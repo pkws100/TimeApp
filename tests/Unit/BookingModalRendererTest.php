@@ -72,4 +72,35 @@ final class BookingModalRendererTest extends TestCase
         self::assertStringContainsString('data-booking-reason', $html);
         self::assertStringContainsString('data-booking-action-form="archive"', $html);
     }
+
+    public function testRenderTableHighlightsOpenProjectAssignments(): void
+    {
+        $renderer = new BookingModalRenderer();
+        $html = $renderer->renderTable(
+            [[
+                'id' => 16,
+                'work_date' => '2026-05-08',
+                'employee_name' => 'Erika Beispiel',
+                'employee_number' => 'M-16',
+                'project_id' => null,
+                'entry_type' => 'work',
+                'source' => 'app',
+                'source_label' => 'App',
+                'start_time' => '08:00:00',
+                'end_time' => null,
+                'break_minutes' => 0,
+                'net_minutes' => 0,
+                'note' => 'Neubau Musterstrasse',
+                'is_deleted' => 0,
+                'version_hint' => 'Originalstand',
+                'needs_project_assignment' => true,
+            ]],
+            [],
+            ['work' => 'Arbeit']
+        );
+
+        self::assertStringContainsString('Nicht zugeordnet', $html);
+        self::assertStringContainsString('Projekt offen', $html);
+        self::assertStringContainsString('badge warn', $html);
+    }
 }

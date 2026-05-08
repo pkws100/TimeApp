@@ -565,6 +565,9 @@ final class AdminBookingService
     {
         $employeeName = trim(((string) ($row['first_name'] ?? '')) . ' ' . ((string) ($row['last_name'] ?? '')));
         $employeeName = $employeeName !== '' ? $employeeName : 'Unbekannter Benutzer';
+        $projectId = isset($row['project_id']) ? (int) $row['project_id'] : null;
+        $entryType = (string) ($row['entry_type'] ?? 'work');
+        $isDeleted = (int) ($row['is_deleted'] ?? 0);
 
         if ((int) ($row['user_is_deleted'] ?? 0) === 1) {
             $employeeName .= ' (archiviert)';
@@ -586,7 +589,7 @@ final class AdminBookingService
         return [
             'id' => (int) ($row['id'] ?? 0),
             'user_id' => isset($row['user_id']) ? (int) $row['user_id'] : null,
-            'project_id' => isset($row['project_id']) ? (int) $row['project_id'] : null,
+            'project_id' => $projectId,
             'work_date' => (string) ($row['work_date'] ?? ''),
             'start_time' => $row['start_time'] ?? null,
             'end_time' => $row['end_time'] ?? null,
@@ -594,12 +597,12 @@ final class AdminBookingService
             'break_minutes' => (int) ($row['break_minutes'] ?? 0),
             'net_minutes' => (int) ($row['net_minutes'] ?? 0),
             'expenses_amount' => (string) ($row['expenses_amount'] ?? '0.00'),
-            'entry_type' => (string) ($row['entry_type'] ?? 'work'),
+            'entry_type' => $entryType,
             'source' => (string) ($row['source'] ?? 'app'),
             'source_label' => $this->sourceLabel((string) ($row['source'] ?? 'app')),
             'note' => self::nullableTrimmed($row['note'] ?? null),
             'updated_at' => (string) ($row['updated_at'] ?? ''),
-            'is_deleted' => (int) ($row['is_deleted'] ?? 0),
+            'is_deleted' => $isDeleted,
             'deleted_at' => $row['deleted_at'] ?? null,
             'deleted_by_user_id' => isset($row['deleted_by_user_id']) ? (int) $row['deleted_by_user_id'] : null,
             'employee_number' => (string) ($row['employee_number'] ?? ''),
@@ -607,6 +610,7 @@ final class AdminBookingService
             'project_number' => (string) ($row['project_number'] ?? ''),
             'project_name_display' => $projectName,
             'project_is_deleted' => (int) ($row['project_is_deleted'] ?? 0),
+            'needs_project_assignment' => $projectId === null && $entryType === 'work' && $isDeleted === 0,
             'change_count' => $changeCount,
             'last_change_at' => (string) ($row['last_change_at'] ?? ''),
             'last_action_type' => (string) ($row['last_action_type'] ?? ''),

@@ -107,4 +107,77 @@ final class AdminBookingServiceTest extends TestCase
             'entry_type' => 'work',
         ], 5);
     }
+
+    public function testHydrateBookingRowMarksOnlyActiveWorkWithoutProjectAsOpenAssignment(): void
+    {
+        $service = new AdminBookingService(new DatabaseConnection([]), new TimesheetCalculator());
+        $method = new ReflectionMethod($service, 'hydrateBookingRow');
+        $method->setAccessible(true);
+
+        $activeWorkWithoutProject = $method->invoke($service, $this->bookingRow([
+            'project_id' => null,
+            'entry_type' => 'work',
+            'is_deleted' => 0,
+        ]));
+        $archivedWorkWithoutProject = $method->invoke($service, $this->bookingRow([
+            'project_id' => null,
+            'entry_type' => 'work',
+            'is_deleted' => 1,
+        ]));
+        $absenceWithoutProject = $method->invoke($service, $this->bookingRow([
+            'project_id' => null,
+            'entry_type' => 'sick',
+            'is_deleted' => 0,
+        ]));
+        $assignedWork = $method->invoke($service, $this->bookingRow([
+            'project_id' => 5,
+            'entry_type' => 'work',
+            'is_deleted' => 0,
+        ]));
+
+        self::assertTrue($activeWorkWithoutProject['needs_project_assignment']);
+        self::assertFalse($archivedWorkWithoutProject['needs_project_assignment']);
+        self::assertFalse($absenceWithoutProject['needs_project_assignment']);
+        self::assertFalse($assignedWork['needs_project_assignment']);
+    }
+
+    /**
+     * @param array<string, mixed> $overrides
+     *
+     * @return array<string, mixed>
+     */
+    private function bookingRow(array $overrides = []): array
+    {
+        return [
+            'id' => 1,
+            'user_id' => 7,
+            'project_id' => 5,
+            'work_date' => '2026-05-08',
+            'start_time' => '07:00:00',
+            'end_time' => null,
+            'gross_minutes' => 0,
+            'break_minutes' => 0,
+            'net_minutes' => 0,
+            'expenses_amount' => '0.00',
+            'entry_type' => 'work',
+            'source' => 'app',
+            'note' => 'Baustelle kurz beschrieben',
+            'updated_at' => '2026-05-08 07:00:00',
+            'is_deleted' => 0,
+            'deleted_at' => null,
+            'deleted_by_user_id' => null,
+            'employee_number' => 'M-7',
+            'first_name' => 'Max',
+            'last_name' => 'Muster',
+            'user_is_deleted' => 0,
+            'project_number' => 'P-5',
+            'project_name' => 'Rathaus',
+            'project_is_deleted' => 0,
+            'change_count' => 0,
+            'last_change_at' => null,
+            'last_action_type' => null,
+            'last_change_reason' => null,
+            ...$overrides,
+        ];
+    }
 }

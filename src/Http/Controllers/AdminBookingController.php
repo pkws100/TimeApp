@@ -163,6 +163,7 @@ final class AdminBookingController
         $userOptions = $this->userOptions($users, $filters['user_id']);
         $entryTypeOptions = $this->entryTypeFilterOptions((string) $filters['entry_type']);
         $scopeSwitch = $this->scopeSwitch('/admin/bookings', (string) $filters['scope'], $filters);
+        $openProjectAssignmentUrl = '/admin/bookings?scope=active&project_id=__none__&entry_type=work';
         $renderer = new BookingModalRenderer();
         $canManage = $this->authService->hasPermission('timesheets.manage');
         $canArchive = $this->authService->hasPermission('timesheets.archive');
@@ -205,6 +206,13 @@ final class AdminBookingController
     </div>
 </header>
 {$notice}
+<div class="notice info">
+    <strong>Offene Projektzuordnungen</strong><br>
+    Aktive Arbeitsbuchungen ohne Projekt brauchen eine spaetere Zuordnung. Nutzen Sie den Schnellfilter und weisen Sie die Buchungen einzeln oder gesammelt zu.
+    <div class="notice-actions">
+        <a class="button button-secondary" href="{$this->e($openProjectAssignmentUrl)}">Offene Projektzuordnungen anzeigen</a>
+    </div>
+</div>
 <section class="card stack">
     <form method="get" action="/admin/bookings" class="form-grid">
         <label><span>Von</span><input type="date" name="date_from" value="{$this->e((string) ($filters['date_from'] ?? ''))}"></label>

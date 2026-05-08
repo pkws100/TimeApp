@@ -25,6 +25,12 @@ final class BookingModalRenderer
         foreach ($bookings as $booking) {
             $id = (int) ($booking['id'] ?? 0);
             $projectLabel = $this->projectLabel($booking);
+            $projectDisplay = $this->e($projectLabel);
+
+            if ((bool) ($booking['needs_project_assignment'] ?? false)) {
+                $projectDisplay .= '<br><span class="badge warn">Projekt offen</span>';
+            }
+
             $typeLabel = (string) ($entryTypeOptions[(string) ($booking['entry_type'] ?? 'work')] ?? ($booking['entry_type'] ?? ''));
             $sourceLabel = (string) ($booking['source_label'] ?? $this->sourceLabel((string) ($booking['source'] ?? 'app')));
             $statusBadge = (int) ($booking['is_deleted'] ?? 0) === 1
@@ -49,7 +55,7 @@ final class BookingModalRenderer
                 . $selectionCell
                 . '<td>' . $this->e((string) ($booking['work_date'] ?? '')) . '</td>'
                 . '<td><strong>' . $this->e((string) ($booking['employee_name'] ?? '')) . '</strong><br><span class="muted">' . $this->e((string) ($booking['employee_number'] ?? '')) . '</span></td>'
-                . '<td>' . $this->e($projectLabel) . '</td>'
+                . '<td>' . $projectDisplay . '</td>'
                 . '<td>' . $this->e($typeLabel) . '</td>'
                 . '<td><span class="badge">' . $this->e($sourceLabel) . '</span></td>'
                 . '<td>' . $this->displayTime($booking['start_time'] ?? null) . '</td>'

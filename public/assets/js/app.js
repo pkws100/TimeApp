@@ -141,6 +141,10 @@
         return state.today.projects.find((project) => project.id === projectId) || null;
     }
 
+    function activeProjects() {
+        return state.today && Array.isArray(state.today.projects) ? state.today.projects : [];
+    }
+
     function selectedProjectId() {
         const projectSelect = document.getElementById('projectSelect');
 
@@ -316,6 +320,32 @@
 
         state.feedback = null;
         render();
+    }
+
+    function projectlessNoteValue(fieldId) {
+        const field = document.getElementById(fieldId);
+
+        return field && typeof field.value === 'string' ? field.value.trim() : '';
+    }
+
+    function requireProjectlessNote(fieldId) {
+        const note = projectlessNoteValue(fieldId);
+
+        if (note !== '') {
+            clearFeedback();
+
+            return note;
+        }
+
+        showFeedback('error', 'Bitte beschreiben Sie die Baustelle oder den Ort, bevor Sie ohne Projekt starten.', true);
+
+        const field = document.getElementById(fieldId);
+
+        if (field && typeof field.focus === 'function') {
+            field.focus();
+        }
+
+        return null;
     }
 
     function openDialog(type, payload) {
@@ -539,14 +569,18 @@
         }
 
         if (state.dialog.type === 'confirm-check-in-without-project') {
+            const payload = state.dialog.payload || {};
+            const note = typeof payload.note === 'string' ? payload.note : '';
+
             return '<div class="app-dialog-layer">'
                 + '<button type="button" class="app-dialog-overlay" id="dialogCancel" aria-label="Dialog schliessen"></button>'
                 + '<section class="app-dialog">'
                 + '<p class="muted">Check-in ohne Baustelle</p>'
-                + '<h2>Ohne Projekt buchen?</h2>'
-                + '<p>Sie haben noch keine Baustelle gewaehlt. Sie koennen den Check-in jetzt trotzdem buchen und spaeter zuordnen.</p>'
+                + '<h2>Ohne Projekt starten?</h2>'
+                + '<p>Bitte beschreiben Sie kurz die Baustelle oder den Ort. Die Zuordnung erfolgt spaeter im Buero.</p>'
+                + '<label class="app-field"><span>Baustelle / Ort</span><textarea id="projectlessDialogNote" rows="3" required placeholder="Baustelle oder Ort kurz beschreiben">' + escapeHtml(note) + '</textarea></label>'
                 + '<div class="app-inline-actions">'
-                + '<button type="button" id="dialogConfirmPrimary">Ohne Projekt buchen</button>'
+                + '<button type="button" id="dialogConfirmPrimary">Ohne Projekt starten</button>'
                 + '<button type="button" id="dialogConfirmSecondary" class="app-button app-button-secondary">Projekt jetzt waehlen</button>'
                 + '</div>'
                 + '</section>'
@@ -850,6 +884,18 @@
         const view = currentProjectDayView();
 
         return view.project_name || 'Nicht zugeordnet';
+    }
+
+    function activeProjectlessWorkEntry() {
+        const entry = globalWorkEntry();
+
+        if (!entry || !entry.start_time || entry.end_time) {
+            return null;
+        }
+
+        const projectId = Object.prototype.hasOwnProperty.call(entry, 'project_id') ? entry.project_id : null;
+
+        return projectId === null ? entry : null;
     }
 
     function globalWorkEntry() {
@@ -1447,21 +1493,56 @@
         const entry = workEntry();
         const hasStartedEntry = !!(entry && entry.start_time);
         const preferred = preferredProject();
+        const hasProjects = activeProjects().length > 0;
+        const projectlessEntry = activeProjectlessWorkEntry();
+        const projectSelectionButtonLabel = projectlessEntry
+            ? 'Laufenden Einsatz zuordnen'
+            : (hasStartedEntry ? 'Projekt fuer heute speichern' : 'Projekt fuer Check-in vormerken');
+        const canStartWithoutProject = !hasStartedEntry
+            && currentStatus() !== 'working'
+            && currentStatus() !== 'paused'
+            && !isBlockedByOtherActiveProject();
+        const projectlessReturnCard = projectlessEntry
+            ? '<div class="app-current-project-card">'
+                + '<div><p class="muted">Laufender Einsatz</p><strong>Nicht zugeordnet</strong>'
+                + '<p>' + escapeHtml(projectlessEntry.note || 'Keine Beschreibung hinterlegt.') + '</p></div>'
+                + '<button type="button" id="returnToProjectlessEntry">Zum laufenden Einsatz</button>'
+                + '</div>'
+            : '';
 
         return shell(
             '<section class="app-card app-grid">'
             + '<div><p class="muted">Projektwahl</p><h1>Baustelle waehlen</h1><p>'
             + (hasStartedEntry
                 ? 'Die gewaehlte Baustelle wird direkt dem heutigen Zeiteintrag zugeordnet.'
-                : 'Sie koennen hier vorab eine Baustelle vormerken. Beim naechsten Check-in wird sie automatisch verwendet.')
+                : (hasProjects
+                    ? 'Sie koennen hier vorab eine Baustelle vormerken. Beim naechsten Check-in wird sie automatisch verwendet.'
+                    : 'Kein Projekt angelegt? Starten Sie ohne Projekt und beschreiben Sie kurz die Baustelle. Die Zuordnung erfolgt spaeter im Buero.'))
             + '</p></div>'
-            + '<label class="app-field"><span>Aktives Projekt</span><select id="projectSelect">' + projectOptions() + '</select></label>'
-            + (preferred && !hasStartedEntry
+            + (hasProjects
+                ? '<label class="app-field"><span>Aktives Projekt</span><select id="projectSelect">' + projectOptions() + '</select></label>'
+                : '')
+            + (hasProjects && preferred && !hasStartedEntry
                 ? '<div class="app-empty"><strong>Vorgemerkt:</strong> ' + escapeHtml(preferred.project_number + ' - ' + preferred.name) + '</div>'
                 : '')
-            + '<button type="button" id="saveProjectSelection" ' + (isBusy('select_project') ? 'disabled' : '') + '>'
-            + escapeHtml(buttonLabel('select_project', hasStartedEntry ? 'Projekt fuer heute speichern' : 'Projekt fuer Check-in vormerken'))
-            + '</button>'
+            + projectlessReturnCard
+            + (hasProjects
+                ? '<button type="button" id="saveProjectSelection" ' + (isBusy('select_project') ? 'disabled' : '') + '>'
+                    + escapeHtml(buttonLabel('select_project', projectSelectionButtonLabel))
+                    + '</button>'
+                : '')
+            + (!hasStartedEntry && !projectlessEntry
+                ? '<div class="app-projectless-card">'
+                    + '<div><strong>' + escapeHtml(hasProjects ? 'Projekt nicht in der Liste?' : 'Ohne Projekt weiterarbeiten') + '</strong>'
+                    + '<p>Starten Sie ohne Projekt und beschreiben Sie kurz die Baustelle. Die Zuordnung erfolgt spaeter im Buero.</p></div>'
+                    + '<label class="app-field"><span>Baustelle / Ort</span><textarea id="projectlessProjectNote" rows="3" required placeholder="z. B. Musterstrasse 12, Neubau Garage"></textarea></label>'
+                    + '<button type="button" id="startWithoutProject" ' + (isBusy('check_in') || !canStartWithoutProject ? 'disabled' : '') + '>'
+                    + escapeHtml(buttonLabel('check_in', 'Ohne Projekt starten'))
+                    + '</button>'
+                    + '</div>'
+                : (!entry || entry.project_id
+                    ? ''
+                    : '<div class="app-empty"><strong>Nicht zugeordnet:</strong> Diese Buchung kann spaeter im Buero einem Projekt zugeordnet werden.</div>'))
             + '</section>'
         );
     }
@@ -1590,10 +1671,16 @@
         if (dialogConfirmPrimary) {
             dialogConfirmPrimary.addEventListener('click', async function () {
                 if (state.dialog && state.dialog.type === 'confirm-check-in-without-project') {
+                    const note = requireProjectlessNote('projectlessDialogNote');
+
+                    if (note === null) {
+                        return;
+                    }
+
                     const payload = state.dialog.payload || {};
 
                     state.dialog = null;
-                    await submitAction('check_in', { ...payload, project_id: null });
+                    await submitAction('check_in', { ...payload, project_id: null, note });
                 }
             });
         }
@@ -1670,6 +1757,35 @@
         if (projectSelection) {
             projectSelection.addEventListener('click', async function () {
                 await handleProjectSelection();
+            });
+        }
+
+        const returnToProjectlessEntry = document.getElementById('returnToProjectlessEntry');
+
+        if (returnToProjectlessEntry) {
+            returnToProjectlessEntry.addEventListener('click', function () {
+                setProjectSelectionState(null);
+                navigate('/app/heute');
+            });
+        }
+
+        const startWithoutProject = document.getElementById('startWithoutProject');
+
+        if (startWithoutProject) {
+            startWithoutProject.addEventListener('click', async function () {
+                const note = requireProjectlessNote('projectlessProjectNote');
+
+                if (note === null) {
+                    return;
+                }
+
+                storePreferredProjectId(null);
+
+                const saved = await submitAction('check_in', { project_id: null, note });
+
+                if (saved) {
+                    navigate('/app/heute');
+                }
             });
         }
 
@@ -1912,7 +2028,11 @@
             : (workEntry() ? workEntry().project_id : preferredProjectId());
 
         if (action === 'check_in' && !projectId) {
-            openDialog('confirm-check-in-without-project', {});
+            const noteField = document.getElementById('timesheetNote');
+
+            openDialog('confirm-check-in-without-project', {
+                note: noteField && typeof noteField.value === 'string' ? noteField.value : ''
+            });
             return;
         }
 
@@ -1927,8 +2047,26 @@
     async function handleProjectSelection() {
         const projectSelect = document.getElementById('projectSelect');
         const selectedProjectId = projectSelect && projectSelect.value ? Number(projectSelect.value) : null;
+        const projectlessEntry = activeProjectlessWorkEntry();
         const entry = workEntry();
         const hasStartedEntry = !!(entry && entry.start_time);
+
+        if (projectlessEntry) {
+            if (selectedProjectId === null) {
+                setProjectSelectionState(null);
+                navigate('/app/heute');
+
+                return true;
+            }
+
+            const saved = await submitAction('select_project', { project_id: selectedProjectId });
+
+            if (saved) {
+                navigate('/app/heute');
+            }
+
+            return saved;
+        }
 
         if (!hasStartedEntry) {
             storePreferredProjectId(selectedProjectId);
@@ -1968,7 +2106,9 @@
             return false;
         }
 
-        if (isBlockedByOtherActiveProject()) {
+        const allowProjectlessReassignment = action === 'select_project' && activeProjectlessWorkEntry() !== null;
+
+        if (isBlockedByOtherActiveProject() && !allowProjectlessReassignment) {
             showFeedback(
                 'error',
                 'Auf ' + (otherActiveProjectName() || 'einem anderen Projekt') + ' laeuft noch ein Einsatz. Bitte zuerst dorthin wechseln.'
