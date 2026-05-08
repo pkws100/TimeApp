@@ -51,10 +51,18 @@ php bin/bootstrap-admin.php --email=admin@example.invalid --password='IHR_PASSWO
 ```
 
 ## Docker Compose
-Der Compose-Stand ist fuer lokale Entwicklung und internes Staging mit zwei Diensten vorbereitet:
+Der Compose-Stand ist fuer einen Dockerhost mit zwei Diensten vorbereitet:
 
 - `app`: PHP 8.2 + Apache
 - `db`: MariaDB 10.11
+
+Vor dem Start muss auf dem Dockerhost eine `.env` mit produktiven Werten angelegt werden. Mindestens erforderlich sind:
+
+```bash
+APP_URL=https://zeiterfassung.example.invalid
+DOCKER_DB_PASSWORD=BITTE_SICHER_SETZEN
+DOCKER_DB_ROOT_PASSWORD=BITTE_SICHER_SETZEN
+```
 
 Starten:
 ```bash
@@ -66,7 +74,6 @@ Die App ist danach standardmaessig unter `http://localhost:18080` erreichbar.
 
 Erstsetup im Container:
 ```bash
-docker compose exec app composer install
 docker compose exec app vendor/bin/phinx migrate -c phinx.php
 docker compose exec app vendor/bin/phinx seed:run -c phinx.php
 docker compose exec app php bin/bootstrap-admin.php --email=admin@example.invalid --password='IHR_PASSWORT' --first-name=Admin --last-name=Benutzer
@@ -78,9 +85,12 @@ Wichtige Hinweise fuer Compose:
 - Nach aussen wird standardmaessig nur die Web-App veroefentlicht, und zwar auf Host-Port `18080`.
 - Die MariaDB wird bewusst **nicht** auf einen Host-Port veroeffentlicht. Fuer Online-Betrieb ist das sicherer als nur einen anderen oeffentlichen DB-Port zu waehlen.
 - `DB_SOCKET` ist im Compose-Betrieb bewusst leer.
+- PHP-Abhaengigkeiten werden beim Image-Build installiert. Im laufenden Container ist kein manuelles `composer install` erforderlich.
 - Laufzeitdaten bleiben ueber benannte Volumes fuer MariaDB und `storage/` erhalten.
+- Der App-Code kommt aus dem gebauten Image. Es gibt bewusst keinen Bind-Mount von `./` nach `/var/www/html`, damit ein Dockerhost reproduzierbar den gebauten Stand ausfuehrt.
 - Compose-Umgebungsvariablen uebersteuern `.env`, damit lokale Host-Sockets den Containerbetrieb nicht blockieren.
 - Wenn Sie einen anderen Web-Port oder andere DB-Zugangsdaten wollen, koennen Sie vor dem Start z. B. `APP_PORT`, `DOCKER_DB_DATABASE`, `DOCKER_DB_USERNAME`, `DOCKER_DB_PASSWORD` und `DOCKER_DB_ROOT_PASSWORD` setzen.
+- Fuer oeffentlichen Betrieb sollte TLS ueber einen vorgeschalteten Reverse Proxy terminiert werden. `APP_URL` muss auf die oeffentliche HTTPS-URL zeigen.
 - Falls Sie die Datenbank ausnahmsweise vom Host aus erreichen muessen, ist ein eigener lokaler Override sinnvoller als ein fester Repo-Default, z. B. per zusaetzlichem Compose-Override mit einem nicht-standardisierten Host-Port wie `13306:3306`.
 
 ## Wichtige Composer-Befehle

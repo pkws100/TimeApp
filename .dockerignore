@@ -2,7 +2,11 @@
 .gitignore
 .env
 .phpunit.result.cache
+node_modules
+playwright-report
+test-results
 vendor
+storage/app/uploads/settings
 storage/app/uploads
 storage/cache
 storage/logs
