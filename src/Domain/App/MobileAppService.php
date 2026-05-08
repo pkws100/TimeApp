@@ -348,14 +348,6 @@ final class MobileAppService
 
             $summaries[$key]['total_break_minutes'] += $completedBreakMinutes;
             $summaries[$key]['total_net_minutes'] += (int) ($entry['net_minutes'] ?? 0);
-
-            if (($entry['start_time'] ?? null) !== null) {
-                $currentStart = $summaries[$key]['start_time'] ?? null;
-
-                if ($currentStart === null || strcmp((string) $entry['start_time'], (string) $currentStart) < 0) {
-                    $summaries[$key]['start_time'] = $entry['start_time'];
-                }
-            }
         }
 
         return array_values($summaries);

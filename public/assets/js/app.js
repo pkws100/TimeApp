@@ -653,7 +653,7 @@
             planned: 'Geplant',
             working: 'Arbeitet',
             paused: 'In Pause',
-            completed: 'Abgeschlossen',
+            completed: 'Einsatz abgeschlossen',
             sick: 'Krank',
             vacation: 'Urlaub',
             holiday: 'Feiertag',
@@ -1036,6 +1036,7 @@
         const projectId = entry && Object.prototype.hasOwnProperty.call(entry, 'project_id')
             ? entry.project_id
             : activeProjectId();
+        const previousSummary = summaries.find((item) => item.project_id === projectId) || null;
         const filtered = summaries.filter((item) => item.project_id !== projectId);
 
         if (!entry || !entry.start_time) {
@@ -1049,6 +1050,13 @@
         const attachments = Array.isArray(state.today.attachments)
             ? state.today.attachments
             : (Array.isArray(entry.attachments) ? entry.attachments : []);
+        const isFreshOptimisticEntry = !Number(entry.id || 0);
+        const previousNetMinutes = isFreshOptimisticEntry && previousSummary
+            ? Number(previousSummary.total_net_minutes || 0)
+            : 0;
+        const previousBreakMinutes = isFreshOptimisticEntry && previousSummary
+            ? Number(previousSummary.total_break_minutes || 0)
+            : 0;
 
         filtered.unshift({
             project_id: projectId,
@@ -1056,8 +1064,8 @@
             status: todayState.status || 'not_started',
             start_time: entry.start_time || null,
             end_time: entry.end_time || null,
-            total_break_minutes: Number(entry.break_minutes || 0),
-            total_net_minutes: Number(entry.net_minutes || 0),
+            total_break_minutes: previousBreakMinutes + Number(entry.break_minutes || 0),
+            total_net_minutes: previousNetMinutes + Number(entry.net_minutes || 0),
             current_break: currentBreakValue,
             tracked_minutes_live_basis: tracked,
             work_entry: {
@@ -1340,7 +1348,7 @@
         const headlines = {
             working: 'Eingecheckt',
             paused: 'Pause laeuft',
-            completed: 'Tag abgeschlossen',
+            completed: 'Einsatz abgeschlossen',
             not_started: 'Noch nicht eingecheckt',
             planned: 'Noch nicht eingecheckt'
         };
@@ -1352,7 +1360,7 @@
         const hints = {
             working: 'Sie sind aktuell in Arbeit.',
             paused: 'Bitte Pause spaeter beenden.',
-            completed: 'Heute ist bereits abgeschlossen.',
+            completed: 'Dieser Einsatz ist abgeschlossen. Sie koennen einen weiteren Einsatz starten.',
             not_started: 'Bitte Check-in nicht vergessen.',
             planned: 'Bitte Check-in nicht vergessen.',
             sick: 'Heute ist ein Kranktag hinterlegt.',
