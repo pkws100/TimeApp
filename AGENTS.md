@@ -313,3 +313,4 @@ Wenn ein neuer Agentenlauf startet, gilt:
 - Settings, Theme, CRUD, Uploads und DB-/Admin-Basis existieren schon.
 - Der naechste grosse Schritt ist nicht mehr das Grundgeruest, sondern die sichere Vertiefung und das mobile Frontend.
 - Vor jeder neuen Umsetzung muessen `AGENTS.md`, `PROJECTS.md`, `DATABASE.md` und `bootstrap/app.php` gemeinsam gegen den aktuellen Stand gelesen werden.
+- Nach Beendigung einer Arbeitsanweisung, einen Ui-Agent sowie einen Workflow-Agent und einen Code-Review der Änderungen laufen lassen. Findigs oder Probleme bitte direkt Fixen/beheben.
