@@ -47,6 +47,7 @@ final class AdminManagementController
                 . '<td>' . $this->e((string) ($project['customer_name'] ?? '')) . '</td>'
                 . '<td>' . $this->e((string) ($project['status'] ?? '')) . '</td>'
                 . '<td>' . $this->e((string) ($project['city'] ?? '')) . '</td>'
+                . '<td>' . $this->e($this->formatProjectHours((int) ($project['tracked_net_minutes'] ?? 0))) . '</td>'
                 . '<td class="table-actions">'
                 . '<a class="button" href="/admin/projects/' . (int) $project['id'] . '/edit">Bearbeiten</a>'
                 . $this->archiveForm('/admin/projects/' . (int) $project['id'], (int) ($project['is_deleted'] ?? 0) === 1)
@@ -61,8 +62,8 @@ final class AdminManagementController
             '/admin/projects',
             $scope,
             $this->notice($request),
-            '<table><thead><tr><th>Nummer</th><th>Name</th><th>Kunde</th><th>Status</th><th>Ort</th><th>Aktionen</th></tr></thead><tbody>'
-            . ($rows !== '' ? $rows : '<tr><td colspan="6" class="table-empty">Keine Projekte im aktuellen Filter.</td></tr>')
+            '<table><thead><tr><th>Nummer</th><th>Name</th><th>Kunde</th><th>Status</th><th>Ort</th><th>Stunden</th><th>Aktionen</th></tr></thead><tbody>'
+            . ($rows !== '' ? $rows : '<tr><td colspan="7" class="table-empty">Keine Projekte im aktuellen Filter.</td></tr>')
             . '</tbody></table>'
         );
 
@@ -846,6 +847,11 @@ HTML;
         }
 
         return $this->e(substr($value, 0, 5));
+    }
+
+    private function formatProjectHours(int $netMinutes): string
+    {
+        return number_format(max(0, $netMinutes) / 60, 2, ',', '.') . ' h';
     }
 
     private function e(string $value): string

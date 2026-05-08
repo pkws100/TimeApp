@@ -15,11 +15,27 @@ final class ProjectService
     public function list(string $scope = 'active'): array
     {
         if ($this->connection->tableExists('projects')) {
+            $trackedSelect = '0 AS tracked_net_minutes';
+            $trackedJoin = '';
+
+            if ($this->connection->tableExists('timesheets')) {
+                $trackedSelect = 'COALESCE(tracked.tracked_net_minutes, 0) AS tracked_net_minutes';
+                $trackedJoin = 'LEFT JOIN (
+                    SELECT project_id, COALESCE(SUM(net_minutes), 0) AS tracked_net_minutes
+                    FROM timesheets
+                    WHERE project_id IS NOT NULL
+                      AND entry_type = "work"
+                      AND COALESCE(is_deleted, 0) = 0
+                    GROUP BY project_id
+                ) AS tracked ON tracked.project_id = projects.id';
+            }
+
             return $this->connection->fetchAll(
-                'SELECT id, project_number, name, customer_name, status, address_line_1, postal_code, city, starts_on, ends_on, is_deleted, deleted_at
+                'SELECT projects.id, projects.project_number, projects.name, projects.customer_name, projects.status, projects.address_line_1, projects.postal_code, projects.city, projects.starts_on, projects.ends_on, projects.is_deleted, projects.deleted_at, ' . $trackedSelect . '
                  FROM projects
+                 ' . $trackedJoin . '
                  WHERE ' . $this->scopeWhereClause($scope) . '
-                 ORDER BY is_deleted ASC, created_at DESC'
+                 ORDER BY projects.is_deleted ASC, projects.created_at DESC'
             );
         }
 
@@ -32,6 +48,7 @@ final class ProjectService
                 'status' => 'active',
                 'city' => 'Hamburg',
                 'is_deleted' => 0,
+                'tracked_net_minutes' => 0,
             ],
             [
                 'id' => 2,
@@ -41,8 +58,34 @@ final class ProjectService
                 'status' => 'planning',
                 'city' => 'Lueneburg',
                 'is_deleted' => 0,
+                'tracked_net_minutes' => 0,
             ],
         ];
+    }
+
+    public function summarizeTrackedNetMinutes(array $timesheets): array
+    {
+        $minutesByProject = [];
+
+        foreach ($timesheets as $timesheet) {
+            $projectId = (int) ($timesheet['project_id'] ?? 0);
+
+            if ($projectId <= 0) {
+                continue;
+            }
+
+            if ((string) ($timesheet['entry_type'] ?? '') !== 'work') {
+                continue;
+            }
+
+            if ((int) ($timesheet['is_deleted'] ?? 0) === 1) {
+                continue;
+            }
+
+            $minutesByProject[$projectId] = ($minutesByProject[$projectId] ?? 0) + max(0, (int) ($timesheet['net_minutes'] ?? 0));
+        }
+
+        return $minutesByProject;
     }
 
     public function find(int $id): ?array
@@ -156,9 +199,9 @@ final class ProjectService
     private function scopeWhereClause(string $scope): string
     {
         return match ($scope) {
-            'archived' => 'is_deleted = 1',
+            'archived' => 'projects.is_deleted = 1',
             'all' => '1 = 1',
-            default => 'is_deleted = 0',
+            default => 'projects.is_deleted = 0',
         };
     }
 }
