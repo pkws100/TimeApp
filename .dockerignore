@@ -1,0 +1,9 @@
+.git
+.gitignore
+.env
+.phpunit.result.cache
+vendor
+storage/app/uploads
+storage/cache
+storage/logs
+storage/config/database.override.php

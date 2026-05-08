@@ -1,0 +1,12 @@
+{
+  "name": "baustelle-zeiterfassung-ui-checks",
+  "private": true,
+  "description": "Playwright UI smoke checks fuer die Baustellen- und Zeiterfassungs-App",
+  "scripts": {
+    "ui:test": "playwright test",
+    "ui:test:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.57.0"
+  }
+}

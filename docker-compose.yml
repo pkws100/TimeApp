@@ -1,0 +1,59 @@
+services:
+  db:
+    image: mariadb:10.11
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${DOCKER_DB_DATABASE:-zeiterfassung}
+      MARIADB_USER: ${DOCKER_DB_USERNAME:-zeiterfassung}
+      MARIADB_PASSWORD: ${DOCKER_DB_PASSWORD:-zeiterfassung}
+      MARIADB_ROOT_PASSWORD: ${DOCKER_DB_ROOT_PASSWORD:-root}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mariadb-admin ping -h 127.0.0.1 -u$$MARIADB_USER -p$$MARIADB_PASSWORD --silent
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    volumes:
+      - db_data:/var/lib/mysql
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-18080}:80"
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_DEBUG: ${APP_DEBUG:-true}
+      APP_URL: ${APP_URL:-http://localhost:18080}
+      APP_TIMEZONE: ${APP_TIMEZONE:-Europe/Berlin}
+      APP_LOCALE: ${APP_LOCALE:-de}
+      APP_FALLBACK_LOCALE: ${APP_FALLBACK_LOCALE:-de}
+      DB_DRIVER: mysql
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_DATABASE: ${DOCKER_DB_DATABASE:-zeiterfassung}
+      DB_USERNAME: ${DOCKER_DB_USERNAME:-zeiterfassung}
+      DB_PASSWORD: ${DOCKER_DB_PASSWORD:-zeiterfassung}
+      DB_CHARSET: ${DB_CHARSET:-utf8mb4}
+      DB_COLLATION: ${DB_COLLATION:-utf8mb4_unicode_ci}
+      DB_SOCKET: ""
+      SESSION_NAME: ${SESSION_NAME:-zeiterfassung_session}
+      SESSION_LIFETIME: ${SESSION_LIFETIME:-7200}
+      UPLOAD_DISK: ${UPLOAD_DISK:-local}
+      UPLOAD_ROOT: ${UPLOAD_ROOT:-storage/app/uploads}
+      UPLOAD_MAX_FILESIZE: ${UPLOAD_MAX_FILESIZE:-10485760}
+      EXPORT_TEMP_PATH: ${EXPORT_TEMP_PATH:-storage/cache/exports}
+    volumes:
+      - ./:/var/www/html
+      - storage_data:/var/www/html/storage
+
+volumes:
+  db_data:
+  storage_data:
