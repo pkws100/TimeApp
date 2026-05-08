@@ -16,6 +16,7 @@ use App\Http\Request;
 use App\Http\Response;
 use App\Presentation\Admin\AdminView;
 use App\Presentation\Admin\BookingModalRenderer;
+use InvalidArgumentException;
 use RuntimeException;
 
 final class AdminManagementController
@@ -41,16 +42,21 @@ final class AdminManagementController
         $rows = '';
 
         foreach ($projects as $project) {
+            $trackedNetMinutes = max(0, (int) ($project['tracked_net_minutes'] ?? 0));
             $rows .= '<tr>'
                 . '<td>' . $this->e((string) $project['project_number']) . '</td>'
                 . '<td>' . $this->e((string) $project['name']) . '</td>'
                 . '<td>' . $this->e((string) ($project['customer_name'] ?? '')) . '</td>'
                 . '<td>' . $this->e((string) ($project['status'] ?? '')) . '</td>'
                 . '<td>' . $this->e((string) ($project['city'] ?? '')) . '</td>'
-                . '<td>' . $this->e($this->formatProjectHours((int) ($project['tracked_net_minutes'] ?? 0))) . '</td>'
-                . '<td class="table-actions">'
+                . '<td data-sort-value="' . $trackedNetMinutes . '">' . $this->e($this->formatProjectHours($trackedNetMinutes)) . '</td>'
+                . '<td class="table-actions" data-search="false">'
                 . '<a class="button" href="/admin/projects/' . (int) $project['id'] . '/edit">Bearbeiten</a>'
-                . $this->archiveForm('/admin/projects/' . (int) $project['id'], (int) ($project['is_deleted'] ?? 0) === 1)
+                . $this->projectLifecycleForm(
+                    '/admin/projects/' . (int) $project['id'],
+                    '/admin/projects/' . (int) $project['id'] . '/restore',
+                    (int) ($project['is_deleted'] ?? 0) === 1
+                )
                 . '</td>'
                 . '</tr>';
         }
@@ -62,9 +68,9 @@ final class AdminManagementController
             '/admin/projects',
             $scope,
             $this->notice($request),
-            '<table><thead><tr><th>Nummer</th><th>Name</th><th>Kunde</th><th>Status</th><th>Ort</th><th>Stunden</th><th>Aktionen</th></tr></thead><tbody>'
+            '<div class="table-scroll"><table data-admin-table="projects" data-table-label="Projekte"><thead><tr><th>Nummer</th><th>Name</th><th>Kunde</th><th>Status</th><th>Ort</th><th data-sort-type="number">Stunden</th><th data-search="false" data-sort="false">Aktionen</th></tr></thead><tbody>'
             . ($rows !== '' ? $rows : '<tr><td colspan="7" class="table-empty">Keine Projekte im aktuellen Filter.</td></tr>')
-            . '</tbody></table>'
+            . '</tbody></table></div>'
         );
 
         return Response::html($this->view->render('Projekte', $content));
@@ -86,15 +92,20 @@ final class AdminManagementController
         $files = $this->fileAttachmentService->listForProject((int) $project['id'], 'all');
         $bookings = [];
         $allProjects = [];
+        $activeUsers = [];
 
         if ($this->authService->hasPermission('timesheets.view')) {
             $bookingFilters = $this->bookingService->normalizeFilters($request->query(), (int) $project['id']);
             $bookings = $this->bookingService->list($bookingFilters);
             $allProjects = $this->projectService->list('all');
+
+            if ($this->authService->hasPermission('timesheets.manage')) {
+                $activeUsers = $this->userService->list('active');
+            }
         }
 
         $content = $this->renderProjectForm('/admin/projects/' . (int) $project['id'], 'Projekt bearbeiten', $project)
-            . $this->renderProjectBookingsSection($project, $bookings, $allProjects, $request)
+            . $this->renderProjectBookingsSection($project, $bookings, $allProjects, $activeUsers, $request)
             . $this->renderAttachmentSection('Projektanhaenge', '/admin/projects/' . (int) $project['id'] . '/files', $files, 'project');
 
         return Response::html($this->view->render('Projekt bearbeiten', $content));
@@ -116,9 +127,34 @@ final class AdminManagementController
 
     public function projectArchive(Request $request, array $params): Response
     {
-        $this->projectService->archive((int) $params['id']);
+        $this->projectService->archive((int) $params['id'], $this->currentUserId());
 
         return Response::redirect('/admin/projects?notice=archived');
+    }
+
+    public function projectRestore(Request $request, array $params): Response
+    {
+        $this->projectService->restore((int) $params['id'], $this->currentUserId());
+
+        return Response::redirect('/admin/projects?notice=restored');
+    }
+
+    public function projectBookingStore(Request $request, array $params): Response
+    {
+        $projectId = (int) ($params['id'] ?? 0);
+        $returnTo = '/admin/projects/' . $projectId . '/edit';
+
+        if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+            return Response::redirect($returnTo . '?error=csrf');
+        }
+
+        try {
+            $this->bookingService->createManual($request->input(), (int) ($this->currentUserId() ?? 0), $projectId);
+
+            return Response::redirect($returnTo . '?notice=booking-created');
+        } catch (InvalidArgumentException) {
+            return Response::redirect($returnTo . '?error=booking-validation');
+        }
     }
 
     public function projectFileStore(Request $request, array $params): Response
@@ -628,7 +664,7 @@ HTML;
 HTML;
     }
 
-    private function renderProjectBookingsSection(array $project, array $bookings, array $projects, Request $request): string
+    private function renderProjectBookingsSection(array $project, array $bookings, array $projects, array $users, Request $request): string
     {
         if (!$this->authService->hasPermission('timesheets.view')) {
             return '';
@@ -643,6 +679,9 @@ HTML;
         $renderer = new BookingModalRenderer();
         $canManageBookings = $this->authService->hasPermission('timesheets.manage');
         $canArchiveBookings = $this->authService->hasPermission('timesheets.archive');
+        $manualCreateForm = $canManageBookings
+            ? $this->renderManualProjectBookingForm((int) $project['id'], $users, $this->bookingService->entryTypeOptions(), $csrfToken)
+            : '';
         $table = $renderer->renderTable(
             $bookings,
             $projects,
@@ -678,15 +717,43 @@ HTML;
     <div class="section-toolbar">
         <div>
             <h2>Geleistete Arbeitszeiten</h2>
-            <p class="muted">Die Buchungen dieses Projekts koennen im Modal bearbeitet, archiviert und exportiert werden.</p>
+            <p class="muted">Die Buchungen dieses Projekts koennen nacherfasst, im Modal bearbeitet, archiviert und exportiert werden.</p>
         </div>
         <div class="toolbar-actions">
             <a class="button" href="/admin/bookings?project_id={$this->e((string) $project['id'])}&scope=all">Vollansicht Buchungen</a>
             {$exportButtons}
         </div>
     </div>
+    {$manualCreateForm}
     {$table}
     {$modal}
+</section>
+HTML;
+    }
+
+    private function renderManualProjectBookingForm(int $projectId, array $users, array $entryTypeOptions, string $csrfToken): string
+    {
+        $userOptions = $this->activeUserOptions($users);
+        $entryOptions = $this->selectOptions($entryTypeOptions, 'work');
+
+        return <<<HTML
+<section class="geo-map-panel">
+    <div>
+        <h3>Buchung nacherfassen</h3>
+        <p class="muted">Nacherfasste Buchungen werden als Admin-Nacherfassung markiert und direkt diesem Projekt zugeordnet.</p>
+    </div>
+    <form method="post" action="/admin/projects/{$projectId}/bookings" class="form-grid">
+        <input type="hidden" name="csrf_token" value="{$this->e($csrfToken)}">
+        <label><span>Mitarbeiter</span><select name="user_id" required>{$userOptions}</select></label>
+        <label><span>Datum</span><input type="date" name="work_date" required></label>
+        <label><span>Typ</span><select name="entry_type">{$entryOptions}</select></label>
+        <label><span>Start</span><input type="time" name="start_time"></label>
+        <label><span>Ende</span><input type="time" name="end_time"></label>
+        <label><span>Pause in Minuten</span><input type="number" name="break_minutes" min="0" step="1" value="0"></label>
+        <label class="full-span"><span>Notiz</span><textarea name="note" rows="3"></textarea></label>
+        <label class="full-span"><span>Begruendung</span><textarea name="change_reason" rows="3" required placeholder="Warum wird diese Buchung im Backend nacherfasst?"></textarea></label>
+        <button type="submit" class="button">Buchung nacherfassen</button>
+    </form>
 </section>
 HTML;
     }
@@ -703,6 +770,8 @@ HTML;
                 'file-not-found' => 'Die Datei wurde nicht gefunden.',
                 'no-file' => 'Bitte waehlen Sie zuerst eine Datei aus.',
                 'validation' => 'Bitte pruefen Sie die Eingaben im Formular.',
+                'booking-validation' => 'Die Buchung konnte nicht nacherfasst werden. Bitte Mitarbeiter, Datum, Zeiten und Begruendung pruefen.',
+                'csrf' => 'Die Sicherheitspruefung ist abgelaufen. Bitte erneut versuchen.',
                 default => 'Beim Vorgang ist ein Fehler aufgetreten.',
             };
 
@@ -717,6 +786,8 @@ HTML;
             'created' => 'Datensatz erfolgreich angelegt.',
             'updated' => 'Datensatz erfolgreich gespeichert.',
             'archived' => 'Datensatz erfolgreich archiviert.',
+            'restored' => 'Projekt erfolgreich wiederhergestellt.',
+            'booking-created' => 'Buchung erfolgreich nacherfasst.',
             'file-uploaded' => 'Datei erfolgreich zugewiesen.',
             'file-archived' => 'Datei erfolgreich archiviert.',
             default => 'Vorgang erfolgreich ausgefuehrt.',
@@ -778,6 +849,27 @@ HTML;
             . '</form>';
     }
 
+    private function projectLifecycleForm(string $archiveAction, string $restoreAction, bool $alreadyArchived): string
+    {
+        if ($alreadyArchived) {
+            return '<form method="post" action="' . $this->e($restoreAction) . '" class="inline-form">'
+                . '<button type="submit" class="button button-secondary">Wiederherstellen</button>'
+                . '</form>';
+        }
+
+        return '<form method="post" action="' . $this->e($archiveAction) . '" class="inline-form" onsubmit="return confirm(\'Projekt wirklich archivieren?\')">'
+            . '<input type="hidden" name="_method" value="DELETE">'
+            . '<button type="submit">Archivieren</button>'
+            . '</form>';
+    }
+
+    private function currentUserId(): ?int
+    {
+        $userId = $this->authService->currentUser()['id'] ?? null;
+
+        return is_numeric($userId) ? (int) $userId : null;
+    }
+
     private function scope(Request $request): string
     {
         $scope = (string) $request->query('scope', 'active');
@@ -802,6 +894,45 @@ HTML;
         }
 
         $html .= '</select>';
+
+        return $html;
+    }
+
+    private function selectOptions(array $options, string $selected): string
+    {
+        $html = '';
+
+        foreach ($options as $value => $label) {
+            $isSelected = (string) $value === $selected ? ' selected' : '';
+            $html .= '<option value="' . $this->e((string) $value) . '"' . $isSelected . '>' . $this->e((string) $label) . '</option>';
+        }
+
+        return $html;
+    }
+
+    private function activeUserOptions(array $users): string
+    {
+        if ($users === []) {
+            return '<option value="">Keine aktiven Mitarbeiter vorhanden</option>';
+        }
+
+        $html = '<option value="">Bitte waehlen</option>';
+
+        foreach ($users as $user) {
+            if ((int) ($user['is_deleted'] ?? 0) === 1 || (string) ($user['employment_status'] ?? 'active') !== 'active') {
+                continue;
+            }
+
+            $name = trim((string) ($user['first_name'] ?? '') . ' ' . (string) ($user['last_name'] ?? ''));
+            $number = trim((string) ($user['employee_number'] ?? ''));
+            $label = trim($name . ($number !== '' ? ' (' . $number . ')' : ''));
+
+            if ($label === '') {
+                $label = (string) ($user['email'] ?? ('User #' . (int) ($user['id'] ?? 0)));
+            }
+
+            $html .= '<option value="' . (int) ($user['id'] ?? 0) . '">' . $this->e($label) . '</option>';
+        }
 
         return $html;
     }

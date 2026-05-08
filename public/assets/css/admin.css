@@ -378,6 +378,113 @@ th {
     color: var(--page-ink-soft);
 }
 
+.admin-table {
+    display: grid;
+    gap: 1rem;
+}
+
+.admin-table-toolbar {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.admin-table-search {
+    display: grid;
+    gap: 0.4rem;
+    flex: 1 1 280px;
+    font-weight: 700;
+}
+
+.admin-table-search input {
+    max-width: 36rem;
+}
+
+.admin-table-meta {
+    display: flex;
+    align-items: end;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.admin-table-size {
+    display: grid;
+    gap: 0.4rem;
+    min-width: 7rem;
+    font-weight: 700;
+}
+
+.admin-table-summary {
+    margin: 0;
+    color: var(--page-muted);
+    font-weight: 700;
+    min-height: 48px;
+    display: inline-flex;
+    align-items: center;
+}
+
+.admin-table-pager {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.admin-table-page-button,
+.admin-table-sort {
+    background: var(--page-surface-soft);
+    color: var(--page-ink);
+    border: 1px solid var(--page-line);
+    box-shadow: none;
+}
+
+.admin-table-page-button {
+    min-height: 44px;
+    padding: 0.7rem 0.9rem;
+}
+
+.admin-table-page-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+    transform: none;
+    filter: none;
+}
+
+.admin-table-page-info {
+    color: var(--page-muted);
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.admin-table-sort {
+    display: inline-flex;
+    align-items: center;
+    width: 100%;
+    min-height: 36px;
+    justify-content: flex-start;
+    padding: 0.35rem 0.5rem;
+    border-radius: 0.55rem;
+    font-size: inherit;
+}
+
+.admin-table-sort__indicator {
+    display: inline-block;
+    width: 1.1em;
+    margin-left: 0.35rem;
+    color: var(--page-accent);
+}
+
+th.is-sorted-asc .admin-table-sort__indicator::before {
+    content: "^";
+}
+
+th.is-sorted-desc .admin-table-sort__indicator::before {
+    content: "v";
+}
+
 .list {
     margin: 0;
     padding-left: 1.2rem;
@@ -815,9 +922,20 @@ th {
     .inline-form,
     .toolbar-actions,
     .scope-switch,
-    .geo-map-toolbar {
+    .geo-map-toolbar,
+    .admin-table-toolbar,
+    .admin-table-meta,
+    .admin-table-pager {
         flex-direction: column;
         align-items: stretch;
+    }
+
+    .admin-table-search input {
+        max-width: none;
+    }
+
+    .admin-table-summary {
+        min-height: 0;
     }
 
     .admin-modal__dialog {

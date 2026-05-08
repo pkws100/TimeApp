@@ -42,4 +42,12 @@ final class ProjectServiceTest extends TestCase
             self::assertSame(0, $project['tracked_net_minutes']);
         }
     }
+
+    public function testArchiveAndRestoreFallbackWithoutDatabase(): void
+    {
+        $service = new ProjectService(new DatabaseConnection([]));
+
+        self::assertTrue($service->archive(123, 7));
+        self::assertTrue($service->restore(123, 7));
+    }
 }

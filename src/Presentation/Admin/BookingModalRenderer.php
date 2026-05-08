@@ -26,6 +26,7 @@ final class BookingModalRenderer
             $id = (int) ($booking['id'] ?? 0);
             $projectLabel = $this->projectLabel($booking);
             $typeLabel = (string) ($entryTypeOptions[(string) ($booking['entry_type'] ?? 'work')] ?? ($booking['entry_type'] ?? ''));
+            $sourceLabel = (string) ($booking['source_label'] ?? $this->sourceLabel((string) ($booking['source'] ?? 'app')));
             $statusBadge = (int) ($booking['is_deleted'] ?? 0) === 1
                 ? '<span class="badge warn">Archiviert</span>'
                 : '<span class="badge ok">Aktiv</span>';
@@ -50,6 +51,7 @@ final class BookingModalRenderer
                 . '<td><strong>' . $this->e((string) ($booking['employee_name'] ?? '')) . '</strong><br><span class="muted">' . $this->e((string) ($booking['employee_number'] ?? '')) . '</span></td>'
                 . '<td>' . $this->e($projectLabel) . '</td>'
                 . '<td>' . $this->e($typeLabel) . '</td>'
+                . '<td><span class="badge">' . $this->e($sourceLabel) . '</span></td>'
                 . '<td>' . $this->displayTime($booking['start_time'] ?? null) . '</td>'
                 . '<td>' . $this->displayTime($booking['end_time'] ?? null) . '</td>'
                 . '<td>' . $this->e((string) ($booking['break_minutes'] ?? 0)) . ' Min</td>'
@@ -62,7 +64,7 @@ final class BookingModalRenderer
         }
 
         if ($rows === '') {
-            $colspan = $showSelection ? '13' : '12';
+            $colspan = $showSelection ? '14' : '13';
             $rows = '<tr><td colspan="' . $colspan . '" class="table-empty">' . $this->e($emptyMessage) . '</td></tr>';
         }
 
@@ -78,6 +80,7 @@ final class BookingModalRenderer
                 <th>Mitarbeiter</th>
                 <th>Projekt</th>
                 <th>Typ</th>
+                <th>Herkunft</th>
                 <th>Start</th>
                 <th>Ende</th>
                 <th>Pause</th>
@@ -237,6 +240,8 @@ HTML;
             'project_label' => $projectLabel,
             'entry_type' => (string) ($booking['entry_type'] ?? 'work'),
             'entry_type_label' => $typeLabel,
+            'source' => (string) ($booking['source'] ?? 'app'),
+            'source_label' => (string) ($booking['source_label'] ?? $this->sourceLabel((string) ($booking['source'] ?? 'app'))),
             'work_date' => (string) ($booking['work_date'] ?? ''),
             'start_time' => $this->timeValue($booking['start_time'] ?? null),
             'end_time' => $this->timeValue($booking['end_time'] ?? null),
@@ -264,6 +269,14 @@ HTML;
         }
 
         return $html;
+    }
+
+    private function sourceLabel(string $source): string
+    {
+        return match ($source) {
+            'admin' => 'Admin-Nacherfassung',
+            default => 'App',
+        };
     }
 
     /**

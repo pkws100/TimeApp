@@ -174,6 +174,20 @@ final class ProjectService
         );
     }
 
+    public function restore(int $id, ?int $restoredByUserId = null): bool
+    {
+        unset($restoredByUserId);
+
+        if (!$this->connection->tableExists('projects')) {
+            return true;
+        }
+
+        return $this->connection->execute(
+            'UPDATE projects SET is_deleted = 0, deleted_at = NULL, deleted_by_user_id = NULL, updated_at = NOW() WHERE id = :id',
+            ['id' => $id]
+        );
+    }
+
     private function normalize(array $payload): array
     {
         return [

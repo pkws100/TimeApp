@@ -239,9 +239,9 @@ final class AppTimesheetSyncService
         if ($entry === null) {
             $this->connection->execute(
                 'INSERT INTO timesheets (
-                    user_id, project_id, created_by_user_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes, expenses_amount, entry_type, note, created_at, updated_at
+                    user_id, project_id, created_by_user_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes, expenses_amount, entry_type, source, note, created_at, updated_at
                 ) VALUES (
-                    :user_id, :project_id, :created_by_user_id, :work_date, :start_time, :end_time, :gross_minutes, :break_minutes, :net_minutes, 0, "work", :note, NOW(), NOW()
+                    :user_id, :project_id, :created_by_user_id, :work_date, :start_time, :end_time, :gross_minutes, :break_minutes, :net_minutes, 0, "work", "app", :note, NOW(), NOW()
                 )',
                 $bindings
             );

@@ -23,6 +23,8 @@ final class BookingModalRendererTest extends TestCase
                 'project_name' => 'Rathaus',
                 'project_is_deleted' => 0,
                 'entry_type' => 'work',
+                'source' => 'admin',
+                'source_label' => 'Admin-Nacherfassung',
                 'start_time' => '07:30:00',
                 'end_time' => '16:00:00',
                 'break_minutes' => 30,
@@ -43,6 +45,8 @@ final class BookingModalRendererTest extends TestCase
 
         self::assertStringContainsString('data-booking-row', $html);
         self::assertStringContainsString('data-booking-open', $html);
+        self::assertStringContainsString('<th>Herkunft</th>', $html);
+        self::assertStringContainsString('Admin-Nacherfassung', $html);
         self::assertStringNotContainsString('type="date" name="work_date"', $html);
         self::assertStringNotContainsString('<textarea', $html);
         self::assertStringContainsString('Bearbeiten', $html);

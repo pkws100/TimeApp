@@ -56,6 +56,9 @@ final class AdminBookingService
         }
 
         [$where, $bindings] = $this->buildFilterClause($filters);
+        $sourceSelect = $this->hasTimesheetSourceColumn()
+            ? 'COALESCE(timesheets.source, "app") AS source,'
+            : '"app" AS source,';
         $auditJoin = '';
 
         if ($this->connection->tableExists('timesheet_change_log')) {
@@ -91,6 +94,7 @@ final class AdminBookingService
                 timesheets.net_minutes,
                 timesheets.expenses_amount,
                 timesheets.entry_type,
+                ' . $sourceSelect . '
                 timesheets.note,
                 timesheets.updated_at,
                 COALESCE(timesheets.is_deleted, 0) AS is_deleted,
@@ -138,6 +142,7 @@ final class AdminBookingService
                 timesheets.net_minutes,
                 timesheets.expenses_amount,
                 timesheets.entry_type,
+                ' . ($this->hasTimesheetSourceColumn() ? 'COALESCE(timesheets.source, "app")' : '"app"') . ' AS source,
                 timesheets.note,
                 timesheets.updated_at,
                 COALESCE(timesheets.is_deleted, 0) AS is_deleted,
@@ -163,6 +168,51 @@ final class AdminBookingService
         }
 
         return $this->hydrateBookingRow($rows[0]);
+    }
+
+    public function createManual(array $payload, int $adminUserId, int $forcedProjectId): array
+    {
+        $reason = trim((string) ($payload['change_reason'] ?? ''));
+
+        if ($reason === '') {
+            throw new InvalidArgumentException('Bitte eine fachliche Begruendung angeben.');
+        }
+
+        $normalized = $this->normalizeManualCreatePayload($payload, $forcedProjectId);
+        $this->assertProjectExists($forcedProjectId);
+        $this->assertActiveUserExists((int) $normalized['user_id']);
+
+        if (!$this->connection->tableExists('timesheets')) {
+            throw new InvalidArgumentException('Die Buchungstabelle ist nicht verfuegbar.');
+        }
+
+        $bookingId = 0;
+
+        $this->connection->transaction(function () use ($normalized, $adminUserId, $reason, &$bookingId): void {
+            $this->connection->execute(
+                'INSERT INTO timesheets (
+                    user_id, project_id, created_by_user_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes, expenses_amount, entry_type, source, note, created_at, updated_at
+                ) VALUES (
+                    :user_id, :project_id, :created_by_user_id, :work_date, :start_time, :end_time, :gross_minutes, :break_minutes, :net_minutes, 0, :entry_type, "admin", :note, NOW(), NOW()
+                )',
+                [
+                    ...$normalized,
+                    'created_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
+                ]
+            );
+
+            $bookingId = $this->connection->lastInsertId();
+            $after = $this->find($bookingId);
+            $this->logChange($bookingId, 'manual_created', $adminUserId, $reason, null, $after);
+        });
+
+        $booking = $this->find($bookingId);
+
+        if ($booking === null) {
+            throw new InvalidArgumentException('Die nacherfasste Buchung konnte nicht geladen werden.');
+        }
+
+        return $booking;
     }
 
     public function update(int $id, array $payload, int $changedByUserId, string $reason): ?array
@@ -271,6 +321,7 @@ final class AdminBookingService
                 'Projekt' => (string) ($row['project_name_display'] ?? ''),
                 'Projekt-Nr' => (string) ($row['project_number'] ?? ''),
                 'Typ' => (string) ($row['entry_type'] ?? ''),
+                'Herkunft' => (string) ($row['source_label'] ?? $this->sourceLabel((string) ($row['source'] ?? 'app'))),
                 'Start' => (string) ($row['start_time'] ?? ''),
                 'Ende' => (string) ($row['end_time'] ?? ''),
                 'Pause (Min)' => (int) ($row['break_minutes'] ?? 0),
@@ -308,6 +359,8 @@ final class AdminBookingService
                 'project_number' => (string) ($row['project_number'] ?? ''),
                 'project_name' => (string) ($row['project_name_display'] ?? ''),
                 'entry_type' => (string) ($row['entry_type'] ?? ''),
+                'source' => (string) ($row['source'] ?? 'app'),
+                'source_label' => (string) ($row['source_label'] ?? 'App'),
                 'gross_minutes' => (int) ($row['gross_minutes'] ?? 0),
                 'break_minutes' => (int) ($row['break_minutes'] ?? 0),
                 'net_minutes' => (int) ($row['net_minutes'] ?? 0),
@@ -363,6 +416,58 @@ final class AdminBookingService
             $after = $this->find($id);
             $this->logChange($id, $archived ? 'archived' : 'restored', $changedByUserId, $reason, $before, $after);
         });
+    }
+
+    private function normalizeManualCreatePayload(array $payload, int $forcedProjectId): array
+    {
+        $userId = (int) $this->normalizePositiveIntOrEmpty((string) ($payload['user_id'] ?? ''));
+
+        if ($userId <= 0) {
+            throw new InvalidArgumentException('Bitte einen Mitarbeiter auswaehlen.');
+        }
+
+        $entryType = trim((string) ($payload['entry_type'] ?? 'work'));
+        $entryType = array_key_exists($entryType, $this->entryTypeOptions()) ? $entryType : 'work';
+        $workDate = $this->normalizeDate($payload['work_date'] ?? null);
+
+        if ($workDate === null) {
+            throw new InvalidArgumentException('Bitte ein gueltiges Datum angeben.');
+        }
+
+        $startTime = $this->normalizeTime($payload['start_time'] ?? null);
+        $endTime = $this->normalizeTime($payload['end_time'] ?? null);
+        $manualBreakMinutes = max(0, (int) ($payload['break_minutes'] ?? 0));
+        $note = self::nullableTrimmed($payload['note'] ?? null);
+
+        if ($entryType === 'work') {
+            if ($startTime === null || $endTime === null) {
+                throw new InvalidArgumentException('Start- und Endzeit sind fuer Arbeitsbuchungen erforderlich.');
+            }
+
+            $calculation = $this->calculator->calculate($workDate, $startTime, $endTime, $manualBreakMinutes, $entryType);
+            $grossMinutes = (int) ($calculation['gross_minutes'] ?? 0);
+            $breakMinutes = (int) ($calculation['break_minutes'] ?? $manualBreakMinutes);
+            $netMinutes = (int) ($calculation['net_minutes'] ?? 0);
+        } else {
+            $startTime = null;
+            $endTime = null;
+            $grossMinutes = 0;
+            $breakMinutes = 0;
+            $netMinutes = 0;
+        }
+
+        return [
+            'user_id' => $userId,
+            'project_id' => $forcedProjectId,
+            'work_date' => $workDate,
+            'start_time' => $startTime,
+            'end_time' => $endTime,
+            'gross_minutes' => $grossMinutes,
+            'break_minutes' => $breakMinutes,
+            'net_minutes' => $netMinutes,
+            'entry_type' => $entryType,
+            'note' => $note,
+        ];
     }
 
     private function normalizeBookingPayload(array $payload, array $before): array
@@ -490,6 +595,8 @@ final class AdminBookingService
             'net_minutes' => (int) ($row['net_minutes'] ?? 0),
             'expenses_amount' => (string) ($row['expenses_amount'] ?? '0.00'),
             'entry_type' => (string) ($row['entry_type'] ?? 'work'),
+            'source' => (string) ($row['source'] ?? 'app'),
+            'source_label' => $this->sourceLabel((string) ($row['source'] ?? 'app')),
             'note' => self::nullableTrimmed($row['note'] ?? null),
             'updated_at' => (string) ($row['updated_at'] ?? ''),
             'is_deleted' => (int) ($row['is_deleted'] ?? 0),
@@ -506,6 +613,14 @@ final class AdminBookingService
             'last_change_reason' => (string) ($row['last_change_reason'] ?? ''),
             'version_hint' => $versionHint,
         ];
+    }
+
+    private function sourceLabel(string $source): string
+    {
+        return match ($source) {
+            'admin' => 'Admin-Nacherfassung',
+            default => 'App',
+        };
     }
 
     private function logChange(int $timesheetId, string $actionType, int $changedByUserId, string $reason, ?array $before, ?array $after): void
@@ -609,6 +724,37 @@ final class AdminBookingService
         if ($exists === 0) {
             throw new InvalidArgumentException('Das gewaehlte Projekt ist nicht vorhanden.');
         }
+    }
+
+    private function assertActiveUserExists(int $userId): void
+    {
+        if ($userId <= 0 || !$this->connection->tableExists('users')) {
+            throw new InvalidArgumentException('Bitte einen aktiven Mitarbeiter auswaehlen.');
+        }
+
+        $exists = (int) ($this->connection->fetchColumn(
+            'SELECT COUNT(*) FROM users WHERE id = :id AND COALESCE(is_deleted, 0) = 0 AND employment_status = "active"',
+            ['id' => $userId]
+        ) ?? 0);
+
+        if ($exists === 0) {
+            throw new InvalidArgumentException('Bitte einen aktiven Mitarbeiter auswaehlen.');
+        }
+    }
+
+    private function hasTimesheetSourceColumn(): bool
+    {
+        if (!$this->connection->tableExists('timesheets')) {
+            return false;
+        }
+
+        return (int) ($this->connection->fetchColumn(
+            'SELECT COUNT(*)
+             FROM information_schema.columns
+             WHERE table_schema = DATABASE()
+               AND table_name = "timesheets"
+               AND column_name = "source"'
+        ) ?? 0) > 0;
     }
 
     private function normalizePositiveIntOrEmpty(string $value): string
