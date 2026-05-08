@@ -1270,6 +1270,66 @@
         return '<article class="app-card"><p class="muted">' + title + '</p><h2>' + value + '</h2><p class="muted">' + note + '</p></article>';
     }
 
+    function statusTone(status) {
+        if (status === 'working') {
+            return 'working';
+        }
+
+        if (status === 'paused') {
+            return 'paused';
+        }
+
+        if (status === 'completed') {
+            return 'completed';
+        }
+
+        if (status === 'not_started' || status === 'planned') {
+            return 'missing';
+        }
+
+        return 'neutral';
+    }
+
+    function statusHeadline(status) {
+        const headlines = {
+            working: 'Eingecheckt',
+            paused: 'Pause laeuft',
+            completed: 'Tag abgeschlossen',
+            not_started: 'Noch nicht eingecheckt',
+            planned: 'Noch nicht eingecheckt'
+        };
+
+        return headlines[status] || statusLabel(status);
+    }
+
+    function statusHint(status) {
+        const hints = {
+            working: 'Sie sind aktuell in Arbeit.',
+            paused: 'Bitte Pause spaeter beenden.',
+            completed: 'Heute ist bereits abgeschlossen.',
+            not_started: 'Bitte Check-in nicht vergessen.',
+            planned: 'Bitte Check-in nicht vergessen.',
+            sick: 'Heute ist ein Kranktag hinterlegt.',
+            vacation: 'Heute ist Urlaub hinterlegt.',
+            holiday: 'Heute ist ein Feiertag hinterlegt.',
+            absent: 'Heute ist eine Abwesenheit hinterlegt.'
+        };
+
+        return hints[status] || 'Aktueller Tagesstatus.';
+    }
+
+    function statusMetric(today, status) {
+        const tone = statusTone(status);
+
+        return '<article class="app-card app-status-card is-' + tone + '">'
+            + '<p class="muted">Heute</p>'
+            + '<h2>' + escapeHtml(statusHeadline(status)) + '</h2>'
+            + '<p class="app-status-date">' + escapeHtml(today.today || '-') + '</p>'
+            + '<p class="app-status-current"><span data-live-status>' + escapeHtml(statusLabel(status)) + '</span></p>'
+            + '<p class="app-status-hint">' + escapeHtml(statusHint(status)) + '</p>'
+            + '</article>';
+    }
+
     function projectStatusValueMarkup() {
         return '<span data-live-project-name>' + escapeHtml(currentProjectName()) + '</span>';
     }
@@ -1309,7 +1369,7 @@
 
         return shell(
             '<section class="app-grid app-metrics">'
-            + metric('Heute', escapeHtml(today.today || '-'), statusValueMarkup())
+            + statusMetric(today, status)
             + metric('Aktuelle Aufgabe', projectStatusValueMarkup(), entry && entry.start_time ? 'Aktueller Arbeitseinsatz' : 'Noch kein Arbeitseinsatz gestartet')
             + metric('Offline Queue', pendingCountValueMarkup(), state.online ? 'Wird automatisch synchronisiert' : 'Wird spaeter gesendet')
             + '</section>'

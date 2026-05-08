@@ -161,6 +161,99 @@ button,
     box-shadow: var(--app-shadow);
 }
 
+.app-status-card {
+    position: relative;
+    overflow: hidden;
+    border-width: 2px;
+}
+
+.app-status-card h2 {
+    font-size: 1.45rem;
+    line-height: 1.15;
+}
+
+.app-status-date,
+.app-status-current,
+.app-status-hint {
+    margin-bottom: 0;
+}
+
+.app-status-current {
+    display: inline-flex;
+    align-items: center;
+    min-height: 34px;
+    padding: 0.35rem 0.75rem;
+    border-radius: 999px;
+    font-weight: 800;
+    background: rgba(255, 255, 255, 0.72);
+}
+
+.app-status-hint {
+    font-weight: 700;
+}
+
+.app-status-card.is-working,
+.app-status-card.is-completed {
+    border-color: rgba(22, 101, 52, 0.4);
+    background:
+        linear-gradient(180deg, rgba(22, 101, 52, 0.18) 0%, rgba(255, 255, 255, 0.94) 100%),
+        var(--app-surface);
+}
+
+.app-status-card.is-working .app-status-current,
+.app-status-card.is-completed .app-status-current {
+    color: var(--app-ok);
+}
+
+.app-status-card.is-paused {
+    border-color: rgba(146, 64, 14, 0.42);
+    background:
+        linear-gradient(180deg, rgba(251, 191, 36, 0.34) 0%, rgba(255, 255, 255, 0.94) 100%),
+        var(--app-surface);
+}
+
+.app-status-card.is-paused .app-status-current {
+    color: var(--app-warn);
+}
+
+.app-status-card.is-missing {
+    border-color: rgba(153, 27, 27, 0.42);
+    background:
+        linear-gradient(180deg, rgba(153, 27, 27, 0.17) 0%, rgba(255, 255, 255, 0.94) 100%),
+        var(--app-surface);
+}
+
+.app-status-card.is-missing .app-status-current {
+    color: var(--app-danger);
+}
+
+.app-status-card.is-neutral .app-status-current {
+    color: var(--app-ink);
+}
+
+html[data-theme="dark"] .app-status-current {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+html[data-theme="dark"] .app-status-card.is-working,
+html[data-theme="dark"] .app-status-card.is-completed {
+    background:
+        linear-gradient(180deg, rgba(22, 101, 52, 0.3) 0%, rgba(14, 24, 42, 0.94) 100%),
+        var(--app-surface);
+}
+
+html[data-theme="dark"] .app-status-card.is-paused {
+    background:
+        linear-gradient(180deg, rgba(251, 191, 36, 0.22) 0%, rgba(14, 24, 42, 0.94) 100%),
+        var(--app-surface);
+}
+
+html[data-theme="dark"] .app-status-card.is-missing {
+    background:
+        linear-gradient(180deg, rgba(153, 27, 27, 0.34) 0%, rgba(14, 24, 42, 0.94) 100%),
+        var(--app-surface);
+}
+
 .app-feedback {
     position: sticky;
     top: 3.9rem;
