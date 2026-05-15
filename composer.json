@@ -2,7 +2,7 @@
   "name": "pkws100/timeapp",
   "description": "Backend-Grundgeruest fuer die Baustellen- und Zeiterfassungs-App",
   "type": "project",
-  "license": "GPL-3.0-or-later",
+  "license": "GPL-2.0-or-later",
   "require": {
     "php": "^8.2",
     "ext-json": "*",

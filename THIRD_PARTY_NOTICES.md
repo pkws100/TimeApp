@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-Dieses Projekt wird unter der GNU General Public License Version 3 oder spaeter
+Dieses Projekt wird unter der GNU General Public License Version 2 oder spaeter
 veroeffentlicht. Zusaetzlich werden Drittkomponenten genutzt, deren jeweilige
 Lizenzbedingungen zu beachten sind.
 
@@ -17,10 +17,10 @@ Die meisten direkten und transitiven Composer-Abhaengigkeiten sind unter MIT-
 oder BSD-Lizenzen veroeffentlicht. Lizenzrelevant fuer die Copyleft-Bewertung ist
 insbesondere:
 
-- `mpdf/mpdf`: Die mPDF-Projektdokumentation beschreibt die Lizenz als GNU GPL
-  Version 2 oder spaeter. Die Composer-/Packagist-Metadaten koennen je nach
-  Version `GPL-2.0-only` ausweisen. Vor einer oeffentlichen Freigabe sollte diese
-  Abweichung juristisch oder technisch abschliessend bewertet werden.
+- `mpdf/mpdf`: Die Composer-/Packagist-Metadaten weisen `GPL-2.0-only` aus.
+  Die Projektlizenz `GPL-2.0-or-later` erlaubt eine Nutzung unter GPLv2 und ist
+  damit auf diese Abhaengigkeit ausgerichtet. Bei einer Weitergabe zusammen mit
+  mPDF sind die GPLv2-Bedingungen fuer die kombinierte Auslieferung zu beachten.
 
 ## JavaScript- und UI-Abhaengigkeiten
 

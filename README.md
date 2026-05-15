@@ -11,12 +11,12 @@ Monolithische PHP-Anwendung fuer Admin-Backend, API und mobile Mitarbeiter-WebAp
 ## GitHub und Lizenz
 - Geplantes Repository: `pkws100/TimeApp`
 - Sichtbarkeit fuer die Erstveroeffentlichung: privat vorbereiten, nach finalem Check oeffentlich schalten
-- Lizenz: GNU General Public License Version 3 oder spaeter (`GPL-3.0-or-later`)
+- Lizenz: GNU General Public License Version 2 oder spaeter (`GPL-2.0-or-later`)
 - Rechteinhaber: pkws100
 - Lizenztext: `COPYING`
 - Drittkomponenten und Lizenzhinweise: `THIRD_PARTY_NOTICES.md`
 
-GPLv3 ist eine Copyleft-Lizenz. Wer das Projekt weitergibt oder abgeleitete
+Die GPL ist eine Copyleft-Lizenz. Wer das Projekt weitergibt oder abgeleitete
 Versionen verteilt, muss die entsprechenden Lizenzpflichten beachten.
 
 ## Wichtige Pfade
