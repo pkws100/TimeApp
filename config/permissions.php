@@ -26,6 +26,8 @@ return [
                 'reports.accounting.export',
                 'settings.manage',
                 'settings.database.manage',
+                'push.manage',
+                'push.receive',
             ],
         ],
         'bauleiter' => [
@@ -41,6 +43,7 @@ return [
                 'timesheets.manage',
                 'timesheets.export',
                 'reports.export',
+                'push.receive',
             ],
         ],
         'kolonnenfuehrer' => [
@@ -54,6 +57,7 @@ return [
                 'assets.assign',
                 'timesheets.view',
                 'timesheets.manage',
+                'push.receive',
             ],
         ],
         'mitarbeiter' => [
@@ -63,6 +67,7 @@ return [
                 'files.view',
                 'timesheets.create',
                 'timesheets.view_own',
+                'push.receive',
             ],
         ],
         'disposition' => [
@@ -75,6 +80,7 @@ return [
                 'timesheets.view',
                 'timesheets.export',
                 'reports.export',
+                'push.receive',
             ],
         ],
     ],
@@ -100,5 +106,7 @@ return [
         'reports.accounting.export',
         'settings.manage',
         'settings.database.manage',
+        'push.receive',
+        'push.manage',
     ],
 ];

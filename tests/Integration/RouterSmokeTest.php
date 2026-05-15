@@ -149,6 +149,22 @@ final class RouterSmokeTest extends TestCase
             || (str_contains($timesheetListPayload, '"items"') && str_contains($timesheetListPayload, '"scope"')),
             'Die App-Zeitlisten-Route sollte erreichbar sein und entweder Daten oder einen Auth-Fehler liefern.'
         );
+
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/api/v1/app/push/status';
+        $_GET = [];
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $router->dispatch($request)->send();
+        $pushPayload = ob_get_clean() ?: '';
+
+        self::assertTrue(
+            str_contains($pushPayload, '"Nicht authentifiziert."')
+            || str_contains($pushPayload, '"can_subscribe"'),
+            'Die App-Push-Statusroute sollte erreichbar sein und entweder Daten oder einen Auth-Fehler liefern.'
+        );
     }
 
     public function testAdminBookingsRoutesAreAvailable(): void
@@ -171,6 +187,29 @@ final class RouterSmokeTest extends TestCase
             || str_contains($html, 'Keine Berechtigung')
             || str_contains($html, '/admin/login?next=%2Fadmin%2Fbookings'),
             'Die Admin-Buchungsseite sollte erreichbar sein und auf Login, Inhalt oder 403 aufloesen.'
+        );
+    }
+
+    public function testAdminPushRouteIsAvailable(): void
+    {
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/admin/settings/push';
+        $_GET = [];
+        $_POST = [];
+        $_FILES = [];
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $router->dispatch($request)->send();
+        $html = ob_get_clean() ?: '';
+
+        self::assertTrue(
+            $html === ''
+            || str_contains($html, 'Browser-Push')
+            || str_contains($html, 'Keine Berechtigung')
+            || str_contains($html, '/admin/login?next=%2Fadmin%2Fsettings%2Fpush'),
+            'Die Admin-Push-Seite sollte erreichbar sein und auf Login, Inhalt oder 403 aufloesen.'
         );
     }
 

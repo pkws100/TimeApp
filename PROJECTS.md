@@ -37,6 +37,7 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [x] IndexedDB fuer lokal gespeicherte, noch nicht synchronisierte Zeiteintraege einplanen.
 - [x] Sync-Warteschlange fuer Wiederverbindung und Nachsendung vorbereiten.
 - [x] Visuelle Anzeige fuer Online, Offline und laufende Synchronisation vorsehen.
+- [x] Browser-Push fuer Buchungs-Erinnerungen mit Service Worker und Geraeteaktivierung vorbereiten.
 
 ### Theme und UI-System
 - [x] Dieselben Modi `light`, `dark` und `system` wie im Admin verwenden.
@@ -75,7 +76,7 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [ ] Datei-Uploads im Frontend
 - [ ] Tiefere Historienansichten
 - [ ] Verbesserte Sync-Konfliktbehandlung
-- [ ] Push- und Benachrichtigungslogik
+- [x] Push- und Benachrichtigungslogik
 - [ ] Erweiterte GEO-Funktionen
 
 ## Bereits umgesetzt
@@ -116,6 +117,7 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [x] Session-/Token-taugliche API-Nutzung fuer die mobile Mitarbeiter-App ausbauen.
 - [x] Endpunkte fuer benutzerbezogene Tagesdaten bzw. eine mobile Startansicht vorbereiten, falls das bestehende Dashboard dafuer nicht passend ist.
 - [x] Robuste Sync-faehige Zeiterfassungs-Endpunkte fuer Offline-Nachsendung definieren.
+- [x] Browser-Push fuer fehlende Tagesbuchungen mit Rollenfreigabe, Admin-Settings, Geraeteverwaltung und Cron-CLI eingebaut.
 - [x] Möglichkeit schaffen das System auch in Docker-Compose zu deplyen
 
 ## Offene Punkte fuer den naechsten Schritt
@@ -132,7 +134,11 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - Admin-Backend: `/admin`
 - Settings: `/admin/settings/company`
 - Datenbankeinstellungen: `/admin/settings/database`
+- Push-Einstellungen: `/admin/settings/push`
 - App-Login API: `POST /api/v1/auth/login`
+- App-Push-Status API: `GET /api/v1/app/push/status`
+- VAPID-Key-Generator: `php bin/generate-vapid-keys.php`
+- Push-Reminder CLI: `php bin/send-push-reminders.php`
 - CLI-Erstadministrator: `php bin/bootstrap-admin.php --email=... --password=... --first-name=... --last-name=...`
 - Dashboard API: `/api/v1/dashboard/overview`
 - Firmenprofil API: `/api/v1/settings/company`

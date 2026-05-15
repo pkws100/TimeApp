@@ -90,12 +90,30 @@ test('mobile profile shows company, legal texts and geo policy', async ({ page }
     });
   });
 
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          enabled: true,
+          can_subscribe: true,
+          permission_required: false,
+          vapid_configured: true,
+          vapid_public_key: 'BMockPublicKey',
+          reminder_time: '09:00',
+          notice_text: 'Bitte buchen Sie rechtzeitig.',
+          devices: []
+        }
+      })
+    });
+  });
+
   await page.goto('/app/profil');
 
   await expect(page.getByRole('heading', { name: 'Einstellungen und Firma' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Muster Bau GmbH' })).toBeVisible();
-  await expect(page.locator('.app-info-list')).toContainText('Musterstrasse 12');
-  await expect(page.locator('.app-info-list')).toContainText('info@example.test');
+  await expect(page.locator('.app-info-list').first()).toContainText('Musterstrasse 12');
+  await expect(page.locator('.app-info-list').first()).toContainText('info@example.test');
   await expect(page.getByRole('heading', { name: 'AGB' })).toBeVisible();
   await page.getByText('AGB anzeigen').click();
   await expect(page.locator('.app-legal-text').first()).toContainText('AGB Zeile 2');
@@ -106,6 +124,9 @@ test('mobile profile shows company, legal texts and geo policy', async ({ page }
   await expect(page.locator('#geoAckSelect')).toBeVisible();
   await page.locator('#geoAckSelect').selectOption('1');
   await expect(page.getByText('GEO-Zustimmung wurde lokal gespeichert.')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Benachrichtigungen' })).toBeVisible();
+  await expect(page.getByText('Bitte buchen Sie rechtzeitig.')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Installation' })).toBeVisible();
 });
 
 test('mobile history is its own area with project filter', async ({ page }) => {
@@ -185,6 +206,24 @@ test('mobile history is its own area with project filter', async ({ page }) => {
           scope,
           project_id: projectId ? Number(projectId) : null,
           cached_at: '2026-05-15 10:00:00'
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          enabled: false,
+          can_subscribe: false,
+          permission_required: false,
+          vapid_configured: false,
+          vapid_public_key: '',
+          reminder_time: '09:00',
+          notice_text: '',
+          devices: []
         }
       })
     });

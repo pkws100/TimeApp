@@ -96,7 +96,8 @@ final class AdminContextService
                 'badge' => count($this->assetService->list('active')),
                 'permission' => 'assets.manage',
             ],
-            ['href' => '/admin/settings/company', 'label' => 'Settings', 'active_prefix' => '/admin/settings', 'permission' => 'settings.manage'],
+            ['href' => '/admin/settings/company', 'label' => 'Settings', 'active_prefix' => '/admin/settings/company', 'permission' => 'settings.manage'],
+            ['href' => '/admin/settings/push', 'label' => 'Push', 'active_prefix' => '/admin/settings/push', 'permission' => 'push.manage'],
         ];
 
         return array_values(array_filter(

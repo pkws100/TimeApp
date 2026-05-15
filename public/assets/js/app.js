@@ -38,10 +38,15 @@
         timesheetListUpdatedAt: null,
         timesheetListLoading: false,
         timesheetListOffline: false,
+        push: null,
+        pushLoading: false,
+        pushBusy: false,
+        installPromptAvailable: false,
     };
     let feedbackTimer = null;
     let clientIdCounter = 0;
     let revalidateTimer = null;
+    let deferredInstallPrompt = null;
 
     function getStoredThemeMode() {
         try {
@@ -1708,7 +1713,74 @@
             + '<div><p class="muted">GEO</p><h2>Standortfreigabe</h2></div>'
             + geoPolicyMarkup()
             + '</section>'
+            + pushProfileSection()
+            + installProfileSection()
         );
+    }
+
+    function pushProfileSection() {
+        const support = pushSupport();
+        const push = state.push || {};
+        const devices = Array.isArray(push.devices) ? push.devices : [];
+        const permission = support.notification ? Notification.permission : 'unsupported';
+        const permissionLabel = permission === 'granted'
+            ? 'erlaubt'
+            : (permission === 'denied' ? 'blockiert' : 'offen');
+        const statusRows = appInfoRows([
+            { label: 'Status', value: push.enabled ? 'Global aktiv' : 'Global deaktiviert' },
+            { label: 'Freigabe', value: push.can_subscribe ? 'Fuer Ihre Rolle freigegeben' : (push.permission_required ? 'Nicht fuer Ihre Rolle freigegeben' : 'Aktuell nicht verfuegbar') },
+            { label: 'Browser', value: support.supported ? 'unterstuetzt' : 'nicht unterstuetzt' },
+            { label: 'Berechtigung', value: permissionLabel },
+            { label: 'Erinnerung', value: push.reminder_time ? 'taeglich ab ' + push.reminder_time + ' Uhr' : null }
+        ]);
+        const enableButton = support.supported && push.can_subscribe && permission !== 'denied'
+            ? '<button type="button" id="enablePushButton" ' + (state.pushBusy ? 'disabled' : '') + '>' + escapeHtml(state.pushBusy ? 'Wird aktiviert ...' : 'Push aktivieren') + '</button>'
+            : '';
+        const reloadButton = state.online
+            ? '<button type="button" id="reloadPushButton">Status aktualisieren</button>'
+            : '';
+        const deviceMarkup = devices.length > 0
+            ? '<div class="app-info-list">' + devices.map((device) => {
+                const status = device.is_enabled ? 'aktiv' : 'inaktiv';
+                const disableButton = device.is_enabled
+                    ? '<button type="button" data-disable-push-device="' + String(device.id) + '" ' + (state.pushBusy ? 'disabled' : '') + '>Deaktivieren</button>'
+                    : '';
+
+                return '<div class="app-info-row">'
+                    + '<span class="muted">' + escapeHtml(status) + '</span>'
+                    + '<strong>' + escapeHtml(device.device_label || 'Browser-Geraet') + '</strong>'
+                    + '<span class="muted">Zuletzt gesehen: ' + escapeHtml(device.last_seen_at || '-') + '</span>'
+                    + disableButton
+                    + '</div>';
+            }).join('') + '</div>'
+            : '<div class="app-empty">Noch kein Geraet fuer Push aktiviert.</div>';
+        const deniedHint = permission === 'denied'
+            ? '<div class="app-empty">Benachrichtigungen sind im Browser blockiert. Bitte die Browser-Einstellung pruefen.</div>'
+            : '';
+        const unsupportedHint = !support.supported
+            ? '<div class="app-empty">Dieser Browser unterstuetzt Push-Benachrichtigungen hier nicht.</div>'
+            : '';
+
+        return '<section class="app-card app-grid">'
+            + '<div><p class="muted">Push</p><h2>Benachrichtigungen</h2><p>' + escapeHtml(push.notice_text || 'Erinnerungen werden nur fuer fehlende Tagesbuchungen gesendet.') + '</p></div>'
+            + statusRows
+            + deniedHint
+            + unsupportedHint
+            + '<div class="app-inline-actions">' + enableButton + reloadButton + '</div>'
+            + deviceMarkup
+            + '</section>';
+    }
+
+    function installProfileSection() {
+        const installed = window.matchMedia && window.matchMedia('(display-mode: standalone)').matches;
+        const canInstall = state.installPromptAvailable && !installed;
+
+        return '<section class="app-card app-grid">'
+            + '<div><p class="muted">App</p><h2>Installation</h2><p>' + escapeHtml(installed ? 'Die App laeuft bereits im installierten Modus.' : 'Die mobile App kann auf geeigneten Geraeten installiert werden.') + '</p></div>'
+            + '<div class="app-inline-actions">'
+            + (canInstall ? '<button type="button" id="installAppButton">App installieren</button>' : '<button type="button" disabled>Installation aktuell nicht verfuegbar</button>')
+            + '</div>'
+            + '</section>';
     }
 
     function geoPolicyMarkup() {
@@ -1727,6 +1799,32 @@
             + '<option value="1"' + (acknowledged ? ' selected' : '') + '>Zugestimmt</option>'
             + '</select></label>'
             + '</div>';
+    }
+
+    function pushSupport() {
+        const notification = 'Notification' in window;
+        const serviceWorker = 'serviceWorker' in navigator;
+        const pushManager = 'PushManager' in window;
+
+        return {
+            notification,
+            serviceWorker,
+            pushManager,
+            supported: notification && serviceWorker && pushManager
+        };
+    }
+
+    function urlBase64ToUint8Array(value) {
+        const padding = '='.repeat((4 - value.length % 4) % 4);
+        const base64 = (value + padding).replace(/-/g, '+').replace(/_/g, '/');
+        const rawData = window.atob(base64);
+        const output = new Uint8Array(rawData.length);
+
+        for (let index = 0; index < rawData.length; index++) {
+            output[index] = rawData.charCodeAt(index);
+        }
+
+        return output;
     }
 
     function projectOptions() {
@@ -2003,6 +2101,36 @@
             });
         }
 
+        const enablePushButton = document.getElementById('enablePushButton');
+
+        if (enablePushButton) {
+            enablePushButton.addEventListener('click', async function () {
+                await enablePushNotifications();
+            });
+        }
+
+        const reloadPushButton = document.getElementById('reloadPushButton');
+
+        if (reloadPushButton) {
+            reloadPushButton.addEventListener('click', async function () {
+                await loadPushStatus(false);
+            });
+        }
+
+        document.querySelectorAll('[data-disable-push-device]').forEach((button) => {
+            button.addEventListener('click', async function () {
+                await disablePushDevice(Number(button.getAttribute('data-disable-push-device') || '0'));
+            });
+        });
+
+        const installAppButton = document.getElementById('installAppButton');
+
+        if (installAppButton) {
+            installAppButton.addEventListener('click', async function () {
+                await promptAppInstall();
+            });
+        }
+
         const logoutButton = document.getElementById('logoutButton');
 
         if (logoutButton) {
@@ -2093,9 +2221,10 @@
         }
 
         try {
-            const [dayResponse, companyResponse] = await Promise.all([
+            const [dayResponse, companyResponse, pushResponse] = await Promise.all([
                 fetch('/api/v1/app/me/day'),
-                fetch('/api/v1/settings/company')
+                fetch('/api/v1/settings/company'),
+                fetch('/api/v1/app/push/status')
             ]);
 
             if (dayResponse.ok) {
@@ -2111,6 +2240,11 @@
                 const companyPayload = await companyResponse.json();
                 state.company = companyPayload.data;
                 await cacheSet('company', state.company);
+            }
+
+            if (pushResponse.ok) {
+                const pushPayload = await pushResponse.json();
+                state.push = pushPayload.data || null;
             }
 
             if (routeName() === '/historie') {
@@ -2210,6 +2344,147 @@
             state.timesheetListLoading = false;
             render();
         }
+    }
+
+    async function loadPushStatus(showErrors) {
+        if (!state.session.authenticated || !navigator.onLine) {
+            return;
+        }
+
+        state.pushLoading = true;
+        render();
+
+        try {
+            const response = await fetch('/api/v1/app/push/status');
+            const payload = await response.json();
+
+            if (!response.ok) {
+                throw new Error(payload.message || payload.error || 'Push-Status konnte nicht geladen werden.');
+            }
+
+            state.push = payload.data || null;
+        } catch (error) {
+            if (showErrors) {
+                showFeedback('error', friendlyMessage(error.message, 'Push-Status konnte nicht geladen werden.'));
+            }
+        } finally {
+            state.pushLoading = false;
+            render();
+        }
+    }
+
+    async function enablePushNotifications() {
+        const support = pushSupport();
+
+        if (!support.supported) {
+            showFeedback('error', 'Dieser Browser unterstuetzt Push-Benachrichtigungen hier nicht.');
+            return;
+        }
+
+        if (!state.push || !state.push.can_subscribe || !state.push.vapid_public_key) {
+            showFeedback('error', 'Push ist aktuell nicht freigegeben oder nicht konfiguriert.');
+            return;
+        }
+
+        state.pushBusy = true;
+        render();
+
+        try {
+            const permission = await Notification.requestPermission();
+
+            if (permission !== 'granted') {
+                showFeedback('error', 'Push-Berechtigung wurde nicht erteilt.');
+                return;
+            }
+
+            const registration = await navigator.serviceWorker.ready;
+            const subscription = await registration.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: urlBase64ToUint8Array(state.push.vapid_public_key)
+            });
+            const body = subscription.toJSON();
+
+            body.permission_status = permission;
+            body.device_label = navigator.userAgent && navigator.userAgent.includes('Mobile') ? 'Mobiles Geraet' : 'Browser-Geraet';
+
+            const response = await fetch('/api/v1/app/push/subscriptions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            const payload = await response.json();
+
+            if (!response.ok) {
+                throw new Error(payload.message || payload.error || 'Push konnte nicht aktiviert werden.');
+            }
+
+            state.push = {
+                ...(state.push || {}),
+                devices: payload.data && Array.isArray(payload.data.devices) ? payload.data.devices : []
+            };
+            showFeedback('success', friendlyMessage(payload.message, 'Push wurde aktiviert.'));
+        } catch (error) {
+            showFeedback('error', friendlyMessage(error.message, 'Push konnte nicht aktiviert werden.'));
+        } finally {
+            state.pushBusy = false;
+            render();
+        }
+    }
+
+    async function disablePushDevice(deviceId) {
+        if (!deviceId || !navigator.onLine) {
+            showFeedback('error', 'Push-Geraete koennen nur online geaendert werden.');
+            return;
+        }
+
+        state.pushBusy = true;
+        render();
+
+        try {
+            const response = await fetch('/api/v1/app/push/subscriptions/' + deviceId, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: '_method=DELETE'
+            });
+            const payload = await response.json();
+
+            if (!response.ok) {
+                throw new Error(payload.message || payload.error || 'Push konnte nicht deaktiviert werden.');
+            }
+
+            state.push = {
+                ...(state.push || {}),
+                devices: payload.data && Array.isArray(payload.data.devices) ? payload.data.devices : []
+            };
+            showFeedback('success', friendlyMessage(payload.message, 'Push wurde deaktiviert.'));
+        } catch (error) {
+            showFeedback('error', friendlyMessage(error.message, 'Push konnte nicht deaktiviert werden.'));
+        } finally {
+            state.pushBusy = false;
+            render();
+        }
+    }
+
+    async function promptAppInstall() {
+        if (!deferredInstallPrompt) {
+            showFeedback('error', 'Die Installation ist aktuell nicht verfuegbar.');
+            return;
+        }
+
+        const promptEvent = deferredInstallPrompt;
+        deferredInstallPrompt = null;
+        state.installPromptAvailable = false;
+        promptEvent.prompt();
+
+        try {
+            await promptEvent.userChoice;
+        } catch (error) {
+            console.warn('Installationsdialog wurde ohne Ergebnis geschlossen.', error);
+        }
+
+        render();
     }
 
     async function enqueueAction(action) {
@@ -2829,6 +3104,20 @@
 
     window.addEventListener('popstate', function () {
         state.route = window.location.pathname || '/app';
+        render();
+    });
+
+    window.addEventListener('beforeinstallprompt', function (event) {
+        event.preventDefault();
+        deferredInstallPrompt = event;
+        state.installPromptAvailable = true;
+        render();
+    });
+
+    window.addEventListener('appinstalled', function () {
+        deferredInstallPrompt = null;
+        state.installPromptAvailable = false;
+        showFeedback('success', 'App wurde installiert.');
         render();
     });
 

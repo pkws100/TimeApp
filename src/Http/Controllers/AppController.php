@@ -44,7 +44,14 @@ final class AppController
             'theme_color' => '#d97706',
             'lang' => 'de-DE',
             'scope' => '/app',
-            'icons' => [],
+            'icons' => [
+                [
+                    'src' => '/assets/app-icon.svg',
+                    'sizes' => 'any',
+                    'type' => 'image/svg+xml',
+                    'purpose' => 'any maskable',
+                ],
+            ],
         ];
 
         return new Response(
@@ -59,7 +66,7 @@ final class AppController
         $cssUrl = AppView::versionedAssetUrl('/assets/css/app.css');
         $jsUrl = AppView::versionedAssetUrl('/assets/js/app.js');
         $script = <<<JS
-const CACHE_NAME = 'zeiterfassung-app-v3';
+const CACHE_NAME = 'zeiterfassung-app-v4';
 const APP_SHELL = [
   '/app',
   '{$cssUrl}',
@@ -87,7 +94,9 @@ self.addEventListener('fetch', (event) => {
   }
 
   const url = new URL(request.url);
-  const isAppShellRequest = url.pathname === '/app' || url.pathname.startsWith('/app/');
+  const isAppShellRequest = (url.pathname === '/app' || url.pathname.startsWith('/app/'))
+    && url.pathname !== '/app/sw.js'
+    && url.pathname !== '/app/manifest.json';
   const isStaticAssetRequest = url.pathname.startsWith('/assets/');
 
   if (!isAppShellRequest && !isStaticAssetRequest) {
@@ -108,6 +117,56 @@ self.addEventListener('fetch', (event) => {
 
         return response;
       }).catch(() => caches.match('/app'));
+    })
+  );
+});
+
+self.addEventListener('push', (event) => {
+  let payload = {};
+
+  if (event.data) {
+    try {
+      payload = event.data.json();
+    } catch (error) {
+      payload = { body: event.data.text() };
+    }
+  }
+
+  const title = payload.title || 'Zeiterfassung';
+  const options = {
+    body: payload.body || 'Bitte oeffnen Sie die App.',
+    icon: '/assets/app-icon.svg',
+    badge: '/assets/app-icon.svg',
+    tag: payload.tag || 'zeiterfassung-push',
+    data: {
+      url: payload.url || '/app'
+    }
+  };
+
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const targetUrl = event.notification.data && event.notification.data.url ? event.notification.data.url : '/app';
+
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if ('focus' in client && client.url.includes('/app')) {
+          if ('navigate' in client) {
+            return client.navigate(targetUrl).then(() => client.focus());
+          }
+
+          return client.focus();
+        }
+      }
+
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(targetUrl);
+      }
+
+      return undefined;
     })
   );
 });

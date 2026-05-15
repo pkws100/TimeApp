@@ -120,7 +120,8 @@ HTML;
             ['href' => '/admin/users', 'label' => 'User', 'active_prefix' => '/admin/users', 'badge' => 0],
             ['href' => '/admin/roles', 'label' => 'Rollen', 'active_prefix' => '/admin/roles', 'badge' => 0],
             ['href' => '/admin/assets', 'label' => 'Geraete', 'active_prefix' => '/admin/assets', 'badge' => 0],
-            ['href' => '/admin/settings/company', 'label' => 'Settings', 'active_prefix' => '/admin/settings'],
+            ['href' => '/admin/settings/company', 'label' => 'Settings', 'active_prefix' => '/admin/settings/company'],
+            ['href' => '/admin/settings/push', 'label' => 'Push', 'active_prefix' => '/admin/settings/push'],
         ];
     }
 

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Zeiterfassung">
+  <rect width="512" height="512" rx="96" fill="#14213d"/>
+  <path fill="#f59e0b" d="M128 122h256a42 42 0 0 1 42 42v222a42 42 0 0 1-42 42H128a42 42 0 0 1-42-42V164a42 42 0 0 1 42-42Z"/>
+  <path fill="#fff7ed" d="M144 190h224v42H144v-42Zm0 82h96v42h-96v-42Zm128 0h96v42h-96v-42Zm-128 82h96v42h-96v-42Zm128 0h96v42h-96v-42Z"/>
+  <path fill="#14213d" d="M170 86h44v78h-44V86Zm128 0h44v78h-44V86Z"/>
+</svg>

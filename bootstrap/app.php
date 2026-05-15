@@ -18,6 +18,9 @@ use App\Domain\Exports\BookingExportService;
 use App\Domain\Exports\ReportService;
 use App\Domain\Files\FileAttachmentService;
 use App\Domain\Projects\ProjectService;
+use App\Domain\Push\PushNotificationService;
+use App\Domain\Push\PushSettingsService;
+use App\Domain\Push\PushSubscriptionService;
 use App\Domain\Settings\CompanySettingsService;
 use App\Domain\Settings\DatabaseSettingsManager;
 use App\Domain\Settings\SmtpTestService;
@@ -37,8 +40,10 @@ use App\Http\Controllers\AdminBookingController;
 use App\Http\Controllers\AdminCalendarController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminManagementController;
+use App\Http\Controllers\AdminPushController;
 use App\Http\Controllers\AppApiController;
 use App\Http\Controllers\AppController;
+use App\Http\Controllers\AppPushController;
 use App\Http\Controllers\AppTimesheetAttachmentController;
 use App\Http\Controllers\AppTimesheetController;
 use App\Http\Controllers\AssetController;
@@ -111,7 +116,7 @@ if (session_status() !== PHP_SESSION_ACTIVE) {
     ]);
 }
 
-$config = ConfigRepository::load(['app', 'database', 'permissions', 'uploads', 'exports', 'maps']);
+$config = ConfigRepository::load(['app', 'database', 'permissions', 'uploads', 'exports', 'maps', 'push']);
 date_default_timezone_set((string) $config->get('app.timezone', 'Europe/Berlin'));
 
 $databaseSettings = new DatabaseSettingsManager(
@@ -133,6 +138,9 @@ $timesheetService = new TimesheetService($connection, $timesheetCalculator);
 $adminBookingService = new AdminBookingService($connection, $timesheetCalculator);
 $adminCalendarService = new AdminCalendarService($connection, $adminBookingService);
 $companySettingsService = new CompanySettingsService($connection, $config->get('uploads', []));
+$pushSettingsService = new PushSettingsService($connection, $config->get('push', []));
+$pushSubscriptionService = new PushSubscriptionService($connection);
+$pushNotificationService = new PushNotificationService($connection, $pushSettingsService, $pushSubscriptionService);
 $authService = new AuthService($connection, $permissionMatrix);
 $csrfService = new CsrfService();
 $routeGuard = new RouteGuard($authService);
@@ -169,6 +177,7 @@ $authController = new AuthController($authService);
 $adminAuthController = new AdminAuthController($authService, $companySettingsService);
 $appController = new AppController($appView, $authService, $appDisplayName, $companySettingsService);
 $appApiController = new AppApiController($mobileAppService, $authService);
+$appPushController = new AppPushController($pushSettingsService, $pushSubscriptionService, $authService);
 $appTimesheetController = new AppTimesheetController($appTimesheetSyncService, $authService);
 $appTimesheetAttachmentController = new AppTimesheetAttachmentController($fileService, $authService);
 $adminController = new AdminController($adminView, $dashboardService, $databaseSettings);
@@ -202,6 +211,7 @@ $adminCalendarController = new AdminCalendarController(
     $csrfService
 );
 $companySettingsController = new CompanySettingsController($adminView, $companySettingsService, $smtpTestService, $csrfService, $config->get('maps', []));
+$adminPushController = new AdminPushController($adminView, $pushSettingsService, $pushSubscriptionService, $pushNotificationService, $csrfService);
 $attendanceController = new AttendanceController($attendanceService, $adminView);
 $accountingExportController = new AccountingExportController($accountingExportService);
 $backupController = new BackupController($backupService);
@@ -288,6 +298,10 @@ $router->post('/admin/settings/company/geo', $admin([$companySettingsController,
 $router->post('/admin/settings/company/smtp-test', $admin([$companySettingsController, 'smtpTest'], 'settings.manage'));
 $router->get('/admin/settings/database', $admin([$adminController, 'databaseSettings'], 'settings.database.manage'));
 $router->post('/admin/settings/database', $admin([new SettingsController($databaseSettings), 'saveFromAdmin'], 'settings.database.manage'));
+$router->get('/admin/settings/push', $admin([$adminPushController, 'show'], 'push.manage'));
+$router->post('/admin/settings/push', $admin([$adminPushController, 'save'], 'push.manage'));
+$router->post('/admin/settings/push/subscriptions/{id}', $admin([$adminPushController, 'updateDevice'], 'push.manage'));
+$router->post('/admin/settings/push/test', $admin([$adminPushController, 'test'], 'push.manage'));
 
 $router->post('/api/v1/auth/login', [$authController, 'login']);
 $router->post('/api/v1/auth/logout', [$authController, 'logout']);
@@ -295,6 +309,9 @@ $router->get('/api/v1/auth/session', [$authController, 'session']);
 
 $router->get('/api/v1/app/me/day', $api([$appApiController, 'meDay'], 'timesheets.view_own'));
 $router->get('/api/v1/app/me/timesheets', $api([$appApiController, 'meTimesheets'], 'timesheets.view_own'));
+$router->get('/api/v1/app/push/status', $api([$appPushController, 'status']));
+$router->post('/api/v1/app/push/subscriptions', $api([$appPushController, 'store'], 'push.receive'));
+$router->delete('/api/v1/app/push/subscriptions/{id}', $api([$appPushController, 'disable'], 'push.receive'));
 $router->post('/api/v1/app/timesheets/sync', $api([$appTimesheetController, 'sync'], 'timesheets.create'));
 $router->get('/api/v1/app/timesheets/{id}/files', $api([$appTimesheetAttachmentController, 'index'], 'timesheets.view_own'));
 $router->post('/api/v1/app/timesheets/{id}/files', $api([$appTimesheetAttachmentController, 'upload'], 'timesheets.create'));
