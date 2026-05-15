@@ -757,6 +757,64 @@ html[data-theme="dark"] .app-timesheet-table thead th {
     gap: 0.7rem;
 }
 
+.app-info-list {
+    display: grid;
+    gap: 0.7rem;
+}
+
+.app-info-row {
+    display: grid;
+    gap: 0.25rem;
+    padding: 0.85rem 1rem;
+    border-radius: 1rem;
+    border: 1px solid var(--app-line);
+    background: rgba(255, 255, 255, 0.45);
+}
+
+.app-info-row strong {
+    overflow-wrap: anywhere;
+}
+
+html[data-theme="dark"] .app-info-row {
+    background: rgba(8, 16, 29, 0.55);
+}
+
+.app-legal-details {
+    display: grid;
+    gap: 0.8rem;
+}
+
+.app-legal-details summary {
+    min-height: 48px;
+    display: flex;
+    align-items: center;
+    padding: 0.85rem 1rem;
+    border-radius: 1rem;
+    border: 1px solid var(--app-line);
+    background: rgba(255, 255, 255, 0.45);
+    color: var(--app-ink);
+    cursor: pointer;
+    font-weight: 800;
+}
+
+html[data-theme="dark"] .app-legal-details summary {
+    background: rgba(8, 16, 29, 0.55);
+}
+
+.app-legal-text {
+    padding: 1rem;
+    border-radius: 1rem;
+    border: 1px solid var(--app-line);
+    background: rgba(255, 255, 255, 0.45);
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+html[data-theme="dark"] .app-legal-text {
+    background: rgba(8, 16, 29, 0.55);
+}
+
 .app-stat-row {
     display: flex;
     justify-content: space-between;

@@ -54,7 +54,7 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [ ] Projekt- und Asset-Datei-Endpunkte nur als spaeteren Frontend-Ausbau einplanen.
 
 ### Recht, Datenschutz und GEO
-- [ ] AGB und Datenschutz im Frontend lesbar anzeigen.
+- [x] AGB und Datenschutz im Frontend lesbar anzeigen.
 - [x] GEO-Policy aus den globalen Settings beziehen.
 - [x] GEO-Zustimmung und Hinweistext im Frontend vorbereiten.
 - [ ] Echte Positionsspeicherung ausdruecklich als spaeteren Schritt markieren und nicht ins Frontend-MVP ziehen.
@@ -69,7 +69,7 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [x] Projektwahl
 - [x] Offline-Puffer fuer Zeiteintraege
 - [x] Theme-Umschaltung
-- [ ] Rechtstexte und Firmenprofil anzeigen
+- [x] Rechtstexte und Firmenprofil anzeigen
 
 ### Frontend nach MVP
 - [ ] Datei-Uploads im Frontend

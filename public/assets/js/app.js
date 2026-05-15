@@ -1203,6 +1203,54 @@
         return '<div class="app-empty"><strong>Theme:</strong> ' + escapeHtml(THEME_LABELS[mode] || 'System') + '<br><span class="muted">Umschaltung ueber das Einstellungsmenue im Header.</span></div>';
     }
 
+    function compactLine(parts) {
+        return parts
+            .map((part) => String(part || '').trim())
+            .filter((part) => part !== '')
+            .join(' ');
+    }
+
+    function compactBlock(parts, separator) {
+        return parts
+            .map((part) => String(part || '').trim())
+            .filter((part) => part !== '')
+            .join(separator || ', ');
+    }
+
+    function appInfoRows(rows) {
+        const markup = rows
+            .filter((row) => String(row.value || '').trim() !== '')
+            .map((row) => '<div class="app-info-row"><span class="muted">' + escapeHtml(row.label) + '</span><strong>' + escapeHtml(row.value) + '</strong></div>')
+            .join('');
+
+        return markup !== '' ? '<div class="app-info-list">' + markup + '</div>' : '<div class="app-empty">Noch keine Angaben hinterlegt.</div>';
+    }
+
+    function legalTextSection(title, text) {
+        const value = String(text || '').trim();
+
+        return '<section class="app-card app-grid">'
+            + '<div><p class="muted">Rechtstext</p><h2>' + escapeHtml(title) + '</h2></div>'
+            + (value !== ''
+                ? '<details class="app-legal-details"><summary>' + escapeHtml(title) + ' anzeigen</summary><div class="app-legal-text">' + escapeHtml(value) + '</div></details>'
+                : '<div class="app-empty">Noch kein Text hinterlegt.</div>')
+            + '</section>';
+    }
+
+    function geoPolicy() {
+        if (state.today && state.today.geo_policy) {
+            return state.today.geo_policy;
+        }
+
+        const company = state.company || {};
+
+        return {
+            enabled: !!company.geo_capture_enabled,
+            notice_text: company.geo_notice_text || '',
+            requires_acknowledgement: !!company.geo_requires_acknowledgement
+        };
+    }
+
     function currentAttachments() {
         const entry = workEntry();
 
@@ -1557,20 +1605,43 @@
 
     function profileView() {
         const company = state.company || {};
-        const geo = state.today ? state.today.geo_policy : { enabled: false };
+        const companyName = compactLine([company.company_name, company.legal_form]) || '-';
+        const address = compactBlock([
+            compactLine([company.street, company.house_number]),
+            compactLine([company.postal_code, company.city]),
+            company.country
+        ]);
+        const register = compactBlock([company.register_court, company.commercial_register]);
+        const tax = compactBlock([company.vat_id, company.tax_number], ' / ');
 
         return shell(
             '<section class="app-card app-grid">'
-            + '<div><p class="muted">Profil</p><h1>Einstellungen</h1></div>'
+            + '<div><p class="muted">Profil</p><h1>Einstellungen und Firma</h1><p>Firmenangaben, Rechtstexte und GEO-Hinweise bleiben mit dem letzten bekannten Stand offline lesbar.</p></div>'
             + themeSettingsHint()
-            + '<div class="app-empty"><strong>Firma:</strong> ' + escapeHtml(company.company_name || '-') + '</div>'
-            + '<div class="app-empty"><strong>GEO:</strong> ' + (geo.enabled ? 'aktivierbar' : 'deaktiviert') + '</div>'
+            + '</section>'
+            + '<section class="app-card app-grid">'
+            + '<div><p class="muted">Firmenprofil</p><h2>' + escapeHtml(companyName) + '</h2></div>'
+            + appInfoRows([
+                { label: 'Adresse', value: address },
+                { label: 'E-Mail', value: company.email },
+                { label: 'Telefon', value: company.phone },
+                { label: 'Website', value: company.website },
+                { label: 'Vertretung', value: company.managing_director },
+                { label: 'Register', value: register },
+                { label: 'Steuer', value: tax }
+            ])
+            + '</section>'
+            + legalTextSection('AGB', company.agb_text)
+            + legalTextSection('Datenschutz', company.datenschutz_text)
+            + '<section class="app-card app-grid">'
+            + '<div><p class="muted">GEO</p><h2>Standortfreigabe</h2></div>'
+            + geoPolicyMarkup()
             + '</section>'
         );
     }
 
     function geoPolicyMarkup() {
-        const policy = state.today ? state.today.geo_policy : { enabled: false };
+        const policy = geoPolicy();
 
         if (!policy.enabled) {
             return '<div class="app-empty">GEO ist aktuell global deaktiviert.</div>';
@@ -1827,8 +1898,10 @@
             geoAckSelect.addEventListener('change', function () {
                 try {
                     window.localStorage.setItem(GEO_ACK_KEY, geoAckSelect.value === '1' ? '1' : '0');
+                    showFeedback('success', geoAckSelect.value === '1' ? 'GEO-Zustimmung wurde lokal gespeichert.' : 'GEO-Zustimmung wurde lokal zurueckgenommen.');
                 } catch (error) {
                     console.warn('GEO-Zustimmung konnte nicht gespeichert werden.', error);
+                    showFeedback('error', 'GEO-Zustimmung konnte nicht gespeichert werden.');
                 }
             });
         }
@@ -1880,35 +1953,38 @@
         }
     }
 
+    async function applyCachedData() {
+        const cachedToday = await cacheGet('today');
+        const cachedCompany = await cacheGet('company');
+        const cachedTimesheets = await cacheGet(currentTimesheetCacheKey());
+
+        if (cachedToday) {
+            state.today = cachedToday;
+            syncTodayStateStatus();
+        }
+
+        if (cachedCompany) {
+            state.company = cachedCompany;
+        }
+
+        if (cachedTimesheets && Array.isArray(cachedTimesheets.items)) {
+            state.timesheetList = cachedTimesheets.items;
+            state.timesheetListUpdatedAt = cachedTimesheets.cached_at || null;
+            state.timesheetListOffline = true;
+        } else {
+            state.timesheetList = [];
+            state.timesheetListUpdatedAt = null;
+            state.timesheetListOffline = true;
+        }
+    }
+
     async function loadOnlineData(force) {
         if (!state.session.authenticated) {
             return;
         }
 
         if (!navigator.onLine) {
-            const cachedToday = await cacheGet('today');
-            const cachedCompany = await cacheGet('company');
-            const cachedTimesheets = await cacheGet(currentTimesheetCacheKey());
-
-            if (cachedToday) {
-                state.today = cachedToday;
-                syncTodayStateStatus();
-            }
-
-            if (cachedCompany) {
-                state.company = cachedCompany;
-            }
-
-            if (cachedTimesheets && Array.isArray(cachedTimesheets.items)) {
-                state.timesheetList = cachedTimesheets.items;
-                state.timesheetListUpdatedAt = cachedTimesheets.cached_at || null;
-                state.timesheetListOffline = true;
-            } else {
-                state.timesheetList = [];
-                state.timesheetListUpdatedAt = null;
-                state.timesheetListOffline = true;
-            }
-
+            await applyCachedData();
             render();
             return;
         }
@@ -1936,6 +2012,7 @@
             await loadTimesheetList(force);
         } catch (error) {
             console.warn('App-Daten konnten nicht geladen werden.', error);
+            await applyCachedData();
 
             if (!force) {
                 showFeedback('error', 'Die aktuellen App-Daten konnten nicht geladen werden. Bitte erneut versuchen.');
@@ -2369,7 +2446,7 @@
     }
 
     async function currentGeoPayload() {
-        const policy = state.today ? state.today.geo_policy : null;
+        const policy = geoPolicy();
 
         if (!policy || !policy.enabled || !readGeoAck() || !navigator.geolocation) {
             return null;

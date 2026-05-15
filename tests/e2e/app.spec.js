@@ -10,6 +10,104 @@ test('mobile app login screen loads', async ({ page }) => {
   await expect(page.locator('input[name="password"]')).toBeVisible();
 });
 
+test('mobile profile shows company, legal texts and geo policy', async ({ page }) => {
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test'
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          today: '2026-05-15',
+          projects: [],
+          attachments: [],
+          today_state: {
+            status: 'not_started',
+            work_entry: null,
+            active_break: null
+          },
+          geo_policy: null
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          app_display_name: 'Baustellen App',
+          company_name: 'Muster Bau',
+          legal_form: 'GmbH',
+          street: 'Musterstrasse',
+          house_number: '12',
+          postal_code: '12345',
+          city: 'Berlin',
+          country: 'Deutschland',
+          email: 'info@example.test',
+          phone: '+49 30 123456',
+          website: 'https://example.test',
+          managing_director: 'Maria Muster',
+          register_court: 'Amtsgericht Berlin',
+          commercial_register: 'HRB 123',
+          vat_id: 'DE123456789',
+          tax_number: '12/345/67890',
+          agb_text: 'AGB Zeile 1\nAGB Zeile 2',
+          datenschutz_text: 'Datenschutz Zeile 1\nDatenschutz Zeile 2',
+          geo_capture_enabled: true,
+          geo_notice_text: 'GEO Hinweis aus den Firmeneinstellungen.',
+          geo_requires_acknowledgement: true
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/timesheets**', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          items: [],
+          scope: 'project',
+          project_id: null,
+          cached_at: '2026-05-15 10:00:00'
+        }
+      })
+    });
+  });
+
+  await page.goto('/app/profil');
+
+  await expect(page.getByRole('heading', { name: 'Einstellungen und Firma' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Muster Bau GmbH' })).toBeVisible();
+  await expect(page.locator('.app-info-list')).toContainText('Musterstrasse 12');
+  await expect(page.locator('.app-info-list')).toContainText('info@example.test');
+  await expect(page.getByRole('heading', { name: 'AGB' })).toBeVisible();
+  await page.getByText('AGB anzeigen').click();
+  await expect(page.locator('.app-legal-text').first()).toContainText('AGB Zeile 2');
+  await expect(page.getByRole('heading', { name: 'Datenschutz' })).toBeVisible();
+  await page.getByText('Datenschutz anzeigen').click();
+  await expect(page.locator('.app-legal-text').nth(1)).toContainText('Datenschutz Zeile 2');
+  await expect(page.getByText('GEO Hinweis aus den Firmeneinstellungen.')).toBeVisible();
+  await expect(page.locator('#geoAckSelect')).toBeVisible();
+  await page.locator('#geoAckSelect').selectOption('1');
+  await expect(page.getByText('GEO-Zustimmung wurde lokal gespeichert.')).toBeVisible();
+});
+
 test('dark drawer keeps active navigation link readable after login', async ({ page }) => {
   const email = process.env.UI_TEST_EMAIL || '';
   const password = process.env.UI_TEST_PASSWORD || '';
