@@ -1,9 +1,13 @@
 /vendor/
 /node_modules/
+/.codex
 /.env
 /.phpunit.result.cache
 /playwright-report/
 /test-results/
+*.sql
+*.dump
+*.bak
 /storage/cache/*
 /storage/config/*.php
 !/storage/config/.gitkeep

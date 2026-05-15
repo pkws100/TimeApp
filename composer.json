@@ -1,8 +1,8 @@
 {
-  "name": "baustelle/zeiterfassung",
+  "name": "pkws100/timeapp",
   "description": "Backend-Grundgeruest fuer die Baustellen- und Zeiterfassungs-App",
   "type": "project",
-  "license": "proprietary",
+  "license": "GPL-3.0-or-later",
   "require": {
     "php": "^8.2",
     "ext-json": "*",
@@ -32,7 +32,7 @@
   "scripts": {
     "test": "phpunit --configuration phpunit.xml.dist",
     "migrate": "phinx migrate -c phinx.php",
-    "seed": "phinx seed:run -c phinx.php",
+    "seed": "phinx seed:run -c phinx.php -s InitialReferenceSeeder",
     "bootstrap-admin": "php bin/bootstrap-admin.php"
   },
   "config": {

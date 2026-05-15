@@ -8,6 +8,17 @@ Monolithische PHP-Anwendung fuer Admin-Backend, API und mobile Mitarbeiter-WebAp
 - API-Basis: `/api/v1`
 - Stack: Apache, PHP 8.2, MariaDB 10.11, PHPUnit, Phinx
 
+## GitHub und Lizenz
+- Geplantes Repository: `pkws100/TimeApp`
+- Sichtbarkeit fuer die Erstveroeffentlichung: privat vorbereiten, nach finalem Check oeffentlich schalten
+- Lizenz: GNU General Public License Version 3 oder spaeter (`GPL-3.0-or-later`)
+- Rechteinhaber: pkws100
+- Lizenztext: `COPYING`
+- Drittkomponenten und Lizenzhinweise: `THIRD_PARTY_NOTICES.md`
+
+GPLv3 ist eine Copyleft-Lizenz. Wer das Projekt weitergibt oder abgeleitete
+Versionen verteilt, muss die entsprechenden Lizenzpflichten beachten.
+
 ## Wichtige Pfade
 - Projektwurzel: `/var/www/html`
 - Bootstrap: `bootstrap/app.php`
@@ -42,7 +53,7 @@ vendor/bin/phinx migrate -c phinx.php
 
 3. Referenzdaten einspielen:
 ```bash
-vendor/bin/phinx seed:run -c phinx.php
+vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder
 ```
 
 4. Ersten Administrator anlegen:
@@ -75,7 +86,7 @@ Die App ist danach standardmaessig unter `http://localhost:18080` erreichbar.
 Erstsetup im Container:
 ```bash
 docker compose exec app vendor/bin/phinx migrate -c phinx.php
-docker compose exec app vendor/bin/phinx seed:run -c phinx.php
+docker compose exec app vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder
 docker compose exec app php bin/bootstrap-admin.php --email=admin@example.invalid --password='IHR_PASSWORT' --first-name=Admin --last-name=Benutzer
 ```
 
@@ -100,6 +111,9 @@ composer migrate
 composer seed
 composer bootstrap-admin -- --email=admin@example.invalid --password='IHR_PASSWORT' --first-name=Admin --last-name=Benutzer
 ```
+
+`composer seed` spielt nur die notwendigen Referenzdaten ein. Demo-Daten sind
+bewusst separat und duerfen nicht in produktiven Setups ausgefuehrt werden.
 
 ## Seeder-Strategie
 - `InitialReferenceSeeder`: Rollen, Rechte und notwendige Referenzdaten
@@ -128,6 +142,31 @@ vendor/bin/phinx seed:run -c phinx.php -s DemoDataSeeder
 - Die aktive DB-Override-Datei kann lokale Verbindungsdaten enthalten:
   `storage/config/database.override.php`
 - Produktive Secrets sollten spaeter weiter gehaertet werden.
+- Vor einer Veroeffentlichung muessen `.env`, Datenbank-Dumps, Uploads,
+  Session-Dateien und sonstige Runtime-Daten ausserhalb des Git-Repos bleiben.
+
+## Veroeffentlichung auf GitHub
+Vorgesehene Repository-Daten:
+
+- Owner/Repo: `pkws100/TimeApp`
+- Default-Branch: `main`
+- Beschreibung: `Baustellen- und Zeiterfassungs-App mit PHP-Admin-Backend, API und mobiler PWA-Zeiterfassung`
+- Topics: `php`, `mariadb`, `time-tracking`, `pwa`, `construction`, `self-hosted`, `docker`
+
+Nach Anlage des privaten GitHub-Repositories:
+
+```bash
+git remote add origin git@github.com:pkws100/TimeApp.git
+git push -u origin main
+```
+
+Empfohlener Check vor dem Push:
+
+```bash
+git status --short --ignored
+grep -RInE "(password|secret|token|api[_-]?key|PRIVATE KEY)" --exclude-dir=.git --exclude-dir=vendor --exclude-dir=node_modules --exclude-dir=storage .
+COMPOSER_ALLOW_SUPERUSER=1 composer test
+```
 
 ## Dokumentation im Projekt
 - Agenten-Leitfaden: `AGENTS.md`

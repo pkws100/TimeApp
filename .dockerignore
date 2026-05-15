@@ -1,5 +1,6 @@
 .git
 .gitignore
+.codex
 .env
 .phpunit.result.cache
 node_modules
@@ -10,4 +11,4 @@ storage/app/uploads/settings
 storage/app/uploads
 storage/cache
 storage/logs
-storage/config/database.override.php
+storage/config/*.php
