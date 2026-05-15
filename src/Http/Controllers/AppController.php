@@ -59,7 +59,7 @@ final class AppController
         $cssUrl = AppView::versionedAssetUrl('/assets/css/app.css');
         $jsUrl = AppView::versionedAssetUrl('/assets/js/app.js');
         $script = <<<JS
-const CACHE_NAME = 'zeiterfassung-app-v2';
+const CACHE_NAME = 'zeiterfassung-app-v3';
 const APP_SHELL = [
   '/app',
   '{$cssUrl}',
@@ -68,11 +68,14 @@ const APP_SHELL = [
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
+  self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))))
+    caches.keys()
+      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))))
+      .then(() => self.clients.claim())
   );
 });
 
@@ -83,6 +86,14 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  const url = new URL(request.url);
+  const isAppShellRequest = url.pathname === '/app' || url.pathname.startsWith('/app/');
+  const isStaticAssetRequest = url.pathname.startsWith('/assets/');
+
+  if (!isAppShellRequest && !isStaticAssetRequest) {
+    return;
+  }
+
   event.respondWith(
     caches.match(request).then((cached) => {
       if (cached) {
@@ -90,7 +101,7 @@ self.addEventListener('fetch', (event) => {
       }
 
       return fetch(request).then((response) => {
-        if (request.url.includes('/app') || request.url.includes('/assets/')) {
+        if (response.ok) {
           const cloned = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(request, cloned));
         }

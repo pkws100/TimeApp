@@ -9,7 +9,7 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 ### Frontend-Architektur
 - [x] Vanilla-JS-PWA als verbindliches Frontend-Zielbild festhalten und nicht auf React oder ein anderes Framework ausrichten.
 - [x] App-Shell fuer mobile Nutzung definieren.
-- [ ] Clientseitiges Routing fuer Login, Heute, Zeiterfassung, Projekte, Historie und Profil vorsehen.
+- [x] Clientseitiges Routing fuer Login, Heute, Zeiterfassung, Projekte, Historie und Profil vorsehen.
 - [ ] API-Client-Schicht fuer geschuetzte und oeffentliche Requests strukturieren.
 - [ ] Zentralen App-State fuer Auth, Theme, Benutzerkontext und Synchronisationsstatus planen.
 
@@ -25,7 +25,7 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [x] Startseite `Heute` mit Tagesstatus und Arbeitskontext vorsehen.
 - [x] Zeiterfassung fuer Check-in, Check-out, Pause und Tagesabschluss planen.
 - [x] Projekt- bzw. Baustellenwahl in der App vorsehen.
-- [ ] `Meine Zeiten` bzw. Historie als mobiler Bereich einplanen.
+- [x] `Meine Zeiten` bzw. Historie als mobiler Bereich einplanen.
 - [ ] Abwesenheitsstatus fuer krank, Urlaub, Feiertag oder fehlend sichtbar machen.
 - [ ] Projektdateien und mobile Uploads als spaeteren Frontend-Baustein einplanen.
 - [x] Profilbereich fuer Theme, Firmenprofil, Rechtstexte, Datenschutz und GEO-Hinweise vorsehen.

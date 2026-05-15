@@ -108,6 +108,112 @@ test('mobile profile shows company, legal texts and geo policy', async ({ page }
   await expect(page.getByText('GEO-Zustimmung wurde lokal gespeichert.')).toBeVisible();
 });
 
+test('mobile history is its own area with project filter', async ({ page }) => {
+  const timesheetRequests = [];
+
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test'
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          today: '2026-05-15',
+          projects: [
+            { id: 2, project_number: 'P-002', name: 'Baustelle Mitte', city: 'Berlin' }
+          ],
+          attachments: [],
+          today_state: {
+            status: 'not_started',
+            work_entry: null,
+            active_break: null
+          },
+          geo_policy: {
+            enabled: false,
+            notice_text: '',
+            requires_acknowledgement: false
+          }
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { company_name: 'Muster Bau' } })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/timesheets**', async (route) => {
+    const url = new URL(route.request().url());
+    timesheetRequests.push(url.search);
+    const scope = url.searchParams.get('scope') || 'all';
+    const projectId = url.searchParams.get('project_id');
+
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          items: [
+            {
+              id: projectId === '2' ? 20 : 10,
+              project_id: projectId === '2' ? 2 : null,
+              project_name: projectId === '2' ? 'Baustelle Mitte' : 'Nicht zugeordnet',
+              work_date: '2026-05-14',
+              start_time: '07:30:00',
+              end_time: '16:00:00',
+              break_minutes: 30,
+              net_minutes: 480,
+              entry_type: 'work',
+              note: scope === 'all' ? 'Gesamtansicht' : 'Projektansicht'
+            }
+          ],
+          scope,
+          project_id: projectId ? Number(projectId) : null,
+          cached_at: '2026-05-15 10:00:00'
+        }
+      })
+    });
+  });
+
+  await page.goto('/app/historie');
+
+  await expect(page.getByRole('heading', { name: 'Meine Zeiten' })).toBeVisible();
+  await expect(page.locator('a[href="/app/historie"]').first()).toHaveText('Historie');
+  await expect(page.getByText('Gesamtuebersicht ueber alle Projekte')).toBeVisible();
+  await expect(page.locator('.app-timesheet-cards')).toContainText('Gesamtansicht');
+  await expect.poll(() => timesheetRequests.some((query) => query.includes('scope=all'))).toBe(true);
+
+  await page.getByRole('button', { name: 'Projekt' }).click();
+  await expect(page.locator('#timesheetProjectFilter')).toBeVisible();
+  await page.locator('#timesheetProjectFilter').selectOption('2');
+
+  await expect(page.locator('.app-timesheet-cards')).toContainText('Projektansicht');
+  await expect.poll(() => timesheetRequests.some((query) => query.includes('scope=project') && query.includes('project_id=2'))).toBe(true);
+
+  await page.evaluate(() => {
+    window.history.pushState({}, '', '/app/zeiten');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  });
+
+  await expect(page.getByRole('heading', { name: 'Arbeitszeiten' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Zeituebersicht' })).toHaveCount(0);
+});
+
 test('dark drawer keeps active navigation link readable after login', async ({ page }) => {
   const email = process.env.UI_TEST_EMAIL || '';
   const password = process.env.UI_TEST_PASSWORD || '';

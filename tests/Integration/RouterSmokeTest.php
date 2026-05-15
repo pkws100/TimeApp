@@ -93,6 +93,18 @@ final class RouterSmokeTest extends TestCase
         self::assertStringContainsString('/assets/js/app.js', $shell);
 
         $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/app/historie';
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $router->dispatch($request)->send();
+        $historyShell = ob_get_clean() ?: '';
+
+        self::assertStringContainsString('window.__APP_BOOTSTRAP__', $historyShell);
+        self::assertStringContainsString('/assets/js/app.js', $historyShell);
+
+        $_SERVER['REQUEST_METHOD'] = 'GET';
         $_SERVER['REQUEST_URI'] = '/api/v1/auth/session';
 
         [$request, $router] = require base_path('bootstrap/app.php');

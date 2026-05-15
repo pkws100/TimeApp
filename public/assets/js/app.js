@@ -3,6 +3,7 @@
     const PREFERRED_PROJECT_KEY = 'app.preferredProjectId';
     const PROJECT_SELECTION_KEY = 'app.projectSelectionId';
     const TIMESHEET_FILTER_SCOPE_KEY = 'app.timesheetFilterScope';
+    const TIMESHEET_FILTER_PROJECT_KEY = 'app.timesheetFilterProjectId';
     const ALLOWED_THEME_MODES = ['light', 'dark', 'system'];
     const THEME_LABELS = {
         light: 'Hell',
@@ -32,7 +33,8 @@
         preferredProjectId: null,
         projectSelectionId: undefined,
         timesheetList: [],
-        timesheetFilterScope: 'project',
+        timesheetFilterScope: 'all',
+        timesheetFilterProjectId: null,
         timesheetListUpdatedAt: null,
         timesheetListLoading: false,
         timesheetListOffline: false,
@@ -109,9 +111,9 @@
         try {
             const stored = window.localStorage.getItem(TIMESHEET_FILTER_SCOPE_KEY);
 
-            return stored === 'all' ? 'all' : 'project';
+            return stored === 'project' ? 'project' : 'all';
         } catch (error) {
-            return 'project';
+            return 'all';
         }
     }
 
@@ -122,6 +124,35 @@
             window.localStorage.setItem(TIMESHEET_FILTER_SCOPE_KEY, state.timesheetFilterScope);
         } catch (error) {
             console.warn('Zeiten-Filter konnte nicht gespeichert werden.', error);
+        }
+    }
+
+    function readTimesheetFilterProjectId() {
+        try {
+            const stored = window.localStorage.getItem(TIMESHEET_FILTER_PROJECT_KEY);
+
+            if (stored === null || stored === '' || stored === 'none') {
+                return null;
+            }
+
+            const parsed = Number(stored);
+
+            return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function storeTimesheetFilterProjectId(projectId) {
+        state.timesheetFilterProjectId = typeof projectId === 'number' && projectId > 0 ? projectId : null;
+
+        try {
+            window.localStorage.setItem(
+                TIMESHEET_FILTER_PROJECT_KEY,
+                state.timesheetFilterProjectId === null ? 'none' : String(state.timesheetFilterProjectId)
+            );
+        } catch (error) {
+            console.warn('Historien-Projektfilter konnte nicht gespeichert werden.', error);
         }
     }
 
@@ -172,19 +203,7 @@
             return null;
         }
 
-        const selectedProject = selectedProjectId();
-
-        if (selectedProject !== null) {
-            return selectedProject;
-        }
-
-        const entry = workEntry();
-
-        if (entry && entry.project_id) {
-            return Number(entry.project_id);
-        }
-
-        return preferredProjectId();
+        return state.timesheetFilterProjectId;
     }
 
     function currentTimesheetCacheKey() {
@@ -202,7 +221,10 @@
             return 'Gesamtuebersicht ueber alle Projekte';
         }
 
-        return 'Projektfilter: ' + currentProjectName();
+        const projectId = currentTimesheetProjectId();
+        const project = projectById(projectId);
+
+        return 'Projektfilter: ' + (project ? project.name : 'Nicht zugeordnet');
     }
 
     function projectSelectionStateId() {
@@ -628,6 +650,7 @@
         return [
             { href: '/app/heute', label: 'Heute' },
             { href: '/app/zeiten', label: 'Zeiten' },
+            { href: '/app/historie', label: 'Historie' },
             { href: '/app/projektwahl', label: 'Projekt' },
             { href: '/app/profil', label: 'Profil' }
         ];
@@ -778,8 +801,24 @@
         if (entry && Object.prototype.hasOwnProperty.call(entry, 'project_id')) {
             setProjectSelectionState(entry.project_id);
         } else {
-            clearProjectSelectionState();
+            resetProjectSelectionState();
         }
+    }
+
+    function normalizeTimesheetFilterAgainstToday() {
+        if (!state.today || state.timesheetFilterProjectId === null) {
+            return;
+        }
+
+        const availableProjectIds = Array.isArray(state.today.projects)
+            ? state.today.projects.map((project) => project.id)
+            : [];
+
+        if (availableProjectIds.includes(state.timesheetFilterProjectId)) {
+            return;
+        }
+
+        storeTimesheetFilterProjectId(null);
     }
 
     function activeProjectId() {
@@ -1293,7 +1332,25 @@
             return '<div class="app-empty">Keine Zeiten fuer diese Auswahl gefunden.</div>';
         }
 
-        return '<div class="app-timesheet-table-wrap"><table class="app-timesheet-table">'
+        const cards = '<div class="app-timesheet-cards">'
+            + state.timesheetList.map((item) => {
+                const projectName = item.project_name || 'Nicht zugeordnet';
+                const note = item.note ? '<p class="muted">' + escapeHtml(item.note) + '</p>' : '';
+
+                return '<article class="app-timesheet-card">'
+                    + '<div><p class="muted">' + escapeHtml(formatDate(item.work_date)) + '</p><h3>' + escapeHtml(projectName) + '</h3>' + note + '</div>'
+                    + '<div class="app-timesheet-card-grid">'
+                    + '<div><span class="muted">Start</span><strong>' + escapeHtml(formatTime(item.start_time)) + '</strong></div>'
+                    + '<div><span class="muted">Ende</span><strong>' + escapeHtml(formatTime(item.end_time)) + '</strong></div>'
+                    + '<div><span class="muted">Pause</span><strong>' + escapeHtml(formatDurationMinutes(Number(item.break_minutes || 0))) + '</strong></div>'
+                    + '<div><span class="muted">Netto</span><strong>' + escapeHtml(formatDurationMinutes(Number(item.net_minutes || 0))) + '</strong></div>'
+                    + '</div>'
+                    + '<div class="app-timesheet-type">' + escapeHtml(entryTypeLabel(item.entry_type)) + '</div>'
+                    + '</article>';
+            }).join('')
+            + '</div>';
+
+        const table = '<div class="app-timesheet-table-wrap"><table class="app-timesheet-table">'
             + '<thead><tr>'
             + '<th>Datum</th><th>Projekt</th><th>Start</th><th>Ende</th><th>Pause</th><th>Netto</th><th>Typ</th>'
             + '</tr></thead><tbody>'
@@ -1312,6 +1369,8 @@
                     + '</tr>';
             }).join('')
             + '</tbody></table></div>';
+
+        return cards + table;
     }
 
     function timesheetHistoryMarkup() {
@@ -1322,6 +1381,9 @@
             : 'Noch kein Stand geladen';
         const offlineNote = state.timesheetListOffline
             ? '<div class="app-empty">Letzter bekannter Stand (offline).</div>'
+            : '';
+        const projectFilter = projectScopeActive
+            ? '<label class="app-field"><span>Projektfilter</span><select id="timesheetProjectFilter">' + timesheetProjectFilterOptions() + '</select></label>'
             : '';
 
         return '<section class="app-card app-grid">'
@@ -1335,6 +1397,7 @@
             + '<button type="button" data-timesheet-scope="project" class="' + (projectScopeActive ? 'is-active' : '') + '" aria-pressed="' + (projectScopeActive ? 'true' : 'false') + '">Projekt</button>'
             + '<button type="button" data-timesheet-scope="all" class="' + (allScopeActive ? 'is-active' : '') + '" aria-pressed="' + (allScopeActive ? 'true' : 'false') + '">Gesamtuebersicht</button>'
             + '</div>'
+            + projectFilter
             + offlineNote
             + timesheetRowsMarkup()
             + '</section>';
@@ -1540,8 +1603,16 @@
             + '</div>'
             + otherProjectHint
             + '</section>'
-            + timesheetHistoryMarkup()
             + attachmentSectionMarkup()
+        );
+    }
+
+    function historyView() {
+        return shell(
+            '<section class="app-card app-grid">'
+            + '<div><p class="muted">Historie</p><h1>Meine Zeiten</h1><p>Ihre erfassten Zeiten bleiben mit dem letzten bekannten Stand auch offline sichtbar.</p></div>'
+            + '</section>'
+            + timesheetHistoryMarkup()
         );
     }
 
@@ -1677,6 +1748,19 @@
         return options.join('');
     }
 
+    function timesheetProjectFilterOptions() {
+        const items = state.today && Array.isArray(state.today.projects) ? state.today.projects : [];
+        const activeId = currentTimesheetProjectId();
+        const options = ['<option value=""' + (activeId === null ? ' selected' : '') + '>Nicht zugeordnet</option>'];
+
+        items.forEach((project) => {
+            const selected = activeId === project.id ? ' selected' : '';
+            options.push('<option value="' + project.id + '"' + selected + '>' + escapeHtml(project.project_number + ' - ' + project.name) + '</option>');
+        });
+
+        return options.join('');
+    }
+
     function render() {
         if (!root) {
             return;
@@ -1688,6 +1772,8 @@
             html = loginView();
         } else if (routeName() === '/zeiten') {
             html = timesView();
+        } else if (routeName() === '/historie') {
+            html = historyView();
         } else if (routeName() === '/projektwahl') {
             html = projectView();
         } else if (routeName() === '/profil') {
@@ -1874,7 +1960,6 @@
             projectSelect.addEventListener('change', function () {
                 setProjectSelectionState(selectedProjectId());
                 render();
-                loadTimesheetList(false);
             });
         }
 
@@ -1885,6 +1970,18 @@
                 loadTimesheetList(false);
             });
         });
+
+        const timesheetProjectFilter = document.getElementById('timesheetProjectFilter');
+
+        if (timesheetProjectFilter) {
+            timesheetProjectFilter.addEventListener('change', function () {
+                const projectId = timesheetProjectFilter.value ? Number(timesheetProjectFilter.value) : null;
+
+                storeTimesheetFilterProjectId(projectId);
+                render();
+                loadTimesheetList(false);
+            });
+        }
 
         document.querySelectorAll('[data-theme-mode-button]').forEach((button) => {
             button.addEventListener('click', function () {
@@ -1956,16 +2053,22 @@
     async function applyCachedData() {
         const cachedToday = await cacheGet('today');
         const cachedCompany = await cacheGet('company');
-        const cachedTimesheets = await cacheGet(currentTimesheetCacheKey());
 
         if (cachedToday) {
             state.today = cachedToday;
             syncTodayStateStatus();
+            normalizeTimesheetFilterAgainstToday();
         }
 
         if (cachedCompany) {
             state.company = cachedCompany;
         }
+
+        if (routeName() !== '/historie') {
+            return;
+        }
+
+        const cachedTimesheets = await cacheGet(currentTimesheetCacheKey());
 
         if (cachedTimesheets && Array.isArray(cachedTimesheets.items)) {
             state.timesheetList = cachedTimesheets.items;
@@ -2000,6 +2103,7 @@
                 state.today = dayPayload.data;
                 syncTodayStateStatus();
                 normalizeProjectSelectionAgainstToday();
+                normalizeTimesheetFilterAgainstToday();
                 await cacheSet('today', state.today);
             }
 
@@ -2009,7 +2113,9 @@
                 await cacheSet('company', state.company);
             }
 
-            await loadTimesheetList(force);
+            if (routeName() === '/historie') {
+                await loadTimesheetList(force);
+            }
         } catch (error) {
             console.warn('App-Daten konnten nicht geladen werden.', error);
             await applyCachedData();
@@ -2630,6 +2736,7 @@
         state.preferredProjectId = readPreferredProjectId();
         state.projectSelectionId = readProjectSelectionState();
         state.timesheetFilterScope = readTimesheetFilterScope();
+        state.timesheetFilterProjectId = readTimesheetFilterProjectId();
         const cachedSession = await cacheGet('session');
 
         if (cachedSession) {

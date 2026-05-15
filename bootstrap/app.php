@@ -230,6 +230,7 @@ $router->get('/app', [$appController, 'shell']);
 $router->get('/app/login', [$appController, 'shell']);
 $router->get('/app/heute', [$appController, 'shell']);
 $router->get('/app/zeiten', [$appController, 'shell']);
+$router->get('/app/historie', [$appController, 'shell']);
 $router->get('/app/projektwahl', [$appController, 'shell']);
 $router->get('/app/profil', [$appController, 'shell']);
 
