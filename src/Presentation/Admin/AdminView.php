@@ -113,6 +113,7 @@ HTML;
     {
         return [
             ['href' => '/admin', 'label' => 'Dashboard', 'active_prefix' => '/admin'],
+            ['href' => '/admin/calendar', 'label' => 'Kalender', 'active_prefix' => '/admin/calendar'],
             ['href' => '/admin/attendance', 'label' => 'Anwesenheit', 'active_prefix' => '/admin/attendance', 'badge' => 0],
             ['href' => '/admin/projects', 'label' => 'Projekte', 'active_prefix' => '/admin/projects', 'badge' => 0],
             ['href' => '/admin/bookings', 'label' => 'Buchungen', 'active_prefix' => '/admin/bookings', 'badge' => 0],

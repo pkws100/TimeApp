@@ -49,6 +49,12 @@ final class AdminContextService
         $items = [
             ['href' => '/admin', 'label' => 'Dashboard', 'active_prefix' => '/admin', 'permission' => 'dashboard.view'],
             [
+                'href' => '/admin/calendar',
+                'label' => 'Kalender',
+                'active_prefix' => '/admin/calendar',
+                'permission' => 'timesheets.view',
+            ],
+            [
                 'href' => '/admin/attendance',
                 'label' => 'Anwesenheit',
                 'active_prefix' => '/admin/attendance',

@@ -161,4 +161,61 @@ final class RouterSmokeTest extends TestCase
             'Die Admin-Buchungsseite sollte erreichbar sein und auf Login, Inhalt oder 403 aufloesen.'
         );
     }
+
+    public function testAdminCalendarRoutesAreAvailable(): void
+    {
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/admin/calendar';
+        $_GET = [];
+        $_POST = [];
+        $_FILES = [];
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $router->dispatch($request)->send();
+        $html = ob_get_clean() ?: '';
+
+        self::assertTrue(
+            $html === ''
+            || str_contains($html, 'Kalender')
+            || str_contains($html, 'Keine Berechtigung')
+            || str_contains($html, '/admin/login?next=%2Fadmin%2Fcalendar'),
+            'Die Admin-Kalenderseite sollte erreichbar sein und auf Login, Inhalt oder 403 aufloesen.'
+        );
+
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/admin/calendar/month?month=2026-05';
+        $_GET = ['month' => '2026-05'];
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $router->dispatch($request)->send();
+        $monthPayload = ob_get_clean() ?: '';
+
+        self::assertTrue(
+            $monthPayload === ''
+            || str_contains($monthPayload, '"Nicht authentifiziert."')
+            || str_contains($monthPayload, '"days"'),
+            'Die Admin-Kalender-Monatsroute sollte erreichbar sein.'
+        );
+
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/admin/calendar/day?date=2026-05-15';
+        $_GET = ['date' => '2026-05-15'];
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $router->dispatch($request)->send();
+        $dayPayload = ob_get_clean() ?: '';
+
+        self::assertTrue(
+            $dayPayload === ''
+            || str_contains($dayPayload, '"Nicht authentifiziert."')
+            || str_contains($dayPayload, '"html"'),
+            'Die Admin-Kalender-Tagesroute sollte erreichbar sein.'
+        );
+    }
 }

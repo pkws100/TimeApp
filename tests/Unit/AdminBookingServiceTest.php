@@ -70,6 +70,26 @@ final class AdminBookingServiceTest extends TestCase
         self::assertSame('work', $payload['entry_type']);
     }
 
+    public function testNormalizeManualCreatePayloadAllowsOptionalProjectForCalendarCreate(): void
+    {
+        $service = new AdminBookingService(new DatabaseConnection([]), new TimesheetCalculator());
+        $method = new ReflectionMethod($service, 'normalizeManualCreatePayload');
+        $method->setAccessible(true);
+
+        $payload = $method->invoke($service, [
+            'user_id' => '7',
+            'project_id' => '__none__',
+            'work_date' => '2026-05-08',
+            'entry_type' => 'work',
+            'start_time' => '07:00',
+            'end_time' => '15:30',
+            'break_minutes' => '30',
+        ]);
+
+        self::assertNull($payload['project_id']);
+        self::assertSame(480, $payload['net_minutes']);
+    }
+
     public function testNormalizeManualCreatePayloadClearsTimesForAbsence(): void
     {
         $service = new AdminBookingService(new DatabaseConnection([]), new TimesheetCalculator());
@@ -108,6 +128,47 @@ final class AdminBookingServiceTest extends TestCase
         ], 5);
     }
 
+    public function testNormalizeManualCreatePayloadRejectsInvalidCalendarDateAndTime(): void
+    {
+        $service = new AdminBookingService(new DatabaseConnection([]), new TimesheetCalculator());
+        $method = new ReflectionMethod($service, 'normalizeManualCreatePayload');
+        $method->setAccessible(true);
+
+        $this->expectException(InvalidArgumentException::class);
+
+        $method->invoke($service, [
+            'user_id' => '7',
+            'work_date' => '2026-02-31',
+            'entry_type' => 'work',
+            'start_time' => '24:30',
+            'end_time' => '15:30',
+        ], 5);
+    }
+
+    public function testNormalizeBookingPayloadRejectsFilledInvalidTimeOnUpdate(): void
+    {
+        $service = new AdminBookingService(new DatabaseConnection([]), new TimesheetCalculator());
+        $method = new ReflectionMethod($service, 'normalizeBookingPayload');
+        $method->setAccessible(true);
+
+        $this->expectException(InvalidArgumentException::class);
+
+        $method->invoke($service, [
+            'work_date' => '2026-05-08',
+            'entry_type' => 'work',
+            'start_time' => '24:30',
+            'end_time' => '15:30',
+        ], [
+            'project_id' => 5,
+            'work_date' => '2026-05-08',
+            'entry_type' => 'work',
+            'start_time' => '07:00:00',
+            'end_time' => '15:30:00',
+            'break_minutes' => 30,
+            'note' => null,
+        ]);
+    }
+
     public function testHydrateBookingRowMarksOnlyActiveWorkWithoutProjectAsOpenAssignment(): void
     {
         $service = new AdminBookingService(new DatabaseConnection([]), new TimesheetCalculator());
@@ -136,6 +197,7 @@ final class AdminBookingServiceTest extends TestCase
         ]));
 
         self::assertTrue($activeWorkWithoutProject['needs_project_assignment']);
+        self::assertSame('Rathaus', $assignedWork['project_name']);
         self::assertFalse($archivedWorkWithoutProject['needs_project_assignment']);
         self::assertFalse($absenceWithoutProject['needs_project_assignment']);
         self::assertFalse($assignedWork['needs_project_assignment']);

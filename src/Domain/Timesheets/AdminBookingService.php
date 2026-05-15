@@ -59,9 +59,13 @@ final class AdminBookingService
         $sourceSelect = $this->hasTimesheetSourceColumn()
             ? 'COALESCE(timesheets.source, "app") AS source,'
             : '"app" AS source,';
+        $auditSelect = '0 AS change_count, NULL AS last_change_at, NULL AS last_action_type, NULL AS last_change_reason';
         $auditJoin = '';
 
         if ($this->connection->tableExists('timesheet_change_log')) {
+            $auditSelect = 'audit.change_count, audit.last_change_at, audit.last_action_type, audit.last_change_reason';
+            [$auditWhere, $auditBindings] = $this->buildFilterClause($filters, 'audit_timesheets', 'audit_');
+            $bindings = [...$bindings, ...$auditBindings];
             $auditJoin = 'LEFT JOIN (
                 SELECT
                     change_log.timesheet_id,
@@ -78,6 +82,8 @@ final class AdminBookingService
                         1
                     ) AS last_change_reason
                 FROM timesheet_change_log AS change_log
+                INNER JOIN timesheets AS audit_timesheets ON audit_timesheets.id = change_log.timesheet_id
+                WHERE ' . $auditWhere . '
                 GROUP BY change_log.timesheet_id
             ) AS audit ON audit.timesheet_id = timesheets.id';
         }
@@ -107,10 +113,7 @@ final class AdminBookingService
                 projects.project_number,
                 projects.name AS project_name,
                 COALESCE(projects.is_deleted, 0) AS project_is_deleted,
-                audit.change_count,
-                audit.last_change_at,
-                audit.last_action_type,
-                audit.last_change_reason
+                ' . $auditSelect . '
             FROM timesheets
             LEFT JOIN users ON users.id = timesheets.user_id
             LEFT JOIN projects ON projects.id = timesheets.project_id
@@ -127,6 +130,34 @@ final class AdminBookingService
     {
         if ($id <= 0 || !$this->connection->tableExists('timesheets')) {
             return null;
+        }
+
+        $auditSelect = '0 AS change_count, NULL AS last_change_at, NULL AS last_action_type, NULL AS last_change_reason';
+        $auditJoin = '';
+        $bindings = ['id' => $id];
+
+        if ($this->connection->tableExists('timesheet_change_log')) {
+            $auditSelect = 'audit.change_count, audit.last_change_at, audit.last_action_type, audit.last_change_reason';
+            $auditJoin = 'LEFT JOIN (
+                SELECT
+                    change_log.timesheet_id,
+                    COUNT(*) AS change_count,
+                    MAX(change_log.created_at) AS last_change_at,
+                    SUBSTRING_INDEX(
+                        GROUP_CONCAT(change_log.action_type ORDER BY change_log.created_at DESC SEPARATOR "||"),
+                        "||",
+                        1
+                    ) AS last_action_type,
+                    SUBSTRING_INDEX(
+                        GROUP_CONCAT(change_log.change_reason ORDER BY change_log.created_at DESC SEPARATOR "||"),
+                        "||",
+                        1
+                    ) AS last_change_reason
+                FROM timesheet_change_log AS change_log
+                WHERE change_log.timesheet_id = :audit_id
+                GROUP BY change_log.timesheet_id
+             ) AS audit ON audit.timesheet_id = timesheets.id';
+            $bindings['audit_id'] = $id;
         }
 
         $rows = $this->connection->fetchAll(
@@ -154,13 +185,15 @@ final class AdminBookingService
                 COALESCE(users.is_deleted, 0) AS user_is_deleted,
                 projects.project_number,
                 projects.name AS project_name,
-                COALESCE(projects.is_deleted, 0) AS project_is_deleted
+                COALESCE(projects.is_deleted, 0) AS project_is_deleted,
+                ' . $auditSelect . '
              FROM timesheets
              LEFT JOIN users ON users.id = timesheets.user_id
              LEFT JOIN projects ON projects.id = timesheets.project_id
+             ' . $auditJoin . '
              WHERE timesheets.id = :id
              LIMIT 1',
-            ['id' => $id]
+            $bindings
         );
 
         if ($rows === []) {
@@ -170,7 +203,7 @@ final class AdminBookingService
         return $this->hydrateBookingRow($rows[0]);
     }
 
-    public function createManual(array $payload, int $adminUserId, int $forcedProjectId): array
+    public function createManual(array $payload, int $adminUserId, ?int $forcedProjectId = null): array
     {
         $reason = trim((string) ($payload['change_reason'] ?? ''));
 
@@ -179,7 +212,6 @@ final class AdminBookingService
         }
 
         $normalized = $this->normalizeManualCreatePayload($payload, $forcedProjectId);
-        $this->assertProjectExists($forcedProjectId);
         $this->assertActiveUserExists((int) $normalized['user_id']);
 
         if (!$this->connection->tableExists('timesheets')) {
@@ -418,7 +450,7 @@ final class AdminBookingService
         });
     }
 
-    private function normalizeManualCreatePayload(array $payload, int $forcedProjectId): array
+    private function normalizeManualCreatePayload(array $payload, ?int $forcedProjectId = null): array
     {
         $userId = (int) $this->normalizePositiveIntOrEmpty((string) ($payload['user_id'] ?? ''));
 
@@ -456,9 +488,12 @@ final class AdminBookingService
             $netMinutes = 0;
         }
 
+        $projectId = $forcedProjectId ?? $this->normalizeProjectValue($payload['project_id'] ?? null);
+        $this->assertProjectExists($projectId);
+
         return [
             'user_id' => $userId,
-            'project_id' => $forcedProjectId,
+            'project_id' => $projectId,
             'work_date' => $workDate,
             'start_time' => $startTime,
             'end_time' => $endTime,
@@ -482,8 +517,19 @@ final class AdminBookingService
 
         $projectId = $this->normalizeProjectValue($payload['project_id'] ?? ($before['project_id'] ?? null));
         $this->assertProjectExists($projectId);
-        $startTime = $this->normalizeTime($payload['start_time'] ?? ($before['start_time'] ?? null));
-        $endTime = $this->normalizeTime($payload['end_time'] ?? ($before['end_time'] ?? null));
+        $startInput = $payload['start_time'] ?? ($before['start_time'] ?? null);
+        $endInput = $payload['end_time'] ?? ($before['end_time'] ?? null);
+        $startTime = $this->normalizeTime($startInput);
+        $endTime = $this->normalizeTime($endInput);
+
+        if ($this->hasFilledTimeInput($startInput) && $startTime === null) {
+            throw new InvalidArgumentException('Bitte eine gueltige Startzeit angeben.');
+        }
+
+        if ($this->hasFilledTimeInput($endInput) && $endTime === null) {
+            throw new InvalidArgumentException('Bitte eine gueltige Endzeit angeben.');
+        }
+
         $manualBreakMinutes = max(0, (int) ($payload['break_minutes'] ?? ($before['break_minutes'] ?? 0)));
         $note = self::nullableTrimmed($payload['note'] ?? ($before['note'] ?? null));
 
@@ -517,47 +563,52 @@ final class AdminBookingService
         ];
     }
 
-    private function buildFilterClause(array $filters): array
+    private function buildFilterClause(array $filters, string $alias = 'timesheets', string $bindingPrefix = ''): array
     {
-        $clauses = [$this->scopeClause((string) ($filters['scope'] ?? 'active'))];
+        $clauses = [$this->scopeClause((string) ($filters['scope'] ?? 'active'), $alias)];
         $bindings = [];
 
         if (($filters['date_from'] ?? null) !== null) {
-            $clauses[] = 'timesheets.work_date >= :date_from';
-            $bindings['date_from'] = $filters['date_from'];
+            $key = $bindingPrefix . 'date_from';
+            $clauses[] = $alias . '.work_date >= :' . $key;
+            $bindings[$key] = $filters['date_from'];
         }
 
         if (($filters['date_to'] ?? null) !== null) {
-            $clauses[] = 'timesheets.work_date <= :date_to';
-            $bindings['date_to'] = $filters['date_to'];
+            $key = $bindingPrefix . 'date_to';
+            $clauses[] = $alias . '.work_date <= :' . $key;
+            $bindings[$key] = $filters['date_to'];
         }
 
         if (($filters['project_id'] ?? '') === '__none__') {
-            $clauses[] = 'timesheets.project_id IS NULL';
+            $clauses[] = $alias . '.project_id IS NULL';
         } elseif (($filters['project_id'] ?? '') !== '') {
-            $clauses[] = 'timesheets.project_id = :project_id';
-            $bindings['project_id'] = (int) $filters['project_id'];
+            $key = $bindingPrefix . 'project_id';
+            $clauses[] = $alias . '.project_id = :' . $key;
+            $bindings[$key] = (int) $filters['project_id'];
         }
 
         if (($filters['user_id'] ?? '') !== '') {
-            $clauses[] = 'timesheets.user_id = :user_id';
-            $bindings['user_id'] = (int) $filters['user_id'];
+            $key = $bindingPrefix . 'user_id';
+            $clauses[] = $alias . '.user_id = :' . $key;
+            $bindings[$key] = (int) $filters['user_id'];
         }
 
         if (($filters['entry_type'] ?? '') !== '') {
-            $clauses[] = 'timesheets.entry_type = :entry_type';
-            $bindings['entry_type'] = $filters['entry_type'];
+            $key = $bindingPrefix . 'entry_type';
+            $clauses[] = $alias . '.entry_type = :' . $key;
+            $bindings[$key] = $filters['entry_type'];
         }
 
         return [implode(' AND ', $clauses), $bindings];
     }
 
-    private function scopeClause(string $scope): string
+    private function scopeClause(string $scope, string $alias = 'timesheets'): string
     {
         return match ($scope) {
-            'archived' => 'COALESCE(timesheets.is_deleted, 0) = 1',
+            'archived' => 'COALESCE(' . $alias . '.is_deleted, 0) = 1',
             'all' => '1 = 1',
-            default => 'COALESCE(timesheets.is_deleted, 0) = 0',
+            default => 'COALESCE(' . $alias . '.is_deleted, 0) = 0',
         };
     }
 
@@ -573,7 +624,8 @@ final class AdminBookingService
             $employeeName .= ' (archiviert)';
         }
 
-        $projectName = trim((string) ($row['project_name'] ?? ''));
+        $rawProjectName = trim((string) ($row['project_name'] ?? ''));
+        $projectName = $rawProjectName;
 
         if ($projectName === '') {
             $projectName = 'Nicht zugeordnet';
@@ -608,6 +660,7 @@ final class AdminBookingService
             'employee_number' => (string) ($row['employee_number'] ?? ''),
             'employee_name' => $employeeName,
             'project_number' => (string) ($row['project_number'] ?? ''),
+            'project_name' => $rawProjectName !== '' ? $rawProjectName : 'Nicht zugeordnet',
             'project_name_display' => $projectName,
             'project_is_deleted' => (int) ($row['project_is_deleted'] ?? 0),
             'needs_project_assignment' => $projectId === null && $entryType === 'work' && $isDeleted === 0,
@@ -670,8 +723,17 @@ final class AdminBookingService
             return null;
         }
 
+        $date = DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+        $errors = DateTimeImmutable::getLastErrors();
+
+        if ($date instanceof DateTimeImmutable && $date->format('Y-m-d') === $value && ($errors === false || ((int) $errors['warning_count'] === 0 && (int) $errors['error_count'] === 0))) {
+            return $date->format('Y-m-d');
+        }
+
         try {
-            return (new DateTimeImmutable($value))->format('Y-m-d');
+            $fallback = new DateTimeImmutable($value);
+
+            return $fallback->format('Y-m-d') === $value ? $fallback->format('Y-m-d') : null;
         } catch (\Exception) {
             return null;
         }
@@ -685,11 +747,22 @@ final class AdminBookingService
             return null;
         }
 
-        try {
-            return (new DateTimeImmutable('1970-01-01 ' . $value))->format('H:i:s');
-        } catch (\Exception) {
-            return null;
+        foreach (['!H:i:s', '!H:i'] as $format) {
+            $time = DateTimeImmutable::createFromFormat($format, $value);
+            $errors = DateTimeImmutable::getLastErrors();
+            $expected = $format === '!H:i:s' ? 'H:i:s' : 'H:i';
+
+            if ($time instanceof DateTimeImmutable && $time->format($expected) === $value && ($errors === false || ((int) $errors['warning_count'] === 0 && (int) $errors['error_count'] === 0))) {
+                return $time->format('H:i:s');
+            }
         }
+
+        return null;
+    }
+
+    private function hasFilledTimeInput(mixed $value): bool
+    {
+        return trim((string) ($value ?? '')) !== '';
     }
 
     private function normalizeProjectFilter(string $value): string

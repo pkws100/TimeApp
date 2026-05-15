@@ -22,6 +22,7 @@ use App\Domain\Settings\CompanySettingsService;
 use App\Domain\Settings\DatabaseSettingsManager;
 use App\Domain\Settings\SmtpTestService;
 use App\Domain\Timesheets\AdminBookingService;
+use App\Domain\Timesheets\AdminCalendarService;
 use App\Domain\Timesheets\AppTimesheetSyncService;
 use App\Domain\Timesheets\TimesheetCalculator;
 use App\Domain\Timesheets\TimesheetService;
@@ -33,6 +34,7 @@ use App\Domain\Users\UserService;
 use App\Http\Controllers\AccountingExportController;
 use App\Http\Controllers\AdminAuthController;
 use App\Http\Controllers\AdminBookingController;
+use App\Http\Controllers\AdminCalendarController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminManagementController;
 use App\Http\Controllers\AppApiController;
@@ -129,6 +131,7 @@ $timesheetCalculator = new TimesheetCalculator();
 $workdayStateCalculator = new WorkdayStateCalculator();
 $timesheetService = new TimesheetService($connection, $timesheetCalculator);
 $adminBookingService = new AdminBookingService($connection, $timesheetCalculator);
+$adminCalendarService = new AdminCalendarService($connection, $adminBookingService);
 $companySettingsService = new CompanySettingsService($connection, $config->get('uploads', []));
 $authService = new AuthService($connection, $permissionMatrix);
 $csrfService = new CsrfService();
@@ -189,6 +192,15 @@ $adminBookingController = new AdminBookingController(
     $authService,
     $csrfService
 );
+$adminCalendarController = new AdminCalendarController(
+    $adminView,
+    $adminCalendarService,
+    $adminBookingService,
+    $projectService,
+    $userService,
+    $authService,
+    $csrfService
+);
 $companySettingsController = new CompanySettingsController($adminView, $companySettingsService, $smtpTestService, $csrfService, $config->get('maps', []));
 $attendanceController = new AttendanceController($attendanceService, $adminView);
 $accountingExportController = new AccountingExportController($accountingExportService);
@@ -222,10 +234,14 @@ $router->get('/app/projektwahl', [$appController, 'shell']);
 $router->get('/app/profil', [$appController, 'shell']);
 
 $router->get('/admin', $admin([$adminController, 'dashboard'], 'dashboard.view'));
+$router->get('/admin/calendar', $admin([$adminCalendarController, 'index'], 'timesheets.view'));
+$router->get('/admin/calendar/month', $admin([$adminCalendarController, 'month'], 'timesheets.view'));
+$router->get('/admin/calendar/day', $admin([$adminCalendarController, 'day'], 'timesheets.view'));
 $router->get('/admin/attendance', $admin([$attendanceController, 'index'], 'attendance.view'));
 $router->get('/admin/projects', $admin([$adminManagementController, 'projects'], 'projects.view'));
 $router->get('/admin/bookings', $admin([$adminBookingController, 'index'], 'timesheets.view'));
 $router->get('/admin/bookings/export', $admin([$adminBookingController, 'export'], 'timesheets.export'));
+$router->post('/admin/bookings', $admin([$adminBookingController, 'create'], 'timesheets.manage'));
 $router->post('/admin/bookings/bulk-assign', $admin([$adminBookingController, 'bulkAssign'], 'timesheets.manage'));
 $router->put('/admin/bookings/{id}', $admin([$adminBookingController, 'update'], 'timesheets.manage'));
 $router->delete('/admin/bookings/{id}/archive', $admin([$adminBookingController, 'archive'], 'timesheets.archive'));

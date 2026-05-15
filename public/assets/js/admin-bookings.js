@@ -45,6 +45,17 @@
         return false;
     }
 
+    function currentReturnTo() {
+        var url = new URL(window.location.href);
+
+        url.searchParams.delete('notice');
+        url.searchParams.delete('error');
+        url.searchParams.delete('booking_id');
+        url.searchParams.delete('modal');
+
+        return url.pathname + url.search;
+    }
+
     function openModal(modal, row, trigger) {
         var booking = parseBooking(row);
 
@@ -131,6 +142,10 @@
                 visibleReason.value = '';
             }
         }
+
+        modal.querySelectorAll('input[name="return_to"]').forEach(function (field) {
+            field.value = currentReturnTo();
+        });
 
         modal.querySelectorAll('[data-booking-action-form] textarea[name="change_reason"]').forEach(function (field) {
             field.value = '';

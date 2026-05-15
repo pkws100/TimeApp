@@ -53,6 +53,24 @@ final class AdminBookingController
         return Response::html($this->view->render('Buchungen', $content));
     }
 
+    public function create(Request $request): Response
+    {
+        $returnTo = $this->returnTo($request);
+        $userId = (int) (($this->authService->currentUser()['id'] ?? 0));
+
+        if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+            return Response::redirect($this->withError($returnTo, 'csrf'));
+        }
+
+        try {
+            $this->bookingService->createManual($request->input(), $userId);
+
+            return Response::redirect($this->withNotice($returnTo, 'created'));
+        } catch (InvalidArgumentException) {
+            return Response::redirect($this->withError($returnTo, 'validation'));
+        }
+    }
+
     public function update(Request $request, array $params): Response
     {
         $returnTo = $this->returnTo($request);
@@ -167,12 +185,13 @@ final class AdminBookingController
         $renderer = new BookingModalRenderer();
         $canManage = $this->authService->hasPermission('timesheets.manage');
         $canArchive = $this->authService->hasPermission('timesheets.archive');
+        $canExport = $this->authService->hasPermission('timesheets.export');
         $table = $renderer->renderTable(
             $bookings,
             $projects,
             $this->bookingService->entryTypeOptions(),
             [
-                'show_selection' => true,
+                'show_selection' => $canManage,
                 'bulk_form_id' => 'bulk-assignment-form',
                 'empty_message' => 'Keine Buchungen fuer die aktuelle Filterung gefunden.',
                 'can_manage' => $canManage,
@@ -191,6 +210,22 @@ final class AdminBookingController
                 'selected_booking' => $this->selectedBooking($request),
             ]
         );
+        $exportButtons = $canExport
+            ? '<a class="button" href="' . $this->e($exportBase . (str_contains($exportBase, '?') ? '&' : '?') . 'format=csv') . '">CSV</a>'
+                . '<a class="button" href="' . $this->e($exportBase . (str_contains($exportBase, '?') ? '&' : '?') . 'format=xlsx') . '">Excel</a>'
+                . '<a class="button" href="' . $this->e($exportBase . (str_contains($exportBase, '?') ? '&' : '?') . 'format=pdf') . '">PDF</a>'
+            : '';
+        $bulkForm = $canManage
+            ? <<<HTML
+    <form id="bulk-assignment-form" method="post" action="/admin/bookings/bulk-assign" class="form-grid">
+        <input type="hidden" name="return_to" value="{$this->e($returnTo)}">
+        <input type="hidden" name="csrf_token" value="{$this->e($csrfToken)}">
+        <label><span>Sammelzuordnung auf Projekt</span><select name="project_id">{$this->projectAssignmentOptions($projects, '__none__')}</select></label>
+        <label class="full-span"><span>Begruendung</span><textarea name="change_reason" rows="3" required placeholder="Warum werden diese Buchungen umgehaengt?"></textarea></label>
+        <button class="button" type="submit">Markierte Buchungen zuordnen</button>
+    </form>
+HTML
+            : '';
 
         return <<<HTML
 <header class="page-header">
@@ -200,9 +235,7 @@ final class AdminBookingController
         <p>Buchungen filtern, GoBD-konform bearbeiten, projekten zuordnen und belastbar exportieren.</p>
     </div>
     <div class="toolbar-actions">
-        <a class="button" href="{$this->e($exportBase . (str_contains($exportBase, '?') ? '&' : '?') . 'format=csv')}">CSV</a>
-        <a class="button" href="{$this->e($exportBase . (str_contains($exportBase, '?') ? '&' : '?') . 'format=xlsx')}">Excel</a>
-        <a class="button" href="{$this->e($exportBase . (str_contains($exportBase, '?') ? '&' : '?') . 'format=pdf')}">PDF</a>
+        {$exportButtons}
     </div>
 </header>
 {$notice}
@@ -234,13 +267,7 @@ final class AdminBookingController
 </section>
 <section class="card stack">
     {$table}
-    <form id="bulk-assignment-form" method="post" action="/admin/bookings/bulk-assign" class="form-grid">
-        <input type="hidden" name="return_to" value="{$this->e($returnTo)}">
-        <input type="hidden" name="csrf_token" value="{$this->e($csrfToken)}">
-        <label><span>Sammelzuordnung auf Projekt</span><select name="project_id">{$this->projectAssignmentOptions($projects, '__none__')}</select></label>
-        <label class="full-span"><span>Begruendung</span><textarea name="change_reason" rows="3" required placeholder="Warum werden diese Buchungen umgehaengt?"></textarea></label>
-        <button class="button" type="submit">Markierte Buchungen zuordnen</button>
-    </form>
+    {$bulkForm}
 </section>
 {$modal}
 HTML;
@@ -425,6 +452,7 @@ HTML;
         }
 
         $message = match ($notice) {
+            'created' => 'Buchung erfolgreich nacherfasst.',
             'updated' => 'Buchung erfolgreich gespeichert.',
             'reassigned' => 'Die markierten Buchungen wurden dem Projekt zugeordnet.',
             'archived' => 'Buchung erfolgreich archiviert.',
