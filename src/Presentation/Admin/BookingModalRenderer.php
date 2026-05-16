@@ -17,8 +17,9 @@ final class BookingModalRenderer
         $emptyMessage = (string) ($options['empty_message'] ?? 'Keine Buchungen vorhanden.');
         $canManage = (bool) ($options['can_manage'] ?? false);
         $canArchive = (bool) ($options['can_archive'] ?? false);
+        $canViewAttachments = (bool) ($options['can_view_attachments'] ?? false);
         $openBookingLocation = (string) ($options['open_booking_location'] ?? '/admin/bookings');
-        $canOpenModal = $canManage || $canArchive;
+        $canOpenModal = $canManage || $canArchive || $canViewAttachments;
 
         $rows = '';
 
@@ -40,7 +41,20 @@ final class BookingModalRenderer
             $noteDisplay = $note !== ''
                 ? '<span class="table-note">' . $this->e($note) . '</span>'
                 : '<span class="muted">-</span>';
-            $actionLabel = $canManage ? 'Bearbeiten' : 'Aktionen';
+            $attachmentCount = (int) ($booking['attachment_count'] ?? 0);
+            $attachmentTotalCount = (int) ($booking['attachment_total_count'] ?? $attachmentCount);
+            $archivedAttachmentCount = (int) ($booking['archived_attachment_count'] ?? max(0, $attachmentTotalCount - $attachmentCount));
+            $imageAttachmentCount = (int) ($booking['image_attachment_count'] ?? 0);
+            if ($attachmentCount > 0) {
+                $attachmentDisplay = '<span class="badge">Anhänge: ' . $attachmentCount . '</span>'
+                    . ($imageAttachmentCount > 0 ? '<br><span class="muted">' . $imageAttachmentCount . ' Bild(er)</span>' : '')
+                    . ($archivedAttachmentCount > 0 ? '<br><span class="muted">' . $archivedAttachmentCount . ' archiviert</span>' : '');
+            } elseif ($archivedAttachmentCount > 0) {
+                $attachmentDisplay = '<span class="badge warn">Anhänge archiviert: ' . $archivedAttachmentCount . '</span>';
+            } else {
+                $attachmentDisplay = '<span class="muted">-</span>';
+            }
+            $actionLabel = $canManage ? 'Bearbeiten' : 'Ansehen';
             $actionButton = $canOpenModal
                 ? '<a class="button button-secondary booking-edit-trigger" data-booking-open aria-haspopup="dialog" href="' . $this->e($this->openBookingLocation($openBookingLocation, $id)) . '">' . $this->e($actionLabel) . '</a>'
                 : '<span class="muted">Nur Ansicht</span>';
@@ -63,6 +77,7 @@ final class BookingModalRenderer
                 . '<td>' . $this->e((string) ($booking['break_minutes'] ?? 0)) . ' Min</td>'
                 . '<td>' . $this->e((string) ($booking['net_minutes'] ?? 0)) . ' Min</td>'
                 . '<td>' . $noteDisplay . '</td>'
+                . '<td>' . $attachmentDisplay . '</td>'
                 . '<td>' . $statusBadge . '</td>'
                 . '<td><span class="muted">' . $this->e((string) ($booking['version_hint'] ?? '')) . '</span></td>'
                 . '<td class="table-actions">' . $actionButton . '</td>'
@@ -70,7 +85,7 @@ final class BookingModalRenderer
         }
 
         if ($rows === '') {
-            $colspan = $showSelection ? '14' : '13';
+            $colspan = $showSelection ? '15' : '14';
             $rows = '<tr><td colspan="' . $colspan . '" class="table-empty">' . $this->e($emptyMessage) . '</td></tr>';
         }
 
@@ -92,6 +107,7 @@ final class BookingModalRenderer
                 <th>Pause</th>
                 <th>Netto</th>
                 <th>Notiz</th>
+                <th>Anhänge</th>
                 <th>Status</th>
                 <th>Version</th>
                 <th>Aktionen</th>
@@ -113,9 +129,10 @@ HTML;
     {
         $canManage = (bool) ($options['can_manage'] ?? false);
         $canArchive = (bool) ($options['can_archive'] ?? false);
+        $canViewAttachments = (bool) ($options['can_view_attachments'] ?? false);
         $selectedBooking = is_array($options['selected_booking'] ?? null) ? $options['selected_booking'] : null;
 
-        if (!$canManage && !$canArchive) {
+        if (!$canManage && !$canArchive && !$canViewAttachments) {
             return '';
         }
 
@@ -147,6 +164,13 @@ HTML;
         $updateAction = $selectedId > 0 ? '/admin/bookings/' . $selectedId : '';
         $archiveAction = $selectedId > 0 ? '/admin/bookings/' . $selectedId . '/archive' : '';
         $restoreAction = $selectedId > 0 ? '/admin/bookings/' . $selectedId . '/restore' : '';
+        $attachmentSection = $this->renderAttachmentSection(
+            is_array($selectedBooking['attachments'] ?? null) ? $selectedBooking['attachments'] : [],
+            $canArchive,
+            $returnTo,
+            $csrfToken,
+            $selectedId
+        );
         $archiveControls = $canArchive
             ? <<<HTML
 <div class="admin-modal__divider"></div>
@@ -212,6 +236,7 @@ HTML
                 {$saveButton}
             </div>
         </form>
+        {$attachmentSection}
         {$archiveControls}
     </div>
 </div>
@@ -233,8 +258,61 @@ HTML;
         return $label !== '' ? $label : 'Nicht zugeordnet';
     }
 
+    private function renderAttachmentSection(array $attachments, bool $canArchive, string $returnTo, string $csrfToken, int $bookingId): string
+    {
+        $items = '';
+
+        foreach ($attachments as $file) {
+            $isDeleted = (int) ($file['is_deleted'] ?? 0) === 1;
+            $downloadUrl = (string) ($file['download_url'] ?? '');
+            $previewUrl = (string) ($file['preview_url'] ?? '');
+            $archiveUrl = (string) ($file['archive_url'] ?? '');
+            $preview = $previewUrl !== ''
+                ? '<a class="booking-attachment__preview" href="' . $this->e($previewUrl) . '" target="_blank" rel="noopener"><img src="' . $this->e($previewUrl) . '" alt="" loading="lazy"></a>'
+                : '<div class="booking-attachment__icon" aria-hidden="true">Datei</div>';
+            $openLink = (!$isDeleted && $downloadUrl !== '')
+                ? '<a class="button button-secondary" href="' . $this->e($downloadUrl) . '" target="_blank" rel="noopener">Öffnen</a>'
+                : '<span class="muted">Nicht abrufbar</span>';
+            $archiveForm = ($canArchive && !$isDeleted && $archiveUrl !== '')
+                ? '<form method="post" action="' . $this->e($archiveUrl) . '" class="booking-attachment__archive">'
+                    . '<input type="hidden" name="_method" value="DELETE">'
+                    . '<input type="hidden" name="return_to" value="' . $this->e($returnTo) . '">'
+                    . '<input type="hidden" name="booking_id" value="' . $bookingId . '">'
+                    . '<input type="hidden" name="csrf_token" value="' . $this->e($csrfToken) . '">'
+                    . '<button type="submit" class="button button-danger">Anhang archivieren</button>'
+                    . '</form>'
+                : '';
+            $status = $isDeleted ? '<span class="badge warn">Archiviert</span>' : '<span class="badge ok">Aktiv</span>';
+
+            $items .= '<li class="booking-attachment">'
+                . $preview
+                . '<div class="booking-attachment__body">'
+                . '<strong>' . $this->e((string) ($file['original_name'] ?? 'Anhang')) . '</strong>'
+                . '<span class="muted">' . $this->e($this->formatFileMeta($file)) . '</span>'
+                . '<div class="table-actions">' . $status . $openLink . $archiveForm . '</div>'
+                . '</div>'
+                . '</li>';
+        }
+
+        if ($items === '') {
+            $items = '<li class="booking-attachment is-empty"><p class="muted">Keine Anhänge fuer diese Buchung vorhanden.</p></li>';
+        }
+
+        return <<<HTML
+<section class="booking-attachments" data-booking-modal-attachments data-can-archive-files="{$this->e($canArchive ? '1' : '0')}">
+    <div>
+        <h3>Anhänge</h3>
+        <p class="muted">Bilder werden direkt aus dem geschuetzten Storage geladen; Dateien koennen geoeffnet oder archiviert werden.</p>
+    </div>
+    <ul class="booking-attachment-list">
+        {$items}
+    </ul>
+</section>
+HTML;
+    }
+
     /**
-     * @return array<string, bool|int|string>
+     * @return array<string, mixed>
      */
     private function rowData(array $booking, string $typeLabel, string $projectLabel): array
     {
@@ -256,6 +334,11 @@ HTML;
             'is_deleted' => (int) ($booking['is_deleted'] ?? 0) === 1,
             'version_hint' => (string) ($booking['version_hint'] ?? ''),
             'status_label' => (int) ($booking['is_deleted'] ?? 0) === 1 ? 'Archiviert' : 'Aktiv',
+            'attachments' => is_array($booking['attachments'] ?? null) ? $booking['attachments'] : [],
+            'attachment_count' => (int) ($booking['attachment_count'] ?? 0),
+            'attachment_total_count' => (int) ($booking['attachment_total_count'] ?? (int) ($booking['attachment_count'] ?? 0)),
+            'archived_attachment_count' => (int) ($booking['archived_attachment_count'] ?? 0),
+            'image_attachment_count' => (int) ($booking['image_attachment_count'] ?? 0),
         ];
     }
 
@@ -275,6 +358,38 @@ HTML;
         }
 
         return $html;
+    }
+
+    private function formatFileMeta(array $file): string
+    {
+        $parts = [];
+        $mimeType = trim((string) ($file['mime_type'] ?? ''));
+        $uploadedAt = trim((string) ($file['uploaded_at'] ?? ''));
+
+        if ($mimeType !== '') {
+            $parts[] = $mimeType;
+        }
+
+        $parts[] = $this->formatBytes((int) ($file['size_bytes'] ?? 0));
+
+        if ($uploadedAt !== '') {
+            $parts[] = $uploadedAt;
+        }
+
+        return implode(' · ', $parts);
+    }
+
+    private function formatBytes(int $bytes): string
+    {
+        if ($bytes < 1024) {
+            return $bytes . ' B';
+        }
+
+        if ($bytes < 1024 * 1024) {
+            return number_format($bytes / 1024, 1, ',', '.') . ' KB';
+        }
+
+        return number_format($bytes / (1024 * 1024), 1, ',', '.') . ' MB';
     }
 
     private function sourceLabel(string $source): string

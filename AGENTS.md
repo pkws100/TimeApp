@@ -190,6 +190,9 @@ Verbindliche Regeln:
 - Projekt- und Asset-Dateien logisch getrennt behandeln
 - Settings-Dateien wie Logo, AGB-PDF und Datenschutz-PDF ebenfalls geschuetzt speichern
 - Archivierung bedeutet auch bei Dateien keine unkontrollierte physische Loeschung
+- Dateiabrufe fuer App/Admin muessen ueber geschuetzte Controller-Endpunkte laufen und duerfen Uploads nicht direkt aus `public/` ausliefern
+- Mobile Projektdateien duerfen nur fuer global berechtigte Projekt-/Dateiverwalter oder fuer Benutzer mit aktiver Projektmitgliedschaft sichtbar bzw. hochladbar sein
+- JPEG-Uploads werden serverseitig anhand vorhandener EXIF-Orientation normalisiert, sofern `exif` und `gd` verfuegbar sind; andere erlaubte Bildtypen bleiben gueltige Uploads ohne erzwungene Rotation
 
 Exportstrategie:
 

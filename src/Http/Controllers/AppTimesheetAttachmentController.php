@@ -134,4 +134,46 @@ final class AppTimesheetAttachmentController
             ],
         ]);
     }
+
+    public function download(Request $request, array $params): Response
+    {
+        $user = $this->authService->currentUser();
+
+        if ($user === null) {
+            return Response::json([
+                'ok' => false,
+                'error' => 'Nicht authentifiziert.',
+                'message' => 'Bitte erneut anmelden.',
+            ], 401);
+        }
+
+        $fileId = (int) ($params['id'] ?? 0);
+
+        if (!$this->fileAttachmentService->timesheetFileBelongsToUser($fileId, (int) $user['id'])) {
+            return new Response('Datei nicht gefunden.', 404, ['Content-Type' => 'text/plain; charset=utf-8']);
+        }
+
+        $file = $this->fileAttachmentService->downloadableTimesheetFile($fileId);
+
+        if ($file === null) {
+            return new Response('Datei nicht gefunden.', 404, ['Content-Type' => 'text/plain; charset=utf-8']);
+        }
+
+        $content = file_get_contents((string) $file['path']);
+
+        if ($content === false) {
+            return new Response('Datei nicht gefunden.', 404, ['Content-Type' => 'text/plain; charset=utf-8']);
+        }
+
+        $filename = preg_replace('/[^a-zA-Z0-9._-]/', '-', (string) $file['original_name']) ?: 'download.bin';
+        $disposition = ((bool) ($file['is_image'] ?? false) ? 'inline' : 'attachment') . '; filename="' . $filename . '"';
+
+        return new Response($content, 200, [
+            'Content-Type' => (string) $file['mime_type'],
+            'Content-Length' => (string) strlen($content),
+            'Content-Disposition' => $disposition,
+            'Cache-Control' => 'private, max-age=300',
+            'X-Content-Type-Options' => 'nosniff',
+        ]);
+    }
 }

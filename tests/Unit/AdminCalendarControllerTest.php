@@ -6,6 +6,7 @@ namespace Tests\Unit;
 
 use App\Domain\Auth\AuthService;
 use App\Domain\Auth\CsrfService;
+use App\Domain\Files\FileAttachmentService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Timesheets\AdminBookingService;
 use App\Domain\Timesheets\AdminCalendarService;
@@ -110,6 +111,7 @@ final class AdminCalendarControllerTest extends TestCase
             $bookingService,
             new ProjectService($connection),
             new UserService($connection),
+            new FileAttachmentService($connection, []),
             new AuthService($connection, new PermissionMatrix([], [])),
             new CsrfService()
         );

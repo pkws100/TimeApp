@@ -41,8 +41,10 @@ use App\Http\Controllers\AdminCalendarController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminManagementController;
 use App\Http\Controllers\AdminPushController;
+use App\Http\Controllers\AdminTimesheetAttachmentController;
 use App\Http\Controllers\AppApiController;
 use App\Http\Controllers\AppController;
+use App\Http\Controllers\AppProjectAttachmentController;
 use App\Http\Controllers\AppPushController;
 use App\Http\Controllers\AppTimesheetAttachmentController;
 use App\Http\Controllers\AppTimesheetController;
@@ -184,6 +186,8 @@ $appApiController = new AppApiController($mobileAppService, $authService);
 $appPushController = new AppPushController($pushSettingsService, $pushSubscriptionService, $authService);
 $appTimesheetController = new AppTimesheetController($appTimesheetSyncService, $authService);
 $appTimesheetAttachmentController = new AppTimesheetAttachmentController($fileService, $authService);
+$appProjectAttachmentController = new AppProjectAttachmentController($fileService, $authService);
+$adminTimesheetAttachmentController = new AdminTimesheetAttachmentController($fileService, $authService, $csrfService);
 $adminController = new AdminController($adminView, $dashboardService, $databaseSettings);
 $adminManagementController = new AdminManagementController(
     $adminView,
@@ -202,6 +206,7 @@ $adminBookingController = new AdminBookingController(
     $bookingExportService,
     $projectService,
     $userService,
+    $fileService,
     $authService,
     $csrfService
 );
@@ -211,6 +216,7 @@ $adminCalendarController = new AdminCalendarController(
     $adminBookingService,
     $projectService,
     $userService,
+    $fileService,
     $authService,
     $csrfService
 );
@@ -261,6 +267,8 @@ $router->post('/admin/bookings/bulk-assign', $admin([$adminBookingController, 'b
 $router->put('/admin/bookings/{id}', $admin([$adminBookingController, 'update'], 'timesheets.manage'));
 $router->delete('/admin/bookings/{id}/archive', $admin([$adminBookingController, 'archive'], 'timesheets.archive'));
 $router->post('/admin/bookings/{id}/restore', $admin([$adminBookingController, 'restore'], 'timesheets.archive'));
+$router->get('/admin/timesheet-files/{id}/download', $admin([$adminTimesheetAttachmentController, 'download'], 'timesheets.view'));
+$router->delete('/admin/timesheet-files/{id}', $admin([$adminTimesheetAttachmentController, 'archive'], 'timesheets.archive'));
 $router->get('/admin/projects/create', $admin([$adminManagementController, 'projectCreate'], 'projects.manage'));
 $router->get('/admin/projects/{id}/edit', $admin([$adminManagementController, 'projectEdit'], 'projects.manage'));
 $router->post('/admin/projects', $admin([$adminManagementController, 'projectStore'], 'projects.manage'));
@@ -317,8 +325,12 @@ $router->get('/api/v1/app/push/status', $api([$appPushController, 'status']));
 $router->post('/api/v1/app/push/subscriptions', $api([$appPushController, 'store'], 'push.receive'));
 $router->delete('/api/v1/app/push/subscriptions/{id}', $api([$appPushController, 'disable'], 'push.receive'));
 $router->post('/api/v1/app/timesheets/sync', $api([$appTimesheetController, 'sync'], 'timesheets.create'));
+$router->get('/api/v1/app/projects/{id}/files', $api([$appProjectAttachmentController, 'index'], 'files.view'));
+$router->post('/api/v1/app/projects/{id}/files', $api([$appProjectAttachmentController, 'upload'], 'files.upload'));
+$router->get('/api/v1/app/project-files/{id}/download', $api([$appProjectAttachmentController, 'download'], 'files.view'));
 $router->get('/api/v1/app/timesheets/{id}/files', $api([$appTimesheetAttachmentController, 'index'], 'timesheets.view_own'));
 $router->post('/api/v1/app/timesheets/{id}/files', $api([$appTimesheetAttachmentController, 'upload'], 'timesheets.create'));
+$router->get('/api/v1/app/timesheet-files/{id}/download', $api([$appTimesheetAttachmentController, 'download'], 'timesheets.view_own'));
 $router->delete('/api/v1/app/timesheet-files/{id}', $api([$appTimesheetAttachmentController, 'archive'], 'timesheets.create'));
 
 $router->get('/api/v1/attendance/today', $api([$attendanceController, 'today'], 'attendance.view'));

@@ -739,6 +739,11 @@ html[data-theme="dark"] .app-drawer-link:not(.is-active):focus-visible {
     font-weight: 800;
 }
 
+.app-timesheet-attachments {
+    display: grid;
+    gap: 0.7rem;
+}
+
 .app-timesheet-table-wrap {
     display: none;
     overflow-x: auto;
@@ -903,8 +908,50 @@ html[data-theme="dark"] .app-stat-row {
     background: rgba(255, 255, 255, 0.45);
 }
 
+.app-attachment-preview,
+.app-attachment-icon {
+    flex: 0 0 72px;
+    width: 72px;
+    height: 72px;
+    border-radius: 0.8rem;
+    border: 1px solid var(--app-line);
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.55);
+}
+
+.app-attachment-preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.app-attachment-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--app-ink);
+    text-decoration: none;
+    font-weight: 700;
+}
+
+.app-attachment-info {
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.app-attachment-info strong,
+.app-attachment-info p {
+    overflow-wrap: anywhere;
+}
+
 html[data-theme="dark"] .app-attachment-row {
     background: rgba(255, 255, 255, 0.03);
+}
+
+html[data-theme="dark"] .app-attachment-preview,
+html[data-theme="dark"] .app-attachment-icon {
+    background: rgba(255, 255, 255, 0.04);
 }
 
 .app-nav {

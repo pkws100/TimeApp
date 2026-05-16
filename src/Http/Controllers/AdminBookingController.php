@@ -7,6 +7,7 @@ namespace App\Http\Controllers;
 use App\Domain\Auth\AuthService;
 use App\Domain\Auth\CsrfService;
 use App\Domain\Exports\BookingExportService;
+use App\Domain\Files\FileAttachmentService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Timesheets\AdminBookingService;
 use App\Domain\Users\UserService;
@@ -25,6 +26,7 @@ final class AdminBookingController
         private BookingExportService $exportService,
         private ProjectService $projectService,
         private UserService $userService,
+        private FileAttachmentService $fileAttachmentService,
         private AuthService $authService,
         private CsrfService $csrfService
     ) {
@@ -33,7 +35,7 @@ final class AdminBookingController
     public function index(Request $request): Response
     {
         $filters = $this->bookingService->normalizeFilters($request->query());
-        $bookings = $this->bookingService->list($filters);
+        $bookings = $this->withTimesheetAttachments($this->bookingService->list($filters));
         $projects = $this->projectService->list('all');
         $users = $this->userService->list('all');
         $returnTo = $this->currentRequestUri($request);
@@ -196,6 +198,7 @@ final class AdminBookingController
                 'empty_message' => 'Keine Buchungen fuer die aktuelle Filterung gefunden.',
                 'can_manage' => $canManage,
                 'can_archive' => $canArchive,
+                'can_view_attachments' => true,
                 'open_booking_location' => $returnTo,
             ]
         );
@@ -207,6 +210,7 @@ final class AdminBookingController
                 'csrf_token' => $csrfToken,
                 'can_manage' => $canManage,
                 'can_archive' => $canArchive,
+                'can_view_attachments' => true,
                 'selected_booking' => $this->selectedBooking($request),
             ]
         );
@@ -418,7 +422,42 @@ HTML;
             return null;
         }
 
-        return $this->bookingService->find($bookingId);
+        $booking = $this->bookingService->find($bookingId);
+
+        if ($booking === null) {
+            return null;
+        }
+
+        return $this->withTimesheetAttachments([$booking])[0] ?? $booking;
+    }
+
+    private function withTimesheetAttachments(array $bookings): array
+    {
+        foreach ($bookings as $index => $booking) {
+            $timesheetId = (int) ($booking['id'] ?? 0);
+            $attachments = $timesheetId > 0
+                ? $this->fileAttachmentService->listForTimesheetAdmin($timesheetId, 'all')
+                : [];
+            $activeAttachments = array_values(array_filter(
+                $attachments,
+                static fn (array $file): bool => (int) ($file['is_deleted'] ?? 0) === 0
+            ));
+            $archivedAttachments = array_values(array_filter(
+                $attachments,
+                static fn (array $file): bool => (int) ($file['is_deleted'] ?? 0) === 1
+            ));
+
+            $bookings[$index]['attachments'] = $attachments;
+            $bookings[$index]['attachment_count'] = count($activeAttachments);
+            $bookings[$index]['attachment_total_count'] = count($attachments);
+            $bookings[$index]['archived_attachment_count'] = count($archivedAttachments);
+            $bookings[$index]['image_attachment_count'] = count(array_filter(
+                $activeAttachments,
+                static fn (array $file): bool => (bool) ($file['is_image'] ?? false)
+            ));
+        }
+
+        return $bookings;
     }
 
     private function withQueryValue(string $location, string $key, string $value): string
@@ -440,6 +479,8 @@ HTML;
                 'archive' => 'Die Buchung konnte nicht archiviert werden. Bitte Begruendung und Datensatz pruefen.',
                 'restore' => 'Die Buchung konnte nicht wiederhergestellt werden. Bitte Begruendung und Datensatz pruefen.',
                 'export' => 'Der Export konnte nicht erstellt werden. Bitte Format oder Serverabhaengigkeiten pruefen.',
+                'attachment-csrf' => 'Die Anhangsaktion konnte nicht bestaetigt werden. Bitte die Seite neu laden und erneut versuchen.',
+                'attachment-missing' => 'Der Anhang wurde nicht gefunden oder ist bereits archiviert.',
                 'csrf' => 'Die Buchungsaktion konnte nicht bestaetigt werden. Bitte die Seite neu laden und erneut versuchen.',
                 default => 'Beim Vorgang ist ein Fehler aufgetreten.',
             };
@@ -457,6 +498,7 @@ HTML;
             'reassigned' => 'Die markierten Buchungen wurden dem Projekt zugeordnet.',
             'archived' => 'Buchung erfolgreich archiviert.',
             'restored' => 'Buchung erfolgreich wiederhergestellt.',
+            'attachment-archived' => 'Anhang erfolgreich archiviert.',
             'selection-missing' => 'Es wurde keine passende Buchung fuer die Sammelaktion geaendert.',
             default => 'Vorgang erfolgreich ausgefuehrt.',
         };

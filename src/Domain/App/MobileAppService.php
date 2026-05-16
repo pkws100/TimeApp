@@ -39,7 +39,7 @@ final class MobileAppService
                 'name' => (string) ($project['name'] ?? ''),
                 'city' => (string) ($project['city'] ?? ''),
             ],
-            $this->projectService->list('active')
+            $this->activeProjectsForUser($user)
         );
         $profile = $this->companySettingsService->publicProfile();
 
@@ -121,7 +121,7 @@ final class MobileAppService
 
             $rows = $this->connection->fetchAll($sql, $bindings);
             $items = array_map(
-                static fn (array $row): array => [
+                fn (array $row): array => [
                     'id' => (int) ($row['id'] ?? 0),
                     'project_id' => isset($row['project_id']) ? (int) $row['project_id'] : null,
                     'project_name' => trim((string) ($row['project_name'] ?? '')) !== '' ? (string) $row['project_name'] : 'Nicht zugeordnet',
@@ -132,6 +132,7 @@ final class MobileAppService
                     'net_minutes' => (int) ($row['net_minutes'] ?? 0),
                     'entry_type' => (string) ($row['entry_type'] ?? 'work'),
                     'note' => self::nullableTrimmed($row['note'] ?? null),
+                    'attachments' => $this->fileAttachmentService->listForTimesheet((int) ($row['id'] ?? 0)),
                 ],
                 $rows
             );
@@ -168,6 +169,37 @@ final class MobileAppService
                 'note' => self::nullableTrimmed($row['note'] ?? null),
             ],
             $rows
+        );
+    }
+
+    private function activeProjectsForUser(array $user): array
+    {
+        $permissions = $user['permissions'] ?? [];
+
+        if (
+            in_array('*', $permissions, true)
+            || in_array('projects.manage', $permissions, true)
+            || in_array('files.manage', $permissions, true)
+            || in_array('timesheets.manage', $permissions, true)
+        ) {
+            return $this->projectService->list('active');
+        }
+
+        if (!$this->connection->tableExists('projects') || !$this->connection->tableExists('project_memberships')) {
+            return [];
+        }
+
+        return $this->connection->fetchAll(
+            'SELECT DISTINCT projects.id, projects.project_number, projects.name, projects.city
+             FROM projects
+             INNER JOIN project_memberships ON project_memberships.project_id = projects.id
+             WHERE project_memberships.user_id = :user_id
+               AND COALESCE(projects.is_deleted, 0) = 0
+               AND projects.status <> "archived"
+               AND (project_memberships.assigned_from IS NULL OR project_memberships.assigned_from <= CURDATE())
+               AND (project_memberships.assigned_until IS NULL OR project_memberships.assigned_until >= CURDATE())
+             ORDER BY projects.project_number ASC, projects.name ASC',
+            ['user_id' => (int) ($user['id'] ?? 0)]
         );
     }
 

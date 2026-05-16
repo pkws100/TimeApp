@@ -30,8 +30,11 @@
         dialog: null,
         pendingAction: null,
         uploadingTimesheetId: null,
+        uploadingProjectId: null,
         preferredProjectId: null,
         projectSelectionId: undefined,
+        projectFiles: {},
+        projectFilesLoading: false,
         timesheetList: [],
         timesheetFilterScope: 'all',
         timesheetFilterProjectId: null,
@@ -42,6 +45,7 @@
         pushLoading: false,
         pushBusy: false,
         installPromptAvailable: false,
+        fileSelectionGuardUntil: 0,
     };
     let feedbackTimer = null;
     let clientIdCounter = 0;
@@ -201,6 +205,46 @@
         }
 
         return state.today.projects.find((project) => project.id === projectId) || null;
+    }
+
+    function hasPermission(permission) {
+        const permissions = state.session && state.session.user && Array.isArray(state.session.user.permissions)
+            ? state.session.user.permissions
+            : [];
+
+        return permissions.includes('*') || permissions.includes(permission);
+    }
+
+    function projectFileContextId() {
+        const explicitSelection = projectSelectionStateId();
+
+        if (typeof explicitSelection === 'number' && explicitSelection > 0) {
+            return explicitSelection;
+        }
+
+        if (explicitSelection === null) {
+            return null;
+        }
+
+        const entry = workEntry();
+
+        if (entry && typeof entry.project_id === 'number' && entry.project_id > 0) {
+            return entry.project_id;
+        }
+
+        const preferred = preferredProjectId();
+
+        if (preferred !== null) {
+            return preferred;
+        }
+
+        const projects = activeProjects();
+
+        return projects.length > 0 ? projects[0].id : null;
+    }
+
+    function projectFilesCacheKey(projectId) {
+        return 'project_files_' + String(projectId);
     }
 
     function currentTimesheetProjectId() {
@@ -642,6 +686,7 @@
             select_project: 'Wird zugeordnet ...',
             pause: 'Wird gespeichert ...',
             upload_attachment: 'Wird hochgeladen ...',
+            upload_project_attachment: 'Wird hochgeladen ...',
         };
 
         return labels[action] || 'Wird verarbeitet ...';
@@ -1305,6 +1350,53 @@
         return state.today && Array.isArray(state.today.attachments) ? state.today.attachments : [];
     }
 
+    function fileSizeLabel(bytes) {
+        const value = Number(bytes || 0);
+
+        if (!Number.isFinite(value) || value <= 0) {
+            return '';
+        }
+
+        if (value >= 1024 * 1024) {
+            return (value / 1024 / 1024).toFixed(1).replace('.', ',') + ' MB';
+        }
+
+        return Math.max(1, Math.round(value / 1024)) + ' KB';
+    }
+
+    function attachmentListMarkup(files, options) {
+        const items = Array.isArray(files) ? files : [];
+        const settings = options || {};
+
+        if (items.length === 0) {
+            return '<div class="app-empty">' + escapeHtml(settings.emptyText || 'Noch keine Dateien vorhanden.') + '</div>';
+        }
+
+        return items.map((attachment) => {
+            const downloadUrl = attachment.download_url || attachment.preview_url || '#';
+            const canOpen = state.online && downloadUrl && downloadUrl !== '#';
+            const meta = compactBlock([attachment.mime_type || '', fileSizeLabel(attachment.size_bytes)], ' · ');
+            const preview = attachment.is_image && attachment.preview_url
+                ? (canOpen
+                    ? '<a class="app-attachment-preview" href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener" aria-label="' + escapeHtml((attachment.original_name || 'Datei') + ' oeffnen') + '"><img src="' + escapeHtml(attachment.preview_url) + '" alt=""></a>'
+                    : '<span class="app-attachment-icon" aria-label="Datei nur online abrufbar">Datei</span>')
+                : (canOpen
+                    ? '<a class="app-attachment-icon" href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener" aria-label="' + escapeHtml((attachment.original_name || 'Datei') + ' oeffnen') + '">Datei</a>'
+                    : '<span class="app-attachment-icon" aria-label="Datei nur online abrufbar">Datei</span>');
+            const removeButton = settings.deleteAttribute
+                ? '<button type="button" data-' + settings.deleteAttribute + '="' + attachment.id + '">Entfernen</button>'
+                : '';
+
+            return '<article class="app-attachment-row">'
+                + preview
+                + '<div class="app-attachment-info"><strong>' + escapeHtml(attachment.original_name || 'Datei') + '</strong><p class="muted">' + escapeHtml(meta) + '</p>'
+                + (canOpen ? '<a href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener">Oeffnen</a>' : '<span class="muted">Nur online abrufbar</span>')
+                + '</div>'
+                + removeButton
+                + '</article>';
+        }).join('');
+    }
+
     function attachmentSectionMarkup() {
         const entry = workEntry();
         const attachments = currentAttachments();
@@ -1314,16 +1406,49 @@
         }
 
         return '<section class="app-card app-grid">'
-            + '<div><p class="muted">Bilder</p><h2>Anhaenge zum Zeiteintrag</h2><p>Fotos koennen direkt nach dem Buchen hochgeladen werden. Bei fehlender Verbindung ist der Upload nicht verfuegbar.</p></div>'
+            + '<div><p class="muted">Dateien</p><h2>Anhaenge zum Zeiteintrag</h2><p>Fotos und Dateien koennen direkt nach dem Buchen hochgeladen werden. Bei fehlender Verbindung ist der Upload nicht verfuegbar.</p></div>'
             + '<div class="app-grid">'
-            + '<label class="app-field"><span>Bild auswaehlen</span><input id="timesheetAttachmentInput" type="file" accept="image/*,.heic,.heif" ' + (state.online ? '' : 'disabled') + '></label>'
-            + '<button type="button" id="uploadAttachmentButton" ' + (state.online && !isBusy('upload_attachment') ? '' : 'disabled') + '>' + escapeHtml(buttonLabel('upload_attachment', 'Bild hochladen')) + '</button>'
-            + (state.online ? '' : '<div class="app-empty">Bild-Uploads sind nur mit aktiver Verbindung moeglich.</div>')
+            + '<label class="app-field"><span>Foto aufnehmen</span><input id="timesheetCameraInput" type="file" accept="image/*" capture="environment" ' + (state.online ? '' : 'disabled') + '></label>'
+            + '<label class="app-field"><span>Datei auswaehlen</span><input id="timesheetAttachmentInput" type="file" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.heic,.heif" ' + (state.online ? '' : 'disabled') + '></label>'
+            + '<button type="button" id="uploadAttachmentButton" ' + (state.online && !isBusy('upload_attachment') ? '' : 'disabled') + '>' + escapeHtml(buttonLabel('upload_attachment', 'Datei hochladen')) + '</button>'
+            + (state.online ? '' : '<div class="app-empty">Datei-Uploads sind nur mit aktiver Verbindung moeglich.</div>')
             + '</div>'
             + '<div class="app-grid">'
-            + (attachments.length > 0
-                ? attachments.map((attachment) => '<article class="app-attachment-row"><div><strong>' + escapeHtml(attachment.original_name || 'Bild') + '</strong><p class="muted">' + escapeHtml(attachment.mime_type || '') + '</p></div><button type="button" data-delete-attachment="' + attachment.id + '">Entfernen</button></article>').join('')
-                : '<div class="app-empty">Noch keine Bilder zu diesem Zeiteintrag.</div>')
+            + attachmentListMarkup(attachments, {
+                deleteAttribute: 'delete-attachment',
+                emptyText: 'Noch keine Dateien zu diesem Zeiteintrag.'
+            })
+            + '</div>'
+            + '</section>';
+    }
+
+    function projectAttachmentSectionMarkup() {
+        const projectId = projectFileContextId();
+
+        if (projectId === null) {
+            return '<section class="app-card app-grid"><div><p class="muted">Projektdateien</p><h2>Dateien</h2><p>Bitte zuerst ein Projekt auswaehlen.</p></div></section>';
+        }
+
+        const project = projectById(projectId);
+        const files = state.projectFiles[String(projectId)] || [];
+        const loading = state.projectFilesLoading ? '<div class="app-empty">Projektdateien werden geladen ...</div>' : '';
+        const canUpload = hasPermission('files.upload');
+        const uploadDisabled = !state.online || !canUpload || isBusy('upload_project_attachment');
+
+        return '<section class="app-card app-grid">'
+            + '<div><p class="muted">Projektdateien</p><h2>' + escapeHtml(project ? project.name : 'Dateien') + '</h2><p>Projektbezogene Fotos und Dateien werden geschuetzt gespeichert. Uploads sind nur online moeglich.</p></div>'
+            + '<div class="app-grid">'
+            + '<label class="app-field"><span>Foto aufnehmen</span><input id="projectCameraInput" type="file" accept="image/*" capture="environment" ' + (uploadDisabled ? 'disabled' : '') + '></label>'
+            + '<label class="app-field"><span>Datei auswaehlen</span><input id="projectAttachmentInput" type="file" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.heic,.heif" ' + (uploadDisabled ? 'disabled' : '') + '></label>'
+            + '<button type="button" id="uploadProjectAttachmentButton" ' + (uploadDisabled ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upload_project_attachment', 'Datei hochladen')) + '</button>'
+            + (state.online ? '' : '<div class="app-empty">Projektdateien koennen nur mit aktiver Verbindung hochgeladen werden.</div>')
+            + (canUpload ? '' : '<div class="app-empty">Projektdatei-Uploads sind fuer Ihre Rolle nicht freigegeben.</div>')
+            + '</div>'
+            + '<div class="app-grid">'
+            + loading
+            + attachmentListMarkup(files, {
+                emptyText: 'Noch keine Projektdateien vorhanden.'
+            })
             + '</div>'
             + '</section>';
     }
@@ -1341,6 +1466,12 @@
             + state.timesheetList.map((item) => {
                 const projectName = item.project_name || 'Nicht zugeordnet';
                 const note = item.note ? '<p class="muted">' + escapeHtml(item.note) + '</p>' : '';
+                const attachments = Array.isArray(item.attachments) ? item.attachments : [];
+                const attachmentMarkup = attachments.length > 0
+                    ? '<div class="app-timesheet-attachments">' + attachmentListMarkup(attachments, {
+                        emptyText: ''
+                    }) + '</div>'
+                    : '';
 
                 return '<article class="app-timesheet-card">'
                     + '<div><p class="muted">' + escapeHtml(formatDate(item.work_date)) + '</p><h3>' + escapeHtml(projectName) + '</h3>' + note + '</div>'
@@ -1351,17 +1482,19 @@
                     + '<div><span class="muted">Netto</span><strong>' + escapeHtml(formatDurationMinutes(Number(item.net_minutes || 0))) + '</strong></div>'
                     + '</div>'
                     + '<div class="app-timesheet-type">' + escapeHtml(entryTypeLabel(item.entry_type)) + '</div>'
+                    + attachmentMarkup
                     + '</article>';
             }).join('')
             + '</div>';
 
         const table = '<div class="app-timesheet-table-wrap"><table class="app-timesheet-table">'
             + '<thead><tr>'
-            + '<th>Datum</th><th>Projekt</th><th>Start</th><th>Ende</th><th>Pause</th><th>Netto</th><th>Typ</th>'
+            + '<th>Datum</th><th>Projekt</th><th>Start</th><th>Ende</th><th>Pause</th><th>Netto</th><th>Typ</th><th>Dateien</th>'
             + '</tr></thead><tbody>'
             + state.timesheetList.map((item) => {
                 const projectName = item.project_name || 'Nicht zugeordnet';
                 const note = item.note ? '<div class="muted">' + escapeHtml(item.note) + '</div>' : '';
+                const attachmentCount = Array.isArray(item.attachments) ? item.attachments.length : 0;
 
                 return '<tr>'
                     + '<td>' + escapeHtml(formatDate(item.work_date)) + '</td>'
@@ -1371,6 +1504,7 @@
                     + '<td>' + escapeHtml(formatDurationMinutes(Number(item.break_minutes || 0))) + '</td>'
                     + '<td>' + escapeHtml(formatDurationMinutes(Number(item.net_minutes || 0))) + '</td>'
                     + '<td>' + escapeHtml(entryTypeLabel(item.entry_type)) + '</td>'
+                    + '<td>' + escapeHtml(String(attachmentCount)) + '</td>'
                     + '</tr>';
             }).join('')
             + '</tbody></table></div>';
@@ -1676,6 +1810,7 @@
                     ? ''
                     : '<div class="app-empty"><strong>Nicht zugeordnet:</strong> Diese Buchung kann spaeter im Buero einem Projekt zugeordnet werden.</div>'))
             + '</section>'
+            + projectAttachmentSectionMarkup()
         );
     }
 
@@ -2058,6 +2193,9 @@
             projectSelect.addEventListener('change', function () {
                 setProjectSelectionState(selectedProjectId());
                 render();
+                if (routeName() === '/projektwahl') {
+                    loadProjectFiles(projectFileContextId(), false);
+                }
             });
         }
 
@@ -2153,6 +2291,17 @@
             });
         }
 
+        const uploadProjectAttachmentButton = document.getElementById('uploadProjectAttachmentButton');
+
+        if (uploadProjectAttachmentButton) {
+            uploadProjectAttachmentButton.addEventListener('click', async function () {
+                await uploadProjectAttachment();
+            });
+        }
+
+        bindExclusiveFileInputs(['timesheetCameraInput', 'timesheetAttachmentInput']);
+        bindExclusiveFileInputs(['projectCameraInput', 'projectAttachmentInput']);
+
         document.querySelectorAll('[data-delete-attachment]').forEach((button) => {
             button.addEventListener('click', async function () {
                 await archiveTimesheetAttachment(Number(button.getAttribute('data-delete-attachment') || '0'));
@@ -2163,6 +2312,43 @@
             link.addEventListener('click', function (event) {
                 event.preventDefault();
                 navigate(link.getAttribute('href'));
+            });
+        });
+    }
+
+    function bindExclusiveFileInputs(inputIds) {
+        inputIds.forEach((inputId) => {
+            const input = document.getElementById(inputId);
+
+            if (!input) {
+                return;
+            }
+
+            input.addEventListener('pointerdown', function () {
+                markFileSelectionGuard(30000);
+            });
+
+            input.addEventListener('click', function () {
+                markFileSelectionGuard(30000);
+            });
+
+            input.addEventListener('change', function () {
+                if (!input.files || input.files.length === 0) {
+                    clearFileSelectionGuardIfIdle();
+                    return;
+                }
+
+                markFileSelectionGuard(10 * 60 * 1000);
+
+                inputIds
+                    .filter((otherId) => otherId !== inputId)
+                    .forEach((otherId) => {
+                        const other = document.getElementById(otherId);
+
+                        if (other) {
+                            other.value = '';
+                        }
+                    });
             });
         });
     }
@@ -2216,6 +2402,9 @@
 
         if (!navigator.onLine) {
             await applyCachedData();
+            if (routeName() === '/projektwahl') {
+                await loadProjectFiles(projectFileContextId(), force);
+            }
             render();
             return;
         }
@@ -2249,6 +2438,10 @@
 
             if (routeName() === '/historie') {
                 await loadTimesheetList(force);
+            }
+
+            if (routeName() === '/projektwahl') {
+                await loadProjectFiles(projectFileContextId(), force);
             }
         } catch (error) {
             console.warn('App-Daten konnten nicht geladen werden.', error);
@@ -2342,6 +2535,52 @@
             }
         } finally {
             state.timesheetListLoading = false;
+            render();
+        }
+    }
+
+    async function loadProjectFiles(projectId, force) {
+        if (!state.session.authenticated || projectId === null) {
+            return;
+        }
+
+        const cacheKey = projectFilesCacheKey(projectId);
+
+        if (!navigator.onLine) {
+            const cached = await cacheGet(cacheKey);
+            state.projectFiles[String(projectId)] = cached && Array.isArray(cached.items) ? cached.items : [];
+            state.projectFilesLoading = false;
+            render();
+            return;
+        }
+
+        state.projectFilesLoading = true;
+        render();
+
+        try {
+            const response = await fetch('/api/v1/app/projects/' + projectId + '/files');
+            const payload = await response.json();
+
+            if (!response.ok) {
+                throw new Error(payload.message || payload.error || 'Projektdateien konnten nicht geladen werden.');
+            }
+
+            const files = Array.isArray(payload.data) ? payload.data : [];
+            state.projectFiles[String(projectId)] = files;
+
+            await cacheSet(cacheKey, {
+                items: files,
+                cached_at: new Date().toISOString()
+            });
+        } catch (error) {
+            const cached = await cacheGet(cacheKey);
+            state.projectFiles[String(projectId)] = cached && Array.isArray(cached.items) ? cached.items : [];
+
+            if (!force) {
+                showFeedback('error', friendlyMessage(error.message, 'Projektdateien konnten nicht geladen werden.'));
+            }
+        } finally {
+            state.projectFilesLoading = false;
             render();
         }
     }
@@ -2864,9 +3103,60 @@
         state.today.today_state.work_entry = entry;
     }
 
+    function selectedUploadFile(inputIds) {
+        for (const inputId of inputIds) {
+            const input = document.getElementById(inputId);
+
+            if (input && input.files && input.files.length > 0) {
+                return input.files[0];
+            }
+        }
+
+        return null;
+    }
+
+    function uploadInputIds() {
+        return [
+            'timesheetCameraInput',
+            'timesheetAttachmentInput',
+            'projectCameraInput',
+            'projectAttachmentInput'
+        ];
+    }
+
+    function hasPendingUploadSelection() {
+        return uploadInputIds().some((inputId) => {
+            const input = document.getElementById(inputId);
+
+            return !!(input && input.files && input.files.length > 0);
+        });
+    }
+
+    function markFileSelectionGuard(durationMs) {
+        state.fileSelectionGuardUntil = Date.now() + durationMs;
+    }
+
+    function clearFileSelectionGuardIfIdle() {
+        if (!hasPendingUploadSelection()) {
+            state.fileSelectionGuardUntil = 0;
+        }
+    }
+
+    function shouldSkipRevalidateForFileSelection() {
+        return Date.now() < Number(state.fileSelectionGuardUntil || 0) || hasPendingUploadSelection();
+    }
+
+    function updateProjectAttachments(projectId, files) {
+        if (projectId === null) {
+            return;
+        }
+
+        state.projectFiles[String(projectId)] = Array.isArray(files) ? files : [];
+    }
+
     async function uploadTimesheetAttachment() {
         const entry = workEntry();
-        const input = document.getElementById('timesheetAttachmentInput');
+        const selectedFile = selectedUploadFile(['timesheetCameraInput', 'timesheetAttachmentInput']);
 
         if (!entry || !entry.id) {
             showFeedback('error', 'Bitte zuerst einen Zeiteintrag buchen, bevor Sie ein Bild hochladen.');
@@ -2878,13 +3168,13 @@
             return;
         }
 
-        if (!input || !input.files || input.files.length === 0) {
-            showFeedback('error', 'Bitte zuerst ein Bild auswaehlen.');
+        if (!selectedFile) {
+            showFeedback('error', 'Bitte zuerst eine Datei auswaehlen.');
             return;
         }
 
         const formData = new FormData();
-        formData.append('file', input.files[0]);
+        formData.append('file', selectedFile);
 
         state.pendingAction = 'upload_attachment';
         state.uploadingTimesheetId = entry.id;
@@ -2910,6 +3200,66 @@
         } finally {
             state.pendingAction = null;
             state.uploadingTimesheetId = null;
+            state.fileSelectionGuardUntil = 0;
+            render();
+        }
+    }
+
+    async function uploadProjectAttachment() {
+        const projectId = projectFileContextId();
+        const selectedFile = selectedUploadFile(['projectCameraInput', 'projectAttachmentInput']);
+
+        if (projectId === null) {
+            showFeedback('error', 'Bitte zuerst ein Projekt auswaehlen.');
+            return;
+        }
+
+        if (!state.online) {
+            showFeedback('error', 'Projektdateien koennen nur mit aktiver Verbindung hochgeladen werden.');
+            return;
+        }
+
+        if (!hasPermission('files.upload')) {
+            showFeedback('error', 'Projektdatei-Uploads sind fuer Ihre Rolle nicht freigegeben.');
+            return;
+        }
+
+        if (!selectedFile) {
+            showFeedback('error', 'Bitte zuerst eine Datei auswaehlen.');
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('file', selectedFile);
+
+        state.pendingAction = 'upload_project_attachment';
+        state.uploadingProjectId = projectId;
+        render();
+
+        try {
+            const response = await fetch('/api/v1/app/projects/' + projectId + '/files', {
+                method: 'POST',
+                body: formData
+            });
+            const payload = await response.json();
+
+            if (!response.ok) {
+                showFeedback('error', friendlyMessage(payload.message || payload.error, 'Die Datei konnte nicht hochgeladen werden.'), true);
+                return;
+            }
+
+            updateProjectAttachments(projectId, payload.data && payload.data.files ? payload.data.files : []);
+            await cacheSet(projectFilesCacheKey(projectId), {
+                items: state.projectFiles[String(projectId)] || [],
+                cached_at: new Date().toISOString()
+            });
+            showFeedback('success', friendlyMessage(payload.message, 'Datei erfolgreich hochgeladen.'));
+        } catch (error) {
+            showFeedback('error', friendlyMessage(error.message, 'Die Datei konnte nicht hochgeladen werden.'), true);
+        } finally {
+            state.pendingAction = null;
+            state.uploadingProjectId = null;
+            state.fileSelectionGuardUntil = 0;
             render();
         }
     }
@@ -3150,8 +3500,16 @@
             return;
         }
 
+        if (shouldSkipRevalidateForFileSelection()) {
+            return;
+        }
+
         window.clearTimeout(revalidateTimer);
         revalidateTimer = window.setTimeout(async function () {
+            if (shouldSkipRevalidateForFileSelection()) {
+                return;
+            }
+
             await loadOnlineData(true);
         }, 160);
     }

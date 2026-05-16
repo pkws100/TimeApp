@@ -135,6 +135,36 @@ final class RouterSmokeTest extends TestCase
         );
 
         $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/api/v1/app/projects/1/files';
+        $_GET = [];
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $router->dispatch($request)->send();
+        $projectFilesPayload = ob_get_clean() ?: '';
+
+        self::assertTrue(
+            str_contains($projectFilesPayload, '"Nicht authentifiziert."') || str_contains($projectFilesPayload, '"data"'),
+            'App-Projektdatei-Route sollte erreichbar sein und entweder Daten oder einen Auth-Fehler liefern.'
+        );
+
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/api/v1/app/timesheet-files/1/download';
+        $_GET = [];
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $router->dispatch($request)->send();
+        $timesheetDownloadPayload = ob_get_clean() ?: '';
+
+        self::assertTrue(
+            str_contains($timesheetDownloadPayload, '"Nicht authentifiziert."') || str_contains($timesheetDownloadPayload, 'Datei nicht gefunden.'),
+            'Timesheet-Dateidownload sollte geschuetzt erreichbar sein.'
+        );
+
+        $_SERVER['REQUEST_METHOD'] = 'GET';
         $_SERVER['REQUEST_URI'] = '/api/v1/app/me/timesheets?scope=all';
         $_GET = ['scope' => 'all'];
 
@@ -187,6 +217,45 @@ final class RouterSmokeTest extends TestCase
             || str_contains($html, 'Keine Berechtigung')
             || str_contains($html, '/admin/login?next=%2Fadmin%2Fbookings'),
             'Die Admin-Buchungsseite sollte erreichbar sein und auf Login, Inhalt oder 403 aufloesen.'
+        );
+
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/admin/timesheet-files/1/download';
+        $_GET = [];
+        $_POST = [];
+        $_FILES = [];
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $router->dispatch($request)->send();
+        $downloadPayload = ob_get_clean() ?: '';
+
+        self::assertTrue(
+            $downloadPayload === ''
+            || str_contains($downloadPayload, 'Datei nicht gefunden.')
+            || str_contains($downloadPayload, 'Keine Berechtigung')
+            || str_contains($downloadPayload, '/admin/login?next=%2Fadmin%2Ftimesheet-files%2F1%2Fdownload'),
+            'Der Admin-Buchungsdateidownload sollte geschuetzt erreichbar sein.'
+        );
+
+        $_SERVER['REQUEST_METHOD'] = 'DELETE';
+        $_SERVER['REQUEST_URI'] = '/admin/timesheet-files/1';
+        $_GET = [];
+        $_POST = [];
+        $_FILES = [];
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $router->dispatch($request)->send();
+        $archivePayload = ob_get_clean() ?: '';
+
+        self::assertTrue(
+            $archivePayload === ''
+            || str_contains($archivePayload, 'Keine Berechtigung')
+            || str_contains($archivePayload, '/admin/login?next=%2Fadmin%2Ftimesheet-files%2F1'),
+            'Die Admin-Buchungsdateiarchivierung sollte geschuetzt erreichbar sein.'
         );
     }
 

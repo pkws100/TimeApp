@@ -56,6 +56,102 @@
         return url.pathname + url.search;
     }
 
+    function escapeHtml(value) {
+        return String(value == null ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
+    function formatBytes(bytes) {
+        var value = Number(bytes || 0);
+
+        if (value < 1024) {
+            return value + ' B';
+        }
+
+        if (value < 1024 * 1024) {
+            return (value / 1024).toFixed(1).replace('.', ',') + ' KB';
+        }
+
+        return (value / (1024 * 1024)).toFixed(1).replace('.', ',') + ' MB';
+    }
+
+    function fileMeta(file) {
+        var parts = [];
+
+        if (file.mime_type) {
+            parts.push(file.mime_type);
+        }
+
+        parts.push(formatBytes(file.size_bytes));
+
+        if (file.uploaded_at) {
+            parts.push(file.uploaded_at);
+        }
+
+        return parts.join(' · ');
+    }
+
+    function csrfToken(modal) {
+        var field = modal.querySelector('input[name="csrf_token"]');
+
+        return field ? field.value : '';
+    }
+
+    function renderAttachments(modal, attachments) {
+        var section = modal.querySelector('[data-booking-modal-attachments]');
+
+        if (!section) {
+            return;
+        }
+
+        var list = section.querySelector('.booking-attachment-list');
+
+        if (!list) {
+            return;
+        }
+
+        var files = Array.isArray(attachments) ? attachments : [];
+        var canArchive = section.dataset.canArchiveFiles === '1';
+
+        if (files.length === 0) {
+            list.innerHTML = '<li class="booking-attachment is-empty"><p class="muted">Keine Anhänge fuer diese Buchung vorhanden.</p></li>';
+            return;
+        }
+
+        list.innerHTML = files.map(function (file) {
+            var isDeleted = Number(file.is_deleted || 0) === 1;
+            var preview = file.preview_url
+                ? '<a class="booking-attachment__preview" href="' + escapeHtml(file.preview_url) + '" target="_blank" rel="noopener"><img src="' + escapeHtml(file.preview_url) + '" alt="" loading="lazy"></a>'
+                : '<div class="booking-attachment__icon" aria-hidden="true">Datei</div>';
+            var openLink = (!isDeleted && file.download_url)
+                ? '<a class="button button-secondary" href="' + escapeHtml(file.download_url) + '" target="_blank" rel="noopener">Öffnen</a>'
+                : '<span class="muted">Nicht abrufbar</span>';
+            var archiveForm = (canArchive && !isDeleted && file.archive_url)
+                ? '<form method="post" action="' + escapeHtml(file.archive_url) + '" class="booking-attachment__archive">'
+                    + '<input type="hidden" name="_method" value="DELETE">'
+                    + '<input type="hidden" name="return_to" value="' + escapeHtml(currentReturnTo()) + '">'
+                    + '<input type="hidden" name="booking_id" value="' + escapeHtml(modal.dataset.activeBookingId || '') + '">'
+                    + '<input type="hidden" name="csrf_token" value="' + escapeHtml(csrfToken(modal)) + '">'
+                    + '<button type="submit" class="button button-danger">Anhang archivieren</button>'
+                    + '</form>'
+                : '';
+            var status = isDeleted ? '<span class="badge warn">Archiviert</span>' : '<span class="badge ok">Aktiv</span>';
+
+            return '<li class="booking-attachment">'
+                + preview
+                + '<div class="booking-attachment__body">'
+                + '<strong>' + escapeHtml(file.original_name || 'Anhang') + '</strong>'
+                + '<span class="muted">' + escapeHtml(fileMeta(file)) + '</span>'
+                + '<div class="table-actions">' + status + openLink + archiveForm + '</div>'
+                + '</div>'
+                + '</li>';
+        }).join('');
+    }
+
     function openModal(modal, row, trigger) {
         var booking = parseBooking(row);
 
@@ -166,6 +262,8 @@
         if (restoreButton) {
             restoreButton.hidden = !Boolean(booking.is_deleted);
         }
+
+        renderAttachments(modal, booking.attachments);
 
         document.body.classList.add('modal-open');
 

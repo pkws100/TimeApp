@@ -20,7 +20,8 @@ test('mobile profile shows company, legal texts and geo policy', async ({ page }
         user: {
           id: 7,
           display_name: 'Max Mustermann',
-          email: 'max@example.test'
+          email: 'max@example.test',
+          permissions: ['projects.view', 'files.view', 'files.upload']
         }
       })
     });
@@ -141,7 +142,8 @@ test('mobile history is its own area with project filter', async ({ page }) => {
         user: {
           id: 7,
           display_name: 'Max Mustermann',
-          email: 'max@example.test'
+          email: 'max@example.test',
+          permissions: ['projects.view', 'files.view', 'files.upload']
         }
       })
     });
@@ -251,6 +253,119 @@ test('mobile history is its own area with project filter', async ({ page }) => {
 
   await expect(page.getByRole('heading', { name: 'Arbeitszeiten' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Zeituebersicht' })).toHaveCount(0);
+});
+
+test('mobile project view exposes protected upload controls and disables them offline', async ({ page, context }) => {
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test'
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          today: '2026-05-15',
+          projects: [
+            { id: 2, project_number: 'P-002', name: 'Baustelle Mitte', city: 'Berlin' }
+          ],
+          attachments: [],
+          today_state: {
+            status: 'not_started',
+            work_entry: null,
+            active_break: null
+          },
+          geo_policy: {
+            enabled: false,
+            notice_text: '',
+            requires_acknowledgement: false
+          }
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { company_name: 'Muster Bau' } })
+    });
+  });
+
+  await page.route('**/api/v1/app/projects/2/files', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        data: [
+          {
+            id: 5,
+            original_name: 'baustelle.jpg',
+            mime_type: 'image/jpeg',
+            size_bytes: 120000,
+            is_image: true,
+            download_url: '/api/v1/app/project-files/5/download',
+            preview_url: '/api/v1/app/project-files/5/download'
+          }
+        ]
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          enabled: false,
+          can_subscribe: false,
+          permission_required: false,
+          vapid_configured: false,
+          vapid_public_key: '',
+          reminder_time: '09:00',
+          notice_text: '',
+          devices: []
+        }
+      })
+    });
+  });
+
+  await page.goto('/app/projektwahl');
+
+  await expect(page.getByRole('heading', { name: 'Baustelle waehlen' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Baustelle Mitte' })).toBeVisible();
+  await expect(page.locator('#projectCameraInput')).toHaveAttribute('capture', 'environment');
+  await expect(page.locator('#projectAttachmentInput')).toHaveAttribute('accept', /image\/\*/);
+  await expect(page.locator('.app-attachment-info')).toContainText('baustelle.jpg');
+
+  await page.locator('#projectAttachmentInput').setInputFiles({
+    name: 'aufnahme.jpg',
+    mimeType: 'image/jpeg',
+    buffer: Buffer.from([0xff, 0xd8, 0xff, 0xd9])
+  });
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.waitForTimeout(300);
+  await expect.poll(async () => {
+    return page.locator('#projectAttachmentInput').evaluate((input) => input.files ? input.files.length : 0);
+  }).toBe(1);
+
+  await context.setOffline(true);
+  await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+
+  await expect(page.locator('#projectCameraInput')).toBeDisabled();
+  await expect(page.locator('#projectAttachmentInput')).toBeDisabled();
+  await expect(page.getByText('Projektdateien koennen nur mit aktiver Verbindung hochgeladen werden.')).toBeVisible();
 });
 
 test('dark drawer keeps active navigation link readable after login', async ({ page }) => {

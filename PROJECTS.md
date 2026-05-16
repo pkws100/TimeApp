@@ -73,10 +73,11 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [x] Rechtstexte und Firmenprofil anzeigen
 
 ### Frontend nach MVP
-- [ ] Datei-Uploads im Frontend ermöglichen (Projekt und Buchungsbezogen)
-- [ ] Datei-Uploads auch von Handykameras entgegen nehmen und anhand von Metadaten sauber Rotieren und Speichern / Anzeigen im Frontend
+- [x] Datei-Uploads im Frontend ermöglichen (Projekt und Buchungsbezogen)
+- [x] Datei-Uploads auch von Handykameras entgegen nehmen und anhand von Metadaten sauber Rotieren und Speichern / Anzeigen im Frontend
 - [ ] Tiefere Historienansichten
 - [ ] Verbesserte Sync-Konfliktbehandlung
+- [ ] Vollstaendige Offline-Datei-Upload-Queue fuer spaetere Synchronisation ausbauen
 - [x] Push- und Benachrichtigungslogik
 - [ ] Erweiterte GEO-Funktionen
 - [ ] Möglichkeit Kunden/Auftraggeber eine Zeiterfassung (Start und Ende) mit Unterschrift auf dem Touchscreen bestätigen zu lassen
@@ -120,6 +121,8 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [x] Endpunkte fuer benutzerbezogene Tagesdaten bzw. eine mobile Startansicht vorbereiten, falls das bestehende Dashboard dafuer nicht passend ist.
 - [x] Robuste Sync-faehige Zeiterfassungs-Endpunkte fuer Offline-Nachsendung definieren.
 - [x] Browser-Push fuer fehlende Tagesbuchungen mit Rollenfreigabe, Admin-Settings, Geraeteverwaltung und Cron-CLI eingebaut.
+- [x] Mobile Projekt- und Buchungsdatei-Uploads mit geschuetzten Abruf-URLs, Kamera-Inputs und JPEG-EXIF-Orientation-Normalisierung umgesetzt.
+- [x] Backend-Anzeige fuer Buchungsanhaenge in Buchungen und Kalender inklusive geschuetztem Download, Bildvorschau und Archivierung umgesetzt.
 - [x] Möglichkeit schaffen das System auch in Docker-Compose zu deplyen
 - [x] Produktions-Compose fuer VPS/Reverse Proxy mit `timeapp-web`, `timeapp-db`, `timeapp-scheduler`, privaten DB-Netz, Proxy-Netz und stabilen Volumes validiert.
 - [x] Dockerfile fuer `php:8.2-apache` bereinigt: nur fehlende Extensions werden gebaut; bereits enthaltene Core-Extensions werden nicht erneut kompiliert.
@@ -147,6 +150,12 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - Dashboard API: `/api/v1/dashboard/overview`
 - Firmenprofil API: `/api/v1/settings/company`
 - Projektliste API: `/api/v1/projects`
+- App-Projektdateien API: `GET/POST /api/v1/app/projects/{id}/files`
+- App-Projektdatei-Abruf: `GET /api/v1/app/project-files/{id}/download`
+- App-Buchungsdateien API: `GET/POST /api/v1/app/timesheets/{id}/files`
+- App-Buchungsdatei-Abruf: `GET /api/v1/app/timesheet-files/{id}/download`
+- Admin-Buchungsdatei-Abruf: `GET /admin/timesheet-files/{id}/download`
+- Admin-Buchungsdatei-Archivierung: `DELETE /admin/timesheet-files/{id}`
 - Timesheets API: `/api/v1/timesheets`
 - Timesheet-Kalkulation: `POST /api/v1/timesheets/calculate`
 - CSV-Export: `/api/v1/reports/export?format=csv&period=month`
