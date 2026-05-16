@@ -73,11 +73,13 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [x] Rechtstexte und Firmenprofil anzeigen
 
 ### Frontend nach MVP
-- [ ] Datei-Uploads im Frontend
+- [ ] Datei-Uploads im Frontend ermöglichen (Projekt und Buchungsbezogen)
+- [ ] Datei-Uploads auch von Handykameras entgegen nehmen und anhand von Metadaten sauber Rotieren und Speichern / Anzeigen im Frontend
 - [ ] Tiefere Historienansichten
 - [ ] Verbesserte Sync-Konfliktbehandlung
 - [x] Push- und Benachrichtigungslogik
 - [ ] Erweiterte GEO-Funktionen
+- [ ] Möglichkeit Kunden/Auftraggeber eine Zeiterfassung (Start und Ende) mit Unterschrift auf dem Touchscreen bestätigen zu lassen
 
 ## Bereits umgesetzt
 - [x] Composer-, PHPUnit- und Phinx-Grundkonfiguration angelegt.
