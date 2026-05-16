@@ -310,8 +310,12 @@ $router->post('/admin/settings/company', $admin([$companySettingsController, 'sa
 $router->post('/admin/settings/company/logo', $admin([$companySettingsController, 'saveLogo'], 'settings.manage'));
 $router->post('/admin/settings/company/agb-text', $admin([$companySettingsController, 'saveAgbText'], 'settings.manage'));
 $router->post('/admin/settings/company/agb-pdf', $admin([$companySettingsController, 'saveAgbPdf'], 'settings.manage'));
+$router->get('/admin/settings/company/agb-pdf/preview', $admin([$companySettingsController, 'previewAgbPdf'], 'settings.manage'));
+$router->get('/admin/settings/company/agb-pdf/download', $admin([$companySettingsController, 'downloadAgbPdf'], 'settings.manage'));
 $router->post('/admin/settings/company/datenschutz-text', $admin([$companySettingsController, 'saveDatenschutzText'], 'settings.manage'));
 $router->post('/admin/settings/company/datenschutz-pdf', $admin([$companySettingsController, 'saveDatenschutzPdf'], 'settings.manage'));
+$router->get('/admin/settings/company/datenschutz-pdf/preview', $admin([$companySettingsController, 'previewDatenschutzPdf'], 'settings.manage'));
+$router->get('/admin/settings/company/datenschutz-pdf/download', $admin([$companySettingsController, 'downloadDatenschutzPdf'], 'settings.manage'));
 $router->post('/admin/settings/company/smtp', $admin([$companySettingsController, 'saveSmtp'], 'settings.manage'));
 $router->post('/admin/settings/company/geo', $admin([$companySettingsController, 'saveGeo'], 'settings.manage'));
 $router->post('/admin/settings/company/smtp-test', $admin([$companySettingsController, 'smtpTest'], 'settings.manage'));

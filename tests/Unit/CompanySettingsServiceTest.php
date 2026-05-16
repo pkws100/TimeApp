@@ -326,6 +326,128 @@ final class CompanySettingsServiceTest extends TestCase
         }
     }
 
+    public function testProtectedSettingsPdfAcceptsFileInsideUploadRoot(): void
+    {
+        $root = sys_get_temp_dir() . '/company-settings-protected-' . bin2hex(random_bytes(6));
+        $path = $root . '/settings/company/agb/agb.pdf';
+        mkdir(dirname($path), 0775, true);
+        file_put_contents($path, "%PDF-1.4\n%%EOF\n");
+
+        $service = new CompanySettingsService(new DatabaseConnection([]), ['root' => $root]);
+
+        try {
+            $file = $this->validatedSettingsFile($service, [
+                'agb_pdf_original_name' => 'AGB.pdf',
+                'agb_pdf_stored_name' => 'stored-agb.pdf',
+                'agb_pdf_mime_type' => 'application/pdf',
+                'agb_pdf_path' => $path,
+                'agb_pdf_size_bytes' => filesize($path),
+            ], 'agb_pdf', ['application/pdf']);
+
+            self::assertIsArray($file);
+            self::assertSame('AGB.pdf', $file['original_name']);
+            self::assertSame('application/pdf', $file['mime_type']);
+            self::assertSame(realpath($path), $file['path']);
+        } finally {
+            $this->removeDirectory($root);
+        }
+    }
+
+    public function testProtectedSettingsPdfRejectsMissingFile(): void
+    {
+        $root = sys_get_temp_dir() . '/company-settings-protected-' . bin2hex(random_bytes(6));
+        mkdir($root, 0775, true);
+        $service = new CompanySettingsService(new DatabaseConnection([]), ['root' => $root]);
+
+        try {
+            $file = $this->validatedSettingsFile($service, [
+                'agb_pdf_original_name' => 'AGB.pdf',
+                'agb_pdf_mime_type' => 'application/pdf',
+                'agb_pdf_path' => $root . '/settings/company/agb/missing.pdf',
+            ], 'agb_pdf', ['application/pdf']);
+
+            self::assertNull($file);
+        } finally {
+            $this->removeDirectory($root);
+        }
+    }
+
+    public function testProtectedSettingsPdfRejectsPathOutsideUploadRoot(): void
+    {
+        $root = sys_get_temp_dir() . '/company-settings-protected-' . bin2hex(random_bytes(6));
+        $outside = sys_get_temp_dir() . '/company-settings-outside-' . bin2hex(random_bytes(6)) . '.pdf';
+        mkdir($root, 0775, true);
+        file_put_contents($outside, "%PDF-1.4\n%%EOF\n");
+        $service = new CompanySettingsService(new DatabaseConnection([]), ['root' => $root]);
+
+        try {
+            $file = $this->validatedSettingsFile($service, [
+                'agb_pdf_original_name' => 'AGB.pdf',
+                'agb_pdf_mime_type' => 'application/pdf',
+                'agb_pdf_path' => $outside,
+            ], 'agb_pdf', ['application/pdf']);
+
+            self::assertNull($file);
+        } finally {
+            if (is_file($outside)) {
+                unlink($outside);
+            }
+
+            $this->removeDirectory($root);
+        }
+    }
+
+    public function testProtectedSettingsPdfRejectsWrongMimeType(): void
+    {
+        $root = sys_get_temp_dir() . '/company-settings-protected-' . bin2hex(random_bytes(6));
+        $path = $root . '/settings/company/agb/agb.txt';
+        mkdir(dirname($path), 0775, true);
+        file_put_contents($path, 'not a pdf');
+
+        $service = new CompanySettingsService(new DatabaseConnection([]), ['root' => $root]);
+
+        try {
+            $file = $this->validatedSettingsFile($service, [
+                'agb_pdf_original_name' => 'AGB.txt',
+                'agb_pdf_mime_type' => 'text/plain',
+                'agb_pdf_path' => $path,
+            ], 'agb_pdf', ['application/pdf']);
+
+            self::assertNull($file);
+        } finally {
+            $this->removeDirectory($root);
+        }
+    }
+
+    public function testProtectedSettingsPdfRejectsTamperedFileContent(): void
+    {
+        $root = sys_get_temp_dir() . '/company-settings-protected-' . bin2hex(random_bytes(6));
+        $path = $root . '/settings/company/agb/agb.pdf';
+        mkdir(dirname($path), 0775, true);
+        file_put_contents($path, 'not a pdf');
+
+        $service = new CompanySettingsService(new DatabaseConnection([]), ['root' => $root]);
+
+        try {
+            $file = $this->validatedSettingsFile($service, [
+                'agb_pdf_original_name' => 'AGB.pdf',
+                'agb_pdf_mime_type' => 'application/pdf',
+                'agb_pdf_path' => $path,
+            ], 'agb_pdf', ['application/pdf']);
+
+            self::assertNull($file);
+        } finally {
+            $this->removeDirectory($root);
+        }
+    }
+
+    public function testProtectedPdfFileRejectsInvalidPrefix(): void
+    {
+        $service = new CompanySettingsService(new DatabaseConnection([]), []);
+
+        self::assertNull($service->protectedPdfFile('logo'));
+    }
+
     private function storeSettingsFile(
         CompanySettingsService $service,
         array $file,
@@ -337,6 +459,18 @@ final class CompanySettingsServiceTest extends TestCase
         $method->setAccessible(true);
 
         return $method->invoke($service, $file, $subdir, $extensions, $mimeTypes);
+    }
+
+    private function validatedSettingsFile(
+        CompanySettingsService $service,
+        array $settings,
+        string $prefix,
+        array $allowedMimeTypes
+    ): ?array {
+        $method = new ReflectionMethod($service, 'validatedSettingsFile');
+        $method->setAccessible(true);
+
+        return $method->invoke($service, $settings, $prefix, $allowedMimeTypes);
     }
 
     private function normalizeSmtp(

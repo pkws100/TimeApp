@@ -41,6 +41,8 @@ Versionen verteilt, muss die entsprechenden Lizenzpflichten beachten.
 - App-Buchungsdateien: `GET/POST /api/v1/app/timesheets/{id}/files`
 - Admin-Buchungsdatei-Abruf: `GET /admin/timesheet-files/{id}/download`
 - Admin-Buchungsdatei-Archivierung: `DELETE /admin/timesheet-files/{id}`
+- Admin-AGB-PDF: `GET /admin/settings/company/agb-pdf/preview` und `GET /admin/settings/company/agb-pdf/download`
+- Admin-Datenschutz-PDF: `GET /admin/settings/company/datenschutz-pdf/preview` und `GET /admin/settings/company/datenschutz-pdf/download`
 - Dashboard-Overview: `GET /api/v1/dashboard/overview`
 - Projekte: `GET /api/v1/projects`
 
@@ -129,6 +131,11 @@ Details stehen in `DEPLOY.md`. Wiederkehrende Updates laufen ueber
 - Runtime-Overrides wie `storage/config/database.override.php` werden im Restore-Plan nur erkannt und nicht ungefragt zurueckgespielt.
 - Backup- und Restore-Validierung sind mit `settings.database.manage` geschuetzt.
 - Verschluesselte Settings-Secrets wie SMTP-Passwoerter bleiben im Backup verschluesselt; der passende `.env`-Key wird nicht im Backup mitgeliefert. Nach einem Upgrade mit altem Klartext-SMTP-Passwort die SMTP-Settings einmal mit gesetztem Key speichern, bevor ein Backup erstellt wird.
+
+## Geschuetzte Settings-Dateien
+- Firmenlogo wird weiterhin ueber den bestehenden oeffentlichen Logo-Endpunkt fuer Branding ausgeliefert.
+- AGB- und Datenschutz-PDFs werden im Admin unter `settings.manage` ueber geschuetzte Preview-/Download-Endpunkte ausgeliefert.
+- Die Dateien bleiben im geschuetzten Upload-Storage; Admin-HTML enthaelt keine direkte `storage/`- oder `public/`-Datei-URL.
 
 ## Wichtige Composer-Befehle
 ```bash

@@ -416,4 +416,28 @@ final class RouterSmokeTest extends TestCase
             'Die Admin-Kalender-Tagesroute sollte erreichbar sein.'
         );
     }
+
+    public function testAdminSettingsPdfRoutesAreProtected(): void
+    {
+        foreach ([
+            '/admin/settings/company/agb-pdf/preview',
+            '/admin/settings/company/agb-pdf/download',
+            '/admin/settings/company/datenschutz-pdf/preview',
+            '/admin/settings/company/datenschutz-pdf/download',
+        ] as $uri) {
+            $_SERVER['REQUEST_METHOD'] = 'GET';
+            $_SERVER['REQUEST_URI'] = $uri;
+            $_GET = [];
+            $_POST = [];
+            $_FILES = [];
+
+            [$request, $router] = require base_path('bootstrap/app.php');
+
+            $response = $router->dispatch($request);
+            $headers = $response->headers();
+
+            self::assertSame(302, $response->status(), 'Die Settings-PDF-Route sollte zum Login umleiten: ' . $uri);
+            self::assertSame('/admin/login?next=' . rawurlencode($uri), $headers['Location'] ?? null);
+        }
+    }
 }

@@ -474,6 +474,26 @@ HTML;
         ]);
     }
 
+    public function previewAgbPdf(Request $request): Response
+    {
+        return $this->protectedPdfResponse('agb_pdf', true);
+    }
+
+    public function downloadAgbPdf(Request $request): Response
+    {
+        return $this->protectedPdfResponse('agb_pdf', false);
+    }
+
+    public function previewDatenschutzPdf(Request $request): Response
+    {
+        return $this->protectedPdfResponse('datenschutz_pdf', true);
+    }
+
+    public function downloadDatenschutzPdf(Request $request): Response
+    {
+        return $this->protectedPdfResponse('datenschutz_pdf', false);
+    }
+
     private function settingsTabs(string $active): string
     {
         $companyClass = $active === 'company' ? 'scope-link is-active' : 'scope-link';
@@ -530,7 +550,69 @@ HTML;
             return '<p class="muted">Noch keine Datei hinterlegt.</p>';
         }
 
-        return '<p class="muted">Aktuell hinterlegt: ' . $this->escape($name) . ($size !== '' ? ' (' . $this->escape($size) . ' Bytes)' : '') . '</p>';
+        $links = $this->settingsFileLinks($prefix);
+        $fileIsAvailable = $links !== null && $this->companySettingsService->protectedPdfFile($prefix) !== null;
+        $label = $this->settingsFileLabel($prefix);
+        $linkMarkup = $links === null
+            ? ''
+            : ($fileIsAvailable
+                ? ' <span class="table-actions">'
+                . '<a class="button button-secondary" href="' . $this->escape($links['preview']) . '" target="_blank" rel="noopener" aria-label="' . $this->escape($label . ' anzeigen') . '">Anzeigen</a>'
+                . '<a class="button button-secondary" href="' . $this->escape($links['download']) . '" aria-label="' . $this->escape($label . ' herunterladen') . '">Download</a>'
+                . '</span>'
+                : ' <span class="badge warn">Datei nicht abrufbar</span>');
+
+        return '<p class="muted">Aktuell hinterlegt: ' . $this->escape($name) . ($size !== '' ? ' (' . $this->escape($size) . ' Bytes)' : '') . $linkMarkup . '</p>';
+    }
+
+    private function protectedPdfResponse(string $prefix, bool $inline): Response
+    {
+        $file = $this->companySettingsService->protectedPdfFile($prefix);
+
+        if ($file === null) {
+            return new Response('Datei nicht gefunden.', 404, ['Content-Type' => 'text/plain; charset=utf-8']);
+        }
+
+        $content = file_get_contents((string) $file['path']);
+
+        if ($content === false) {
+            return new Response('Datei nicht gefunden.', 404, ['Content-Type' => 'text/plain; charset=utf-8']);
+        }
+
+        $filename = preg_replace('/[^a-zA-Z0-9._-]/', '-', (string) ($file['original_name'] ?? '')) ?: 'settings.pdf';
+        $disposition = ($inline ? 'inline' : 'attachment') . '; filename="' . $filename . '"';
+
+        return new Response($content, 200, [
+            'Content-Type' => (string) $file['mime_type'],
+            'Content-Length' => (string) strlen($content),
+            'Content-Disposition' => $disposition,
+            'Cache-Control' => 'private, max-age=300',
+            'X-Content-Type-Options' => 'nosniff',
+        ]);
+    }
+
+    private function settingsFileLinks(string $prefix): ?array
+    {
+        return match ($prefix) {
+            'agb_pdf' => [
+                'preview' => '/admin/settings/company/agb-pdf/preview',
+                'download' => '/admin/settings/company/agb-pdf/download',
+            ],
+            'datenschutz_pdf' => [
+                'preview' => '/admin/settings/company/datenschutz-pdf/preview',
+                'download' => '/admin/settings/company/datenschutz-pdf/download',
+            ],
+            default => null,
+        };
+    }
+
+    private function settingsFileLabel(string $prefix): string
+    {
+        return match ($prefix) {
+            'agb_pdf' => 'AGB-PDF',
+            'datenschutz_pdf' => 'Datenschutz-PDF',
+            default => 'Settings-Datei',
+        };
     }
 
     private function companyAddress(array $settings): string

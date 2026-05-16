@@ -218,38 +218,16 @@ final class CompanySettingsService
     public function publicLogoFile(): ?array
     {
         $settings = $this->storedCurrent();
-        $descriptor = $this->fileDescriptor($settings, 'logo');
+        return $this->validatedSettingsFile($settings, 'logo', ['image/png', 'image/jpeg', 'image/webp']);
+    }
 
-        if ($descriptor === null) {
+    public function protectedPdfFile(string $prefix): ?array
+    {
+        if (!in_array($prefix, ['agb_pdf', 'datenschutz_pdf'], true)) {
             return null;
         }
 
-        $path = (string) ($descriptor['path'] ?? '');
-        $mimeType = (string) ($descriptor['mime_type'] ?? '');
-
-        if (!in_array($mimeType, ['image/png', 'image/jpeg', 'image/webp'], true)) {
-            return null;
-        }
-
-        $root = rtrim((string) ($this->uploadConfig['root'] ?? storage_path('app/uploads')), '/');
-        $realRoot = realpath($root);
-        $realPath = realpath($path);
-
-        if ($realRoot === false || $realPath === false || !is_file($realPath)) {
-            return null;
-        }
-
-        $normalizedRoot = rtrim($realRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
-
-        if (!str_starts_with($realPath, $normalizedRoot)) {
-            return null;
-        }
-
-        return [
-            ...$descriptor,
-            'path' => $realPath,
-            'mime_type' => $mimeType,
-        ];
+        return $this->validatedSettingsFile($this->storedCurrent(), $prefix, ['application/pdf']);
     }
 
     public function recordSmtpTest(bool $ok, string $message): void
@@ -818,6 +796,68 @@ final class CompanySettingsService
             'size_bytes' => $descriptor['size_bytes'] ?? null,
             'url' => $url,
         ];
+    }
+
+    private function validatedSettingsFile(array $settings, string $prefix, array $allowedMimeTypes): ?array
+    {
+        $descriptor = $this->fileDescriptor($settings, $prefix);
+
+        if ($descriptor === null) {
+            return null;
+        }
+
+        $path = (string) ($descriptor['path'] ?? '');
+        $mimeType = (string) ($descriptor['mime_type'] ?? '');
+
+        if (!in_array($mimeType, $allowedMimeTypes, true)) {
+            return null;
+        }
+
+        $root = rtrim((string) ($this->uploadConfig['root'] ?? storage_path('app/uploads')), '/');
+        $realRoot = realpath($root);
+        $realPath = realpath($path);
+
+        if ($realRoot === false || $realPath === false || !is_file($realPath)) {
+            return null;
+        }
+
+        $normalizedRoot = rtrim($realRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+
+        if (!str_starts_with($realPath, $normalizedRoot)) {
+            return null;
+        }
+
+        $detectedMimeType = $this->detectMimeType($realPath);
+
+        if ($detectedMimeType !== null && !in_array($detectedMimeType, $allowedMimeTypes, true)) {
+            return null;
+        }
+
+        return [
+            'original_name' => $descriptor['original_name'] ?? null,
+            'mime_type' => $mimeType,
+            'path' => $realPath,
+            'size_bytes' => $descriptor['size_bytes'] ?? null,
+            'stored_name' => $descriptor['stored_name'] ?? null,
+        ];
+    }
+
+    private function detectMimeType(string $path): ?string
+    {
+        if (!function_exists('finfo_open')) {
+            return null;
+        }
+
+        $resource = finfo_open(FILEINFO_MIME_TYPE);
+
+        if ($resource === false) {
+            return null;
+        }
+
+        $detected = finfo_file($resource, $path);
+        finfo_close($resource);
+
+        return is_string($detected) && trim($detected) !== '' ? trim($detected) : null;
     }
 
     private function defaults(): array
