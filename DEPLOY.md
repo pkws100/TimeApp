@@ -28,10 +28,16 @@ Mindestens diese Werte produktiv setzen:
 
 ```bash
 APP_URL=https://zeiterfassung.example.de
+APP_SECRET=BITTE_LANG_UND_ZUFAELLIG_SETZEN
 DOCKER_DB_PASSWORD=BITTE_LANG_UND_ZUFAELLIG_SETZEN
 DOCKER_DB_ROOT_PASSWORD=BITTE_ANDERS_UND_ZUFAELLIG_SETZEN
 PUSH_VAPID_SUBJECT=mailto:admin@example.de
 ```
+
+`APP_SECRET` wird fuer verschluesselte Settings-Secrets verwendet, sofern kein
+dedizierter `SETTINGS_ENCRYPTION_KEY` gesetzt ist. Fuer beide Werte gilt: nicht
+committen, getrennt sichern und nach einem Restore wieder identisch setzen,
+damit gespeicherte SMTP-Secrets entschluesselt werden koennen.
 
 Die produktive `.env` schuetzen:
 
@@ -172,7 +178,8 @@ Regelmaessig sichern:
 
 - MariaDB-Daten aus `timeapp_timeapp-db-data`
 - Runtime-Dateien aus `timeapp_timeapp-storage`
-- die produktive `.env` getrennt vom Git-Repository
+- die produktive `.env` getrennt vom Git-Repository, insbesondere `APP_SECRET`
+  bzw. `SETTINGS_ENCRYPTION_KEY`
 
 Beispiel fuer einen Datenbank-Dump:
 
@@ -182,6 +189,12 @@ docker compose -f docker-compose.prod.yml --env-file .env exec timeapp-db mariad
 
 Uploads und Konfigurationsdateien liegen im Storage-Volume. Dieses Volume nicht
 loeschen, wenn nur ein neues Image deployed wird.
+
+SMTP-Passwoerter liegen in der Datenbank verschluesselt. Das Backup enthaelt
+den gespeicherten Wert, aber nicht den benoetigten Settings-Key aus `.env`.
+Nach einem Upgrade von einer Version mit Klartext-SMTP-Passwort die
+SMTP-Settings einmal mit gesetztem Key speichern, bevor ein Backup erstellt
+wird; dabei wird ein vorhandener Legacy-Wert verschluesselt.
 
 ## Restore-Status
 

@@ -108,7 +108,7 @@ Bereits umgesetzt:
 
 Noch nicht final umgesetzt:
 
-- Secret-Haertung fuer sensible Daten wie SMTP-Passwoerter
+- Secret-Haertung fuer weitere sensible Settings ausserhalb des SMTP-Passworts
 - Download-/Preview-Endpunkte fuer Settings-Dateien inklusive Rechtepruefung
 - finales mPDF-Berichtslayout und produktionsreife Excel-Templates
 - tiefere Offline-Konfliktbehandlung und vollstaendige Offline-Datei-Upload-Queue
@@ -131,7 +131,7 @@ Diese Entscheidungen gelten aktuell als gesetzt und sollen nicht ohne expliziten
 - `timesheets` decken mindestens `work`, `sick`, `vacation`, `holiday` und `absent` ab.
 - Fehlende Tagesbuchungen koennen fuer aktive Mitarbeiter an Werktagen als Status angezeigt werden; dieser abgeleitete Fehlend-Status erzeugt keine automatische `timesheets`-Buchung.
 - Das Firmenprofil ist ein globaler Singleton-Datensatz in `company_settings`.
-- SMTP-Settings liegen aktuell in MariaDB.
+- SMTP-Settings liegen aktuell in MariaDB; `smtp_password` wird verschluesselt gespeichert und nutzt `SETTINGS_ENCRYPTION_KEY` bzw. `APP_SECRET` aus der Umgebung.
 - GEO ist fachlich vorbereitet, aber noch nicht produktiv Teil der Zeiterfassung.
 - Theme-Default ist `system`.
 
@@ -217,6 +217,14 @@ Er umfasst:
 - SMTP-Konfiguration
 - SMTP-Testversand
 - GEO-Feature-Flag und Hinweistext
+
+SMTP-Passwoerter:
+
+- duerfen nicht im Klartext an Admin-Templates, API-Antworten oder Frontends ausgegeben werden
+- werden als verschluesseltes `enc:v1`-Secret in der Datenbank gespeichert
+- vorhandene Legacy-Klartextwerte aus frueheren Versionen werden erst beim naechsten gezielten SMTP-Speichern verschluesselt; vor Backups nach einem Upgrade diesen Speicherschritt ausfuehren
+- werden nur fuer den serverseitigen SMTP-Test entschluesselt
+- benoetigen in Produktion einen stabilen `APP_SECRET` oder `SETTINGS_ENCRYPTION_KEY`, der nicht ins Repo gehoert und separat gesichert werden muss
 
 Theme-System:
 
@@ -318,7 +326,7 @@ Beim Aendern von Dokumentation:
 Die naechsten wahrscheinlichen Arbeitsbereiche sind:
 
 - Authentifizierung, Sessions und Rechtemiddleware
-- Secret-Haertung fuer sensible Settings
+- Secret-Haertung fuer weitere sensible Settings
 - Download und Vorschau fuer hochgeladene Dateien
 - produktionsreife Exportlayouts
 - Restore-Apply-Konzept nach bestehendem Validate-Dry-Run

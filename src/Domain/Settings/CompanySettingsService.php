@@ -13,11 +13,26 @@ final class CompanySettingsService
 
     public function __construct(
         private DatabaseConnection $connection,
-        private array $uploadConfig
+        private array $uploadConfig,
+        private ?SettingsSecretService $secretService = null
     ) {
+        $this->secretService ??= new SettingsSecretService((string) env('SETTINGS_ENCRYPTION_KEY', (string) env('APP_SECRET', '')));
     }
 
     public function current(): array
+    {
+        return $this->sanitizeForOutput($this->storedCurrent());
+    }
+
+    public function smtpSettingsForTest(): array
+    {
+        $settings = $this->storedCurrent();
+        $settings['smtp_password'] = $this->smtpPasswordForRuntime($settings);
+
+        return $settings;
+    }
+
+    private function storedCurrent(): array
     {
         if ($this->connection->tableExists('company_settings')) {
             $record = $this->connection->fetchOne(
@@ -35,7 +50,7 @@ final class CompanySettingsService
 
     public function save(array $payload, array $files = []): array
     {
-        $current = $this->current();
+        $current = $this->storedCurrent();
         $data = $this->normalize($payload, $current);
         $this->validate($data);
 
@@ -118,8 +133,8 @@ final class CompanySettingsService
             throw new RuntimeException('Die Settings-Tabelle ist noch nicht verfuegbar. Bitte zuerst die Migration ausfuehren.');
         }
 
-        $current = $this->current();
-        $data = $this->normalizeSmtp($payload, $current);
+        $current = $this->storedCurrent();
+        $data = $this->normalizeSmtp($payload, $current, true);
         $this->validateSmtp($data);
         $this->ensureRowExists();
 
@@ -159,7 +174,7 @@ final class CompanySettingsService
             throw new RuntimeException('Die Settings-Tabelle ist noch nicht verfuegbar. Bitte zuerst die Migration ausfuehren.');
         }
 
-        $data = $this->normalizeGeo($payload, $this->current(), true);
+        $data = $this->normalizeGeo($payload, $this->storedCurrent(), true);
         $this->validateGeo($data);
         $this->ensureRowExists();
 
@@ -202,7 +217,7 @@ final class CompanySettingsService
 
     public function publicLogoFile(): ?array
     {
-        $settings = $this->current();
+        $settings = $this->storedCurrent();
         $descriptor = $this->fileDescriptor($settings, 'logo');
 
         if ($descriptor === null) {
@@ -370,9 +385,10 @@ final class CompanySettingsService
         ];
     }
 
-    private function normalizeSmtp(array $payload, array $current): array
+    private function normalizeSmtp(array $payload, array $current, bool $targetedSave = false): array
     {
-        $smtpPassword = trim((string) ($payload['smtp_password'] ?? ''));
+        $hasSubmittedPassword = array_key_exists('smtp_password', $payload);
+        $smtpPassword = $hasSubmittedPassword ? (string) $payload['smtp_password'] : '';
         $smtpPort = (int) ($payload['smtp_port'] ?? ($current['smtp_port'] ?? 587));
 
         return [
@@ -383,7 +399,7 @@ final class CompanySettingsService
             'smtp_username' => array_key_exists('smtp_username', $payload)
                 ? $this->nullableString($payload['smtp_username'])
                 : ($current['smtp_username'] ?? null),
-            'smtp_password' => $smtpPassword !== '' ? $smtpPassword : ($current['smtp_password'] ?? null),
+            'smtp_password' => $this->smtpPasswordForStorage($smtpPassword, $current, $targetedSave, $hasSubmittedPassword),
             'smtp_encryption' => array_key_exists('smtp_encryption', $payload)
                 ? $this->filledStringOrFallback($payload['smtp_encryption'], 'tls')
                 : (string) ($current['smtp_encryption'] ?? 'tls'),
@@ -397,6 +413,50 @@ final class CompanySettingsService
                 ? $this->nullableString($payload['smtp_reply_to_email'])
                 : ($current['smtp_reply_to_email'] ?? null),
         ];
+    }
+
+    private function smtpPasswordForStorage(
+        string $submittedPassword,
+        array $current,
+        bool $targetedSave,
+        bool $hasSubmittedPassword
+    ): ?string {
+        if ($submittedPassword !== '') {
+            return $this->secretService->encrypt($submittedPassword);
+        }
+
+        $storedPassword = $this->storedSmtpPassword($current);
+
+        if ($storedPassword === null) {
+            return null;
+        }
+
+        if ($this->secretService->isEncrypted($storedPassword)) {
+            return $storedPassword;
+        }
+
+        return $targetedSave && $hasSubmittedPassword ? $this->secretService->encrypt($storedPassword) : $storedPassword;
+    }
+
+    private function storedSmtpPassword(array $settings): ?string
+    {
+        $value = (string) ($settings['smtp_password'] ?? '');
+
+        return $value === '' ? null : $value;
+    }
+
+    private function smtpPasswordForRuntime(array $settings): string
+    {
+        return $this->secretService->decrypt($this->storedSmtpPassword($settings)) ?? '';
+    }
+
+    private function sanitizeForOutput(array $settings): array
+    {
+        $storedPassword = $this->storedSmtpPassword($settings);
+        $settings['smtp_password'] = '';
+        $settings['smtp_password_is_set'] = $storedPassword !== null;
+
+        return $settings;
     }
 
     private function normalizeGeo(array $payload, array $current, bool $targetedSave = false): array

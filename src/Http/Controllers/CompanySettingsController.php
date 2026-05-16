@@ -40,7 +40,11 @@ final class CompanySettingsController
         $privacyInfo = $this->fileInfo($settings, 'datenschutz_pdf');
         $geoEnabled = ((int) ($settings['geo_capture_enabled'] ?? 0) === 1) ? 'checked' : '';
         $geoAck = ((int) ($settings['geo_requires_acknowledgement'] ?? 0) === 1) ? 'checked' : '';
-        $smtpPasswordHint = trim((string) ($settings['smtp_password'] ?? '')) !== '' ? '<p class="muted">Ein SMTP-Passwort ist bereits gespeichert. Leer lassen, um es beizubehalten.</p>' : '';
+        $smtpPasswordStored = (bool) ($settings['smtp_password_is_set'] ?? false);
+        $smtpPasswordHint = $smtpPasswordStored
+            ? '<p class="muted">Ein SMTP-Passwort ist gespeichert. Leer lassen zum Beibehalten; neues Passwort eintragen, um es zu ersetzen.</p>'
+            : '<p class="muted">Noch kein SMTP-Passwort gespeichert. Ein neues Passwort wird verschluesselt abgelegt.</p>';
+        $smtpPasswordPlaceholder = $this->escape($smtpPasswordStored ? 'Passwort ist gespeichert' : 'SMTP-Passwort');
         $logoExisting = trim((string) ($settings['logo_original_name'] ?? '')) !== '' ? '1' : '0';
         $agbExisting = trim((string) ($settings['agb_pdf_original_name'] ?? '')) !== '' ? '1' : '0';
         $privacyExisting = trim((string) ($settings['datenschutz_pdf_original_name'] ?? '')) !== '' ? '1' : '0';
@@ -208,7 +212,7 @@ final class CompanySettingsController
             <label class="settings-field" data-settings-field data-required="true"><span>SMTP Host</span><input name="smtp_host" value="{$this->field($settings, 'smtp_host')}" required></label>
             <label class="settings-field" data-settings-field data-required="true"><span>Port</span><input type="number" name="smtp_port" min="1" max="65535" value="{$this->field($settings, 'smtp_port')}" required></label>
             <label class="settings-field" data-settings-field><span>Benutzername</span><input name="smtp_username" value="{$this->field($settings, 'smtp_username')}"></label>
-            <label class="settings-field" data-settings-field><span>Passwort</span><input type="password" name="smtp_password" value=""></label>
+            <label class="settings-field" data-settings-field data-field-kind="secret" data-secret-set="{$this->escape($smtpPasswordStored ? '1' : '0')}" data-state-label-complete="Gespeichert"><span>Passwort</span><input type="password" name="smtp_password" value="" placeholder="{$smtpPasswordPlaceholder}" autocomplete="off"></label>
             <label class="settings-field" data-settings-field data-required="true"><span>Verschluesselung</span>{$this->select('smtp_encryption', ['tls' => 'TLS / STARTTLS', 'ssl' => 'SSL', 'none' => 'Keine'], (string) ($settings['smtp_encryption'] ?? 'tls'))}</label>
             <label class="settings-field" data-settings-field data-required="true"><span>Absendername</span><input name="smtp_from_name" value="{$this->field($settings, 'smtp_from_name')}" required></label>
             <label class="settings-field" data-settings-field data-required="true"><span>Absender-E-Mail</span><input type="email" name="smtp_from_email" value="{$this->field($settings, 'smtp_from_email')}" required></label>
@@ -426,11 +430,15 @@ HTML;
             return Response::redirect('/admin/settings/company?error=' . rawurlencode('Die Aktion konnte nicht bestaetigt werden. Bitte Seite neu laden.'));
         }
 
-        $settings = $this->companySettingsService->current();
-        $result = $this->smtpTestService->sendTestMail(
-            $settings,
-            (string) $request->input('smtp_test_recipient', '')
-        );
+        try {
+            $settings = $this->companySettingsService->smtpSettingsForTest();
+            $result = $this->smtpTestService->sendTestMail(
+                $settings,
+                (string) $request->input('smtp_test_recipient', '')
+            );
+        } catch (RuntimeException $exception) {
+            $result = ['ok' => false, 'message' => $exception->getMessage()];
+        }
 
         $this->companySettingsService->recordSmtpTest($result['ok'], $result['message']);
 

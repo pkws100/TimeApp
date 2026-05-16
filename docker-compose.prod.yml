@@ -35,6 +35,8 @@ services:
       APP_ENV: ${APP_ENV:-production}
       APP_DEBUG: ${APP_DEBUG:-false}
       APP_URL: ${APP_URL:?Set APP_URL to the public HTTPS application URL}
+      APP_SECRET: ${APP_SECRET:?Set APP_SECRET in .env}
+      SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
       APP_TIMEZONE: ${APP_TIMEZONE:-Europe/Berlin}
       APP_LOCALE: ${APP_LOCALE:-de}
       APP_FALLBACK_LOCALE: ${APP_FALLBACK_LOCALE:-de}
@@ -82,6 +84,8 @@ services:
       APP_ENV: ${APP_ENV:-production}
       APP_DEBUG: ${APP_DEBUG:-false}
       APP_URL: ${APP_URL:?Set APP_URL to the public HTTPS application URL}
+      APP_SECRET: ${APP_SECRET:?Set APP_SECRET in .env}
+      SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
       APP_TIMEZONE: ${APP_TIMEZONE:-Europe/Berlin}
       APP_LOCALE: ${APP_LOCALE:-de}
       APP_FALLBACK_LOCALE: ${APP_FALLBACK_LOCALE:-de}

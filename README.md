@@ -75,6 +75,7 @@ Vor dem Start muss auf dem Dockerhost eine `.env` mit produktiven Werten angeleg
 
 ```bash
 APP_URL=https://zeiterfassung.example.invalid
+APP_SECRET=BITTE_LANG_UND_ZUFAELLIG_SETZEN
 DOCKER_DB_PASSWORD=BITTE_SICHER_SETZEN
 DOCKER_DB_ROOT_PASSWORD=BITTE_SICHER_SETZEN
 ```
@@ -127,6 +128,7 @@ Details stehen in `DEPLOY.md`. Wiederkehrende Updates laufen ueber
 - Es gibt bewusst noch keinen produktiven Restore-Apply. Ein Upload fuehrt niemals automatisch einen Restore aus.
 - Runtime-Overrides wie `storage/config/database.override.php` werden im Restore-Plan nur erkannt und nicht ungefragt zurueckgespielt.
 - Backup- und Restore-Validierung sind mit `settings.database.manage` geschuetzt.
+- Verschluesselte Settings-Secrets wie SMTP-Passwoerter bleiben im Backup verschluesselt; der passende `.env`-Key wird nicht im Backup mitgeliefert. Nach einem Upgrade mit altem Klartext-SMTP-Passwort die SMTP-Settings einmal mit gesetztem Key speichern, bevor ein Backup erstellt wird.
 
 ## Wichtige Composer-Befehle
 ```bash
@@ -163,9 +165,12 @@ vendor/bin/phinx seed:run -c phinx.php -s DemoDataSeeder
 
 ## Hinweise zu sensiblen Daten
 - Sensible Zugangsdaten und Passwoerter gehoeren nicht dauerhaft ins Repo.
+- `APP_SECRET` muss in Produktion auf einen langen Zufallswert gesetzt werden.
+- Optional kann `SETTINGS_ENCRYPTION_KEY` als dedizierter Key fuer verschluesselte Settings-Secrets gesetzt werden; wenn er leer ist, wird `APP_SECRET` verwendet.
+- SMTP-Passwoerter werden in `company_settings.smtp_password` verschluesselt gespeichert und im Admin nie als Klartext ausgegeben. Das Passwortfeld leer lassen, um ein bestehendes Secret beizubehalten; ein neuer Wert ersetzt es verschluesselt. Bestehende Klartextwerte aus frueheren Versionen werden beim naechsten gezielten SMTP-Speichern verschluesselt.
+- Backups enthalten den jeweils gespeicherten SMTP-Wert. Fuer neue bzw. erneut gespeicherte SMTP-Settings ist das der verschluesselte Wert; der passende `APP_SECRET` bzw. `SETTINGS_ENCRYPTION_KEY` muss getrennt und sicher aufbewahrt werden, sonst kann ein wiederhergestelltes SMTP-Secret nicht genutzt werden.
 - Die aktive DB-Override-Datei kann lokale Verbindungsdaten enthalten:
   `storage/config/database.override.php`
-- Produktive Secrets sollten spaeter weiter gehaertet werden.
 - Vor einer Veroeffentlichung muessen `.env`, Datenbank-Dumps, Uploads,
   Session-Dateien und sonstige Runtime-Daten ausserhalb des Git-Repos bleiben.
 

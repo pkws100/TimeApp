@@ -11,5 +11,5 @@ return [
     'locale' => (string) env('APP_LOCALE', 'de'),
     'fallback_locale' => (string) env('APP_FALLBACK_LOCALE', 'de'),
     'storage_root' => storage_path(),
+    'settings_encryption_key' => (string) env('SETTINGS_ENCRYPTION_KEY', (string) env('APP_SECRET', '')),
 ];
-

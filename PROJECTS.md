@@ -132,6 +132,7 @@ Das Frontend ist als mobile Mitarbeiter-App unter `/app` als Vanilla-JS-PWA umge
 - [x] Push-Test aus dem mobilen Profil sendet eine echte serverseitige Web-Push-Testnachricht an das aktive Geraet.
 - [x] Zeiterfassungspflicht pro User steuerbar; freiwillige Admin-/Notfalluser bleiben aktiv, werden aber nicht als fehlend gewertet oder erinnert.
 - [x] Backup-Import-Validierung als sicherer Dry-Run gehaertet: Manifest, Version, Schema, Tabellen-JSON und Pfade werden geprueft; Restore-Apply bleibt getrennt.
+- [x] SMTP-Passwoerter werden als verschluesselte Settings-Secrets gespeichert, im Admin nicht mehr als Klartext ausgegeben und fuer den SMTP-Test nur serverseitig entschluesselt.
 - [x] Möglichkeit schaffen das System auch in Docker-Compose zu deplyen
 - [x] Produktions-Compose fuer VPS/Reverse Proxy mit `timeapp-web`, `timeapp-db`, `timeapp-scheduler`, privaten DB-Netz, Proxy-Netz und stabilen Volumes validiert.
 - [x] Dockerfile fuer `php:8.2-apache` bereinigt: nur fehlende Extensions werden gebaut; bereits enthaltene Core-Extensions werden nicht erneut kompiliert.
@@ -139,7 +140,8 @@ Das Frontend ist als mobile Mitarbeiter-App unter `/app` als Vanilla-JS-PWA umge
 ## Offene Punkte
 
 ### MVP-Haertung
-- [ ] Sensitive Secrets wie `smtp_password` verschluesseln bzw. in ein dediziertes Secret-Konzept ueberfuehren.
+- [x] Sensitive Secrets wie `smtp_password` verschluesseln bzw. in ein dediziertes Secret-Konzept ueberfuehren.
+- [ ] Secret-Haertung fuer weitere sensible Settings pruefen und bei Bedarf erweitern.
 - [ ] Backup-Restore-Apply mit explizitem Admin-Gate, Dry-Run-Protokoll, Rollback-/Wartungsmodus-Konzept und separatem Auftrag produktionsreif bauen.
 - [ ] Validierung, Fehlermeldungen und Wiederherstellen archivierter Datensaetze weiter ausbauen.
 - [ ] Download- und Vorschaufunktion fuer Settings-Dateien wie Logo, AGB und Datenschutz inklusive Rechtepruefung vervollstaendigen.

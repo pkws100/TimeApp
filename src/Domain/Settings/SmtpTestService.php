@@ -142,7 +142,11 @@ final class SmtpTestService
         $code = (int) substr($response, 0, 3);
 
         if (!in_array($code, $expectedCodes, true)) {
-            throw new RuntimeException('SMTP-Fehler: ' . trim($response));
+            $message = $code > 0
+                ? 'SMTP-Fehler (Code ' . $code . '). Bitte Server, Zugangsdaten und Verschluesselung pruefen.'
+                : 'SMTP-Fehler. Bitte Server, Zugangsdaten und Verschluesselung pruefen.';
+
+            throw new RuntimeException($message);
         }
 
         return $response;

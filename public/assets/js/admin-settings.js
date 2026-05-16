@@ -19,6 +19,17 @@ function classifySettingsField(field) {
         return isRequired ? 'missing' : 'optional';
     }
 
+    if (kind === 'secret') {
+        const hasStoredSecret = field.dataset.secretSet === '1';
+        const hasNewSecret = (control.value ?? '') !== '';
+
+        if (hasStoredSecret || hasNewSecret) {
+            return 'complete';
+        }
+
+        return isRequired ? 'missing' : 'optional';
+    }
+
     if (control.type === 'checkbox') {
         return control.checked ? 'complete' : 'optional';
     }
@@ -76,7 +87,7 @@ function renderFieldState(field, state) {
         field.insertBefore(pill, field.firstChild);
     }
 
-    pill.textContent = stateLabel(state);
+    pill.textContent = field.dataset['stateLabel' + state.charAt(0).toUpperCase() + state.slice(1)] || stateLabel(state);
 }
 
 function updateSectionState(section) {

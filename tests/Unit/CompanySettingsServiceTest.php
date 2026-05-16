@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Unit;
 
 use App\Domain\Settings\CompanySettingsService;
+use App\Domain\Settings\SettingsSecretService;
 use App\Infrastructure\Database\DatabaseConnection;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
@@ -40,7 +41,9 @@ final class CompanySettingsServiceTest extends TestCase
 
     public function testSmtpNormalizationPreservesExistingPasswordWhenFieldIsBlank(): void
     {
-        $service = new CompanySettingsService(new DatabaseConnection([]), []);
+        $secretService = new SettingsSecretService('unit-test-key');
+        $service = new CompanySettingsService(new DatabaseConnection([]), [], $secretService);
+        $storedSecret = $secretService->encrypt('stored-secret');
         $normalized = $this->normalizeSmtp($service, [
             'smtp_host' => 'mail.example.test',
             'smtp_port' => '587',
@@ -48,12 +51,12 @@ final class CompanySettingsServiceTest extends TestCase
             'smtp_encryption' => 'tls',
             'smtp_from_email' => 'system@example.test',
         ], [
-            'smtp_password' => 'stored-secret',
-        ]);
+            'smtp_password' => $storedSecret,
+        ], true);
 
         self::assertSame('mail.example.test', $normalized['smtp_host']);
         self::assertSame(587, $normalized['smtp_port']);
-        self::assertSame('stored-secret', $normalized['smtp_password']);
+        self::assertSame($storedSecret, $normalized['smtp_password']);
         self::assertSame('system@example.test', $normalized['smtp_from_email']);
         self::assertSame([
             'smtp_host',
@@ -65,6 +68,85 @@ final class CompanySettingsServiceTest extends TestCase
             'smtp_from_email',
             'smtp_reply_to_email',
         ], array_keys($normalized));
+    }
+
+    public function testSmtpNormalizationEncryptsNewPassword(): void
+    {
+        $secretService = new SettingsSecretService('unit-test-key');
+        $service = new CompanySettingsService(new DatabaseConnection([]), [], $secretService);
+
+        $normalized = $this->normalizeSmtp($service, [
+            'smtp_password' => 'new-secret',
+        ], [], true);
+
+        self::assertIsString($normalized['smtp_password']);
+        self::assertStringStartsWith('enc:v1:', $normalized['smtp_password']);
+        self::assertStringNotContainsString('new-secret', $normalized['smtp_password']);
+        self::assertSame('new-secret', $secretService->decrypt($normalized['smtp_password']));
+    }
+
+    public function testSmtpNormalizationKeepsPasswordWhitespaceByteExact(): void
+    {
+        $secretService = new SettingsSecretService('unit-test-key');
+        $service = new CompanySettingsService(new DatabaseConnection([]), [], $secretService);
+
+        $normalized = $this->normalizeSmtp($service, [
+            'smtp_password' => ' secret with spaces ',
+        ], [], true);
+
+        self::assertSame(' secret with spaces ', $secretService->decrypt($normalized['smtp_password']));
+    }
+
+    public function testSmtpNormalizationEncryptsLegacyPasswordOnTargetedSave(): void
+    {
+        $secretService = new SettingsSecretService('unit-test-key');
+        $service = new CompanySettingsService(new DatabaseConnection([]), [], $secretService);
+
+        $normalized = $this->normalizeSmtp($service, [
+            'smtp_password' => '',
+        ], [
+            'smtp_password' => 'legacy-secret',
+        ], true);
+
+        self::assertIsString($normalized['smtp_password']);
+        self::assertStringStartsWith('enc:v1:', $normalized['smtp_password']);
+        self::assertSame('legacy-secret', $secretService->decrypt($normalized['smtp_password']));
+    }
+
+    public function testSmtpNormalizationRequiresEncryptionKeyForNewPassword(): void
+    {
+        $service = new CompanySettingsService(new DatabaseConnection([]), [], new SettingsSecretService(''));
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('SETTINGS_ENCRYPTION_KEY');
+
+        $this->normalizeSmtp($service, [
+            'smtp_password' => 'new-secret',
+        ], [], true);
+    }
+
+    public function testSettingsOutputHidesStoredSmtpPassword(): void
+    {
+        $service = new CompanySettingsService(new DatabaseConnection([]), [], new SettingsSecretService('unit-test-key'));
+
+        $settings = $this->sanitizeForOutput($service, [
+            'company_name' => 'Muster GmbH',
+            'smtp_password' => 'stored-secret',
+        ]);
+
+        self::assertSame('', $settings['smtp_password']);
+        self::assertTrue($settings['smtp_password_is_set']);
+    }
+
+    public function testSmtpRuntimePasswordDecryptsEncryptedValue(): void
+    {
+        $secretService = new SettingsSecretService('unit-test-key');
+        $service = new CompanySettingsService(new DatabaseConnection([]), [], $secretService);
+        $encrypted = $secretService->encrypt('runtime-secret');
+
+        self::assertSame('runtime-secret', $this->smtpPasswordForRuntime($service, [
+            'smtp_password' => $encrypted,
+        ]));
     }
 
     public function testSmtpValidationRejectsInvalidEncryption(): void
@@ -257,12 +339,32 @@ final class CompanySettingsServiceTest extends TestCase
         return $method->invoke($service, $file, $subdir, $extensions, $mimeTypes);
     }
 
-    private function normalizeSmtp(CompanySettingsService $service, array $payload, array $current): array
-    {
+    private function normalizeSmtp(
+        CompanySettingsService $service,
+        array $payload,
+        array $current,
+        bool $targetedSave = false
+    ): array {
         $method = new ReflectionMethod($service, 'normalizeSmtp');
         $method->setAccessible(true);
 
-        return $method->invoke($service, $payload, $current);
+        return $method->invoke($service, $payload, $current, $targetedSave);
+    }
+
+    private function sanitizeForOutput(CompanySettingsService $service, array $settings): array
+    {
+        $method = new ReflectionMethod($service, 'sanitizeForOutput');
+        $method->setAccessible(true);
+
+        return $method->invoke($service, $settings);
+    }
+
+    private function smtpPasswordForRuntime(CompanySettingsService $service, array $settings): string
+    {
+        $method = new ReflectionMethod($service, 'smtpPasswordForRuntime');
+        $method->setAccessible(true);
+
+        return $method->invoke($service, $settings);
     }
 
     private function validateSmtp(CompanySettingsService $service, array $data): void
