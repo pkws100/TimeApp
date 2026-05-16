@@ -4,6 +4,9 @@
     const PROJECT_SELECTION_KEY = 'app.projectSelectionId';
     const TIMESHEET_FILTER_SCOPE_KEY = 'app.timesheetFilterScope';
     const TIMESHEET_FILTER_PROJECT_KEY = 'app.timesheetFilterProjectId';
+    const TIMESHEET_FILTER_MONTH_KEY = 'app.timesheetFilterMonth';
+    const TIMESHEET_FILTER_ENTRY_TYPE_KEY = 'app.timesheetFilterEntryType';
+    const TIMESHEET_ENTRY_TYPES = ['all', 'work', 'sick', 'vacation', 'holiday', 'absent'];
     const ALLOWED_THEME_MODES = ['light', 'dark', 'system'];
     const THEME_LABELS = {
         light: 'Hell',
@@ -36,8 +39,14 @@
         projectFiles: {},
         projectFilesLoading: false,
         timesheetList: [],
+        timesheetDays: [],
+        timesheetSummary: null,
+        timesheetFilters: null,
+        timesheetProjects: [],
         timesheetFilterScope: 'all',
         timesheetFilterProjectId: null,
+        timesheetFilterMonth: currentMonthValue(),
+        timesheetFilterEntryType: 'all',
         timesheetListUpdatedAt: null,
         timesheetListLoading: false,
         timesheetListOffline: false,
@@ -50,6 +59,7 @@
     };
     let feedbackTimer = null;
     let clientIdCounter = 0;
+    let timesheetListRequestCounter = 0;
     let revalidateTimer = null;
     let deferredInstallPrompt = null;
 
@@ -166,6 +176,46 @@
         }
     }
 
+    function readTimesheetFilterMonth() {
+        try {
+            const stored = window.localStorage.getItem(TIMESHEET_FILTER_MONTH_KEY);
+
+            return normalizeMonthValue(stored) || currentMonthValue();
+        } catch (error) {
+            return currentMonthValue();
+        }
+    }
+
+    function storeTimesheetFilterMonth(month) {
+        state.timesheetFilterMonth = normalizeMonthValue(month) || currentMonthValue();
+
+        try {
+            window.localStorage.setItem(TIMESHEET_FILTER_MONTH_KEY, state.timesheetFilterMonth);
+        } catch (error) {
+            console.warn('Historien-Monat konnte nicht gespeichert werden.', error);
+        }
+    }
+
+    function readTimesheetFilterEntryType() {
+        try {
+            const stored = window.localStorage.getItem(TIMESHEET_FILTER_ENTRY_TYPE_KEY);
+
+            return TIMESHEET_ENTRY_TYPES.includes(stored) ? stored : 'all';
+        } catch (error) {
+            return 'all';
+        }
+    }
+
+    function storeTimesheetFilterEntryType(entryType) {
+        state.timesheetFilterEntryType = TIMESHEET_ENTRY_TYPES.includes(entryType) ? entryType : 'all';
+
+        try {
+            window.localStorage.setItem(TIMESHEET_FILTER_ENTRY_TYPE_KEY, state.timesheetFilterEntryType);
+        } catch (error) {
+            console.warn('Historien-Typfilter konnte nicht gespeichert werden.', error);
+        }
+    }
+
     function preferredProjectId() {
         return typeof state.preferredProjectId === 'number' && state.preferredProjectId > 0
             ? state.preferredProjectId
@@ -248,6 +298,13 @@
         return 'project_files_' + String(projectId);
     }
 
+    function currentSessionUserCachePart() {
+        const user = state.session && state.session.user ? state.session.user : null;
+        const userId = user && typeof user.id !== 'undefined' ? Number(user.id) : 0;
+
+        return Number.isInteger(userId) && userId > 0 ? String(userId) : 'anonymous';
+    }
+
     function currentTimesheetProjectId() {
         if (state.timesheetFilterScope === 'all') {
             return null;
@@ -257,13 +314,17 @@
     }
 
     function currentTimesheetCacheKey() {
+        const month = normalizeMonthValue(state.timesheetFilterMonth) || currentMonthValue();
+        const entryType = TIMESHEET_ENTRY_TYPES.includes(state.timesheetFilterEntryType) ? state.timesheetFilterEntryType : 'all';
+
         if (state.timesheetFilterScope === 'all') {
-            return 'timesheets_all';
+            return 'timesheets_user_' + currentSessionUserCachePart() + '_all_' + month + '_' + entryType;
         }
 
         const projectId = currentTimesheetProjectId();
+        const projectPart = projectId === null ? 'none' : String(projectId);
 
-        return projectId === null ? 'timesheets_project_none' : 'timesheets_project_' + projectId;
+        return 'timesheets_user_' + currentSessionUserCachePart() + '_project_' + projectPart + '_' + month + '_' + entryType;
     }
 
     function currentTimesheetFilterLabel() {
@@ -818,6 +879,58 @@
         return String(value).padStart(2, '0');
     }
 
+    function currentMonthValue() {
+        const now = new Date();
+
+        return now.getFullYear() + '-' + pad(now.getMonth() + 1);
+    }
+
+    function normalizeMonthValue(value) {
+        const month = String(value || '').trim();
+
+        if (!/^\d{4}-\d{2}$/.test(month)) {
+            return null;
+        }
+
+        const parsed = new Date(month + '-01T00:00:00');
+
+        if (Number.isNaN(parsed.getTime()) || parsed.getFullYear() !== Number(month.slice(0, 4)) || parsed.getMonth() + 1 !== Number(month.slice(5, 7))) {
+            return null;
+        }
+
+        return month;
+    }
+
+    function shiftMonthValue(month, offset) {
+        const normalized = normalizeMonthValue(month) || currentMonthValue();
+        const parsed = new Date(normalized + '-01T00:00:00');
+
+        parsed.setMonth(parsed.getMonth() + offset);
+
+        return parsed.getFullYear() + '-' + pad(parsed.getMonth() + 1);
+    }
+
+    function formatMonthLabel(month) {
+        const normalized = normalizeMonthValue(month) || currentMonthValue();
+        const parsed = new Date(normalized + '-01T00:00:00');
+        const labels = [
+            'Januar',
+            'Februar',
+            'Maerz',
+            'April',
+            'Mai',
+            'Juni',
+            'Juli',
+            'August',
+            'September',
+            'Oktober',
+            'November',
+            'Dezember'
+        ];
+
+        return labels[parsed.getMonth()] + ' ' + parsed.getFullYear();
+    }
+
     function formatClock(timestamp) {
         const date = new Date(timestamp);
 
@@ -934,19 +1047,7 @@
     }
 
     function normalizeTimesheetFilterAgainstToday() {
-        if (!state.today || state.timesheetFilterProjectId === null) {
-            return;
-        }
-
-        const availableProjectIds = Array.isArray(state.today.projects)
-            ? state.today.projects.map((project) => project.id)
-            : [];
-
-        if (availableProjectIds.includes(state.timesheetFilterProjectId)) {
-            return;
-        }
-
-        storeTimesheetFilterProjectId(null);
+        return;
     }
 
     function activeProjectId() {
@@ -1647,68 +1748,196 @@
             + '</section>';
     }
 
+    function historySummaryMetric(title, value, note) {
+        return '<article class="app-history-metric"><span>' + escapeHtml(title) + '</span><strong>' + escapeHtml(value) + '</strong><small>' + escapeHtml(note) + '</small></article>';
+    }
+
+    function timesheetEntryTypeOptions() {
+        return TIMESHEET_ENTRY_TYPES.map((entryType) => {
+            const labels = {
+                all: 'Alle Typen',
+                work: 'Arbeit',
+                sick: 'Krank',
+                vacation: 'Urlaub',
+                holiday: 'Feiertag',
+                absent: 'Fehlt'
+            };
+            const selected = state.timesheetFilterEntryType === entryType ? ' selected' : '';
+
+            return '<option value="' + entryType + '"' + selected + '>' + escapeHtml(labels[entryType] || entryTypeLabel(entryType)) + '</option>';
+        }).join('');
+    }
+
+    function timesheetDayStatusLabel(day) {
+        const counts = day && day.status_counts ? day.status_counts : {};
+        const labels = [];
+
+        if (Number(counts.work || 0) > 0) {
+            labels.push(String(counts.work) + ' Arbeit');
+        }
+
+        ['sick', 'vacation', 'holiday', 'absent'].forEach((entryType) => {
+            const count = Number(counts[entryType] || 0);
+
+            if (count > 0) {
+                labels.push(String(count) + ' ' + entryTypeLabel(entryType));
+            }
+        });
+
+        return labels.length > 0 ? labels.join(' · ') : 'Keine Buchungen';
+    }
+
+    function buildTimesheetHistoryDays(items) {
+        const grouped = {};
+
+        (Array.isArray(items) ? items : []).forEach((item) => {
+            const date = item.work_date || '';
+            const entryType = item.entry_type || 'work';
+
+            if (!grouped[date]) {
+                grouped[date] = {
+                    date,
+                    date_label: formatDate(date),
+                    weekday: '',
+                    total_net_minutes: 0,
+                    total_break_minutes: 0,
+                    entry_count: 0,
+                    status_counts: {
+                        work: 0,
+                        sick: 0,
+                        vacation: 0,
+                        holiday: 0,
+                        absent: 0
+                    },
+                    attachment_count: 0,
+                    items: []
+                };
+            }
+
+            grouped[date].total_net_minutes += Number(item.net_minutes || 0);
+            grouped[date].total_break_minutes += Number(item.break_minutes || 0);
+            grouped[date].entry_count += 1;
+            grouped[date].attachment_count += Number(item.attachment_count || (Array.isArray(item.attachments) ? item.attachments.length : 0));
+            grouped[date].items.push(item);
+
+            if (Object.prototype.hasOwnProperty.call(grouped[date].status_counts, entryType)) {
+                grouped[date].status_counts[entryType] += 1;
+            }
+        });
+
+        return Object.keys(grouped).sort().reverse().map((date) => grouped[date]);
+    }
+
+    function buildTimesheetHistorySummary(items) {
+        const projectKeys = {};
+
+        return (Array.isArray(items) ? items : []).reduce((summary, item) => {
+            const entryType = item.entry_type || 'work';
+
+            summary.total_net_minutes += Number(item.net_minutes || 0);
+            summary.total_break_minutes += Number(item.break_minutes || 0);
+            summary.entry_count += 1;
+            summary.attachment_count += Number(item.attachment_count || (Array.isArray(item.attachments) ? item.attachments.length : 0));
+            projectKeys[item.project_id === null || typeof item.project_id === 'undefined' ? 'none' : 'project:' + item.project_id] = true;
+            summary.project_count = Object.keys(projectKeys).length;
+
+            if (entryType === 'work') {
+                summary.work_entry_count += 1;
+            } else if (['sick', 'vacation', 'holiday', 'absent'].includes(entryType)) {
+                summary.absence_entry_count += 1;
+            }
+
+            return summary;
+        }, {
+            total_net_minutes: 0,
+            total_break_minutes: 0,
+            entry_count: 0,
+            work_entry_count: 0,
+            absence_entry_count: 0,
+            attachment_count: 0,
+            project_count: 0
+        });
+    }
+
+    function timesheetBreaksMarkup(item) {
+        const breaks = Array.isArray(item.breaks) ? item.breaks : [];
+
+        if (breaks.length === 0) {
+            return '<div class="app-history-empty-line">Keine Einzelpausen erfasst.</div>';
+        }
+
+        return '<div class="app-history-breaks">'
+            + breaks.map((breakItem) => {
+                const start = breakItem.break_started_at ? formatDateTimeStamp(breakItem.break_started_at) : '-';
+                const end = breakItem.break_ended_at ? formatDateTimeStamp(breakItem.break_ended_at) : 'laeuft';
+                const note = breakItem.note ? '<small>' + escapeHtml(breakItem.note) + '</small>' : '';
+
+                return '<div><strong>' + escapeHtml(start) + '</strong><span>' + escapeHtml(end) + '</span>' + note + '</div>';
+            }).join('')
+            + '</div>';
+    }
+
+    function timesheetDetailMarkup(item) {
+        const projectName = item.project_name || item.project_label || 'Nicht zugeordnet';
+        const note = item.note ? '<p class="app-history-note">' + escapeHtml(item.note) + '</p>' : '';
+        const attachments = Array.isArray(item.attachments) ? item.attachments : [];
+        const attachmentMarkup = attachments.length > 0
+            ? '<div class="app-timesheet-attachments">' + attachmentListMarkup(attachments, {
+                emptyText: ''
+            }) + '</div>'
+            : '<div class="app-history-empty-line">Keine Anhaenge vorhanden.</div>';
+
+        return '<article class="app-timesheet-card app-history-entry">'
+            + '<div class="app-history-entry-head">'
+            + '<div><p class="muted">' + escapeHtml(entryTypeLabel(item.entry_type)) + '</p><h3>' + escapeHtml(projectName) + '</h3></div>'
+            + '<div class="app-timesheet-type">' + escapeHtml(formatDurationMinutes(Number(item.net_minutes || 0))) + '</div>'
+            + '</div>'
+            + '<div class="app-timesheet-card-grid">'
+            + '<div><span class="muted">Start</span><strong>' + escapeHtml(formatTime(item.start_time)) + '</strong></div>'
+            + '<div><span class="muted">Ende</span><strong>' + escapeHtml(formatTime(item.end_time)) + '</strong></div>'
+            + '<div><span class="muted">Pause</span><strong>' + escapeHtml(formatDurationMinutes(Number(item.break_minutes || 0))) + '</strong></div>'
+            + '<div><span class="muted">Dateien</span><strong>' + escapeHtml(String(item.attachment_count || attachments.length || 0)) + '</strong></div>'
+            + '</div>'
+            + note
+            + '<details class="app-history-detail"><summary>Pausen anzeigen</summary>' + timesheetBreaksMarkup(item) + '</details>'
+            + '<details class="app-history-detail"><summary>Anhaenge anzeigen</summary>' + attachmentMarkup + '</details>'
+            + '</article>';
+    }
+
     function timesheetRowsMarkup() {
         if (state.timesheetListLoading) {
             return '<div class="app-empty">Zeiten werden geladen ...</div>';
         }
 
-        if (!Array.isArray(state.timesheetList) || state.timesheetList.length === 0) {
+        const days = Array.isArray(state.timesheetDays) && state.timesheetDays.length > 0
+            ? state.timesheetDays
+            : [];
+
+        if (days.length === 0) {
             return '<div class="app-empty">Keine Zeiten fuer diese Auswahl gefunden.</div>';
         }
 
-        const cards = '<div class="app-timesheet-cards">'
-            + state.timesheetList.map((item) => {
-                const projectName = item.project_name || 'Nicht zugeordnet';
-                const note = item.note ? '<p class="muted">' + escapeHtml(item.note) + '</p>' : '';
-                const attachments = Array.isArray(item.attachments) ? item.attachments : [];
-                const attachmentMarkup = attachments.length > 0
-                    ? '<div class="app-timesheet-attachments">' + attachmentListMarkup(attachments, {
-                        emptyText: ''
-                    }) + '</div>'
-                    : '';
+        return '<div class="app-history-days">'
+            + days.map((day, index) => {
+                const items = Array.isArray(day.items) ? day.items : [];
 
-                return '<article class="app-timesheet-card">'
-                    + '<div><p class="muted">' + escapeHtml(formatDate(item.work_date)) + '</p><h3>' + escapeHtml(projectName) + '</h3>' + note + '</div>'
-                    + '<div class="app-timesheet-card-grid">'
-                    + '<div><span class="muted">Start</span><strong>' + escapeHtml(formatTime(item.start_time)) + '</strong></div>'
-                    + '<div><span class="muted">Ende</span><strong>' + escapeHtml(formatTime(item.end_time)) + '</strong></div>'
-                    + '<div><span class="muted">Pause</span><strong>' + escapeHtml(formatDurationMinutes(Number(item.break_minutes || 0))) + '</strong></div>'
-                    + '<div><span class="muted">Netto</span><strong>' + escapeHtml(formatDurationMinutes(Number(item.net_minutes || 0))) + '</strong></div>'
-                    + '</div>'
-                    + '<div class="app-timesheet-type">' + escapeHtml(entryTypeLabel(item.entry_type)) + '</div>'
-                    + attachmentMarkup
-                    + '</article>';
+                return '<details class="app-history-day"' + (index === 0 ? ' open' : '') + '>'
+                    + '<summary>'
+                    + '<span><strong>' + escapeHtml(day.date_label || formatDate(day.date)) + '</strong><small>' + escapeHtml(day.weekday || '') + '</small></span>'
+                    + '<span><strong>' + escapeHtml(formatDurationMinutes(Number(day.total_net_minutes || 0))) + '</strong><small>' + escapeHtml(timesheetDayStatusLabel(day)) + '</small></span>'
+                    + '<span><strong>' + escapeHtml(String(day.attachment_count || 0)) + '</strong><small>Dateien</small></span>'
+                    + '</summary>'
+                    + '<div class="app-timesheet-cards">' + items.map((item) => timesheetDetailMarkup(item)).join('') + '</div>'
+                    + '</details>';
             }).join('')
             + '</div>';
-
-        const table = '<div class="app-timesheet-table-wrap"><table class="app-timesheet-table">'
-            + '<thead><tr>'
-            + '<th>Datum</th><th>Projekt</th><th>Start</th><th>Ende</th><th>Pause</th><th>Netto</th><th>Typ</th><th>Dateien</th>'
-            + '</tr></thead><tbody>'
-            + state.timesheetList.map((item) => {
-                const projectName = item.project_name || 'Nicht zugeordnet';
-                const note = item.note ? '<div class="muted">' + escapeHtml(item.note) + '</div>' : '';
-                const attachmentCount = Array.isArray(item.attachments) ? item.attachments.length : 0;
-
-                return '<tr>'
-                    + '<td>' + escapeHtml(formatDate(item.work_date)) + '</td>'
-                    + '<td><strong>' + escapeHtml(projectName) + '</strong>' + note + '</td>'
-                    + '<td>' + escapeHtml(formatTime(item.start_time)) + '</td>'
-                    + '<td>' + escapeHtml(formatTime(item.end_time)) + '</td>'
-                    + '<td>' + escapeHtml(formatDurationMinutes(Number(item.break_minutes || 0))) + '</td>'
-                    + '<td>' + escapeHtml(formatDurationMinutes(Number(item.net_minutes || 0))) + '</td>'
-                    + '<td>' + escapeHtml(entryTypeLabel(item.entry_type)) + '</td>'
-                    + '<td>' + escapeHtml(String(attachmentCount)) + '</td>'
-                    + '</tr>';
-            }).join('')
-            + '</tbody></table></div>';
-
-        return cards + table;
     }
 
     function timesheetHistoryMarkup() {
         const projectScopeActive = state.timesheetFilterScope !== 'all';
         const allScopeActive = state.timesheetFilterScope === 'all';
+        const summary = state.timesheetSummary || {};
+        const month = normalizeMonthValue(state.timesheetFilterMonth) || currentMonthValue();
         const statusNote = state.timesheetListUpdatedAt
             ? 'Stand: ' + formatDateTimeStamp(state.timesheetListUpdatedAt)
             : 'Noch kein Stand geladen';
@@ -1718,19 +1947,36 @@
         const projectFilter = projectScopeActive
             ? '<label class="app-field"><span>Projektfilter</span><select id="timesheetProjectFilter">' + timesheetProjectFilterOptions() + '</select></label>'
             : '';
+        const monthNav = '<div class="app-history-month-nav" aria-label="Historienmonat">'
+            + '<button type="button" data-history-month="' + escapeHtml(shiftMonthValue(month, -1)) + '">Zurueck</button>'
+            + '<strong>' + escapeHtml(formatMonthLabel(month)) + '</strong>'
+            + '<button type="button" data-history-month="' + escapeHtml(shiftMonthValue(month, 1)) + '">Weiter</button>'
+            + '<button type="button" data-history-month="' + escapeHtml(currentMonthValue()) + '">Aktuell</button>'
+            + '</div>';
+        const typeFilter = '<label class="app-field"><span>Typfilter</span><select id="timesheetEntryTypeFilter">' + timesheetEntryTypeOptions() + '</select></label>';
+        const summaryMarkup = '<div class="app-history-summary">'
+            + historySummaryMetric('Arbeitszeit', formatDurationMinutes(Number(summary.total_net_minutes || 0)), 'Netto im Monat')
+            + historySummaryMetric('Pausen', formatDurationMinutes(Number(summary.total_break_minutes || 0)), 'Gesamt')
+            + historySummaryMetric('Buchungen', String(summary.entry_count || 0), String(summary.work_entry_count || 0) + ' Arbeit')
+            + historySummaryMetric('Abwesenheit', String(summary.absence_entry_count || 0), 'Krank/Urlaub/Fehlt')
+            + historySummaryMetric('Dateien', String(summary.attachment_count || 0), String(summary.project_count || 0) + ' Projekte')
+            + '</div>';
 
         return '<section class="app-card app-grid">'
             + '<div>'
             + '<p class="muted">Eigene Zeiten</p>'
-            + '<h2>Zeituebersicht</h2>'
+            + '<h2>Monatshistorie</h2>'
             + '<p>' + escapeHtml(currentTimesheetFilterLabel()) + '</p>'
             + '<p class="muted">' + escapeHtml(statusNote) + '</p>'
             + '</div>'
+            + monthNav
+            + summaryMarkup
             + '<div class="app-filter-toggle" role="group" aria-label="Zeiten filtern">'
             + '<button type="button" data-timesheet-scope="project" class="' + (projectScopeActive ? 'is-active' : '') + '" aria-pressed="' + (projectScopeActive ? 'true' : 'false') + '">Projekt</button>'
             + '<button type="button" data-timesheet-scope="all" class="' + (allScopeActive ? 'is-active' : '') + '" aria-pressed="' + (allScopeActive ? 'true' : 'false') + '">Gesamtuebersicht</button>'
             + '</div>'
             + projectFilter
+            + typeFilter
             + offlineNote
             + timesheetRowsMarkup()
             + '</section>';
@@ -2178,13 +2424,43 @@
     }
 
     function timesheetProjectFilterOptions() {
-        const items = state.today && Array.isArray(state.today.projects) ? state.today.projects : [];
         const activeId = currentTimesheetProjectId();
+        const byId = {};
+        const activeProjectsList = state.today && Array.isArray(state.today.projects) ? state.today.projects : [];
+        const historyProjectsList = Array.isArray(state.timesheetProjects) ? state.timesheetProjects : [];
+
+        activeProjectsList.concat(historyProjectsList).forEach((project) => {
+            const projectId = Number(project.id || 0);
+
+            if (!Number.isInteger(projectId) || projectId <= 0) {
+                return;
+            }
+
+            byId[String(projectId)] = {
+                id: projectId,
+                project_number: project.project_number || '',
+                name: project.name || ('Projekt ' + projectId)
+            };
+        });
+
+        if (activeId !== null && !byId[String(activeId)]) {
+            byId[String(activeId)] = {
+                id: activeId,
+                project_number: '',
+                name: 'Projekt #' + activeId
+            };
+        }
+
+        const items = Object.values(byId).sort((left, right) => {
+            return String(left.project_number + left.name).localeCompare(String(right.project_number + right.name));
+        });
         const options = ['<option value=""' + (activeId === null ? ' selected' : '') + '>Nicht zugeordnet</option>'];
 
         items.forEach((project) => {
             const selected = activeId === project.id ? ' selected' : '';
-            options.push('<option value="' + project.id + '"' + selected + '>' + escapeHtml(project.project_number + ' - ' + project.name) + '</option>');
+            const label = project.project_number ? project.project_number + ' - ' + project.name : project.name;
+
+            options.push('<option value="' + project.id + '"' + selected + '>' + escapeHtml(label) + '</option>');
         });
 
         return options.join('');
@@ -2427,6 +2703,24 @@
             });
         }
 
+        const timesheetEntryTypeFilter = document.getElementById('timesheetEntryTypeFilter');
+
+        if (timesheetEntryTypeFilter) {
+            timesheetEntryTypeFilter.addEventListener('change', function () {
+                storeTimesheetFilterEntryType(timesheetEntryTypeFilter.value || 'all');
+                render();
+                loadTimesheetList(false);
+            });
+        }
+
+        document.querySelectorAll('[data-history-month]').forEach((button) => {
+            button.addEventListener('click', function () {
+                storeTimesheetFilterMonth(button.getAttribute('data-history-month') || currentMonthValue());
+                render();
+                loadTimesheetList(false);
+            });
+        });
+
         document.querySelectorAll('[data-theme-mode-button]').forEach((button) => {
             button.addEventListener('click', function () {
                 setTheme(button.getAttribute('data-theme-mode-button') || 'system');
@@ -2595,10 +2889,18 @@
 
         if (cachedTimesheets && Array.isArray(cachedTimesheets.items)) {
             state.timesheetList = cachedTimesheets.items;
+            state.timesheetDays = Array.isArray(cachedTimesheets.days) ? cachedTimesheets.days : buildTimesheetHistoryDays(state.timesheetList);
+            state.timesheetSummary = cachedTimesheets.summary || buildTimesheetHistorySummary(state.timesheetList);
+            state.timesheetFilters = cachedTimesheets.filters || null;
+            state.timesheetProjects = Array.isArray(cachedTimesheets.projects) ? cachedTimesheets.projects : state.timesheetProjects;
             state.timesheetListUpdatedAt = cachedTimesheets.cached_at || null;
             state.timesheetListOffline = true;
         } else {
             state.timesheetList = [];
+            state.timesheetDays = [];
+            state.timesheetSummary = null;
+            state.timesheetFilters = null;
+            state.timesheetProjects = [];
             state.timesheetListUpdatedAt = null;
             state.timesheetListOffline = true;
         }
@@ -2619,22 +2921,44 @@
         }
 
         try {
-            const [dayPayload, companyPayload, pushPayload] = await Promise.all([
+            const [dayResult, companyResult, pushResult] = await Promise.allSettled([
                 apiJson('/api/v1/app/me/day'),
                 publicJson('/api/v1/settings/company'),
                 apiJson('/api/v1/app/push/status')
             ]);
 
-            state.today = dayPayload.data;
-            syncTodayStateStatus();
-            normalizeProjectSelectionAgainstToday();
-            normalizeTimesheetFilterAgainstToday();
-            await cacheSet('today', state.today);
+            const failures = [dayResult, companyResult, pushResult].filter((result) => result.status === 'rejected');
 
-            state.company = companyPayload.data;
-            await cacheSet('company', state.company);
+            if (failures.some((result) => isSessionExpiredError(result.reason))) {
+                return;
+            }
 
-            state.push = pushPayload.data || null;
+            if (dayResult.status === 'fulfilled') {
+                state.today = dayResult.value.data;
+                syncTodayStateStatus();
+                normalizeProjectSelectionAgainstToday();
+                normalizeTimesheetFilterAgainstToday();
+
+                try {
+                    await cacheSet('today', state.today);
+                } catch (cacheError) {
+                    console.warn('Today-Cache konnte nicht geschrieben werden.', cacheError);
+                }
+            }
+
+            if (companyResult.status === 'fulfilled') {
+                state.company = companyResult.value.data;
+
+                try {
+                    await cacheSet('company', state.company);
+                } catch (cacheError) {
+                    console.warn('Company-Cache konnte nicht geschrieben werden.', cacheError);
+                }
+            }
+
+            if (pushResult.status === 'fulfilled') {
+                state.push = pushResult.value.data || null;
+            }
 
             if (routeName() === '/historie') {
                 await loadTimesheetList(force);
@@ -2642,6 +2966,14 @@
 
             if (routeName() === '/projektwahl') {
                 await loadProjectFiles(projectFileContextId(), force);
+            }
+
+            if (failures.length > 0) {
+                console.warn('Ein Teil der App-Daten konnte nicht geladen werden.', failures.map((result) => result.reason));
+
+                if (!force && routeName() !== '/historie') {
+                    showFeedback('error', 'Ein Teil der aktuellen App-Daten konnte nicht geladen werden.');
+                }
             }
         } catch (error) {
             if (isSessionExpiredError(error)) {
@@ -2666,16 +2998,25 @@
         }
 
         const cacheKey = currentTimesheetCacheKey();
+        const requestId = ++timesheetListRequestCounter;
 
         if (!navigator.onLine) {
             const cached = await cacheGet(cacheKey);
 
             if (cached && Array.isArray(cached.items)) {
                 state.timesheetList = cached.items;
+                state.timesheetDays = Array.isArray(cached.days) ? cached.days : buildTimesheetHistoryDays(state.timesheetList);
+                state.timesheetSummary = cached.summary || buildTimesheetHistorySummary(state.timesheetList);
+                state.timesheetFilters = cached.filters || null;
+                state.timesheetProjects = Array.isArray(cached.projects) ? cached.projects : state.timesheetProjects;
                 state.timesheetListUpdatedAt = cached.cached_at || null;
                 state.timesheetListOffline = true;
             } else {
                 state.timesheetList = [];
+                state.timesheetDays = [];
+                state.timesheetSummary = null;
+                state.timesheetFilters = null;
+                state.timesheetProjects = [];
                 state.timesheetListUpdatedAt = null;
                 state.timesheetListOffline = true;
             }
@@ -2692,6 +3033,8 @@
             const params = new URLSearchParams();
 
             params.set('scope', state.timesheetFilterScope);
+            params.set('month', normalizeMonthValue(state.timesheetFilterMonth) || currentMonthValue());
+            params.set('entry_type', TIMESHEET_ENTRY_TYPES.includes(state.timesheetFilterEntryType) ? state.timesheetFilterEntryType : 'all');
 
             if (state.timesheetFilterScope !== 'all') {
                 const projectId = currentTimesheetProjectId();
@@ -2703,21 +3046,43 @@
 
             const payload = await apiJson('/api/v1/app/me/timesheets?' + params.toString());
 
+            if (requestId !== timesheetListRequestCounter || cacheKey !== currentTimesheetCacheKey()) {
+                return;
+            }
+
             const data = payload.data || {};
             const cachedAt = data.cached_at || data.server_time || null;
 
             state.timesheetList = Array.isArray(data.items) ? data.items : [];
+            state.timesheetDays = Array.isArray(data.days) ? data.days : buildTimesheetHistoryDays(state.timesheetList);
+            state.timesheetSummary = data.summary || buildTimesheetHistorySummary(state.timesheetList);
+            state.timesheetFilters = data.filters || null;
+            state.timesheetProjects = Array.isArray(data.projects) ? data.projects : state.timesheetProjects;
             state.timesheetListUpdatedAt = cachedAt;
             state.timesheetListOffline = false;
 
-            await cacheSet(cacheKey, {
-                items: state.timesheetList,
-                cached_at: cachedAt,
-                scope: data.scope || state.timesheetFilterScope,
-                project_id: Object.prototype.hasOwnProperty.call(data, 'project_id') ? data.project_id : currentTimesheetProjectId()
-            });
+            try {
+                await cacheSet(cacheKey, {
+                    items: state.timesheetList,
+                    days: state.timesheetDays,
+                    summary: state.timesheetSummary,
+                    filters: state.timesheetFilters,
+                    projects: state.timesheetProjects,
+                    cached_at: cachedAt,
+                    scope: data.scope || state.timesheetFilterScope,
+                    project_id: Object.prototype.hasOwnProperty.call(data, 'project_id') ? data.project_id : currentTimesheetProjectId(),
+                    month: state.timesheetFilterMonth,
+                    entry_type: state.timesheetFilterEntryType
+                });
+            } catch (cacheError) {
+                console.warn('Historien-Cache konnte nicht geschrieben werden.', cacheError);
+            }
         } catch (error) {
             if (isSessionExpiredError(error)) {
+                return;
+            }
+
+            if (requestId !== timesheetListRequestCounter || cacheKey !== currentTimesheetCacheKey()) {
                 return;
             }
 
@@ -2725,10 +3090,18 @@
 
             if (cached && Array.isArray(cached.items)) {
                 state.timesheetList = cached.items;
+                state.timesheetDays = Array.isArray(cached.days) ? cached.days : buildTimesheetHistoryDays(state.timesheetList);
+                state.timesheetSummary = cached.summary || buildTimesheetHistorySummary(state.timesheetList);
+                state.timesheetFilters = cached.filters || null;
+                state.timesheetProjects = Array.isArray(cached.projects) ? cached.projects : state.timesheetProjects;
                 state.timesheetListUpdatedAt = cached.cached_at || null;
                 state.timesheetListOffline = true;
             } else {
                 state.timesheetList = [];
+                state.timesheetDays = [];
+                state.timesheetSummary = null;
+                state.timesheetFilters = null;
+                state.timesheetProjects = [];
                 state.timesheetListUpdatedAt = null;
                 state.timesheetListOffline = false;
             }
@@ -2737,8 +3110,10 @@
                 showFeedback('error', friendlyMessage(error.message, 'Die Zeiten konnten nicht geladen werden.'));
             }
         } finally {
-            state.timesheetListLoading = false;
-            render();
+            if (requestId === timesheetListRequestCounter) {
+                state.timesheetListLoading = false;
+                render();
+            }
         }
     }
 
@@ -3575,6 +3950,8 @@
         state.projectSelectionId = readProjectSelectionState();
         state.timesheetFilterScope = readTimesheetFilterScope();
         state.timesheetFilterProjectId = readTimesheetFilterProjectId();
+        state.timesheetFilterMonth = readTimesheetFilterMonth();
+        state.timesheetFilterEntryType = readTimesheetFilterEntryType();
         const cachedSession = await cacheGet('session');
         const hadCachedAuthenticatedSession = !!(cachedSession && cachedSession.authenticated);
 

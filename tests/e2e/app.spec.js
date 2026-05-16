@@ -569,6 +569,10 @@ test('mobile profile shows company, legal texts and geo policy', async ({ page }
 test('mobile history is its own area with project filter', async ({ page }) => {
   const timesheetRequests = [];
 
+  await page.addInitScript(() => {
+    window.localStorage.setItem('app.timesheetFilterMonth', '2026-05');
+  });
+
   await page.route('**/api/v1/auth/session', async (route) => {
     await route.fulfill({
       contentType: 'application/json',
@@ -622,25 +626,89 @@ test('mobile history is its own area with project filter', async ({ page }) => {
     timesheetRequests.push(url.search);
     const scope = url.searchParams.get('scope') || 'all';
     const projectId = url.searchParams.get('project_id');
+    const entryType = url.searchParams.get('entry_type') || 'all';
+    const note = entryType === 'vacation'
+      ? 'Urlaubsansicht'
+      : (scope === 'all' ? 'Gesamtansicht' : 'Projektansicht');
+    const item = {
+      id: projectId === '2' ? 20 : 10,
+      project_id: projectId === '2' ? 2 : null,
+      project_name: projectId === '2' ? 'Baustelle Mitte' : 'Nicht zugeordnet',
+      work_date: '2026-05-14',
+      date_label: '14.05.2026',
+      weekday: 'Donnerstag',
+      start_time: entryType === 'vacation' ? null : '07:30:00',
+      end_time: entryType === 'vacation' ? null : '16:00:00',
+      break_minutes: entryType === 'vacation' ? 0 : 30,
+      net_minutes: entryType === 'vacation' ? 0 : 480,
+      entry_type: entryType === 'vacation' ? 'vacation' : 'work',
+      entry_type_label: entryType === 'vacation' ? 'Urlaub' : 'Arbeit',
+      note,
+      breaks: entryType === 'vacation' ? [] : [
+        {
+          id: 1,
+          break_started_at: '2026-05-14T12:00:00+02:00',
+          break_ended_at: '2026-05-14T12:30:00+02:00',
+          source: 'app',
+          note: 'Mittag'
+        }
+      ],
+      attachments: entryType === 'vacation' ? [] : [
+        {
+          id: 5,
+          original_name: 'stundenzettel.pdf',
+          mime_type: 'application/pdf',
+          size_bytes: 12000,
+          is_image: false,
+          download_url: '/api/v1/app/timesheet-files/5/download',
+          preview_url: null
+        }
+      ],
+      attachment_count: entryType === 'vacation' ? 0 : 1
+    };
 
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
         data: {
-          items: [
+          items: [item],
+          summary: {
+            total_net_minutes: item.net_minutes,
+            total_break_minutes: item.break_minutes,
+            entry_count: 1,
+            work_entry_count: item.entry_type === 'work' ? 1 : 0,
+            absence_entry_count: item.entry_type === 'work' ? 0 : 1,
+            attachment_count: item.attachment_count,
+            project_count: 1
+          },
+          days: [
             {
-              id: projectId === '2' ? 20 : 10,
-              project_id: projectId === '2' ? 2 : null,
-              project_name: projectId === '2' ? 'Baustelle Mitte' : 'Nicht zugeordnet',
-              work_date: '2026-05-14',
-              start_time: '07:30:00',
-              end_time: '16:00:00',
-              break_minutes: 30,
-              net_minutes: 480,
-              entry_type: 'work',
-              note: scope === 'all' ? 'Gesamtansicht' : 'Projektansicht'
+              date: '2026-05-14',
+              date_label: '14.05.2026',
+              weekday: 'Donnerstag',
+              total_net_minutes: item.net_minutes,
+              total_break_minutes: item.break_minutes,
+              entry_count: 1,
+              status_counts: {
+                work: item.entry_type === 'work' ? 1 : 0,
+                sick: 0,
+                vacation: item.entry_type === 'vacation' ? 1 : 0,
+                holiday: 0,
+                absent: 0
+              },
+              attachment_count: item.attachment_count,
+              items: [item]
             }
           ],
+          projects: [
+            { id: 2, project_number: 'P-002', name: 'Baustelle Mitte' }
+          ],
+          filters: {
+            scope,
+            project_id: projectId ? Number(projectId) : null,
+            month: url.searchParams.get('month'),
+            entry_type: entryType
+          },
           scope,
           project_id: projectId ? Number(projectId) : null,
           cached_at: '2026-05-15 10:00:00'
@@ -671,9 +739,18 @@ test('mobile history is its own area with project filter', async ({ page }) => {
 
   await expect(page.getByRole('heading', { name: 'Meine Zeiten' })).toBeVisible();
   await expect(page.locator('a[href="/app/historie"]').first()).toHaveText('Historie');
+  await expect(page.getByRole('heading', { name: 'Monatshistorie' })).toBeVisible();
   await expect(page.getByText('Gesamtuebersicht ueber alle Projekte')).toBeVisible();
+  await expect(page.getByText('Mai 2026')).toBeVisible();
+  await expect(page.locator('.app-history-day > summary').first()).toContainText('14.05.2026');
   await expect(page.locator('.app-timesheet-cards')).toContainText('Gesamtansicht');
+  await expect(page.locator('.app-history-summary')).toContainText('Arbeitszeit');
+  await page.getByText('Anhaenge anzeigen').click();
+  await expect(page.getByText('stundenzettel.pdf')).toBeVisible();
+  await page.getByText('Pausen anzeigen').click();
+  await expect(page.getByText('Mittag')).toBeVisible();
   await expect.poll(() => timesheetRequests.some((query) => query.includes('scope=all'))).toBe(true);
+  await expect.poll(() => timesheetRequests.some((query) => query.includes('month=2026-05'))).toBe(true);
 
   await page.getByRole('button', { name: 'Projekt' }).click();
   await expect(page.locator('#timesheetProjectFilter')).toBeVisible();
@@ -682,13 +759,18 @@ test('mobile history is its own area with project filter', async ({ page }) => {
   await expect(page.locator('.app-timesheet-cards')).toContainText('Projektansicht');
   await expect.poll(() => timesheetRequests.some((query) => query.includes('scope=project') && query.includes('project_id=2'))).toBe(true);
 
+  await page.locator('#timesheetEntryTypeFilter').selectOption('vacation');
+
+  await expect(page.locator('.app-timesheet-cards')).toContainText('Urlaubsansicht');
+  await expect.poll(() => timesheetRequests.some((query) => query.includes('entry_type=vacation'))).toBe(true);
+
   await page.evaluate(() => {
     window.history.pushState({}, '', '/app/zeiten');
     window.dispatchEvent(new PopStateEvent('popstate'));
   });
 
   await expect(page.getByRole('heading', { name: 'Arbeitszeiten' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Zeituebersicht' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Monatshistorie' })).toHaveCount(0);
 });
 
 test('mobile project view exposes protected upload controls and disables them offline', async ({ page, context }) => {

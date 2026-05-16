@@ -824,6 +824,158 @@ html[data-theme="dark"] .app-drawer-link:not(.is-active):focus-visible {
     gap: 0.7rem;
 }
 
+.app-history-month-nav {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.45rem;
+    align-items: center;
+}
+
+.app-history-month-nav strong {
+    grid-column: 1 / -1;
+    order: -1;
+    text-align: center;
+    font-size: 1.1rem;
+}
+
+.app-history-month-nav button {
+    min-height: 44px;
+    padding: 0.7rem 0.8rem;
+}
+
+.app-history-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.65rem;
+}
+
+.app-history-metric {
+    min-width: 0;
+    display: grid;
+    gap: 0.2rem;
+    padding: 0.75rem;
+    border: 1px solid var(--app-line);
+    border-radius: 1rem;
+    background: rgba(255, 255, 255, 0.55);
+}
+
+.app-history-metric span,
+.app-history-metric small {
+    min-width: 0;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    color: var(--app-muted);
+    font-weight: 700;
+}
+
+.app-history-metric strong {
+    font-size: 1.35rem;
+    line-height: 1;
+}
+
+.app-history-days {
+    display: grid;
+    gap: 0.75rem;
+}
+
+.app-history-day {
+    border: 1px solid var(--app-line);
+    border-radius: 1rem;
+    background: rgba(255, 255, 255, 0.5);
+    overflow: hidden;
+}
+
+.app-history-day > summary {
+    min-height: 56px;
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto;
+    gap: 0.65rem;
+    align-items: center;
+    padding: 0.85rem;
+    cursor: pointer;
+    list-style: none;
+}
+
+.app-history-day > summary::-webkit-details-marker {
+    display: none;
+}
+
+.app-history-day > summary span {
+    min-width: 0;
+    display: grid;
+    gap: 0.2rem;
+}
+
+.app-history-day > summary strong,
+.app-history-day > summary small {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.app-history-day > summary small,
+.app-history-empty-line,
+.app-history-breaks small {
+    color: var(--app-muted);
+    font-weight: 700;
+}
+
+.app-history-day .app-timesheet-cards {
+    padding: 0 0.85rem 0.85rem;
+}
+
+.app-history-entry-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    align-items: flex-start;
+}
+
+.app-history-entry-head > div {
+    min-width: 0;
+}
+
+.app-history-entry h3,
+.app-history-note,
+.app-history-breaks div,
+.app-history-breaks strong,
+.app-history-breaks span,
+.app-history-breaks small {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.app-history-note {
+    padding: 0.7rem;
+    border-radius: 0.85rem;
+    background: rgba(255, 255, 255, 0.5);
+}
+
+.app-history-detail {
+    border-top: 1px solid var(--app-line);
+    padding-top: 0.65rem;
+}
+
+.app-history-detail summary {
+    min-height: 44px;
+    cursor: pointer;
+    font-weight: 800;
+}
+
+.app-history-breaks {
+    display: grid;
+    gap: 0.5rem;
+}
+
+.app-history-breaks div {
+    display: grid;
+    gap: 0.15rem;
+    padding: 0.65rem;
+    border-radius: 0.85rem;
+    background: rgba(255, 255, 255, 0.48);
+}
+
 .app-timesheet-table-wrap {
     display: none;
     overflow-x: auto;
@@ -871,6 +1023,13 @@ html[data-theme="dark"] .app-timesheet-card {
     background: rgba(255, 255, 255, 0.02);
 }
 
+html[data-theme="dark"] .app-history-metric,
+html[data-theme="dark"] .app-history-day,
+html[data-theme="dark"] .app-history-note,
+html[data-theme="dark"] .app-history-breaks div {
+    background: rgba(255, 255, 255, 0.03);
+}
+
 html[data-theme="dark"] .app-timesheet-table thead th {
     background: rgba(255, 255, 255, 0.04);
 }
@@ -878,6 +1037,23 @@ html[data-theme="dark"] .app-timesheet-table thead th {
 @media (min-width: 768px) {
     .app-timesheet-cards {
         display: none;
+    }
+
+    .app-history-day .app-timesheet-cards {
+        display: grid;
+    }
+
+    .app-history-summary {
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+    }
+
+    .app-history-month-nav {
+        grid-template-columns: auto 1fr auto auto;
+    }
+
+    .app-history-month-nav strong {
+        grid-column: auto;
+        order: 0;
     }
 
     .app-timesheet-table-wrap {

@@ -80,6 +80,98 @@ final class MobileAppServiceTest extends TestCase
         self::assertFalse($method->invoke($service, '2026-05-15', null, ['entry_type' => 'sick']));
     }
 
+    public function testHistoryMonthBoundsUseFullCalendarMonth(): void
+    {
+        $service = $this->service();
+        $normalize = new ReflectionMethod($service, 'normalizeHistoryMonth');
+        $bounds = new ReflectionMethod($service, 'timesheetHistoryBounds');
+        $normalize->setAccessible(true);
+        $bounds->setAccessible(true);
+
+        self::assertSame('2026-05', $normalize->invoke($service, '2026-05'));
+        self::assertSame(['2026-05-01', '2026-05-31'], $bounds->invoke($service, '2026-05'));
+        self::assertSame([null, null], $bounds->invoke($service, null));
+    }
+
+    public function testInvalidHistoryFiltersAreRejected(): void
+    {
+        $service = $this->service();
+        $month = new ReflectionMethod($service, 'normalizeHistoryMonth');
+        $entryType = new ReflectionMethod($service, 'normalizeHistoryEntryType');
+        $month->setAccessible(true);
+        $entryType->setAccessible(true);
+
+        try {
+            $month->invoke($service, '2026-13');
+            self::fail('Ungueltiger Monat muss abgewiesen werden.');
+        } catch (\InvalidArgumentException $exception) {
+            self::assertSame('Bitte einen gueltigen Monat im Format JJJJ-MM angeben.', $exception->getMessage());
+        }
+
+        try {
+            $entryType->invoke($service, 'deleted');
+            self::fail('Ungueltiger Entry-Type muss abgewiesen werden.');
+        } catch (\InvalidArgumentException $exception) {
+            self::assertSame('Bitte einen gueltigen Buchungstyp auswaehlen.', $exception->getMessage());
+        }
+    }
+
+    public function testHistoryPayloadAggregatesSummaryAndDays(): void
+    {
+        $service = $this->service();
+        $method = new ReflectionMethod($service, 'buildTimesheetHistoryPayload');
+        $method->setAccessible(true);
+
+        $payload = $method->invoke($service, [
+            [
+                'id' => 1,
+                'project_id' => 2,
+                'work_date' => '2026-05-15',
+                'entry_type' => 'work',
+                'break_minutes' => 30,
+                'net_minutes' => 450,
+                'attachment_count' => 2,
+                'attachments' => [],
+            ],
+            [
+                'id' => 2,
+                'project_id' => null,
+                'work_date' => '2026-05-15',
+                'entry_type' => 'sick',
+                'break_minutes' => 0,
+                'net_minutes' => 0,
+                'attachment_count' => 0,
+                'attachments' => [],
+            ],
+            [
+                'id' => 3,
+                'project_id' => 3,
+                'work_date' => '2026-05-14',
+                'entry_type' => 'work',
+                'break_minutes' => 15,
+                'net_minutes' => 240,
+                'attachment_count' => 1,
+                'attachments' => [],
+            ],
+        ]);
+
+        self::assertSame(690, $payload['summary']['total_net_minutes']);
+        self::assertSame(45, $payload['summary']['total_break_minutes']);
+        self::assertSame(3, $payload['summary']['entry_count']);
+        self::assertSame(2, $payload['summary']['work_entry_count']);
+        self::assertSame(1, $payload['summary']['absence_entry_count']);
+        self::assertSame(3, $payload['summary']['attachment_count']);
+        self::assertSame(3, $payload['summary']['project_count']);
+        self::assertCount(2, $payload['projects']);
+
+        self::assertCount(2, $payload['days']);
+        self::assertSame('2026-05-15', $payload['days'][0]['date']);
+        self::assertSame(2, $payload['days'][0]['entry_count']);
+        self::assertSame(1, $payload['days'][0]['status_counts']['work']);
+        self::assertSame(1, $payload['days'][0]['status_counts']['sick']);
+        self::assertSame(2, $payload['days'][0]['attachment_count']);
+    }
+
     private function service(): MobileAppService
     {
         $connection = new DatabaseConnection([]);
