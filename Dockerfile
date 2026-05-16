@@ -6,25 +6,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git \
         unzip \
-        libcurl4-openssl-dev \
         libfreetype6-dev \
         libjpeg62-turbo-dev \
-        libonig-dev \
         libpng-dev \
         libzip-dev \
-        libxml2-dev \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install dom \
-    && docker-php-ext-install \
-        simplexml \
-        xml \
-        xmlreader \
-        xmlwriter \
     && docker-php-ext-install -j"$(nproc)" \
-        curl \
-        fileinfo \
         gd \
-        mbstring \
         pdo_mysql \
         zip \
     && a2enmod headers rewrite \
