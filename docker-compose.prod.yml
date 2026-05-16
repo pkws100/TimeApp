@@ -1,0 +1,122 @@
+services:
+  timeapp-db:
+    image: mariadb:10.11
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${DOCKER_DB_DATABASE:-zeiterfassung}
+      MARIADB_USER: ${DOCKER_DB_USERNAME:-zeiterfassung}
+      MARIADB_PASSWORD: ${DOCKER_DB_PASSWORD:?Set DOCKER_DB_PASSWORD in .env}
+      MARIADB_ROOT_PASSWORD: ${DOCKER_DB_ROOT_PASSWORD:?Set DOCKER_DB_ROOT_PASSWORD in .env}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mariadb-admin ping -h 127.0.0.1 -u$$MARIADB_USER -p$$MARIADB_PASSWORD --silent
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    volumes:
+      - timeapp-db-data:/var/lib/mysql
+    networks:
+      - timeapp-db-private
+
+  timeapp-web:
+    image: ${TIMEAPP_IMAGE:-timeapp-web:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      timeapp-db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${APP_PORT:-18080}:80"
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      APP_DEBUG: ${APP_DEBUG:-false}
+      APP_URL: ${APP_URL:?Set APP_URL to the public HTTPS application URL}
+      APP_TIMEZONE: ${APP_TIMEZONE:-Europe/Berlin}
+      APP_LOCALE: ${APP_LOCALE:-de}
+      APP_FALLBACK_LOCALE: ${APP_FALLBACK_LOCALE:-de}
+      DB_DRIVER: mysql
+      DB_HOST: timeapp-db
+      DB_PORT: 3306
+      DB_DATABASE: ${DOCKER_DB_DATABASE:-zeiterfassung}
+      DB_USERNAME: ${DOCKER_DB_USERNAME:-zeiterfassung}
+      DB_PASSWORD: ${DOCKER_DB_PASSWORD:?Set DOCKER_DB_PASSWORD in .env}
+      DB_CHARSET: ${DB_CHARSET:-utf8mb4}
+      DB_COLLATION: ${DB_COLLATION:-utf8mb4_unicode_ci}
+      DB_SOCKET: ""
+      SESSION_NAME: ${SESSION_NAME:-zeiterfassung_session}
+      SESSION_LIFETIME: ${SESSION_LIFETIME:-7200}
+      SESSION_SECURE_COOKIE: ${SESSION_SECURE_COOKIE:-true}
+      UPLOAD_DISK: ${UPLOAD_DISK:-local}
+      UPLOAD_ROOT: ${UPLOAD_ROOT:-storage/app/uploads}
+      UPLOAD_MAX_FILESIZE: ${UPLOAD_MAX_FILESIZE:-33554432}
+      EXPORT_TEMP_PATH: ${EXPORT_TEMP_PATH:-storage/cache/exports}
+      PUSH_VAPID_PUBLIC_KEY: ${PUSH_VAPID_PUBLIC_KEY:-}
+      PUSH_VAPID_PRIVATE_KEY: ${PUSH_VAPID_PRIVATE_KEY:-}
+      PUSH_VAPID_SUBJECT: ${PUSH_VAPID_SUBJECT:-mailto:admin@example.invalid}
+      MAP_TILE_URL: ${MAP_TILE_URL:-https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png}
+      MAP_TILE_ATTRIBUTION: ${MAP_TILE_ATTRIBUTION:-&copy; OpenStreetMap-Mitwirkende}
+      MAP_GEOCODE_URL: ${MAP_GEOCODE_URL:-https://nominatim.openstreetmap.org/search}
+    volumes:
+      - timeapp-storage:/var/www/html/storage
+    networks:
+      - proxy
+      - timeapp-db-private
+
+  timeapp-scheduler:
+    image: ${TIMEAPP_IMAGE:-timeapp-web:latest}
+    restart: unless-stopped
+    depends_on:
+      timeapp-db:
+        condition: service_healthy
+      timeapp-web:
+        condition: service_started
+    command:
+      - /bin/sh
+      - -lc
+      - while true; do php bin/send-push-reminders.php || true; sleep "$${SCHEDULER_INTERVAL_SECONDS:-300}"; done
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      APP_DEBUG: ${APP_DEBUG:-false}
+      APP_URL: ${APP_URL:?Set APP_URL to the public HTTPS application URL}
+      APP_TIMEZONE: ${APP_TIMEZONE:-Europe/Berlin}
+      APP_LOCALE: ${APP_LOCALE:-de}
+      APP_FALLBACK_LOCALE: ${APP_FALLBACK_LOCALE:-de}
+      DB_DRIVER: mysql
+      DB_HOST: timeapp-db
+      DB_PORT: 3306
+      DB_DATABASE: ${DOCKER_DB_DATABASE:-zeiterfassung}
+      DB_USERNAME: ${DOCKER_DB_USERNAME:-zeiterfassung}
+      DB_PASSWORD: ${DOCKER_DB_PASSWORD:?Set DOCKER_DB_PASSWORD in .env}
+      DB_CHARSET: ${DB_CHARSET:-utf8mb4}
+      DB_COLLATION: ${DB_COLLATION:-utf8mb4_unicode_ci}
+      DB_SOCKET: ""
+      UPLOAD_DISK: ${UPLOAD_DISK:-local}
+      UPLOAD_ROOT: ${UPLOAD_ROOT:-storage/app/uploads}
+      EXPORT_TEMP_PATH: ${EXPORT_TEMP_PATH:-storage/cache/exports}
+      PUSH_VAPID_PUBLIC_KEY: ${PUSH_VAPID_PUBLIC_KEY:-}
+      PUSH_VAPID_PRIVATE_KEY: ${PUSH_VAPID_PRIVATE_KEY:-}
+      PUSH_VAPID_SUBJECT: ${PUSH_VAPID_SUBJECT:-mailto:admin@example.invalid}
+      SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-300}
+    volumes:
+      - timeapp-storage:/var/www/html/storage
+    networks:
+      - timeapp-egress
+      - timeapp-db-private
+
+networks:
+  proxy:
+    name: ${PROXY_NETWORK:-proxy}
+    external: true
+  timeapp-egress:
+  timeapp-db-private:
+    internal: true
+
+volumes:
+  timeapp-db-data:
+    name: timeapp_timeapp-db-data
+  timeapp-storage:
+    name: timeapp_timeapp-storage

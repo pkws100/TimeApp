@@ -104,6 +104,16 @@ Wichtige Hinweise fuer Compose:
 - Fuer oeffentlichen Betrieb sollte TLS ueber einen vorgeschalteten Reverse Proxy terminiert werden. `APP_URL` muss auf die oeffentliche HTTPS-URL zeigen.
 - Falls Sie die Datenbank ausnahmsweise vom Host aus erreichen muessen, ist ein eigener lokaler Override sinnvoller als ein fester Repo-Default, z. B. per zusaetzlichem Compose-Override mit einem nicht-standardisierten Host-Port wie `13306:3306`.
 
+## Produktions-Deploy
+Fuer VPS-/Reverse-Proxy-Setups gibt es zusaetzlich `docker-compose.prod.yml` mit
+den Diensten `timeapp-web`, `timeapp-db` und `timeapp-scheduler`. Die MariaDB
+hat dort keinen oeffentlichen Port, Storage und DB nutzen stabile benannte
+Volumes, und der Webdienst haengt am externen Proxy-Netz plus lokalem
+Smoke-Check-Port.
+
+Details stehen in `DEPLOY.md`. Nach dem Start kann `bin/deploy-prod-check.sh`
+Migrationen, den idempotenten Referenz-Seeder und den Scheduler-Dry-Run pruefen.
+
 ## Wichtige Composer-Befehle
 ```bash
 composer test
@@ -134,7 +144,7 @@ vendor/bin/phinx seed:run -c phinx.php -s DemoDataSeeder
 - App-Name Default: `Baustellen Zeiterfassung`
 - Theme-Modi: `light`, `dark`, `system`
 - Theme-Storage-Key: `app.theme`
-- Session-Cookie: `baustelle_session`
+- Session-Cookie: ueber `SESSION_NAME` steuerbar; Compose-Default ist `zeiterfassung_session`, Code-Fallback ist `baustelle_session`; `SESSION_SECURE_COOKIE` sollte in Produktion aktiv sein
 - Standard-Datenbankname: `zeiterfassung`
 
 ## Hinweise zu sensiblen Daten

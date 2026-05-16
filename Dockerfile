@@ -6,6 +6,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git \
         unzip \
+        libcurl4-openssl-dev \
         libfreetype6-dev \
         libjpeg62-turbo-dev \
         libonig-dev \
@@ -15,6 +16,7 @@ RUN apt-get update \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install -j"$(nproc)" \
         dom \
+        curl \
         fileinfo \
         gd \
         mbstring \

@@ -108,9 +108,13 @@ if (session_status() !== PHP_SESSION_ACTIVE) {
         session_save_path($sessionCandidates[0]);
     }
 
-    session_name('baustelle_session');
+    $sessionSecureDefault = str_starts_with(strtolower((string) env('APP_URL', '')), 'https://');
+    $sessionSecure = (bool) env('SESSION_SECURE_COOKIE', $sessionSecureDefault);
+
+    session_name((string) env('SESSION_NAME', 'baustelle_session'));
     session_start([
         'cookie_httponly' => true,
+        'cookie_secure' => $sessionSecure,
         'cookie_samesite' => 'Lax',
         'use_strict_mode' => true,
     ]);
