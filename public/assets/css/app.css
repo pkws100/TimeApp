@@ -90,6 +90,7 @@ button,
     align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
+    min-width: 0;
 }
 
 .app-topbar-tools {
@@ -141,7 +142,77 @@ button,
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: min(58vw, 16rem);
+    max-width: min(34vw, 12rem);
+}
+
+.app-topbar-status {
+    min-width: 0;
+    min-height: 46px;
+    flex: 1 1 auto;
+    display: grid;
+    align-content: center;
+    gap: 0.1rem;
+    padding: 0.42rem 0.7rem;
+    border: 1px solid var(--app-line);
+    border-radius: 1rem;
+    background: var(--app-surface);
+    box-shadow: none;
+}
+
+.app-topbar-status__label,
+.app-topbar-status__meta {
+    min-width: 0;
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.app-topbar-status__label {
+    font-weight: 900;
+    font-size: 0.92rem;
+}
+
+.app-topbar-status__meta {
+    color: var(--app-muted);
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
+.app-topbar-status.is-working {
+    border-color: rgba(22, 101, 52, 0.35);
+    background: var(--app-ok-soft);
+}
+
+.app-topbar-status.is-working .app-topbar-status__label {
+    color: var(--app-ok);
+}
+
+.app-topbar-status.is-paused {
+    border-color: rgba(146, 64, 14, 0.36);
+    background: var(--app-warn-soft);
+}
+
+.app-topbar-status.is-paused .app-topbar-status__label {
+    color: var(--app-warn);
+}
+
+.app-topbar-status.is-missing {
+    border-color: rgba(153, 27, 27, 0.34);
+    background: var(--app-danger-soft);
+}
+
+.app-topbar-status.is-missing .app-topbar-status__label {
+    color: var(--app-danger);
+}
+
+.app-topbar-status.is-absence {
+    border-color: rgba(37, 99, 235, 0.3);
+    background: rgba(37, 99, 235, 0.1);
+}
+
+.app-topbar-status.is-absence .app-topbar-status__label {
+    color: #1d4ed8;
 }
 
 .app-layout {
@@ -252,6 +323,15 @@ html[data-theme="dark"] .app-status-card.is-missing {
     background:
         linear-gradient(180deg, rgba(153, 27, 27, 0.34) 0%, rgba(14, 24, 42, 0.94) 100%),
         var(--app-surface);
+}
+
+html[data-theme="dark"] .app-topbar-status.is-absence {
+    background: rgba(96, 165, 250, 0.16);
+    border-color: rgba(96, 165, 250, 0.32);
+}
+
+html[data-theme="dark"] .app-topbar-status.is-absence .app-topbar-status__label {
+    color: #bfdbfe;
 }
 
 .app-feedback {
@@ -998,6 +1078,17 @@ html[data-theme="dark"] .app-attachment-icon {
     .app-brand-compact strong {
         max-width: none;
         font-size: 1.05rem;
+    }
+
+    .app-topbar-status {
+        flex: 0 1 min(28rem, 48vw);
+        grid-template-columns: auto minmax(0, 1fr);
+        align-items: center;
+        column-gap: 0.65rem;
+    }
+
+    .app-topbar-status__meta {
+        text-align: right;
     }
 
     .app-topbar {

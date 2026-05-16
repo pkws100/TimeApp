@@ -173,8 +173,277 @@ test('mobile today screen shows derived missing status', async ({ page }) => {
   await page.goto('/app/heute');
 
   await expect(page.getByRole('heading', { name: 'Fehlt' })).toBeVisible();
-  await expect(page.getByText('Fehlt / nicht gebucht')).toBeVisible();
+  await expect(page.locator('main [data-live-status]')).toHaveText('Fehlt / nicht gebucht');
   await expect(page.getByText('Fuer heute liegt noch keine Buchung vor. Diese Meldung ist automatisch abgeleitet.')).toBeVisible();
+  await expect(page.locator('[data-live-topbar-status]')).toHaveText('Fehlt / nicht gebucht');
+  await expect(page.locator('[data-live-topbar-project]')).toHaveText('automatisch erkannt');
+
+  await page.goto('/app/profil');
+
+  await expect(page.locator('[data-live-topbar-status]')).toHaveText('Fehlt / nicht gebucht');
+});
+
+test('mobile topbar shows active work status on every app page', async ({ page }) => {
+  const projectName = 'Neubau Erweiterung Nordfluegel mit sehr langem Projektnamen';
+  const workEntry = {
+    id: 12,
+    project_id: 2,
+    project_name: projectName,
+    work_date: '2026-05-15',
+    start_time: '07:15:00',
+    end_time: null,
+    break_minutes: 0,
+    net_minutes: 0,
+    note: null,
+    attachments: []
+  };
+  const liveBasis = {
+    work_started_at: '2026-05-15T07:15:00+02:00',
+    work_ended_at: null,
+    completed_break_minutes: 0,
+    current_break_started_at: null,
+    is_running: true,
+    is_paused: false
+  };
+
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test',
+          permissions: ['timesheets.create', 'timesheets.view_own']
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          today: '2026-05-15',
+          server_time: '2026-05-15T10:00:00+02:00',
+          projects: [
+            { id: 2, project_number: 'P-002', name: projectName, city: 'Berlin' }
+          ],
+          attachments: [],
+          today_state: {
+            status: 'working',
+            is_missing: false,
+            status_source: null,
+            work_entry: workEntry,
+            status_entry: null,
+            current_break: null
+          },
+          current_break: null,
+          breaks_today: [],
+          tracked_minutes_live_basis: liveBasis,
+          project_day_summaries: [
+            {
+              project_id: 2,
+              project_name: projectName,
+              status: 'working',
+              start_time: '07:15:00',
+              end_time: null,
+              total_break_minutes: 0,
+              total_net_minutes: 0,
+              current_break: null,
+              tracked_minutes_live_basis: liveBasis,
+              work_entry: workEntry,
+              breaks_today: [],
+              attachments: []
+            }
+          ],
+          sync: { server_pending_count: 0 },
+          geo_policy: {
+            enabled: false,
+            notice_text: '',
+            requires_acknowledgement: false
+          },
+          company: {
+            app_display_name: 'TimeApp',
+            company_name: 'Muster Bau'
+          }
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { company_name: 'Muster Bau' } })
+    });
+  });
+
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { enabled: false, can_subscribe: false, devices: [] } })
+    });
+  });
+
+  await page.goto('/app/heute');
+
+  await expect(page.locator('[data-live-topbar-status]')).toHaveText('Eingecheckt');
+  await expect(page.locator('[data-live-topbar-project]')).toContainText(projectName);
+  await expect(page.locator('[data-live-topbar-detail]')).toHaveText('Start 07:15');
+
+  await page.goto('/app/zeiten');
+
+  await expect(page.locator('[data-live-topbar-status]')).toHaveText('Eingecheckt');
+  await expect(page.locator('[data-live-topbar-project]')).toContainText(projectName);
+
+  await page.goto('/app/profil');
+
+  await expect(page.locator('[data-live-topbar-status]')).toHaveText('Eingecheckt');
+  await expect(page.locator('[data-live-topbar-project]')).toContainText(projectName);
+});
+
+test('mobile topbar updates after check-in without a page reload', async ({ page }) => {
+  let checkedIn = false;
+  const project = { id: 2, project_number: 'P-002', name: 'Baustelle Mitte', city: 'Berlin' };
+
+  const dayPayload = () => {
+    const workEntry = checkedIn ? {
+      id: 99,
+      project_id: 2,
+      project_name: project.name,
+      work_date: '2026-05-15',
+      start_time: '10:00:00',
+      end_time: null,
+      break_minutes: 0,
+      net_minutes: 0,
+      note: '',
+      attachments: []
+    } : null;
+    const liveBasis = checkedIn ? {
+      work_started_at: '2026-05-15T10:00:00+02:00',
+      work_ended_at: null,
+      completed_break_minutes: 0,
+      current_break_started_at: null,
+      is_running: true,
+      is_paused: false
+    } : null;
+
+    return {
+      today: '2026-05-15',
+      server_time: '2026-05-15T10:01:00+02:00',
+      projects: [project],
+      attachments: [],
+      today_state: {
+        status: checkedIn ? 'working' : 'missing',
+        is_missing: !checkedIn,
+        status_source: checkedIn ? null : 'derived_missing',
+        work_entry: workEntry,
+        status_entry: null,
+        current_break: null
+      },
+      current_break: null,
+      breaks_today: [],
+      tracked_minutes_live_basis: liveBasis,
+      project_day_summaries: checkedIn ? [
+        {
+          project_id: 2,
+          project_name: project.name,
+          status: 'working',
+          start_time: '10:00:00',
+          end_time: null,
+          total_break_minutes: 0,
+          total_net_minutes: 0,
+          current_break: null,
+          tracked_minutes_live_basis: liveBasis,
+          work_entry: workEntry,
+          breaks_today: [],
+          attachments: []
+        }
+      ] : [],
+      sync: { server_pending_count: 0 },
+      geo_policy: {
+        enabled: false,
+        notice_text: '',
+        requires_acknowledgement: false
+      },
+      company: {
+        app_display_name: 'TimeApp',
+        company_name: 'Muster Bau'
+      }
+    };
+  };
+
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test',
+          permissions: ['timesheets.create', 'timesheets.view_own']
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: dayPayload() })
+    });
+  });
+
+  await page.route('**/api/v1/app/timesheets/sync', async (route) => {
+    checkedIn = true;
+    const data = dayPayload();
+
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        message: 'Aenderung gespeichert.',
+        data: {
+          today_state: data.today_state,
+          timesheet: data.today_state.work_entry,
+          breaks_today: [],
+          current_break: null,
+          tracked_minutes_live_basis: data.tracked_minutes_live_basis,
+          server_time: data.server_time
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { company_name: 'Muster Bau' } })
+    });
+  });
+
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { enabled: false, can_subscribe: false, devices: [] } })
+    });
+  });
+
+  await page.goto('/app/heute');
+
+  await expect(page.locator('[data-live-topbar-status]')).toHaveText('Fehlt / nicht gebucht');
+  await page.locator('#projectSelect').selectOption('2');
+  await page.getByRole('button', { name: 'Check-in' }).click();
+
+  await expect(page.locator('[data-live-topbar-status]')).toHaveText('Eingecheckt');
+  await expect(page.locator('[data-live-topbar-project]')).toHaveText('Baustelle Mitte');
+  await expect(page.locator('[data-live-topbar-detail]')).toHaveText('Start 10:00');
 });
 
 test('mobile profile shows company, legal texts and geo policy', async ({ page }) => {

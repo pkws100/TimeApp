@@ -1320,6 +1320,110 @@
             + '</div>';
     }
 
+    function topbarStatusTone(status) {
+        if (status === 'working' || status === 'completed') {
+            return 'working';
+        }
+
+        if (status === 'paused') {
+            return 'paused';
+        }
+
+        if (status === 'not_started' || status === 'planned' || status === 'missing' || status === 'absent') {
+            return 'missing';
+        }
+
+        if (status === 'sick' || status === 'vacation' || status === 'holiday') {
+            return 'absence';
+        }
+
+        return 'neutral';
+    }
+
+    function topbarStatusLabel(status) {
+        const labels = {
+            working: 'Eingecheckt',
+            paused: 'Pause',
+            completed: 'Abgeschlossen',
+            missing: 'Fehlt / nicht gebucht',
+            not_started: 'Noch nicht gebucht',
+            planned: 'Noch nicht gebucht',
+            sick: 'Krank',
+            vacation: 'Urlaub',
+            holiday: 'Feiertag',
+            absent: 'Fehlt'
+        };
+
+        return labels[status] || statusLabel(status);
+    }
+
+    function topbarStatusContext(status) {
+        if (status === 'working') {
+            return {
+                project: currentProjectName(),
+                detail: 'Start ' + currentStartTimeValue()
+            };
+        }
+
+        if (status === 'paused') {
+            return {
+                project: currentProjectName(),
+                detail: currentBreak() ? 'Pause ' + formatDurationMinutes(liveCurrentBreakMinutes()) : 'Start ' + currentStartTimeValue()
+            };
+        }
+
+        if (status === 'completed') {
+            return {
+                project: currentProjectName(),
+                detail: formatDurationMinutes(liveWorkMinutes())
+            };
+        }
+
+        if (status === 'missing') {
+            return {
+                project: 'automatisch erkannt',
+                detail: 'Keine Buchung heute'
+            };
+        }
+
+        if (status === 'not_started' || status === 'planned') {
+            return {
+                project: 'Heute',
+                detail: 'Keine Buchung'
+            };
+        }
+
+        if (status === 'sick' || status === 'vacation' || status === 'holiday' || status === 'absent') {
+            return {
+                project: 'Tagesstatus',
+                detail: statusLabel(status)
+            };
+        }
+
+        return {
+            project: 'Heute',
+            detail: statusLabel(status)
+        };
+    }
+
+    function topbarStatusMarkup() {
+        if (!state.session.authenticated) {
+            return '';
+        }
+
+        const status = currentStatus();
+        const context = topbarStatusContext(status);
+
+        return '<div class="app-topbar-status is-' + topbarStatusTone(status) + '" data-live-topbar-status-card>'
+            + '<span class="app-topbar-status__label" data-live-topbar-status>' + escapeHtml(topbarStatusLabel(status)) + '</span>'
+            + '<span class="app-topbar-status__meta">'
+            + '<span data-live-topbar-project>' + escapeHtml(context.project) + '</span>'
+            + '<span aria-hidden="true"> · </span>'
+            + '<span data-live-topbar-detail>' + escapeHtml(context.detail) + '</span>'
+            + '</span>'
+            + '</div>';
+    }
+
     function drawerMenuMarkup() {
         const mode = currentThemeMode();
         const companyName = state.company && state.company.company_name ? state.company.company_name : '';
@@ -1363,6 +1467,7 @@
             + '<div class="app-brand app-brand-compact"><span class="muted">Mitarbeiter-App</span><strong>'
             + escapeHtml(bootstrap.app_name || 'Baustellen Zeiterfassung')
             + '</strong></div>'
+            + topbarStatusMarkup()
             + '<div class="app-topbar-tools">'
             + compactClockMarkup()
             + '<button type="button" class="app-menu-button app-burger-button" id="appMenuToggle" aria-expanded="' + (state.menuOpen ? 'true' : 'false') + '" aria-label="Menue oeffnen"><span></span><span></span><span></span></button>'
@@ -3515,6 +3620,8 @@
             element.textContent = statusLabel(currentStatus());
         });
 
+        refreshTopbarStatus();
+
         document.querySelectorAll('[data-live-work-duration]').forEach((element) => {
             element.textContent = formatDurationMinutes(liveWorkMinutes());
         });
@@ -3524,6 +3631,27 @@
         });
 
         refreshProjectDisplays();
+    }
+
+    function refreshTopbarStatus() {
+        const status = currentStatus();
+        const context = topbarStatusContext(status);
+
+        document.querySelectorAll('[data-live-topbar-status-card]').forEach((element) => {
+            element.className = 'app-topbar-status is-' + topbarStatusTone(status);
+        });
+
+        document.querySelectorAll('[data-live-topbar-status]').forEach((element) => {
+            element.textContent = topbarStatusLabel(status);
+        });
+
+        document.querySelectorAll('[data-live-topbar-project]').forEach((element) => {
+            element.textContent = context.project;
+        });
+
+        document.querySelectorAll('[data-live-topbar-detail]').forEach((element) => {
+            element.textContent = context.detail;
+        });
     }
 
     function refreshProjectDisplays() {

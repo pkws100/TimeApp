@@ -125,6 +125,7 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [x] Backend-Anzeige fuer Buchungsanhaenge in Buchungen und Kalender inklusive geschuetztem Download, Bildvorschau und Archivierung umgesetzt.
 - [x] Abgelaufene App-Sessions fuehren sauber zum Login, ohne Offline-Queue oder lokale Caches zu verlieren.
 - [x] Abwesenheitsstatus fuer Krank, Urlaub, Feiertag und automatisch abgeleitetes Fehlen an Werktagen in Admin, Kalender und App sichtbar gemacht.
+- [x] Mobile App-Topbar zeigt den aktuellen Tagesstatus seitenuebergreifend inklusive Projekt, Startzeit, Pause, Abschluss oder Fehlend-Hinweis.
 - [x] Möglichkeit schaffen das System auch in Docker-Compose zu deplyen
 - [x] Produktions-Compose fuer VPS/Reverse Proxy mit `timeapp-web`, `timeapp-db`, `timeapp-scheduler`, privaten DB-Netz, Proxy-Netz und stabilen Volumes validiert.
 - [x] Dockerfile fuer `php:8.2-apache` bereinigt: nur fehlende Extensions werden gebaut; bereits enthaltene Core-Extensions werden nicht erneut kompiliert.
