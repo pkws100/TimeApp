@@ -46,6 +46,8 @@ Aktueller Stand:
 - PDF-Generierung: mPDF
 - Excel-Generierung: PhpSpreadsheet
 - Charts im Admin: vorbereitet fuer Chart.js-Datenquellen
+- Docker: `Dockerfile`, `docker-compose.yml`, `docker-compose.prod.yml` und `DEPLOY.md`
+- Wichtig fuer Docker-Builds: Das Basisimage `php:8.2-apache` bringt `dom`, `SimpleXML`, `xml`, `xmlreader`, `xmlwriter`, `fileinfo`, `curl`, `mbstring` und `json` bereits mit. Diese Extensions im Dockerfile nicht erneut per `docker-php-ext-install` bauen.
 
 ## 5. Architekturstand
 Die Anwendung ist aktuell API-first aufgebaut, aber Admin und API laufen innerhalb derselben PHP-App.
@@ -259,6 +261,9 @@ Wichtige Code-Einstiegspunkte:
 - `src/Presentation/Admin/AdminView.php`
 - `config/permissions.php`
 - `config/uploads.php`
+- `Dockerfile`
+- `docker-compose.prod.yml`
+- `DEPLOY.md`
 - `PROJECTS.md`
 - `DATABASE.md`
 
@@ -279,6 +284,8 @@ Beim Implementieren:
 - keine physische Loeschung fuer archivierte Stammdaten einbauen
 - geschuetzte Uploads ausserhalb des Webroots halten
 - neue Features moeglichst auch fuer Admin und API konsistent denken
+- bei Docker-Aenderungen immer `Dockerfile`, Compose-Dateien, `.env.example`, `DEPLOY.md` und README gemeinsam pruefen
+- im Dockerfile nur PHP-Extensions bauen, die im Basisimage fehlen; aktuell sind das fuer Produktion insbesondere `gd`, `pdo_mysql` und `zip`
 
 Beim Aendern von Dokumentation:
 
@@ -294,6 +301,7 @@ Beim Aendern von Dokumentation:
 - keine Stammdaten physisch loeschen, wenn Archivierung vorgesehen ist
 - keine neue Parallelarchitektur erfinden, solange der bestehende Monolith mit Admin und API gemeinsam weitergefuehrt wird
 - das Frontend nicht als bereits fertig oder verbindlich vorhanden behandeln
+- keine bereits im `php:8.2-apache` enthaltenen Core-Extensions wie `dom`, `xmlreader`, `xmlwriter`, `SimpleXML`, `curl`, `fileinfo` oder `mbstring` im Dockerfile erneut kompilieren
 
 ## 16. Offene Prioritaeten
 Die naechsten wahrscheinlichen Arbeitsbereiche sind:

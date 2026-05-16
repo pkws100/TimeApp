@@ -95,6 +95,7 @@ Wichtige Hinweise fuer Compose:
 - Die Datenbank laeuft im Compose-Stack ueber `DB_HOST=db` und `DB_PORT=3306`.
 - Nach aussen wird standardmaessig nur die Web-App veroefentlicht, und zwar auf Host-Port `18080`.
 - Die MariaDB wird bewusst **nicht** auf einen Host-Port veroeffentlicht. Fuer Online-Betrieb ist das sicherer als nur einen anderen oeffentlichen DB-Port zu waehlen.
+- Das Dockerfile baut nur fehlende PHP-Extensions selbst: `gd`, `pdo_mysql` und `zip`. Core-Extensions aus `php:8.2-apache` wie `dom`, `SimpleXML`, `xml`, `xmlreader`, `xmlwriter`, `fileinfo`, `curl`, `mbstring` und `json` duerfen nicht erneut kompiliert werden.
 - `DB_SOCKET` ist im Compose-Betrieb bewusst leer.
 - PHP-Abhaengigkeiten werden beim Image-Build installiert. Im laufenden Container ist kein manuelles `composer install` erforderlich.
 - Laufzeitdaten bleiben ueber benannte Volumes fuer MariaDB und `storage/` erhalten.
@@ -111,8 +112,9 @@ hat dort keinen oeffentlichen Port, Storage und DB nutzen stabile benannte
 Volumes, und der Webdienst haengt am externen Proxy-Netz plus lokalem
 Smoke-Check-Port.
 
-Details stehen in `DEPLOY.md`. Nach dem Start kann `bin/deploy-prod-check.sh`
-Migrationen, den idempotenten Referenz-Seeder und den Scheduler-Dry-Run pruefen.
+Details stehen in `DEPLOY.md`. Wiederkehrende Updates laufen ueber
+`bin/update-prod.sh`; read-only Smoke- und Status-Checks laufen ueber
+`bin/deploy-prod-check.sh`.
 
 ## Wichtige Composer-Befehle
 ```bash

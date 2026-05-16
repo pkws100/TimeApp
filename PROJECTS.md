@@ -121,6 +121,8 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [x] Robuste Sync-faehige Zeiterfassungs-Endpunkte fuer Offline-Nachsendung definieren.
 - [x] Browser-Push fuer fehlende Tagesbuchungen mit Rollenfreigabe, Admin-Settings, Geraeteverwaltung und Cron-CLI eingebaut.
 - [x] Möglichkeit schaffen das System auch in Docker-Compose zu deplyen
+- [x] Produktions-Compose fuer VPS/Reverse Proxy mit `timeapp-web`, `timeapp-db`, `timeapp-scheduler`, privaten DB-Netz, Proxy-Netz und stabilen Volumes validiert.
+- [x] Dockerfile fuer `php:8.2-apache` bereinigt: nur fehlende Extensions werden gebaut; bereits enthaltene Core-Extensions werden nicht erneut kompiliert.
 
 ## Offene Punkte fuer den naechsten Schritt
 - [ ] Sensitive Secrets wie `smtp_password` verschluesseln bzw. in ein dediziertes Secret-Konzept ueberfuehren.

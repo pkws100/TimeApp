@@ -65,6 +65,17 @@ COMPOSER_ALLOW_SUPERUSER=1 composer test
 docker compose -f docker-compose.prod.yml --env-file .env config >/dev/null
 ```
 
+## Dockerfile-Hinweis
+
+Das Image basiert auf `php:8.2-apache`. Dieses Basisimage bringt mehrere
+Core-Extensions bereits mit, darunter `dom`, `SimpleXML`, `xml`, `xmlreader`,
+`xmlwriter`, `fileinfo`, `curl`, `mbstring` und `json`. Diese Extensions nicht
+erneut im Dockerfile kompilieren, weil das bei XML/DOM zu Build-Fehlern wie
+`fatal error: ext/dom/dom_ce.h: No such file or directory` fuehren kann.
+
+Das Dockerfile baut aktuell nur die fehlenden Extensions `gd`, `pdo_mysql` und
+`zip`.
+
 ## Start
 
 ```bash
@@ -86,17 +97,38 @@ Persistente Volumes:
 
 ## Erstsetup und Updates
 
-Migrationen ausfuehren:
+Fuer wiederkehrende Updates ist `bin/update-prod.sh` der Standardpfad. Das
+Skript validiert Compose, baut das Image, startet den Stack, fuehrt Migrationen
+und den idempotenten Referenz-Seeder aus und prueft den Push-Scheduler per
+Dry-Run:
 
 ```bash
-docker compose -f docker-compose.prod.yml --env-file .env exec timeapp-web vendor/bin/phinx migrate -c phinx.php
+bin/update-prod.sh
 ```
 
-Referenzdaten einspielen. Der Seeder ist idempotent und darf mehrfach laufen:
+Nuetzliche Varianten:
 
 ```bash
-docker compose -f docker-compose.prod.yml --env-file .env exec timeapp-web vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder
-docker compose -f docker-compose.prod.yml --env-file .env exec timeapp-web vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder
+bin/update-prod.sh --no-build
+bin/update-prod.sh --skip-migrations
+bin/update-prod.sh --skip-seed
+bin/update-prod.sh --skip-migrations --skip-seed
+```
+
+Die Einzelschritte bleiben fuer Erstsetup und Fehlerdiagnose verfuegbar.
+
+Migrationen manuell ausfuehren:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-web vendor/bin/phinx migrate -c phinx.php
+```
+
+Referenzdaten manuell einspielen. Der Seeder ist idempotent und darf mehrfach
+laufen:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-web vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder
+docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-web vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder
 ```
 
 Ersten Administrator anlegen:
@@ -108,7 +140,7 @@ docker compose -f docker-compose.prod.yml --env-file .env exec timeapp-web php b
 Push-Scheduler pruefen:
 
 ```bash
-docker compose -f docker-compose.prod.yml --env-file .env exec timeapp-web php bin/send-push-reminders.php --dry-run
+docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-web php bin/send-push-reminders.php --dry-run
 ```
 
 ## Smoke-Checks
