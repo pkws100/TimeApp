@@ -1,17 +1,17 @@
 # PROJECTS.md - Baustellen- und Zeiterfassungs-App
 
 ## Projektueberblick
-Phase 1 liefert das technische Backend-Grundgeruest fuer eine mobile Baustellen- und Zeiterfassungs-App. Der Fokus liegt auf API, Admin-Backend, Konfiguration, Datenmodell, Rollen/Rechten, Exportbasis und sicherem Dateiupload. Das mobile PWA-Frontend folgt im naechsten Schritt.
+Phase 1 hat das technische Backend-Grundgeruest und eine MVP-nahe mobile Mitarbeiter-PWA geliefert. Der aktuelle Fokus liegt auf Haertung, konsistenter Dokumentation, sicherem Backup-/Restore-Vorbau, Exportreife und kontrolliertem Ausbau bestehender Workflows.
 
 ## Frontend-Zielbild und Umsetzungsbedarf
-Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist klar vom bestehenden Admin-Backend getrennt und dient spaeter der taeglichen Nutzung durch Mitarbeiter, Kolonnen und mobile Baustellenrollen.
+Das Frontend ist als mobile Mitarbeiter-App unter `/app` als Vanilla-JS-PWA umgesetzt. Es ist klar vom bestehenden Admin-Backend getrennt und dient der taeglichen Nutzung durch Mitarbeiter, Kolonnen und mobile Baustellenrollen.
 
 ### Frontend-Architektur
 - [x] Vanilla-JS-PWA als verbindliches Frontend-Zielbild festhalten und nicht auf React oder ein anderes Framework ausrichten.
 - [x] App-Shell fuer mobile Nutzung definieren.
 - [x] Clientseitiges Routing fuer Login, Heute, Zeiterfassung, Projekte, Historie und Profil vorsehen.
-- [ ] API-Client-Schicht fuer geschuetzte und oeffentliche Requests strukturieren.
-- [ ] Zentralen App-State fuer Auth, Theme, Benutzerkontext und Synchronisationsstatus planen.
+- [x] API-Client-Schicht fuer geschuetzte und oeffentliche Requests strukturieren.
+- [x] Zentralen App-State fuer Auth, Theme, Benutzerkontext und Synchronisationsstatus planen.
 
 ### Authentifizierung und Session
 - [x] Eigenes App-Login fuer Mitarbeiter vorbereiten.
@@ -27,7 +27,7 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [x] Projekt- bzw. Baustellenwahl in der App vorsehen.
 - [x] `Meine Zeiten` bzw. Historie als mobiler Bereich einplanen.
 - [x] Abwesenheitsstatus fuer krank, Urlaub, Feiertag oder fehlend sichtbar machen.
-- [ ] Projektdateien und mobile Uploads als spaeteren Frontend-Baustein einplanen.
+- [x] Projektdateien und mobile Uploads als Frontend-Baustein umsetzen.
 - [x] Profilbereich fuer Theme, Firmenprofil, Rechtstexte, Datenschutz und GEO-Hinweise vorsehen.
 
 ### PWA und Offline
@@ -42,23 +42,23 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 ### Theme und UI-System
 - [x] Dieselben Modi `light`, `dark` und `system` wie im Admin verwenden.
 - [x] Dieselbe Storage-Konvention `app.theme` im Frontend uebernehmen.
-- [ ] Dieselben semantischen Theme-Tokens und das vorhandene Theme-Verhalten als Vorlage nutzen.
+- [x] Dieselben semantischen Theme-Tokens und das vorhandene Theme-Verhalten als Vorlage nutzen.
 - [x] Mobile Touch-Ziele mit mindestens 48px vorsehen.
 - [x] Hohe Kontraste fuer Baustellen-, Handschuh- und Sonnenlichtnutzung fest einplanen.
 
 ### Frontend-Nutzung vorhandener Backend-Daten
 - [x] Firmenprofil ueber `GET /api/v1/settings/company` im Frontend nutzbar machen.
 - [x] Projekte ueber `GET /api/v1/projects` als mobile Datenbasis verwenden.
-- [ ] Timesheet-Logik ueber bestehende Timesheet-Endpunkte einbinden.
+- [x] Timesheet-Logik ueber App-Tageskontext, Sync und Historien-Endpunkte einbinden.
 - [x] App-Login auf `POST /api/v1/auth/login` ausrichten.
 - [ ] Reports im Frontend vorerst nicht als Kernziel behandeln, sondern nachgelagert einordnen.
-- [ ] Projekt- und Asset-Datei-Endpunkte nur als spaeteren Frontend-Ausbau einplanen.
+- [x] Projekt- und Buchungsdatei-Endpunkte fuer die mobile App anbinden.
 
 ### Recht, Datenschutz und GEO
 - [x] AGB und Datenschutz im Frontend lesbar anzeigen.
 - [x] GEO-Policy aus den globalen Settings beziehen.
 - [x] GEO-Zustimmung und Hinweistext im Frontend vorbereiten.
-- [ ] Echte Positionsspeicherung ausdruecklich als spaeteren Schritt markieren und nicht ins Frontend-MVP ziehen.
+- [x] Optionale Positionsspeicherung bei App-Zeiterfassung umsetzen und in Historie/Admin sichtbar machen.
 
 ### Frontend-MVP
 - [x] Login
@@ -109,7 +109,7 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [x] Name der App (class="brand" und Browser title) in den Settings zum ändern verfügbar machen.
 - [x] Backend vorbereitung vor Statistische Auswertung mit Chart.js und CO.
 - [x] Backend vorbereitung für Buchlatungsexport um Zeiterfassung an Buchlatung zu geben
-- [x] Backend vorbereitung einer vollständigen Datensicherung mit Export und Importmöglichkeit das System vollständig widerherstellen zu können.
+- [x] Backend-Vorbereitung fuer Datensicherung und Restore-Validierung umgesetzt; produktiver Restore-Apply ist bewusst noch nicht implementiert.
 - [x] Session-basierte Authentifizierung mit HttpOnly-Cookie, Admin-Login und Rechtemiddleware fuer Admin/API eingebaut.
 - [x] Erstaufbau ohne fest eingebauten Demo-Login: erster Administrator wird per `php bin/bootstrap-admin.php` angelegt.
 - [x] Standard-Seeds liefern nur Referenzdaten; Demo-Benutzer, Demo-Projekte und Demo-Assets liegen in einem separaten optionalen Seeder.
@@ -131,19 +131,30 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [x] Gespeicherte Standortdaten zu Buchungen werden in mobiler Historie sowie in Admin-Buchungen/Kalender mit Kartenlink sichtbar gemacht.
 - [x] Push-Test aus dem mobilen Profil sendet eine echte serverseitige Web-Push-Testnachricht an das aktive Geraet.
 - [x] Zeiterfassungspflicht pro User steuerbar; freiwillige Admin-/Notfalluser bleiben aktiv, werden aber nicht als fehlend gewertet oder erinnert.
+- [x] Backup-Import-Validierung als sicherer Dry-Run gehaertet: Manifest, Version, Schema, Tabellen-JSON und Pfade werden geprueft; Restore-Apply bleibt getrennt.
 - [x] Möglichkeit schaffen das System auch in Docker-Compose zu deplyen
 - [x] Produktions-Compose fuer VPS/Reverse Proxy mit `timeapp-web`, `timeapp-db`, `timeapp-scheduler`, privaten DB-Netz, Proxy-Netz und stabilen Volumes validiert.
 - [x] Dockerfile fuer `php:8.2-apache` bereinigt: nur fehlende Extensions werden gebaut; bereits enthaltene Core-Extensions werden nicht erneut kompiliert.
 
-## Offene Punkte fuer den naechsten Schritt
+## Offene Punkte
+
+### MVP-Haertung
 - [ ] Sensitive Secrets wie `smtp_password` verschluesseln bzw. in ein dediziertes Secret-Konzept ueberfuehren.
+- [ ] Backup-Restore-Apply mit explizitem Admin-Gate, Dry-Run-Protokoll, Rollback-/Wartungsmodus-Konzept und separatem Auftrag produktionsreif bauen.
 - [ ] Validierung, Fehlermeldungen und Wiederherstellen archivierter Datensaetze weiter ausbauen.
-- [ ] Download- und Vorschaufunktion fuer Dateianhaenge erweitern.
-- [ ] Settings-Dateien (Logo, AGB, Datenschutz) mit Download-/Preview-Endpunkten und Versionshistorie vervollstaendigen.
-- [ ] Firmenprofil und GEO-Policy im spaeteren Mobile-Frontend konsumieren und dort konsistent darstellen.
-- [ ] Echte GEO-Erfassung in der Zeiterfassung inklusive Einwilligungsfluss und Speicherung fachlich finalisieren.
+- [ ] Download- und Vorschaufunktion fuer Settings-Dateien wie Logo, AGB und Datenschutz inklusive Rechtepruefung vervollstaendigen.
 - [ ] Monatsberichte mit echtem mPDF-Layout und Excel-Export mit finalem Template ausbauen.
-- [ ] Mobiles PWA-Frontend fuer die Mitarbeiter-App als Vanilla-JS-PWA mit App-Shell, Routing, IndexedDB und Background Sync entwickeln.
+
+### Nach-MVP-Funktionen
+- [ ] Verbesserte Sync-Konfliktbehandlung fuer Offline-/Wiederverbindungsfaelle ausbauen.
+- [ ] Vollstaendige Offline-Datei-Upload-Queue fuer spaetere Synchronisation ausbauen.
+- [ ] GEO-Erfassung inklusive Einwilligungsfluss, Datenschutz-Policy und fachlicher Auswertung finalisieren.
+- [ ] Settings-Dateien mit Versionshistorie vervollstaendigen.
+
+### Spaetere Komfortfunktionen
+- [ ] Reports in der mobilen App nachgelagert einordnen.
+- [ ] Erweiterte GEO-Funktionen wie Karten-/Distanzansichten ausbauen.
+- [ ] Kunden/Auftraggeber koennen eine Zeiterfassung mit Unterschrift auf dem Touchscreen bestaetigen.
 
 ## Sofort nutzbare Einstiegspunkte
 - Admin-Backend: `/admin`

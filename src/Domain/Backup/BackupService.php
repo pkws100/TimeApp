@@ -122,6 +122,7 @@ final class BackupService
             throw new RuntimeException('Das Backup-Archiv konnte nicht geoeffnet werden.');
         }
 
+        $archiveEntries = $this->archiveEntries($zip);
         $manifestContent = $zip->getFromName('manifest.json');
 
         if (!is_string($manifestContent) || trim($manifestContent) === '') {
@@ -130,7 +131,13 @@ final class BackupService
             throw new RuntimeException('Im Backup fehlt die Datei manifest.json.');
         }
 
-        $manifest = json_decode($manifestContent, true);
+        try {
+            $manifest = json_decode($manifestContent, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            $zip->close();
+
+            throw new RuntimeException('Das Backup-Manifest ist ungueltiges JSON.');
+        }
 
         if (!is_array($manifest)) {
             $zip->close();
@@ -138,28 +145,30 @@ final class BackupService
             throw new RuntimeException('Das Backup-Manifest ist ungueltig.');
         }
 
-        $this->assertManifest($manifest);
+        $this->assertArchiveEntries($archiveEntries);
+        $validation = $this->validateManifest($manifest, $zip, $archiveEntries);
 
-        $databaseEntries = [];
-
-        for ($index = 0; $index < $zip->numFiles; $index++) {
-            $name = (string) $zip->getNameIndex($index);
-
-            if (str_starts_with($name, 'database/') && str_ends_with($name, '.json')) {
-                $databaseEntries[] = $name;
-            }
-        }
+        $databaseEntries = $validation['database_files'];
+        $uploadEntries = $validation['upload_files'];
+        $runtimeEntries = $validation['runtime_files'];
+        $warnings = $validation['warnings'];
 
         $zip->close();
 
         return [
             'ok' => true,
+            'dry_run' => true,
+            'apply_supported' => false,
             'manifest' => $manifest,
             'database_files' => $databaseEntries,
+            'upload_files' => $uploadEntries,
+            'runtime_files' => $runtimeEntries,
+            'warnings' => $warnings,
             'restore_plan' => [
-                'database' => 'JSON-Dateien wuerden tabellenweise validiert und spaeter importiert.',
-                'uploads' => 'Upload-Dateien sind im Archiv enthalten und koennen spaeter geschuetzt zurueckgespielt werden.',
-                'runtime' => 'Runtime-Overrides werden aktuell nur validiert, nicht automatisch angewendet.',
+                'database' => 'JSON-Dateien wurden gegen Manifest und Schema im Dry-Run validiert; es wird nichts importiert.',
+                'uploads' => 'Upload-Dateien wurden nur als sichere Restore-Kandidaten geprueft; es wird nichts extrahiert.',
+                'runtime' => 'Runtime-Overrides werden nur erkannt und nicht automatisch angewendet.',
+                'apply_gate' => 'Ein produktiver Restore-Apply ist bewusst nicht implementiert und muss separat freigegeben werden.',
             ],
         ];
     }
@@ -262,6 +271,221 @@ final class BackupService
         foreach (['backup_version', 'created_at', 'schema_version', 'database', 'uploads', 'runtime', 'compatibility'] as $key) {
             if (!array_key_exists($key, $manifest)) {
                 throw new RuntimeException('Im Backup-Manifest fehlt der Schluessel "' . $key . '".');
+            }
+        }
+    }
+
+    private function validateManifest(array $manifest, ZipArchive $zip, array $archiveEntries): array
+    {
+        $this->assertManifest($manifest);
+
+        if (!is_int($manifest['backup_version']) || $manifest['backup_version'] !== self::BACKUP_VERSION) {
+            throw new RuntimeException('Die Backup-Version wird nicht unterstuetzt.');
+        }
+
+        if (!is_string($manifest['created_at']) || trim($manifest['created_at']) === '') {
+            throw new RuntimeException('Im Backup-Manifest ist created_at ungueltig.');
+        }
+
+        $schemaVersion = (string) ($manifest['schema_version'] ?? '');
+
+        if ($schemaVersion === '') {
+            throw new RuntimeException('Im Backup-Manifest ist schema_version ungueltig.');
+        }
+
+        if ($schemaVersion !== $this->schemaVersion()) {
+            throw new RuntimeException('Die Backup-Schema-Version passt nicht zum aktuellen System.');
+        }
+
+        foreach (['database', 'uploads', 'runtime', 'compatibility'] as $section) {
+            if (!is_array($manifest[$section])) {
+                throw new RuntimeException('Im Backup-Manifest ist "' . $section . '" ungueltig.');
+            }
+        }
+
+        $this->validateCompatibility($manifest['compatibility']);
+        $tables = $manifest['database']['tables'] ?? null;
+
+        if (!is_array($tables) || !array_is_list($tables)) {
+            throw new RuntimeException('Im Backup-Manifest ist database.tables ungueltig.');
+        }
+
+        $databaseFiles = $this->validateDatabaseFiles($tables, $zip);
+        $this->assertExpectedTables($tables);
+
+        $uploadFiles = $this->uploadEntries($archiveEntries);
+        $this->validateUploadManifest($manifest['uploads'], $uploadFiles);
+        $runtimeFiles = $this->runtimeEntries($archiveEntries);
+        $this->validateRuntimeEntries($runtimeFiles);
+
+        return [
+            'database_files' => $databaseFiles,
+            'upload_files' => $uploadFiles,
+            'runtime_files' => $runtimeFiles,
+            'warnings' => array_values(array_filter([
+                ($manifest['runtime']['database_override_included'] ?? false)
+                    ? 'runtime/database.override.php ist enthalten, wird aber im Validate-Dry-Run nicht angewendet.'
+                    : null,
+                'Restore-Apply ist nicht implementiert; dieser Endpunkt validiert nur.',
+            ])),
+        ];
+    }
+
+    private function validateDatabaseFiles(array $tables, ZipArchive $zip): array
+    {
+        $databaseFiles = [];
+
+        foreach ($tables as $table) {
+            if (!is_array($table)) {
+                throw new RuntimeException('Ein Tabelleneintrag im Backup-Manifest ist ungueltig.');
+            }
+
+            $tableName = (string) ($table['table'] ?? '');
+            $filename = (string) ($table['filename'] ?? '');
+
+            if ($tableName === '' || !preg_match('/^[A-Za-z0-9_]+$/', $tableName)) {
+                throw new RuntimeException('Ein Tabellenname im Backup-Manifest ist ungueltig.');
+            }
+
+            $this->assertSafeArchivePath($filename);
+
+            if (!str_starts_with($filename, 'database/') || !str_ends_with($filename, '.json')) {
+                throw new RuntimeException('Eine Datenbank-Datei im Backup-Manifest liegt nicht unter database/*.json.');
+            }
+
+            if (!is_int($table['rows'] ?? null) || !is_int($table['size_bytes'] ?? null) || $table['rows'] < 0 || $table['size_bytes'] < 0) {
+                throw new RuntimeException('Zeilen- oder Groessenangaben im Backup-Manifest sind ungueltig.');
+            }
+
+            $content = $zip->getFromName($filename);
+
+            if (!is_string($content)) {
+                throw new RuntimeException('Eine deklarierte Datenbank-Datei fehlt im Backup: ' . $filename);
+            }
+
+            try {
+                $decoded = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
+            } catch (\JsonException) {
+                throw new RuntimeException('Eine Datenbank-Datei enthaelt ungueltiges JSON: ' . $filename);
+            }
+
+            if (!is_array($decoded) || !array_is_list($decoded)) {
+                throw new RuntimeException('Eine Datenbank-Datei muss ein JSON-Array enthalten: ' . $filename);
+            }
+
+            foreach ($decoded as $row) {
+                if (!is_array($row)) {
+                    throw new RuntimeException('Eine Datenbank-Datei enthaelt ungueltige Zeilen: ' . $filename);
+                }
+            }
+
+            if (count($decoded) !== $table['rows']) {
+                throw new RuntimeException('Die Zeilenanzahl passt nicht zum Manifest: ' . $filename);
+            }
+
+            $databaseFiles[] = $filename;
+        }
+
+        return $databaseFiles;
+    }
+
+    private function assertExpectedTables(array $tables): void
+    {
+        $expectedTables = $this->applicationTables();
+
+        if ($expectedTables === []) {
+            return;
+        }
+
+        $manifestTables = array_map(static fn (array $table): string => (string) ($table['table'] ?? ''), $tables);
+        sort($manifestTables);
+        sort($expectedTables);
+
+        if ($manifestTables !== $expectedTables) {
+            throw new RuntimeException('Die Tabellenliste im Backup passt nicht zum aktuellen System.');
+        }
+    }
+
+    private function validateUploadManifest(array $uploads, array $uploadFiles): void
+    {
+        if (!array_key_exists('files', $uploads) || !array_key_exists('size_bytes', $uploads)) {
+            throw new RuntimeException('Im Backup-Manifest fehlen Upload-Metadaten.');
+        }
+
+        if (!is_int($uploads['files']) || !is_int($uploads['size_bytes']) || $uploads['files'] !== count($uploadFiles) || $uploads['size_bytes'] < 0) {
+            throw new RuntimeException('Die Upload-Metadaten passen nicht zum Backup-Archiv.');
+        }
+    }
+
+    private function validateCompatibility(array $compatibility): void
+    {
+        if (!array_key_exists('import_apply_supported', $compatibility) || !array_key_exists('validate_supported', $compatibility)) {
+            throw new RuntimeException('Im Backup-Manifest fehlen Kompatibilitaetsangaben.');
+        }
+
+        if ($compatibility['validate_supported'] !== true || $compatibility['import_apply_supported'] !== false) {
+            throw new RuntimeException('Die Backup-Kompatibilitaetsangaben werden nicht unterstuetzt.');
+        }
+    }
+
+    private function validateRuntimeEntries(array $runtimeFiles): void
+    {
+        foreach ($runtimeFiles as $runtimeFile) {
+            if ($runtimeFile !== 'runtime/database.override.php') {
+                throw new RuntimeException('Unbekannte Runtime-Datei im Backup: ' . $runtimeFile);
+            }
+        }
+    }
+
+    private function archiveEntries(ZipArchive $zip): array
+    {
+        $entries = [];
+
+        for ($index = 0; $index < $zip->numFiles; $index++) {
+            $entries[] = (string) $zip->getNameIndex($index);
+        }
+
+        return $entries;
+    }
+
+    private function assertArchiveEntries(array $archiveEntries): void
+    {
+        foreach ($archiveEntries as $entry) {
+            $this->assertSafeArchivePath($entry);
+        }
+    }
+
+    private function uploadEntries(array $archiveEntries): array
+    {
+        return array_values(array_filter(
+            $archiveEntries,
+            static fn (string $entry): bool => str_starts_with($entry, 'uploads/')
+        ));
+    }
+
+    private function runtimeEntries(array $archiveEntries): array
+    {
+        return array_values(array_filter(
+            $archiveEntries,
+            static fn (string $entry): bool => str_starts_with($entry, 'runtime/')
+        ));
+    }
+
+    private function assertSafeArchivePath(string $path): void
+    {
+        if ($path === ''
+            || str_contains($path, "\0")
+            || str_contains($path, '\\')
+            || str_starts_with($path, '/')
+            || preg_match('/^[A-Za-z]:/', $path) === 1) {
+            throw new RuntimeException('Unsicherer Pfad im Backup-Archiv: ' . $path);
+        }
+
+        $segments = explode('/', $path);
+
+        foreach ($segments as $segment) {
+            if ($segment === '' || $segment === '..' || $segment === '.') {
+                throw new RuntimeException('Unsicherer Pfad im Backup-Archiv: ' . $path);
             }
         }
     }

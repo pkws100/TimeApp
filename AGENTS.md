@@ -24,14 +24,14 @@ Er soll:
 Der Agent soll keine veralteten Annahmen aus frueheren Projektphasen weitertragen, wenn der aktuelle Code oder die aktuelle Doku etwas anderes zeigt.
 
 ## 3. Projektziel und aktuelle Phase
-Ziel ist eine mobile Baustellen- und Zeiterfassungs-App mit Admin-Backend, Rollen- und Rechteverwaltung, Projekt- und Geraeteverwaltung, Exporten sowie spaeterem mobilem PWA-Frontend.
+Ziel ist eine mobile Baustellen- und Zeiterfassungs-App mit Admin-Backend, Rollen- und Rechteverwaltung, Projekt- und Geraeteverwaltung, Exporten sowie mobiler PWA fuer Mitarbeiter.
 
 Aktueller Stand:
 
-- Phase 1 liefert das technische Backend-Grundgeruest.
-- Der Schwerpunkt liegt aktuell auf Admin-Backend, API, Datenmodell, Settings, Uploads, Exporte und fachlichen Grundlagen.
-- Ein erster Mobile-WebApp-Thin-Slice unter `/app` mit Session-Auth, Heute-Screen, Zeiterfassung, Projektwahl, Profil, Service Worker und Offline-Puffer ist umgesetzt.
-- Das eigentliche vollstaendige Offline-First-PWA-Frontend mit Historie, tieferem Sync und erweitertem Ausbau folgt weiterhin spaeter.
+- Phase 1 hat das technische Backend-Grundgeruest und eine MVP-nahe mobile Mitarbeiter-PWA geliefert.
+- Der Schwerpunkt liegt aktuell auf MVP-Haertung, API/Admin-Konsistenz, Backup-/Restore-Vorbereitung, Exporte und sicheren Betriebsablaeufen.
+- Die Mobile-WebApp unter `/app` ist als Vanilla-JS-PWA mit Session-Auth, Heute-Screen, Zeiterfassung, Projektwahl, Historie, Profil, Datei-Uploads, Push-Test, Service Worker und Offline-Puffer umgesetzt.
+- Weitere Offline-First-Vertiefung wie Konfliktbehandlung und vollstaendige Offline-Datei-Upload-Queue folgt weiterhin spaeter.
 
 ## 4. Tech-Stack und Laufzeitumgebung
 - Umgebung: Debian 12 in einem unprivilegierten LXC-Container
@@ -100,18 +100,20 @@ Bereits umgesetzt:
 - echte Session-basierte Authentifizierung fuer Admin und Mitarbeiter-App
 - zentrale Zugriffskontrolle fuer Admin- und geschuetzte API-Routen
 - Erstaufbau des ersten Administrators per CLI-Bootstrap statt fest eingebautem Demo-Login
-- mobile Mitarbeiter-WebApp unter `/app` als Vanilla-JS-PWA-Thin-Slice
-- App-Login, Session-Status, Heute-Screen, Projektwahl, Zeiterfassung und Profil
+- mobile Mitarbeiter-WebApp unter `/app` als MVP-nahe Vanilla-JS-PWA
+- App-Login, Session-Status, Heute-Screen, Projektwahl, Zeiterfassung, Historie, Datei-Uploads und Profil
 - Service Worker, IndexedDB-Cache und Sync-Warteschlange fuer Offline-/Wiederverbindungsfaelle
 - optionales GEO-Mitsenden bei App-Zeiterfassung, wenn global aktiviert und lokal bestaetigt
+- Backup-Export und Restore-Validate-Dry-Run; ein produktiver Restore-Apply ist bewusst noch nicht implementiert
 
 Noch nicht final umgesetzt:
 
 - Secret-Haertung fuer sensible Daten wie SMTP-Passwoerter
-- Download-/Preview-Endpunkte fuer Settings- und Objektdateien
+- Download-/Preview-Endpunkte fuer Settings-Dateien inklusive Rechtepruefung
 - finales mPDF-Berichtslayout und produktionsreife Excel-Templates
-- mobiles PWA-Frontend ist als Thin Slice vorhanden, aber noch nicht vollstaendig fuer Historie, Uploads und tiefere Konfliktbehandlung ausgebaut
-- produktive GEO-Erfassung in der Zeiterfassung
+- tiefere Offline-Konfliktbehandlung und vollstaendige Offline-Datei-Upload-Queue
+- produktiver Restore-Apply mit explizitem Admin-Gate und Sicherheitskonzept
+- fachlich finalisierte GEO-Auswertung und Datenschutz-Policy
 
 ## 7. Fachliche Festlegungen
 Diese Entscheidungen gelten aktuell als gesetzt und sollen nicht ohne expliziten Grund neu aufgerollt werden:
@@ -195,6 +197,7 @@ Verbindliche Regeln:
 - Dateiabrufe fuer App/Admin muessen ueber geschuetzte Controller-Endpunkte laufen und duerfen Uploads nicht direkt aus `public/` ausliefern
 - Mobile Projektdateien duerfen nur fuer global berechtigte Projekt-/Dateiverwalter oder fuer Benutzer mit aktiver Projektmitgliedschaft sichtbar bzw. hochladbar sein
 - JPEG-Uploads werden serverseitig anhand vorhandener EXIF-Orientation normalisiert, sofern `exif` und `gd` verfuegbar sind; andere erlaubte Bildtypen bleiben gueltige Uploads ohne erzwungene Rotation
+- Backup-Import darf nur validieren, nicht automatisch anwenden; Runtime-Overrides duerfen nicht ungefragt zurueckgespielt werden und ein Restore-Apply braucht einen separaten, expliziten Auftrag.
 
 Exportstrategie:
 
@@ -229,19 +232,19 @@ Settings-Felder:
 - gelbe Markierung bedeutet optional/offen
 - rote Markierung bedeutet fehlend oder ungueltig
 
-## 12. Frontend-Zielbild fuer den naechsten grossen Schritt
-Das spaetere Frontend soll als mobile, offlinefaehige PWA entstehen.
+## 12. Frontend-Zielbild und weiterer Ausbau
+Das mobile Frontend ist als offlinefaehige PWA vorhanden und wird kontrolliert weiter gehaertet.
 
 Zielvorgaben:
 
 - Mobile First
 - Offline-First fuer Baustellen mit schlechter Verbindung
-- lokale Zwischenspeicherung per IndexedDB
-- spaetere Synchronisation per Background Sync
+- lokale Zwischenspeicherung per IndexedDB ist vorhanden
+- spaetere Vertiefung von Konfliktbehandlung und Datei-Synchronisation
 - grosse Touch-Ziele, auch mit Handschuhen bedienbar
 - hohe Kontraste fuer Sonnenlicht und Baustellenumgebung
 - Theme-Mechanismus soll mit dem Backend konsistent wiederverwendet werden
-- Firmenprofil und GEO-Policy sollen spaeter im Frontend lesbar nutzbar sein
+- Firmenprofil, Rechtstexte und GEO-Policy sind in der App lesbar nutzbar
 
 ## 13. Wichtige Einstiegspunkte
 Relevante aktuelle URLs und Schnittstellen:
@@ -253,7 +256,10 @@ Relevante aktuelle URLs und Schnittstellen:
 - `/admin/settings/database`
 - `/api/v1/auth/session`
 - `/api/v1/app/me/day`
+- `/api/v1/app/me/timesheets`
 - `/api/v1/app/timesheets/sync`
+- `/api/v1/system/backup/export`
+- `/api/v1/system/backup/import/validate`
 - `/api/v1/dashboard/overview`
 - `/api/v1/projects`
 - `/api/v1/settings/company`
@@ -315,15 +321,15 @@ Die naechsten wahrscheinlichen Arbeitsbereiche sind:
 - Secret-Haertung fuer sensible Settings
 - Download und Vorschau fuer hochgeladene Dateien
 - produktionsreife Exportlayouts
-- Frontend-Nutzung von Firmenprofil, Theme und GEO-Policy
-- echte mobile PWA mit Offline-Sync
-- spaetere GEO-Erfassung in der Zeiterfassung
+- Restore-Apply-Konzept nach bestehendem Validate-Dry-Run
+- tiefere Offline-Sync-Konfliktbehandlung
+- spaetere GEO-Auswertung und Datenschutzfinalisierung
 
 ## 17. Kurzfazit fuer neue Laeufe
 Wenn ein neuer Agentenlauf startet, gilt:
 
-- Das Backend-Grundgeruest ist bereits vorhanden.
-- Settings, Theme, CRUD, Uploads und DB-/Admin-Basis existieren schon.
-- Der naechste grosse Schritt ist nicht mehr das Grundgeruest, sondern die sichere Vertiefung und das mobile Frontend.
+- Das Backend-Grundgeruest und die MVP-nahe mobile PWA sind bereits vorhanden.
+- Settings, Theme, CRUD, Uploads, Push, GEO-Erfassung, Historie und DB-/Admin-Basis existieren schon.
+- Der naechste grosse Schritt ist nicht mehr das Grundgeruest, sondern sichere Haertung, Restore-Konzept, Exportreife und kontrollierter Ausbau.
 - Vor jeder neuen Umsetzung muessen `AGENTS.md`, `PROJECTS.md`, `DATABASE.md` und `bootstrap/app.php` gemeinsam gegen den aktuellen Stand gelesen werden.
 - Nach Beendigung einer Arbeitsanweisung, einen Ui-Agent sowie einen Workflow-Agent und einen Code-Review der Änderungen laufen lassen. Findigs oder Probleme bitte direkt Fixen/beheben.

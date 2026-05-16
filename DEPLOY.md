@@ -182,3 +182,24 @@ docker compose -f docker-compose.prod.yml --env-file .env exec timeapp-db mariad
 
 Uploads und Konfigurationsdateien liegen im Storage-Volume. Dieses Volume nicht
 loeschen, wenn nur ein neues Image deployed wird.
+
+## Restore-Status
+
+Die App besitzt aktuell einen geschuetzten Validate-Endpunkt fuer Backup-ZIPs.
+Dieser prueft das Archiv als Dry-Run, fuehrt aber keinen produktiven Restore aus.
+Ein Backup-Upload darf daher nicht als Wiederherstellung verstanden werden.
+
+Validiert werden insbesondere:
+
+- `manifest.json`
+- `backup_version`
+- `schema_version`
+- deklarierte Tabellen und JSON-Struktur
+- unsichere Archivpfade wie `../`
+- Upload-Kandidaten ohne Extraktion
+- Runtime-Hinweise ohne automatisches Zurueckspielen
+
+Ein produktiver Restore-Apply braucht einen separaten Auftrag mit explizitem
+Admin-Gate, Wartungs-/Rollback-Konzept und klarer Freigabe. Runtime-Overrides
+wie `storage/config/database.override.php` duerfen nicht ungefragt aus einem
+Backup zurueckgespielt werden.

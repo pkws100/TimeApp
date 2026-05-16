@@ -9,8 +9,7 @@ Monolithische PHP-Anwendung fuer Admin-Backend, API und mobile Mitarbeiter-WebAp
 - Stack: Apache, PHP 8.2, MariaDB 10.11, PHPUnit, Phinx
 
 ## GitHub und Lizenz
-- Geplantes Repository: `pkws100/TimeApp`
-- Sichtbarkeit fuer die Erstveroeffentlichung: privat vorbereiten, nach finalem Check oeffentlich schalten
+- Repository: `pkws100/TimeApp`
 - Lizenz: GNU General Public License Version 2 oder spaeter (`GPL-2.0-or-later`)
 - Rechteinhaber: pkws100
 - Lizenztext: `COPYING`
@@ -67,7 +66,7 @@ php bin/bootstrap-admin.php --email=admin@example.invalid --password='IHR_PASSWO
 ```
 
 ## Docker Compose
-Der Compose-Stand ist fuer einen Dockerhost mit zwei Diensten vorbereitet:
+Der lokale Compose-Stand ist fuer einen Dockerhost mit zwei Diensten vorbereitet:
 
 - `app`: PHP 8.2 + Apache
 - `db`: MariaDB 10.11
@@ -121,6 +120,14 @@ Details stehen in `DEPLOY.md`. Wiederkehrende Updates laufen ueber
 `bin/update-prod.sh`; read-only Smoke- und Status-Checks laufen ueber
 `bin/deploy-prod-check.sh`.
 
+## Backup und Restore-Status
+- `GET /api/v1/system/backup/export` erstellt ein ZIP mit Manifest, Datenbank-JSON, Upload-Kandidaten und optionalem Runtime-Hinweis.
+- `POST /api/v1/system/backup/import/validate` validiert ein hochgeladenes Backup als Dry-Run.
+- Der Validate-Endpunkt prueft Manifest, `backup_version`, `schema_version`, deklarierte Tabellen-JSON-Dateien und unsichere Archivpfade.
+- Es gibt bewusst noch keinen produktiven Restore-Apply. Ein Upload fuehrt niemals automatisch einen Restore aus.
+- Runtime-Overrides wie `storage/config/database.override.php` werden im Restore-Plan nur erkannt und nicht ungefragt zurueckgespielt.
+- Backup- und Restore-Validierung sind mit `settings.database.manage` geschuetzt.
+
 ## Wichtige Composer-Befehle
 ```bash
 composer test
@@ -163,14 +170,14 @@ vendor/bin/phinx seed:run -c phinx.php -s DemoDataSeeder
   Session-Dateien und sonstige Runtime-Daten ausserhalb des Git-Repos bleiben.
 
 ## Veroeffentlichung auf GitHub
-Vorgesehene Repository-Daten:
+Repository-Daten:
 
 - Owner/Repo: `pkws100/TimeApp`
 - Default-Branch: `main`
 - Beschreibung: `Baustellen- und Zeiterfassungs-App mit PHP-Admin-Backend, API und mobiler PWA-Zeiterfassung`
 - Topics: `php`, `mariadb`, `time-tracking`, `pwa`, `construction`, `self-hosted`, `docker`
 
-Nach Anlage des privaten GitHub-Repositories:
+Remote fuer frische Klone bzw. neue Arbeitskopien:
 
 ```bash
 git remote add origin git@github.com:pkws100/TimeApp.git
