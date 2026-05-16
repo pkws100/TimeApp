@@ -14,17 +14,18 @@ RUN apt-get update \
         libzip-dev \
         libxml2-dev \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
+    && docker-php-ext-install dom \
+    && docker-php-ext-install \
+        simplexml \
+        xml \
+        xmlreader \
+        xmlwriter \
     && docker-php-ext-install -j"$(nproc)" \
-        dom \
         curl \
         fileinfo \
         gd \
         mbstring \
         pdo_mysql \
-        simplexml \
-        xml \
-        xmlreader \
-        xmlwriter \
         zip \
     && a2enmod headers rewrite \
     && rm -rf /var/lib/apt/lists/*
