@@ -230,6 +230,7 @@ $admin = static fn (callable $handler, ?string $permission = 'dashboard.view'): 
 $api = static fn (callable $handler, ?string $permission = null): callable => $routeGuard->forApi($handler, $permission);
 
 $router = new Router();
+$router->get('/favicon.ico', static fn (): Response => Response::redirect('/assets/app-icon.svg'));
 $router->get('/', static function () use ($authService): Response {
     $user = $authService->currentUser();
 

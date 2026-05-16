@@ -44,6 +44,7 @@ final class AdminAuthController
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Admin Login</title>
+    <link rel="icon" href="/assets/app-icon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/assets/css/admin.css">
 </head>
 <body>

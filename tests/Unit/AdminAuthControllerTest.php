@@ -50,5 +50,6 @@ final class AdminAuthControllerTest extends TestCase
 
         self::assertStringContainsString('bin/bootstrap-admin.php', $content);
         self::assertStringContainsString('System ist noch nicht initialisiert', $content);
+        self::assertStringContainsString('<link rel="icon" href="/assets/app-icon.svg" type="image/svg+xml">', $content);
     }
 }

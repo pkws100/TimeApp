@@ -33,6 +33,7 @@ final class AdminViewTest extends TestCase
 
         self::assertStringContainsString('Team Cockpit', $html);
         self::assertStringContainsString('Titel | Team Cockpit', $html);
+        self::assertStringContainsString('<link rel="icon" href="/assets/app-icon.svg" type="image/svg+xml">', $html);
         self::assertStringContainsString('/admin/attendance', $html);
         self::assertStringContainsString('/admin/projects', $html);
         self::assertStringContainsString('/admin/bookings', $html);

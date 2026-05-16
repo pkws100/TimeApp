@@ -32,6 +32,7 @@ final class AdminView
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{$title} | {$appName}</title>
+    <link rel="icon" href="/assets/app-icon.svg" type="image/svg+xml">
     <script>{$themeBootstrap}</script>
     <link rel="stylesheet" href="/assets/css/admin.css">
 </head>

@@ -29,6 +29,7 @@ final class AppView
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#d97706">
     <title>{$title}</title>
+    <link rel="icon" href="/assets/app-icon.svg" type="image/svg+xml">
     <link rel="manifest" href="/app/manifest.json">
     <link rel="stylesheet" href="{$cssUrl}">
 </head>

@@ -38,6 +38,23 @@ final class RouterSmokeTest extends TestCase
         self::assertSame('mysql', $config->get('database.default'));
     }
 
+    public function testFaviconRouteRedirectsToSharedAppIcon(): void
+    {
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/favicon.ico';
+        $_GET = [];
+        $_POST = [];
+        $_FILES = [];
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $router->dispatch($request)->send();
+        $html = ob_get_clean() ?: '';
+
+        self::assertSame('', $html);
+    }
+
     public function testBootstrapExposesAttendanceAndChartRoutes(): void
     {
         $_SERVER['REQUEST_METHOD'] = 'GET';
