@@ -9,6 +9,8 @@ use DateTimeImmutable;
 
 final class AdminCalendarService
 {
+    private ?array $activeUsers = null;
+
     public function __construct(
         private DatabaseConnection $connection,
         private AdminBookingService $bookingService
@@ -120,6 +122,16 @@ final class AdminCalendarService
             $activeBookings,
             static fn (array $booking): bool => (string) ($booking['entry_type'] ?? 'work') === 'work'
         ));
+        $activeAbsenceBookings = array_values(array_filter(
+            $activeBookings,
+            static fn (array $booking): bool => in_array((string) ($booking['entry_type'] ?? 'work'), ['sick', 'vacation', 'holiday', 'absent'], true)
+        ));
+        $absenceCounts = $this->absenceCounts($activeAbsenceBookings);
+        $bookedUserIds = array_values(array_unique(array_filter(array_map(
+            static fn (array $booking): ?int => isset($booking['user_id']) ? (int) $booking['user_id'] : null,
+            $activeBookings
+        ))));
+        $missingCount = $this->missingCount($date, $bookedUserIds);
         $hasProblem = false;
 
         foreach ($bookings as $booking) {
@@ -130,12 +142,7 @@ final class AdminCalendarService
                 break;
             }
 
-            if ($entryType !== 'work') {
-                $hasProblem = true;
-                break;
-            }
-
-            if (trim((string) ($booking['start_time'] ?? '')) === '' || trim((string) ($booking['end_time'] ?? '')) === '') {
+            if ($entryType === 'work' && (trim((string) ($booking['start_time'] ?? '')) === '' || trim((string) ($booking['end_time'] ?? '')) === '')) {
                 $hasProblem = true;
                 break;
             }
@@ -152,6 +159,12 @@ final class AdminCalendarService
         if ($hasProblem) {
             $status = 'issue';
             $statusLabel = 'Pruefen';
+        } elseif ($missingCount > 0) {
+            $status = 'missing';
+            $statusLabel = 'Fehlend';
+        } elseif ($activeAbsenceBookings !== [] && $activeWorkBookings === []) {
+            $status = 'absence';
+            $statusLabel = 'Abwesenheit';
         } elseif ($activeWorkBookings !== []) {
             $status = 'ok';
             $statusLabel = 'Sauber';
@@ -164,6 +177,12 @@ final class AdminCalendarService
             'booking_count' => count($bookings),
             'active_booking_count' => count($activeBookings),
             'work_booking_count' => count($activeWorkBookings),
+            'absence_count' => count($activeAbsenceBookings),
+            'missing_count' => $missingCount,
+            'sick_count' => $absenceCounts['sick'],
+            'vacation_count' => $absenceCounts['vacation'],
+            'holiday_count' => $absenceCounts['holiday'],
+            'stored_absent_count' => $absenceCounts['absent'],
             'employee_count' => count(array_unique(array_filter(array_map(
                 static fn (array $booking): ?int => isset($booking['user_id']) ? (int) $booking['user_id'] : null,
                 $activeBookings
@@ -261,9 +280,7 @@ final class AdminCalendarService
         foreach ($bookings as $booking) {
             $entryType = (string) ($booking['entry_type'] ?? 'work');
             $isIssue = (int) ($booking['is_deleted'] ?? 0) === 1
-                || $entryType !== 'work'
-                || trim((string) ($booking['start_time'] ?? '')) === ''
-                || trim((string) ($booking['end_time'] ?? '')) === ''
+                || ($entryType === 'work' && (trim((string) ($booking['start_time'] ?? '')) === '' || trim((string) ($booking['end_time'] ?? '')) === ''))
                 || (bool) ($booking['needs_project_assignment'] ?? false);
 
             if ($isIssue) {
@@ -284,9 +301,95 @@ final class AdminCalendarService
         return [
             'ok_days' => count(array_filter($currentMonthDays, static fn (array $day): bool => $day['status'] === 'ok')),
             'issue_days' => count(array_filter($currentMonthDays, static fn (array $day): bool => $day['status'] === 'issue')),
+            'absence_days' => count(array_filter($currentMonthDays, static fn (array $day): bool => (int) ($day['absence_count'] ?? 0) > 0)),
+            'missing_days' => count(array_filter($currentMonthDays, static fn (array $day): bool => (int) ($day['missing_count'] ?? 0) > 0)),
             'empty_days' => count(array_filter($currentMonthDays, static fn (array $day): bool => $day['status'] === 'empty')),
             'net_minutes' => array_sum(array_map(static fn (array $day): int => (int) ($day['net_minutes'] ?? 0), $currentMonthDays)),
         ];
+    }
+
+    private function absenceCounts(array $bookings): array
+    {
+        $counts = [
+            'sick' => 0,
+            'vacation' => 0,
+            'holiday' => 0,
+            'absent' => 0,
+        ];
+
+        foreach ($bookings as $booking) {
+            $entryType = (string) ($booking['entry_type'] ?? '');
+
+            if (array_key_exists($entryType, $counts)) {
+                $counts[$entryType]++;
+            }
+        }
+
+        return $counts;
+    }
+
+    private function missingCount(string $date, array $bookedUserIds): int
+    {
+        if (!$this->shouldDeriveMissing($date)) {
+            return 0;
+        }
+
+        return count(array_diff($this->activeUserIds($date), $bookedUserIds));
+    }
+
+    private function activeUserIds(string $date): array
+    {
+        if ($this->activeUsers === null) {
+            if (!$this->connection->tableExists('users')) {
+                $this->activeUsers = [];
+            } else {
+                $this->activeUsers = $this->connection->fetchAll(
+                    'SELECT id, created_at
+                     FROM users
+                     WHERE COALESCE(is_deleted, 0) = 0
+                       AND employment_status = "active"
+                     ORDER BY id ASC'
+                );
+            }
+        }
+
+        try {
+            $dayEnd = new DateTimeImmutable($date . ' 23:59:59');
+        } catch (\Exception) {
+            return [];
+        }
+
+        return array_values(array_unique(array_filter(array_map(
+            static function (array $row) use ($dayEnd): int {
+                $createdAt = trim((string) ($row['created_at'] ?? ''));
+
+                if ($createdAt !== '') {
+                    try {
+                        if (new DateTimeImmutable($createdAt) > $dayEnd) {
+                            return 0;
+                        }
+                    } catch (\Exception) {
+                        return 0;
+                    }
+                }
+
+                return (int) ($row['id'] ?? 0);
+            },
+            $this->activeUsers
+        ))));
+    }
+
+    private function shouldDeriveMissing(string $dateInput): bool
+    {
+        try {
+            $date = new DateTimeImmutable($dateInput);
+        } catch (\Exception) {
+            return false;
+        }
+
+        $today = new DateTimeImmutable('today');
+
+        return (int) $date->format('N') <= 5 && $date <= $today;
     }
 
     private function monthLabel(DateTimeImmutable $date): string

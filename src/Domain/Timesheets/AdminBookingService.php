@@ -411,7 +411,7 @@ final class AdminBookingService
             'sick' => 'Krank',
             'vacation' => 'Urlaub',
             'holiday' => 'Feiertag',
-            'absent' => 'Abwesend',
+            'absent' => 'Fehlt',
         ];
     }
 

@@ -97,6 +97,86 @@ test('expired mobile session returns to login and keeps pending queue', async ({
   expect(queueCount).toBe(1);
 });
 
+test('mobile today screen shows derived missing status', async ({ page }) => {
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test',
+          permissions: ['timesheets.create', 'timesheets.view_own']
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          today: '2026-05-15',
+          server_time: '2026-05-15T10:00:00+02:00',
+          user: {
+            id: 7,
+            display_name: 'Max Mustermann',
+            email: 'max@example.test',
+            roles: []
+          },
+          today_state: {
+            work_entry: null,
+            status_entry: null,
+            current_break: null,
+            status: 'missing',
+            is_missing: true,
+            status_source: 'derived_missing'
+          },
+          current_break: null,
+          breaks_today: [],
+          tracked_minutes_live_basis: null,
+          attachments: [],
+          project_day_summaries: [],
+          projects: [],
+          sync: { server_pending_count: 0 },
+          geo_policy: {
+            enabled: false,
+            notice_text: '',
+            requires_acknowledgement: false
+          },
+          company: {
+            app_display_name: 'TimeApp',
+            company_name: 'Muster Bau'
+          }
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { company_name: 'Muster Bau' } })
+    });
+  });
+
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { enabled: false, can_subscribe: false, devices: [] } })
+    });
+  });
+
+  await page.goto('/app/heute');
+
+  await expect(page.getByRole('heading', { name: 'Fehlt' })).toBeVisible();
+  await expect(page.getByText('Fehlt / nicht gebucht')).toBeVisible();
+  await expect(page.getByText('Fuer heute liegt noch keine Buchung vor. Diese Meldung ist automatisch abgeleitet.')).toBeVisible();
+});
+
 test('mobile profile shows company, legal texts and geo policy', async ({ page }) => {
   await page.route('**/api/v1/auth/session', async (route) => {
     await route.fulfill({

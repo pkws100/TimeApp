@@ -126,6 +126,7 @@ Diese Entscheidungen gelten aktuell als gesetzt und sollen nicht ohne expliziten
   - 30 Minuten bei mehr als 6 Stunden
   - 45 Minuten bei mehr als 9 Stunden
 - `timesheets` decken mindestens `work`, `sick`, `vacation`, `holiday` und `absent` ab.
+- Fehlende Tagesbuchungen koennen fuer aktive Mitarbeiter an Werktagen als Status angezeigt werden; dieser abgeleitete Fehlend-Status erzeugt keine automatische `timesheets`-Buchung.
 - Das Firmenprofil ist ein globaler Singleton-Datensatz in `company_settings`.
 - SMTP-Settings liegen aktuell in MariaDB.
 - GEO ist fachlich vorbereitet, aber noch nicht produktiv Teil der Zeiterfassung.

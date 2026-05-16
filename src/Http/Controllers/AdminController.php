@@ -43,11 +43,13 @@ final class AdminController
         $absences = '';
 
         foreach ($overview['absences'] as $absence) {
-            $absences .= '<li><strong>' . htmlspecialchars((string) $absence['name'], ENT_QUOTES, 'UTF-8') . '</strong> - ' . htmlspecialchars((string) $absence['type'], ENT_QUOTES, 'UTF-8') . '</li>';
+            $derivedBadge = (bool) ($absence['is_derived'] ?? false) ? ' <span class="badge warn">automatisch</span>' : '';
+            $typeLabel = (string) ($absence['type_label'] ?? $absence['type'] ?? '');
+            $absences .= '<li><strong>' . htmlspecialchars((string) $absence['name'], ENT_QUOTES, 'UTF-8') . '</strong> - ' . htmlspecialchars($typeLabel, ENT_QUOTES, 'UTF-8') . $derivedBadge . '</li>';
         }
 
         if ($absences === '') {
-            $absences = '<li class="muted">Heute liegen keine Krank-, Fehl- oder Urlaubseintraege vor.</li>';
+            $absences = '<li class="muted">Heute liegen keine Krank-, Urlaubs-, Feiertags- oder Fehl-Eintraege vor.</li>';
         }
 
         $periods = '';
@@ -80,7 +82,7 @@ final class AdminController
         </table>
     </article>
     <article class="card">
-        <h2>Krank / Fehlt / Urlaub</h2>
+        <h2>Krank / Urlaub / Feiertag / Fehlt</h2>
         <ul class="list">{$absences}</ul>
     </article>
 </section>

@@ -806,7 +806,8 @@
             sick: 'Krank',
             vacation: 'Urlaub',
             holiday: 'Feiertag',
-            absent: 'Abwesend',
+            absent: 'Fehlt',
+            missing: 'Fehlt / nicht gebucht',
             unknown: 'Unbekannt'
         };
 
@@ -870,7 +871,8 @@
             sick: 'Krank',
             vacation: 'Urlaub',
             holiday: 'Feiertag',
-            absent: 'Abwesend'
+            absent: 'Fehlt',
+            missing: 'Fehlt / nicht gebucht'
         };
 
         return labels[entryType] || String(entryType || '-');
@@ -1011,6 +1013,15 @@
                 project_id: projectId,
                 project_name: projectNameForId(projectId),
                 status: state.today.today_state.status_entry.entry_type || 'not_started'
+            };
+        }
+
+        if (summaries.length === 0 && state.today && state.today.today_state && state.today.today_state.is_missing) {
+            return {
+                ...emptyProjectDayView(),
+                project_id: projectId,
+                project_name: projectNameForId(projectId),
+                status: 'missing'
             };
         }
 
@@ -1173,7 +1184,9 @@
         const todayState = state.today.today_state || {};
         const entry = todayState.work_entry || null;
         const activeBreak = currentBreak();
-        let status = 'not_started';
+        let status = todayState.status_entry && todayState.status_entry.entry_type
+            ? todayState.status_entry.entry_type
+            : (todayState.is_missing ? 'missing' : 'not_started');
 
         if (entry && entry.start_time) {
             status = entry.end_time ? 'completed' : 'working';
@@ -1663,7 +1676,7 @@
             return 'completed';
         }
 
-        if (status === 'not_started' || status === 'planned') {
+        if (status === 'not_started' || status === 'planned' || status === 'missing') {
             return 'missing';
         }
 
@@ -1676,7 +1689,8 @@
             paused: 'Pause laeuft',
             completed: 'Einsatz abgeschlossen',
             not_started: 'Noch nicht eingecheckt',
-            planned: 'Noch nicht eingecheckt'
+            planned: 'Noch nicht eingecheckt',
+            missing: 'Fehlt'
         };
 
         return headlines[status] || statusLabel(status);
@@ -1692,7 +1706,8 @@
             sick: 'Heute ist ein Kranktag hinterlegt.',
             vacation: 'Heute ist Urlaub hinterlegt.',
             holiday: 'Heute ist ein Feiertag hinterlegt.',
-            absent: 'Heute ist eine Abwesenheit hinterlegt.'
+            absent: 'Heute ist eine Fehlzeit hinterlegt.',
+            missing: 'Fuer heute liegt noch keine Buchung vor. Diese Meldung ist automatisch abgeleitet.'
         };
 
         return hints[status] || 'Aktueller Tagesstatus.';
@@ -3035,6 +3050,11 @@
             workEntry.end_time = null;
             workEntry.break_minutes = 0;
             workEntry.attachments = [];
+        }
+
+        if (payload.action === 'check_in' || payload.action === 'upsert' || payload.action === 'select_project') {
+            todayState.is_missing = false;
+            todayState.status_source = null;
         }
 
         if (payload.action === 'pause') {

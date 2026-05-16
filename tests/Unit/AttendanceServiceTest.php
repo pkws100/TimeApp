@@ -88,5 +88,70 @@ final class AttendanceServiceTest extends TestCase
         self::assertCount(1, $summary['statuses']);
         self::assertSame('sick', $summary['statuses'][0]['entry_type']);
         self::assertSame(1, $summary['status_counts']['sick']);
+        self::assertSame(0, $summary['derived_missing_count']);
+    }
+
+    public function testSummarizeRowsAddsDerivedMissingActiveUsersOnWeekdays(): void
+    {
+        $service = new AttendanceService(new DatabaseConnection([]));
+
+        $summary = $service->summarizeRows([
+            [
+                'id' => 2,
+                'user_id' => 10,
+                'entry_type' => 'work',
+                'employee_number' => 'MA-0010',
+                'first_name' => 'Anna',
+                'last_name' => 'Berg',
+                'project_name' => 'Projekt Alpha',
+                'project_is_deleted' => 0,
+                'note' => '',
+                'updated_at' => '2026-05-15 08:00:00',
+                'user_is_deleted' => 0,
+                'start_time' => '07:00',
+                'end_time' => '15:30',
+                'net_minutes' => 480,
+            ],
+        ], '2026-05-15', [
+            [
+                'id' => 10,
+                'employee_number' => 'MA-0010',
+                'first_name' => 'Anna',
+                'last_name' => 'Berg',
+                'email' => 'anna@example.test',
+            ],
+            [
+                'id' => 11,
+                'employee_number' => 'MA-0011',
+                'first_name' => 'Ben',
+                'last_name' => 'Kurz',
+                'email' => 'ben@example.test',
+            ],
+        ]);
+
+        self::assertSame(1, $summary['derived_missing_count']);
+        self::assertSame(1, $summary['status_counts']['absent']);
+        self::assertSame('absent', $summary['statuses'][0]['entry_type']);
+        self::assertTrue($summary['statuses'][0]['is_derived']);
+        self::assertSame('derived_missing', $summary['statuses'][0]['status_source']);
+        self::assertSame('Keine Tagesbuchung', $summary['statuses'][0]['note']);
+    }
+
+    public function testSummarizeRowsDoesNotDeriveMissingOnWeekends(): void
+    {
+        $service = new AttendanceService(new DatabaseConnection([]));
+
+        $summary = $service->summarizeRows([], '2026-05-16', [
+            [
+                'id' => 11,
+                'employee_number' => 'MA-0011',
+                'first_name' => 'Ben',
+                'last_name' => 'Kurz',
+                'email' => 'ben@example.test',
+            ],
+        ]);
+
+        self::assertSame(0, $summary['derived_missing_count']);
+        self::assertSame(0, $summary['status_counts']['absent']);
     }
 }

@@ -96,6 +96,30 @@ final class RouterSmokeTest extends TestCase
             str_contains($attendancePayload, '"present_count"') || str_contains($attendancePayload, '"Nicht authentifiziert."'),
             'Attendance-Route sollte erreichbar sein und entweder Daten oder einen Auth-Fehler liefern.'
         );
+        self::assertTrue(
+            str_contains($attendancePayload, '"derived_missing_count"') || str_contains($attendancePayload, '"Nicht authentifiziert."'),
+            'Attendance-Route sollte den abgeleiteten Fehlend-Zaehler liefern.'
+        );
+
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/admin/attendance';
+        $_GET = [];
+        $_POST = [];
+        $_FILES = [];
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $router->dispatch($request)->send();
+        $attendanceHtml = ob_get_clean() ?: '';
+
+        self::assertTrue(
+            $attendanceHtml === ''
+            || (str_contains($attendanceHtml, 'Krank') && str_contains($attendanceHtml, 'Urlaub') && str_contains($attendanceHtml, 'Feiertag') && str_contains($attendanceHtml, 'Fehlt'))
+            || str_contains($attendanceHtml, 'Keine Berechtigung')
+            || str_contains($attendanceHtml, '/admin/login?next=%2Fadmin%2Fattendance'),
+            'Die Admin-Anwesenheitsseite sollte getrennte Abwesenheitsstatus rendern.'
+        );
 
         $_SERVER['REQUEST_METHOD'] = 'GET';
         $_SERVER['REQUEST_URI'] = '/api/v1/dashboard/charts?period=week';
@@ -354,7 +378,7 @@ final class RouterSmokeTest extends TestCase
         self::assertTrue(
             $monthPayload === ''
             || str_contains($monthPayload, '"Nicht authentifiziert."')
-            || str_contains($monthPayload, '"days"'),
+            || (str_contains($monthPayload, '"days"') && str_contains($monthPayload, '"missing_count"') && str_contains($monthPayload, '"absence_count"')),
             'Die Admin-Kalender-Monatsroute sollte erreichbar sein.'
         );
 
@@ -371,7 +395,7 @@ final class RouterSmokeTest extends TestCase
         self::assertTrue(
             $dayPayload === ''
             || str_contains($dayPayload, '"Nicht authentifiziert."')
-            || str_contains($dayPayload, '"html"'),
+            || (str_contains($dayPayload, '"html"') && str_contains($dayPayload, 'Fehlt') && str_contains($dayPayload, 'Abwesend')),
             'Die Admin-Kalender-Tagesroute sollte erreichbar sein.'
         );
     }

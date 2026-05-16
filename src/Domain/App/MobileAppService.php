@@ -27,8 +27,12 @@ final class MobileAppService
         $todayWorkEntries = $this->findTodayWorkEntries((int) $user['id'], $today);
         $workEntry = $this->findLatestEntry((int) $user['id'], $today, 'work');
         $lastStatusEntry = $this->findLatestStatusEntry((int) $user['id'], $today);
+        $isMissing = $this->isMissingWorkday($today, $workEntry, $lastStatusEntry);
         $breaksToday = $workEntry !== null ? $this->findBreaksForTimesheet((int) $workEntry['id']) : [];
         $currentBreak = $this->workdayStateCalculator->currentBreak($breaksToday);
+        $status = $isMissing
+            ? 'missing'
+            : $this->workdayStateCalculator->status($workEntry, $lastStatusEntry, $currentBreak);
         $trackedMinutesLiveBasis = $this->workdayStateCalculator->trackedMinutesLiveBasis($today, $workEntry, $breaksToday);
         $attachments = $workEntry !== null ? $this->fileAttachmentService->listForTimesheet((int) $workEntry['id']) : [];
         $projectDaySummaries = $this->buildProjectDaySummaries($today, $todayWorkEntries);
@@ -60,7 +64,9 @@ final class MobileAppService
                 ] : null,
                 'status_entry' => $lastStatusEntry,
                 'current_break' => $currentBreak,
-                'status' => $this->workdayStateCalculator->status($workEntry, $lastStatusEntry, $currentBreak),
+                'status' => $status,
+                'is_missing' => $isMissing,
+                'status_source' => $isMissing ? 'derived_missing' : ($lastStatusEntry !== null ? 'stored' : null),
             ],
             'current_break' => $currentBreak,
             'breaks_today' => $breaksToday,
@@ -285,7 +291,26 @@ final class MobileAppService
             'id' => (int) ($entry['id'] ?? 0),
             'entry_type' => (string) ($entry['entry_type'] ?? ''),
             'note' => $entry['note'] ?? null,
+            'is_derived' => false,
+            'status_source' => 'stored',
         ];
+    }
+
+    private function isMissingWorkday(string $workDate, ?array $workEntry, ?array $statusEntry): bool
+    {
+        if ($workEntry !== null || $statusEntry !== null) {
+            return false;
+        }
+
+        try {
+            $date = new \DateTimeImmutable($workDate);
+        } catch (\Exception) {
+            return false;
+        }
+
+        $today = new \DateTimeImmutable('today');
+
+        return (int) $date->format('N') <= 5 && $date <= $today;
     }
 
     private function findTodayWorkEntries(int $userId, string $workDate): array

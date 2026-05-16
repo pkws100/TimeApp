@@ -68,6 +68,18 @@ final class MobileAppServiceTest extends TestCase
         self::assertSame(120, $summaries[1]['total_net_minutes']);
     }
 
+    public function testMissingWorkdayIsDerivedOnlyForWeekdaysWithoutEntries(): void
+    {
+        $service = $this->service();
+        $method = new ReflectionMethod($service, 'isMissingWorkday');
+        $method->setAccessible(true);
+
+        self::assertTrue($method->invoke($service, '2026-05-15', null, null));
+        self::assertFalse($method->invoke($service, '2026-05-16', null, null));
+        self::assertFalse($method->invoke($service, '2026-05-15', ['id' => 1], null));
+        self::assertFalse($method->invoke($service, '2026-05-15', null, ['entry_type' => 'sick']));
+    }
+
     private function service(): MobileAppService
     {
         $connection = new DatabaseConnection([]);

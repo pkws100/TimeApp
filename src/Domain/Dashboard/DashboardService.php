@@ -61,9 +61,11 @@ final class DashboardService
                 ],
                 'allocations' => array_values($allocations),
                 'absences' => array_map(
-                    static fn (array $status): array => [
+                    fn (array $status): array => [
                         'name' => (string) ($status['user_name'] ?? ''),
                         'type' => (string) ($status['entry_type'] ?? ''),
+                        'type_label' => $this->statusLabel((string) ($status['entry_type'] ?? '')),
+                        'is_derived' => (bool) ($status['is_derived'] ?? false),
                     ],
                     $attendance['statuses']
                 ),
@@ -217,6 +219,17 @@ final class DashboardService
             'month' => $this->periodOverview('month', 'Monat'),
             'year' => $this->periodOverview('year', 'Jahr'),
         ];
+    }
+
+    private function statusLabel(string $entryType): string
+    {
+        return match ($entryType) {
+            'sick' => 'Krank',
+            'vacation' => 'Urlaub',
+            'holiday' => 'Feiertag',
+            'absent' => 'Fehlt',
+            default => $entryType,
+        };
     }
 
     private function periodOverview(string $period, string $label): array

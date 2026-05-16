@@ -47,8 +47,9 @@ final class AttendanceService
                  ORDER BY timesheets.user_id ASC, timesheets.updated_at DESC, timesheets.id DESC',
                 ['today' => $today]
             );
+            $activeUsers = $this->activeUsers();
 
-            return $this->summarizeRows($rows, $today);
+            return $this->summarizeRows($rows, $today, $activeUsers);
         }
 
         return $this->fallbackSummary($today);
@@ -59,11 +60,12 @@ final class AttendanceService
         return (int) $this->todaySummary($today)['present_count'];
     }
 
-    public function summarizeRows(array $rows, string $today): array
+    public function summarizeRows(array $rows, string $today, array $activeUsers = []): array
     {
         $present = [];
         $statuses = [];
         $seenUsers = [];
+        $usersWithStatus = [];
 
         foreach ($rows as $row) {
             $userId = (int) ($row['user_id'] ?? 0);
@@ -79,6 +81,7 @@ final class AttendanceService
             }
 
             $seenUsers[$userId] = true;
+            $usersWithStatus[$userId] = true;
             $entryType = (string) ($row['entry_type'] ?? '');
             $mapped = $this->mapRow($row);
 
@@ -92,15 +95,27 @@ final class AttendanceService
                 $statuses[] = [
                     ...$mapped,
                     'entry_type' => $entryType,
+                    'is_derived' => false,
+                    'status_source' => 'stored',
                 ];
             }
         }
+
+        foreach ($this->derivedMissingStatuses($activeUsers, $usersWithStatus, $today) as $missingStatus) {
+            $statuses[] = $missingStatus;
+        }
+
+        $derivedMissingCount = count(array_filter(
+            $statuses,
+            static fn (array $status): bool => (string) ($status['status_source'] ?? '') === 'derived_missing'
+        ));
 
         return [
             'today' => $today,
             'present_count' => count($present),
             'present' => $present,
             'status_counts' => $this->statusCounts($statuses),
+            'derived_missing_count' => $derivedMissingCount,
             'statuses' => $statuses,
         ];
     }
@@ -134,6 +149,8 @@ final class AttendanceService
                 'note' => 'Urlaub genehmigt',
                 'updated_at' => $today . ' 08:00:00',
                 'entry_type' => 'vacation',
+                'is_derived' => false,
+                'status_source' => 'stored',
             ],
         ];
 
@@ -142,8 +159,72 @@ final class AttendanceService
             'present_count' => count($present),
             'present' => $present,
             'status_counts' => $this->statusCounts($statuses),
+            'derived_missing_count' => 0,
             'statuses' => $statuses,
         ];
+    }
+
+    private function activeUsers(): array
+    {
+        if (!$this->connection->tableExists('users')) {
+            return [];
+        }
+
+        return $this->connection->fetchAll(
+            'SELECT id, employee_number, first_name, last_name, email
+             FROM users
+             WHERE COALESCE(is_deleted, 0) = 0
+               AND employment_status = "active"
+             ORDER BY last_name ASC, first_name ASC, id ASC'
+        );
+    }
+
+    private function derivedMissingStatuses(array $activeUsers, array $usersWithStatus, string $today): array
+    {
+        if (!$this->shouldDeriveMissing($today)) {
+            return [];
+        }
+
+        $statuses = [];
+
+        foreach ($activeUsers as $user) {
+            $userId = (int) ($user['id'] ?? 0);
+
+            if ($userId <= 0 || isset($usersWithStatus[$userId])) {
+                continue;
+            }
+
+            $statuses[] = [
+                'user_id' => $userId,
+                'employee_number' => $this->nullableTrimmed($user['employee_number'] ?? null),
+                'user_name' => $this->userName($user),
+                'location' => 'Nicht zugeordnet',
+                'project_name' => null,
+                'start_time' => null,
+                'end_time' => null,
+                'net_minutes' => 0,
+                'note' => 'Keine Tagesbuchung',
+                'updated_at' => '',
+                'entry_type' => 'absent',
+                'is_derived' => true,
+                'status_source' => 'derived_missing',
+            ];
+        }
+
+        return $statuses;
+    }
+
+    private function shouldDeriveMissing(string $today): bool
+    {
+        try {
+            $date = new \DateTimeImmutable($today);
+        } catch (\Exception) {
+            return false;
+        }
+
+        $currentDay = new \DateTimeImmutable('today');
+
+        return (int) $date->format('N') <= 5 && $date <= $currentDay;
     }
 
     private function mapRow(array $row): array

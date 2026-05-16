@@ -1122,6 +1122,14 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
     background: var(--page-line-strong);
 }
 
+.calendar-dot.is-absence {
+    background: #2563eb;
+}
+
+.calendar-dot.is-missing {
+    background: #d97706;
+}
+
 .calendar-dot.is-issue {
     background: #dc2626;
 }
@@ -1182,6 +1190,16 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
     background: linear-gradient(180deg, var(--page-surface-strong) 0%, var(--page-surface-soft) 100%);
 }
 
+.calendar-day.is-absence {
+    background: linear-gradient(180deg, var(--page-surface-strong) 0%, rgba(37, 99, 235, 0.13) 100%);
+    border-color: rgba(37, 99, 235, 0.32);
+}
+
+.calendar-day.is-missing {
+    background: linear-gradient(180deg, var(--page-surface-strong) 0%, rgba(217, 119, 6, 0.16) 100%);
+    border-color: rgba(217, 119, 6, 0.34);
+}
+
 .calendar-day.is-issue {
     background: linear-gradient(180deg, var(--page-surface-strong) 0%, rgba(220, 38, 38, 0.14) 100%);
     border-color: rgba(220, 38, 38, 0.34);
@@ -1218,9 +1236,29 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
     color: var(--page-muted);
 }
 
+.calendar-status-badge.is-absence {
+    background: rgba(37, 99, 235, 0.14);
+    color: #1d4ed8;
+}
+
+.calendar-status-badge.is-missing {
+    background: rgba(217, 119, 6, 0.16);
+    color: #a16207;
+}
+
 .calendar-status-badge.is-issue {
     background: rgba(220, 38, 38, 0.14);
     color: #b91c1c;
+}
+
+html[data-theme="dark"] .calendar-status-badge.is-absence {
+    background: rgba(96, 165, 250, 0.2);
+    color: #bfdbfe;
+}
+
+html[data-theme="dark"] .calendar-status-badge.is-missing {
+    background: rgba(251, 191, 36, 0.2);
+    color: #fde68a;
 }
 
 html[data-theme="dark"] .calendar-status-badge.is-issue {

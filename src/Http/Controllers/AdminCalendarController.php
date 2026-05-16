@@ -133,6 +133,8 @@ final class AdminCalendarController
         <div class="calendar-legend" aria-label="Kalenderstatus">
             <span><i class="calendar-dot is-ok"></i>Sauber</span>
             <span><i class="calendar-dot is-empty"></i>Keine Buchung</span>
+            <span><i class="calendar-dot is-absence"></i>Abwesenheit</span>
+            <span><i class="calendar-dot is-missing"></i>Fehlend</span>
             <span><i class="calendar-dot is-issue"></i>Pruefen</span>
         </div>
         <div class="calendar-weekdays" aria-hidden="true">
@@ -174,6 +176,14 @@ HTML;
 
             if ((int) ($day['issue_count'] ?? 0) > 0) {
                 $meta[] = (int) $day['issue_count'] . ' offen';
+            }
+
+            if ((int) ($day['absence_count'] ?? 0) > 0) {
+                $meta[] = (int) $day['absence_count'] . ' abw.';
+            }
+
+            if ((int) ($day['missing_count'] ?? 0) > 0) {
+                $meta[] = (int) $day['missing_count'] . ' fehlt';
             }
 
             $html .= '<button type="button" class="' . trim(implode(' ', array_filter($classes))) . '" data-calendar-date="' . $this->e($date) . '" aria-pressed="' . ($date === $selectedDate ? 'true' : 'false') . '">'
@@ -220,6 +230,10 @@ HTML;
     <div><span>Buchungen</span><strong>{$this->e((string) ($summary['active_booking_count'] ?? 0))}</strong></div>
     <div><span>Mitarbeiter</span><strong>{$this->e((string) ($summary['employee_count'] ?? 0))}</strong></div>
     <div><span>Stunden</span><strong>{$this->e($this->formatMinutes((int) ($summary['net_minutes'] ?? 0)))}</strong></div>
+    <div><span>Krank</span><strong>{$this->e((string) ($summary['sick_count'] ?? 0))}</strong></div>
+    <div><span>Urlaub</span><strong>{$this->e((string) ($summary['vacation_count'] ?? 0))}</strong></div>
+    <div><span>Feiertag</span><strong>{$this->e((string) ($summary['holiday_count'] ?? 0))}</strong></div>
+    <div><span>Fehlt</span><strong>{$this->e((string) ((int) ($summary['stored_absent_count'] ?? 0) + (int) ($summary['missing_count'] ?? 0)))}</strong></div>
 </div>
 {$this->renderAssetList($assets)}
 {$createForm}

@@ -9,6 +9,8 @@ use App\Domain\Timesheets\AdminCalendarService;
 use App\Domain\Timesheets\TimesheetCalculator;
 use App\Infrastructure\Database\DatabaseConnection;
 use PHPUnit\Framework\TestCase;
+use ReflectionMethod;
+use ReflectionProperty;
 
 final class AdminCalendarServiceTest extends TestCase
 {
@@ -55,13 +57,68 @@ final class AdminCalendarServiceTest extends TestCase
         self::assertSame(0, $summary['active_booking_count']);
     }
 
-    public function testDaySummaryMarksAbsenceArchivedAndOpenWorkAsRed(): void
+    public function testDaySummaryShowsAbsenceWithoutMarkingItAsIssue(): void
+    {
+        $summary = $this->service()->summarizeDay('2026-05-08', [
+            $this->booking(['entry_type' => 'sick', 'start_time' => null, 'end_time' => null]),
+        ]);
+
+        self::assertSame('absence', $summary['status']);
+        self::assertSame('Abwesenheit', $summary['status_label']);
+        self::assertSame(1, $summary['absence_count']);
+        self::assertSame(1, $summary['sick_count']);
+        self::assertSame(0, $summary['issue_count']);
+    }
+
+    public function testDaySummaryMarksDerivedMissingForUnbookedActiveUsers(): void
+    {
+        $service = $this->serviceWithActiveUsers([7, 8]);
+        $summary = $service->summarizeDay('2026-05-08', [
+            $this->booking(['user_id' => 7]),
+        ]);
+
+        self::assertSame('missing', $summary['status']);
+        self::assertSame('Fehlend', $summary['status_label']);
+        self::assertSame(1, $summary['missing_count']);
+        self::assertSame(1, $summary['work_booking_count']);
+    }
+
+    public function testDaySummaryDoesNotCountUsersCreatedAfterTheDayAsMissing(): void
+    {
+        $service = $this->serviceWithActiveUserRows([
+            ['id' => 7, 'created_at' => '2026-01-01 00:00:00'],
+            ['id' => 8, 'created_at' => '2026-05-09 00:00:00'],
+        ]);
+        $summary = $service->summarizeDay('2026-05-08', [
+            $this->booking(['user_id' => 7]),
+        ]);
+
+        self::assertSame(0, $summary['missing_count']);
+    }
+
+    public function testMonthTotalsCountAbsenceAndMissingByCountsNotDominantStatus(): void
+    {
+        $service = $this->service();
+        $monthTotals = new ReflectionMethod($service, 'monthTotals');
+        $monthTotals->setAccessible(true);
+        $totals = $monthTotals->invoke($service, [
+            [
+                'is_current_month' => true,
+                'status' => 'missing',
+                'absence_count' => 1,
+                'missing_count' => 1,
+                'net_minutes' => 0,
+            ],
+        ]);
+
+        self::assertSame(1, $totals['absence_days']);
+        self::assertSame(1, $totals['missing_days']);
+    }
+
+    public function testDaySummaryMarksArchivedAndOpenWorkAsRed(): void
     {
         $service = $this->service();
 
-        self::assertSame('issue', $service->summarizeDay('2026-05-08', [
-            $this->booking(['entry_type' => 'sick', 'start_time' => null, 'end_time' => null]),
-        ])['status']);
         self::assertSame('issue', $service->summarizeDay('2026-05-08', [
             $this->booking(['is_deleted' => 1]),
         ])['status']);
@@ -78,6 +135,24 @@ final class AdminCalendarServiceTest extends TestCase
         $connection = new DatabaseConnection([]);
 
         return new AdminCalendarService($connection, new AdminBookingService($connection, new TimesheetCalculator()));
+    }
+
+    private function serviceWithActiveUsers(array $userIds): AdminCalendarService
+    {
+        return $this->serviceWithActiveUserRows(array_map(
+            static fn (int $userId): array => ['id' => $userId, 'created_at' => '2026-01-01 00:00:00'],
+            $userIds
+        ));
+    }
+
+    private function serviceWithActiveUserRows(array $users): AdminCalendarService
+    {
+        $service = $this->service();
+        $property = new ReflectionProperty($service, 'activeUsers');
+        $property->setAccessible(true);
+        $property->setValue($service, $users);
+
+        return $service;
     }
 
     private function booking(array $overrides = []): array

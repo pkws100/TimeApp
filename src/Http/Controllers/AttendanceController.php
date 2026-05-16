@@ -42,7 +42,8 @@ final class AttendanceController
             $statusRows .= '<tr>'
                 . '<td>' . $this->escape((string) ($status['employee_number'] ?? '')) . '</td>'
                 . '<td>' . $this->escape((string) ($status['user_name'] ?? '')) . '</td>'
-                . '<td>' . $this->escape($this->statusLabel((string) ($status['entry_type'] ?? ''))) . '</td>'
+                . '<td>' . $this->escape($this->statusLabel((string) ($status['entry_type'] ?? '')))
+                    . ((bool) ($status['is_derived'] ?? false) ? '<br><span class="badge warn">automatisch</span>' : '') . '</td>'
                 . '<td>' . $this->escape((string) ($status['note'] ?? '')) . '</td>'
                 . '</tr>';
         }
@@ -74,8 +75,13 @@ final class AttendanceController
         <p class="status-value">{$this->escape((string) ($summary['status_counts']['vacation'] ?? 0))}</p>
     </article>
     <article class="card status-card">
-        <h2>Feiertag / Fehlt</h2>
-        <p class="status-value">{$this->escape((string) ((int) ($summary['status_counts']['holiday'] ?? 0) + (int) ($summary['status_counts']['absent'] ?? 0)))}</p>
+        <h2>Feiertag</h2>
+        <p class="status-value">{$this->escape((string) ($summary['status_counts']['holiday'] ?? 0))}</p>
+    </article>
+    <article class="card status-card">
+        <h2>Fehlt</h2>
+        <p class="status-value">{$this->escape((string) ($summary['status_counts']['absent'] ?? 0))}</p>
+        <p class="muted">{$this->escape((string) ($summary['derived_missing_count'] ?? 0))} automatisch erkannt</p>
     </article>
 </section>
 
