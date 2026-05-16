@@ -17,7 +17,7 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [x] Eigenes App-Login fuer Mitarbeiter vorbereiten.
 - [x] Session-/Token-Handling fuer geschuetzte API-Aufrufe definieren.
 - [x] Logout und Session-Wiederaufnahme beim App-Start beruecksichtigen.
-- [ ] Fehlerfall bei abgelaufener oder ungueltiger Session sauber behandeln.
+- [x] Fehlerfall bei abgelaufener oder ungueltiger Session sauber behandeln.
 - [x] Auth-Status so vorbereiten, dass Offline-Puffer und spaetere Synchronisation damit kompatibel bleiben.
 
 ### Mobile Kernscreens
@@ -123,6 +123,7 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [x] Browser-Push fuer fehlende Tagesbuchungen mit Rollenfreigabe, Admin-Settings, Geraeteverwaltung und Cron-CLI eingebaut.
 - [x] Mobile Projekt- und Buchungsdatei-Uploads mit geschuetzten Abruf-URLs, Kamera-Inputs und JPEG-EXIF-Orientation-Normalisierung umgesetzt.
 - [x] Backend-Anzeige fuer Buchungsanhaenge in Buchungen und Kalender inklusive geschuetztem Download, Bildvorschau und Archivierung umgesetzt.
+- [x] Abgelaufene App-Sessions fuehren sauber zum Login, ohne Offline-Queue oder lokale Caches zu verlieren.
 - [x] Möglichkeit schaffen das System auch in Docker-Compose zu deplyen
 - [x] Produktions-Compose fuer VPS/Reverse Proxy mit `timeapp-web`, `timeapp-db`, `timeapp-scheduler`, privaten DB-Netz, Proxy-Netz und stabilen Volumes validiert.
 - [x] Dockerfile fuer `php:8.2-apache` bereinigt: nur fehlende Extensions werden gebaut; bereits enthaltene Core-Extensions werden nicht erneut kompiliert.

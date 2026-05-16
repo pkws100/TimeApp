@@ -55,6 +55,40 @@ function chartOptions() {
     };
 }
 
+async function adminJson(url) {
+    const response = await fetch(url, {
+        headers: { Accept: 'application/json' }
+    });
+
+    if (response.redirected && response.url.includes('/admin/login')) {
+        window.location.href = response.url;
+        throw new Error('Bitte erneut anmelden.');
+    }
+
+    if (response.status === 401) {
+        window.location.href = '/admin/login?next=' + encodeURIComponent(window.location.pathname + window.location.search);
+        throw new Error('Bitte erneut anmelden.');
+    }
+
+    if (response.status === 403) {
+        throw new Error('Keine Berechtigung fuer diese Dashboard-Daten.');
+    }
+
+    const contentType = response.headers.get('Content-Type') || '';
+
+    if (!contentType.includes('application/json')) {
+        throw new Error('Ungueltige Serverantwort.');
+    }
+
+    const payload = await response.json();
+
+    if (!response.ok) {
+        throw new Error(payload.message || payload.error || 'Dashboard-Daten konnten nicht geladen werden.');
+    }
+
+    return payload;
+}
+
 async function bootDashboard() {
     const chartTarget = document.getElementById('headcountChart');
 
@@ -63,8 +97,7 @@ async function bootDashboard() {
     }
 
     try {
-        const response = await fetch('/api/v1/dashboard/charts');
-        const payload = await response.json();
+        const payload = await adminJson('/api/v1/dashboard/charts');
 
         if (window.Chart) {
             const chart = new window.Chart(chartTarget, {

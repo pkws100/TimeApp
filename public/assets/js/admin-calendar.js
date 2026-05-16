@@ -25,6 +25,40 @@
         root.classList.toggle('is-loading', Boolean(loading));
     }
 
+    async function adminJson(url) {
+        var response = await fetch(url, {
+            headers: {'Accept': 'application/json'}
+        });
+
+        if (response.redirected && response.url.indexOf('/admin/login') !== -1) {
+            window.location.href = response.url;
+            throw new Error('Bitte erneut anmelden.');
+        }
+
+        if (response.status === 401) {
+            window.location.href = '/admin/login?next=' + encodeURIComponent(window.location.pathname + window.location.search);
+            throw new Error('Bitte erneut anmelden.');
+        }
+
+        if (response.status === 403) {
+            throw new Error('Keine Berechtigung fuer diese Kalenderdaten.');
+        }
+
+        var contentType = response.headers.get('Content-Type') || '';
+
+        if (contentType.indexOf('application/json') === -1) {
+            throw new Error('Ungueltige Serverantwort.');
+        }
+
+        var payload = await response.json();
+
+        if (!response.ok) {
+            throw new Error(payload.message || payload.error || 'Daten konnten nicht geladen werden.');
+        }
+
+        return payload;
+    }
+
     function renderMonth(root, payload) {
         var grid = root.querySelector('[data-calendar-grid]');
         var title = root.querySelector('[data-calendar-title]');
@@ -79,12 +113,9 @@
         setLoading(root, true);
 
         try {
-            var response = await fetch('/admin/calendar/month?month=' + encodeURIComponent(month), {
-                headers: {'Accept': 'application/json'}
-            });
-            var payload = await response.json();
+            var payload = await adminJson('/admin/calendar/month?month=' + encodeURIComponent(month));
 
-            if (!response.ok || !payload.data) {
+            if (!payload.data) {
                 throw new Error('Monat konnte nicht geladen werden.');
             }
 
@@ -125,12 +156,9 @@
         panel.classList.add('is-loading');
 
         try {
-            var response = await fetch('/admin/calendar/day?date=' + encodeURIComponent(date), {
-                headers: {'Accept': 'application/json'}
-            });
-            var payload = await response.json();
+            var payload = await adminJson('/admin/calendar/day?date=' + encodeURIComponent(date));
 
-            if (!response.ok || !payload.data || typeof payload.data.html !== 'string') {
+            if (!payload.data || typeof payload.data.html !== 'string') {
                 throw new Error('Tag konnte nicht geladen werden.');
             }
 

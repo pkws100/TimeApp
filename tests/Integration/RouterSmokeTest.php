@@ -55,6 +55,27 @@ final class RouterSmokeTest extends TestCase
         self::assertSame('', $html);
     }
 
+    public function testHeadRequestsReachGetRoutesWithoutBody(): void
+    {
+        $_SERVER['REQUEST_METHOD'] = 'HEAD';
+        $_SERVER['REQUEST_URI'] = '/admin/login';
+        $_GET = [];
+        $_POST = [];
+        $_FILES = [];
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        $response = $router->dispatch($request);
+
+        self::assertSame(200, $response->status());
+
+        ob_start();
+        $response->send($request->method() === 'HEAD');
+        $body = ob_get_clean() ?: '';
+
+        self::assertSame('', $body);
+    }
+
     public function testBootstrapExposesAttendanceAndChartRoutes(): void
     {
         $_SERVER['REQUEST_METHOD'] = 'GET';
@@ -139,17 +160,16 @@ final class RouterSmokeTest extends TestCase
         [$request, $router] = require base_path('bootstrap/app.php');
 
         ob_start();
-        $router->dispatch($request)->send();
+        $attachmentResponse = $router->dispatch($request);
+        $attachmentResponse->send();
         $attachmentPayload = ob_get_clean() ?: '';
+        $attachmentJson = json_decode($attachmentPayload, true);
 
-        self::assertTrue(
-            str_contains($attachmentPayload, '"Nicht authentifiziert."') || str_contains($attachmentPayload, '"data"'),
-            'Timesheet-Datei-Route sollte erreichbar sein und entweder Daten oder einen Auth-Fehler liefern.'
-        );
-        self::assertTrue(
-            str_contains($attachmentPayload, '"message"') || str_contains($attachmentPayload, '"data"'),
-            'Timesheet-Datei-Route sollte strukturierte JSON-Meldungen fuer das Frontend liefern.'
-        );
+        self::assertSame(401, $attachmentResponse->status());
+        self::assertIsArray($attachmentJson);
+        self::assertSame(false, $attachmentJson['ok'] ?? null);
+        self::assertSame('auth_required', $attachmentJson['code'] ?? null);
+        self::assertSame('Bitte erneut anmelden.', $attachmentJson['message'] ?? null);
 
         $_SERVER['REQUEST_METHOD'] = 'GET';
         $_SERVER['REQUEST_URI'] = '/api/v1/app/projects/1/files';

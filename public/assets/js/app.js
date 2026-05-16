@@ -46,6 +46,7 @@
         pushBusy: false,
         installPromptAvailable: false,
         fileSelectionGuardUntil: 0,
+        sessionExpiredHandled: false,
     };
     let feedbackTimer = null;
     let clientIdCounter = 0;
@@ -455,6 +456,81 @@
         };
 
         return map[value] || value || fallback || 'Bitte erneut versuchen.';
+    }
+
+    class SessionExpiredError extends Error {
+        constructor(message) {
+            super(message || 'Ihre Sitzung ist abgelaufen. Bitte erneut anmelden.');
+            this.name = 'SessionExpiredError';
+        }
+    }
+
+    function isSessionExpiredError(error) {
+        return error instanceof SessionExpiredError;
+    }
+
+    async function handleExpiredSession(message) {
+        if (state.sessionExpiredHandled && !state.session.authenticated) {
+            return;
+        }
+
+        state.sessionExpiredHandled = true;
+        state.session = { authenticated: false, user: null };
+        state.menuOpen = false;
+        state.dialog = null;
+        state.pendingAction = null;
+        state.uploadingTimesheetId = null;
+        state.uploadingProjectId = null;
+
+        await cacheSet('session', state.session);
+
+        state.route = '/app/login';
+
+        if (window.location.pathname !== '/app/login') {
+            window.history.pushState({}, '', '/app/login');
+        }
+
+        showFeedback(
+            'error',
+            message || 'Ihre Sitzung ist abgelaufen. Bitte erneut anmelden. Wartende Buchungen bleiben erhalten.',
+            true
+        );
+    }
+
+    async function parseJsonResponse(response) {
+        try {
+            return await response.json();
+        } catch (error) {
+            return {};
+        }
+    }
+
+    async function apiJson(url, options) {
+        const response = await fetch(url, options || {});
+        const payload = await parseJsonResponse(response);
+
+        if (response.status === 401) {
+            const message = payload.message || payload.error || 'Bitte erneut anmelden.';
+            await handleExpiredSession('Ihre Sitzung ist abgelaufen. Bitte erneut anmelden. Wartende Buchungen bleiben erhalten.');
+            throw new SessionExpiredError(message);
+        }
+
+        if (!response.ok) {
+            throw new Error(payload.message || payload.error || 'Bitte erneut versuchen.');
+        }
+
+        return payload;
+    }
+
+    async function publicJson(url, options) {
+        const response = await fetch(url, options || {});
+        const payload = await parseJsonResponse(response);
+
+        if (!response.ok) {
+            throw new Error(payload.message || payload.error || 'Bitte erneut versuchen.');
+        }
+
+        return payload;
     }
 
     function db() {
@@ -2129,8 +2205,20 @@
                 }
 
                 state.session = payload.session || { authenticated: true, user: payload.user || null };
+                state.sessionExpiredHandled = false;
                 await cacheSet('session', state.session);
                 await loadOnlineData(true);
+
+                if (!state.session.authenticated) {
+                    return;
+                }
+
+                const syncResult = await syncQueue();
+
+                if (syncResult.sessionExpired || !state.session.authenticated) {
+                    return;
+                }
+
                 showFeedback('success', friendlyMessage(payload.message, 'Login erfolgreich.'));
                 navigate('/app/heute');
             });
@@ -2275,6 +2363,7 @@
             logoutButton.addEventListener('click', async function () {
                 await fetch('/api/v1/auth/logout', { method: 'POST' });
                 state.session = { authenticated: false, user: null };
+                state.sessionExpiredHandled = false;
                 state.menuOpen = false;
                 resetProjectSelectionState();
                 await cacheSet('session', state.session);
@@ -2410,31 +2499,22 @@
         }
 
         try {
-            const [dayResponse, companyResponse, pushResponse] = await Promise.all([
-                fetch('/api/v1/app/me/day'),
-                fetch('/api/v1/settings/company'),
-                fetch('/api/v1/app/push/status')
+            const [dayPayload, companyPayload, pushPayload] = await Promise.all([
+                apiJson('/api/v1/app/me/day'),
+                publicJson('/api/v1/settings/company'),
+                apiJson('/api/v1/app/push/status')
             ]);
 
-            if (dayResponse.ok) {
-                const dayPayload = await dayResponse.json();
-                state.today = dayPayload.data;
-                syncTodayStateStatus();
-                normalizeProjectSelectionAgainstToday();
-                normalizeTimesheetFilterAgainstToday();
-                await cacheSet('today', state.today);
-            }
+            state.today = dayPayload.data;
+            syncTodayStateStatus();
+            normalizeProjectSelectionAgainstToday();
+            normalizeTimesheetFilterAgainstToday();
+            await cacheSet('today', state.today);
 
-            if (companyResponse.ok) {
-                const companyPayload = await companyResponse.json();
-                state.company = companyPayload.data;
-                await cacheSet('company', state.company);
-            }
+            state.company = companyPayload.data;
+            await cacheSet('company', state.company);
 
-            if (pushResponse.ok) {
-                const pushPayload = await pushResponse.json();
-                state.push = pushPayload.data || null;
-            }
+            state.push = pushPayload.data || null;
 
             if (routeName() === '/historie') {
                 await loadTimesheetList(force);
@@ -2444,6 +2524,10 @@
                 await loadProjectFiles(projectFileContextId(), force);
             }
         } catch (error) {
+            if (isSessionExpiredError(error)) {
+                return;
+            }
+
             console.warn('App-Daten konnten nicht geladen werden.', error);
             await applyCachedData();
 
@@ -2497,12 +2581,7 @@
                 }
             }
 
-            const response = await fetch('/api/v1/app/me/timesheets?' + params.toString());
-            const payload = await response.json();
-
-            if (!response.ok) {
-                throw new Error(payload.message || payload.error || 'Die Zeiten konnten nicht geladen werden.');
-            }
+            const payload = await apiJson('/api/v1/app/me/timesheets?' + params.toString());
 
             const data = payload.data || {};
             const cachedAt = data.cached_at || data.server_time || null;
@@ -2518,6 +2597,10 @@
                 project_id: Object.prototype.hasOwnProperty.call(data, 'project_id') ? data.project_id : currentTimesheetProjectId()
             });
         } catch (error) {
+            if (isSessionExpiredError(error)) {
+                return;
+            }
+
             const cached = await cacheGet(cacheKey);
 
             if (cached && Array.isArray(cached.items)) {
@@ -2558,12 +2641,7 @@
         render();
 
         try {
-            const response = await fetch('/api/v1/app/projects/' + projectId + '/files');
-            const payload = await response.json();
-
-            if (!response.ok) {
-                throw new Error(payload.message || payload.error || 'Projektdateien konnten nicht geladen werden.');
-            }
+            const payload = await apiJson('/api/v1/app/projects/' + projectId + '/files');
 
             const files = Array.isArray(payload.data) ? payload.data : [];
             state.projectFiles[String(projectId)] = files;
@@ -2573,6 +2651,10 @@
                 cached_at: new Date().toISOString()
             });
         } catch (error) {
+            if (isSessionExpiredError(error)) {
+                return;
+            }
+
             const cached = await cacheGet(cacheKey);
             state.projectFiles[String(projectId)] = cached && Array.isArray(cached.items) ? cached.items : [];
 
@@ -2594,15 +2676,14 @@
         render();
 
         try {
-            const response = await fetch('/api/v1/app/push/status');
-            const payload = await response.json();
-
-            if (!response.ok) {
-                throw new Error(payload.message || payload.error || 'Push-Status konnte nicht geladen werden.');
-            }
+            const payload = await apiJson('/api/v1/app/push/status');
 
             state.push = payload.data || null;
         } catch (error) {
+            if (isSessionExpiredError(error)) {
+                return;
+            }
+
             if (showErrors) {
                 showFeedback('error', friendlyMessage(error.message, 'Push-Status konnte nicht geladen werden.'));
             }
@@ -2646,16 +2727,11 @@
             body.permission_status = permission;
             body.device_label = navigator.userAgent && navigator.userAgent.includes('Mobile') ? 'Mobiles Geraet' : 'Browser-Geraet';
 
-            const response = await fetch('/api/v1/app/push/subscriptions', {
+            const payload = await apiJson('/api/v1/app/push/subscriptions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body)
             });
-            const payload = await response.json();
-
-            if (!response.ok) {
-                throw new Error(payload.message || payload.error || 'Push konnte nicht aktiviert werden.');
-            }
 
             state.push = {
                 ...(state.push || {}),
@@ -2663,6 +2739,10 @@
             };
             showFeedback('success', friendlyMessage(payload.message, 'Push wurde aktiviert.'));
         } catch (error) {
+            if (isSessionExpiredError(error)) {
+                return;
+            }
+
             showFeedback('error', friendlyMessage(error.message, 'Push konnte nicht aktiviert werden.'));
         } finally {
             state.pushBusy = false;
@@ -2680,18 +2760,13 @@
         render();
 
         try {
-            const response = await fetch('/api/v1/app/push/subscriptions/' + deviceId, {
+            const payload = await apiJson('/api/v1/app/push/subscriptions/' + deviceId, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded'
                 },
                 body: '_method=DELETE'
             });
-            const payload = await response.json();
-
-            if (!response.ok) {
-                throw new Error(payload.message || payload.error || 'Push konnte nicht deaktiviert werden.');
-            }
 
             state.push = {
                 ...(state.push || {}),
@@ -2699,6 +2774,10 @@
             };
             showFeedback('success', friendlyMessage(payload.message, 'Push wurde deaktiviert.'));
         } catch (error) {
+            if (isSessionExpiredError(error)) {
+                return;
+            }
+
             showFeedback('error', friendlyMessage(error.message, 'Push konnte nicht deaktiviert werden.'));
         } finally {
             state.pushBusy = false;
@@ -2878,7 +2957,12 @@
             applyOptimisticPayload(payload);
             await cacheSet('today', state.today);
             render();
-            await syncQueue();
+            const syncResult = await syncQueue();
+
+            if (syncResult.sessionExpired) {
+                return false;
+            }
+
             await registerBackgroundSync();
             succeeded = true;
         } catch (error) {
@@ -2988,15 +3072,21 @@
 
     async function syncQueue() {
         if (!navigator.onLine || !state.session.authenticated) {
-            return;
+            return {
+                completed: false,
+                deferred: true,
+                sessionExpired: false
+            };
         }
 
         const items = await queueAll();
+        let completed = true;
+        let sessionExpired = false;
 
         for (const item of items) {
             try {
                 await queueUpdate({ ...item, status: 'syncing' });
-                const response = await fetch(item.endpoint, {
+                const payload = await apiJson(item.endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -3004,15 +3094,6 @@
                         ...item.payload
                     })
                 });
-                const payload = await response.json();
-
-                if (!response.ok) {
-                    const message = friendlyMessage(payload.message || payload.error, 'Synchronisierung fehlgeschlagen.');
-
-                    await queueUpdate({ ...item, status: 'failed', error: message });
-                    showFeedback('error', message, true);
-                    continue;
-                }
 
                 await queueRemove(item.id);
 
@@ -3053,6 +3134,13 @@
 
                 showFeedback('success', friendlyMessage(payload.message || (payload.data ? payload.data.message : ''), 'Aenderung erfolgreich gespeichert.'));
             } catch (error) {
+                if (isSessionExpiredError(error)) {
+                    await queueUpdate({ ...item, status: 'pending', error: null });
+                    completed = false;
+                    sessionExpired = true;
+                    break;
+                }
+
                 const message = friendlyMessage(error.message, 'Synchronisierung fehlgeschlagen.');
 
                 await queueUpdate({ ...item, status: 'failed', error: message });
@@ -3063,6 +3151,12 @@
         state.pendingCount = (await queueAll()).length;
         await cacheSet('today', state.today);
         await loadOnlineData(true);
+
+        return {
+            completed,
+            deferred: false,
+            sessionExpired
+        };
     }
 
     async function currentGeoPayload() {
@@ -3181,21 +3275,19 @@
         render();
 
         try {
-            const response = await fetch('/api/v1/app/timesheets/' + entry.id + '/files', {
+            const payload = await apiJson('/api/v1/app/timesheets/' + entry.id + '/files', {
                 method: 'POST',
                 body: formData
             });
-            const payload = await response.json();
-
-            if (!response.ok) {
-                showFeedback('error', friendlyMessage(payload.message || payload.error, 'Das Bild konnte nicht hochgeladen werden.'), true);
-                return;
-            }
 
             updateCurrentAttachments(payload.data && payload.data.files ? payload.data.files : []);
             await cacheSet('today', state.today);
             showFeedback('success', friendlyMessage(payload.message, 'Bild erfolgreich hochgeladen.'));
         } catch (error) {
+            if (isSessionExpiredError(error)) {
+                return;
+            }
+
             showFeedback('error', friendlyMessage(error.message, 'Das Bild konnte nicht hochgeladen werden.'), true);
         } finally {
             state.pendingAction = null;
@@ -3237,16 +3329,10 @@
         render();
 
         try {
-            const response = await fetch('/api/v1/app/projects/' + projectId + '/files', {
+            const payload = await apiJson('/api/v1/app/projects/' + projectId + '/files', {
                 method: 'POST',
                 body: formData
             });
-            const payload = await response.json();
-
-            if (!response.ok) {
-                showFeedback('error', friendlyMessage(payload.message || payload.error, 'Die Datei konnte nicht hochgeladen werden.'), true);
-                return;
-            }
 
             updateProjectAttachments(projectId, payload.data && payload.data.files ? payload.data.files : []);
             await cacheSet(projectFilesCacheKey(projectId), {
@@ -3255,6 +3341,10 @@
             });
             showFeedback('success', friendlyMessage(payload.message, 'Datei erfolgreich hochgeladen.'));
         } catch (error) {
+            if (isSessionExpiredError(error)) {
+                return;
+            }
+
             showFeedback('error', friendlyMessage(error.message, 'Die Datei konnte nicht hochgeladen werden.'), true);
         } finally {
             state.pendingAction = null;
@@ -3276,24 +3366,22 @@
         render();
 
         try {
-            const response = await fetch('/api/v1/app/timesheet-files/' + fileId, {
+            const payload = await apiJson('/api/v1/app/timesheet-files/' + fileId, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded'
                 },
                 body: '_method=DELETE'
             });
-            const payload = await response.json();
-
-            if (!response.ok) {
-                showFeedback('error', friendlyMessage(payload.message || payload.error, 'Das Bild konnte nicht entfernt werden.'), true);
-                return;
-            }
 
             updateCurrentAttachments(payload.data && payload.data.files ? payload.data.files : []);
             await cacheSet('today', state.today);
             showFeedback('success', friendlyMessage(payload.message, 'Bild erfolgreich entfernt.'));
         } catch (error) {
+            if (isSessionExpiredError(error)) {
+                return;
+            }
+
             showFeedback('error', friendlyMessage(error.message, 'Das Bild konnte nicht entfernt werden.'), true);
         } finally {
             state.pendingAction = null;
@@ -3363,6 +3451,7 @@
         state.timesheetFilterScope = readTimesheetFilterScope();
         state.timesheetFilterProjectId = readTimesheetFilterProjectId();
         const cachedSession = await cacheGet('session');
+        const hadCachedAuthenticatedSession = !!(cachedSession && cachedSession.authenticated);
 
         if (cachedSession) {
             state.session = cachedSession;
@@ -3370,9 +3459,16 @@
 
         if (navigator.onLine) {
             try {
-                const response = await fetch('/api/v1/auth/session');
-                const payload = await response.json();
+                const payload = await publicJson('/api/v1/auth/session');
+
+                if (!payload.authenticated && hadCachedAuthenticatedSession) {
+                    state.pendingCount = (await queueAll()).length;
+                    await handleExpiredSession('Ihre Sitzung ist abgelaufen. Bitte erneut anmelden. Wartende Buchungen bleiben erhalten.');
+                    return;
+                }
+
                 state.session = payload;
+                state.sessionExpiredHandled = false;
                 await cacheSet('session', state.session);
             } catch (error) {
                 console.warn('Sessionstatus konnte nicht geladen werden.', error);

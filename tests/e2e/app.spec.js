@@ -10,6 +10,93 @@ test('mobile app login screen loads', async ({ page }) => {
   await expect(page.locator('input[name="password"]')).toBeVisible();
 });
 
+test('expired mobile session returns to login and keeps pending queue', async ({ page }) => {
+  await page.addInitScript(async () => {
+    await new Promise((resolve, reject) => {
+      const request = indexedDB.open('zeiterfassung-app', 1);
+
+      request.onupgradeneeded = () => {
+        const database = request.result;
+
+        if (!database.objectStoreNames.contains('cache')) {
+          database.createObjectStore('cache', { keyPath: 'key' });
+        }
+
+        if (!database.objectStoreNames.contains('queue')) {
+          const store = database.createObjectStore('queue', { keyPath: 'id' });
+          store.createIndex('status', 'status', { unique: false });
+        }
+      };
+
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const database = request.result;
+        const tx = database.transaction(['cache', 'queue'], 'readwrite');
+
+        tx.objectStore('cache').put({
+          key: 'session',
+          value: {
+            authenticated: true,
+            bootstrap_required: false,
+            user: {
+              id: 7,
+              display_name: 'Max Mustermann',
+              permissions: ['timesheets.create', 'timesheets.view_own']
+            }
+          },
+          updatedAt: Date.now()
+        });
+        tx.objectStore('queue').put({
+          id: 'queued-entry',
+          client_request_id: 'queued-entry',
+          endpoint: '/api/v1/app/timesheets/sync',
+          payload: { action: 'check_in', work_date: '2026-05-16' },
+          status: 'pending',
+          createdAt: Date.now()
+        });
+
+        tx.oncomplete = () => {
+          database.close();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      };
+    });
+  });
+
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: false,
+        bootstrap_required: false,
+        user: null
+      })
+    });
+  });
+
+  await page.goto('/app/heute');
+
+  await expect(page.locator('#loginForm')).toBeVisible();
+  await expect(page.getByText('Ihre Sitzung ist abgelaufen. Bitte erneut anmelden. Wartende Buchungen bleiben erhalten.')).toBeVisible();
+
+  const queueCount = await page.evaluate(async () => new Promise((resolve, reject) => {
+    const request = indexedDB.open('zeiterfassung-app', 1);
+
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const tx = database.transaction('queue', 'readonly');
+      const getAll = tx.objectStore('queue').getAll();
+
+      getAll.onsuccess = () => resolve(getAll.result.length);
+      getAll.onerror = () => reject(getAll.error);
+    };
+  }));
+
+  expect(queueCount).toBe(1);
+});
+
 test('mobile profile shows company, legal texts and geo policy', async ({ page }) => {
   await page.route('**/api/v1/auth/session', async (route) => {
     await route.fulfill({

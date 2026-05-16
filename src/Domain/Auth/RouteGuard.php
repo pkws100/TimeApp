@@ -36,6 +36,7 @@ final class RouteGuard
         if ($this->authService->currentUser() === null) {
             return Response::json([
                 'ok' => false,
+                'code' => 'auth_required',
                 'error' => 'Nicht authentifiziert.',
                 'message' => 'Bitte erneut anmelden.',
             ], 401);

@@ -32,7 +32,12 @@ final class Response
         return new self('', $status, ['Location' => $location]);
     }
 
-    public function send(): void
+    public function status(): int
+    {
+        return $this->status;
+    }
+
+    public function send(bool $withoutBody = false): void
     {
         http_response_code($this->status);
 
@@ -40,7 +45,10 @@ final class Response
             header($name . ': ' . $value);
         }
 
+        if ($withoutBody) {
+            return;
+        }
+
         echo $this->content;
     }
 }
-

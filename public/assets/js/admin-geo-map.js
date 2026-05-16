@@ -24,6 +24,34 @@
         return (panel.dataset.address ?? '').trim();
     }
 
+    async function geoJson(url) {
+        const response = await fetch(url, {
+            headers: {
+                Accept: 'application/json'
+            }
+        });
+
+        if (response.redirected && response.url.includes('/admin/login')) {
+            window.location.href = response.url;
+            throw new Error('Bitte erneut anmelden.');
+        }
+
+        if (response.status === 401) {
+            window.location.href = '/admin/login?next=' + encodeURIComponent(window.location.pathname + window.location.search);
+            throw new Error('Bitte erneut anmelden.');
+        }
+
+        if (response.status === 403) {
+            throw new Error('Keine Berechtigung fuer diese GEO-Daten.');
+        }
+
+        if (!response.ok) {
+            throw new Error('Geocoding fehlgeschlagen.');
+        }
+
+        return response.json();
+    }
+
     function updateFields(fields, latLng, label) {
         fields.latitude.value = formatCoordinate(latLng.lat);
         fields.longitude.value = formatCoordinate(latLng.lng);
@@ -116,18 +144,7 @@
                 searchButton.disabled = true;
                 setMessage(panel, 'Adresse wird gesucht...', false);
 
-                fetch(url, {
-                    headers: {
-                        Accept: 'application/json'
-                    }
-                })
-                    .then((response) => {
-                        if (!response.ok) {
-                            throw new Error('Geocoding fehlgeschlagen.');
-                        }
-
-                        return response.json();
-                    })
+                geoJson(url)
                     .then((results) => {
                         const first = Array.isArray(results) ? results[0] : null;
 

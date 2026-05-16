@@ -45,8 +45,10 @@ final class Router
 
     public function dispatch(Request $request): Response
     {
+        $method = $request->method() === 'HEAD' ? 'GET' : $request->method();
+
         foreach ($this->routes as $route) {
-            if ($route['method'] !== $request->method()) {
+            if ($route['method'] !== $method) {
                 continue;
             }
 
