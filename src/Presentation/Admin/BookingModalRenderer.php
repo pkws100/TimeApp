@@ -267,8 +267,12 @@ HTML;
             $downloadUrl = (string) ($file['download_url'] ?? '');
             $previewUrl = (string) ($file['preview_url'] ?? '');
             $archiveUrl = (string) ($file['archive_url'] ?? '');
-            $preview = $previewUrl !== ''
-                ? '<a class="booking-attachment__preview" href="' . $this->e($previewUrl) . '" target="_blank" rel="noopener"><img src="' . $this->e($previewUrl) . '" alt="" loading="lazy"></a>'
+            $previewType = $this->previewType($file);
+            $previewAttributes = $previewUrl !== '' && $previewType !== ''
+                ? ' data-attachment-viewer-open data-preview-url="' . $this->e($previewUrl) . '" data-preview-type="' . $this->e($previewType) . '" data-preview-name="' . $this->e((string) ($file['original_name'] ?? 'Anhang')) . '" data-preview-mime="' . $this->e((string) ($file['mime_type'] ?? '')) . '"'
+                : '';
+            $preview = $previewUrl !== '' && $previewType !== ''
+                ? '<a class="booking-attachment__preview" href="' . $this->e($previewUrl) . '" target="_blank" rel="noopener"' . $previewAttributes . ' aria-label="' . $this->e((string) ($file['original_name'] ?? 'Anhang')) . ' gross anzeigen">' . $this->previewMarkup($file, $previewUrl, $previewType) . '</a>'
                 : '<div class="booking-attachment__icon" aria-hidden="true">Datei</div>';
             $openLink = (!$isDeleted && $downloadUrl !== '')
                 ? '<a class="button button-secondary" href="' . $this->e($downloadUrl) . '" target="_blank" rel="noopener">Öffnen</a>'
@@ -377,6 +381,26 @@ HTML;
         }
 
         return implode(' · ', $parts);
+    }
+
+    private function previewType(array $file): string
+    {
+        $mimeType = (string) ($file['mime_type'] ?? '');
+
+        if ((bool) ($file['is_image'] ?? false)) {
+            return 'image';
+        }
+
+        return $mimeType === 'application/pdf' ? 'pdf' : '';
+    }
+
+    private function previewMarkup(array $file, string $previewUrl, string $previewType): string
+    {
+        if ($previewType === 'image') {
+            return '<img src="' . $this->e($previewUrl) . '" alt="" loading="lazy">';
+        }
+
+        return '<span>PDF</span>';
     }
 
     private function formatBytes(int $bytes): string

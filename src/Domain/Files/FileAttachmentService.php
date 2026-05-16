@@ -426,6 +426,7 @@ final class FileAttachmentService
         $isDeleted = (int) ($file['is_deleted'] ?? 0) === 1;
         $downloadUrl = (!$isDeleted && $fileId > 0) ? '/admin/timesheet-files/' . $fileId . '/download' : null;
         $isImage = $this->isImageMimeType($mimeType);
+        $isPreviewable = $isImage || $mimeType === 'application/pdf';
 
         return [
             'id' => $fileId,
@@ -436,8 +437,9 @@ final class FileAttachmentService
             'is_deleted' => $isDeleted ? 1 : 0,
             'deleted_at' => $file['deleted_at'] ?? null,
             'is_image' => $isImage,
+            'is_previewable' => $isPreviewable,
             'download_url' => $downloadUrl,
-            'preview_url' => $isImage ? $downloadUrl : null,
+            'preview_url' => $isPreviewable ? $downloadUrl : null,
             'archive_url' => $fileId > 0 ? '/admin/timesheet-files/' . $fileId : null,
         ];
     }

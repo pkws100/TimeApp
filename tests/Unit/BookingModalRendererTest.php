@@ -135,6 +135,8 @@ final class BookingModalRendererTest extends TestCase
         self::assertStringContainsString('data-booking-modal-attachments', $html);
         self::assertStringContainsString('foto.jpg', $html);
         self::assertStringContainsString('/admin/timesheet-files/5/download', $html);
+        self::assertStringContainsString('data-attachment-viewer-open', $html);
+        self::assertStringContainsString('loading="lazy"', $html);
         self::assertStringContainsString('action="/admin/timesheet-files/5"', $html);
         self::assertStringContainsString('name="_method" value="DELETE"', $html);
         self::assertStringContainsString('name="booking_id" value="15"', $html);
@@ -181,6 +183,46 @@ final class BookingModalRendererTest extends TestCase
         self::assertStringContainsString('/admin/timesheet-files/5/download', $html);
         self::assertStringNotContainsString('action="/admin/timesheet-files/5"', $html);
         self::assertStringContainsString('Keine Bearbeitungsrechte', $html);
+    }
+
+    public function testRenderModalUsesPdfPreviewTriggerWithoutEmbeddingLargeDocument(): void
+    {
+        $renderer = new BookingModalRenderer();
+        $html = $renderer->renderModal(
+            [],
+            ['work' => 'Arbeit'],
+            [
+                'return_to' => '/admin/bookings',
+                'csrf_token' => 'abc123',
+                'can_manage' => false,
+                'can_archive' => false,
+                'can_view_attachments' => true,
+                'selected_booking' => [
+                    'id' => 15,
+                    'employee_name' => 'Max Mustermann',
+                    'project_id' => null,
+                    'entry_type' => 'work',
+                    'is_deleted' => 0,
+                    'attachments' => [[
+                        'id' => 6,
+                        'original_name' => 'beleg.pdf',
+                        'mime_type' => 'application/pdf',
+                        'size_bytes' => 2048,
+                        'uploaded_at' => '2026-05-16 10:00:00',
+                        'is_deleted' => 0,
+                        'is_image' => false,
+                        'is_previewable' => true,
+                        'download_url' => '/admin/timesheet-files/6/download',
+                        'preview_url' => '/admin/timesheet-files/6/download',
+                        'archive_url' => '/admin/timesheet-files/6',
+                    ]],
+                ],
+            ]
+        );
+
+        self::assertStringContainsString('data-preview-type="pdf"', $html);
+        self::assertStringContainsString('>PDF</span>', $html);
+        self::assertStringNotContainsString('<iframe', $html);
     }
 
     public function testRenderTableHighlightsOpenProjectAssignments(): void

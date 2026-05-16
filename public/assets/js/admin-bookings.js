@@ -101,6 +101,114 @@
         return field ? field.value : '';
     }
 
+    function previewType(file) {
+        if (file.is_image) {
+            return 'image';
+        }
+
+        return file.mime_type === 'application/pdf' ? 'pdf' : '';
+    }
+
+    function previewMarkup(file, url, type) {
+        if (type === 'image') {
+            return '<img src="' + escapeHtml(url) + '" alt="" loading="lazy">';
+        }
+
+        return '<span>PDF</span>';
+    }
+
+    function ensureAttachmentViewer() {
+        var existing = document.querySelector('[data-admin-attachment-viewer]');
+
+        if (existing) {
+            return existing;
+        }
+
+        var viewer = document.createElement('div');
+        viewer.className = 'admin-attachment-viewer';
+        viewer.hidden = true;
+        viewer.setAttribute('aria-hidden', 'true');
+        viewer.setAttribute('data-admin-attachment-viewer', '');
+        viewer.innerHTML = ''
+            + '<div class="admin-attachment-viewer__overlay" data-attachment-viewer-close></div>'
+            + '<div class="admin-attachment-viewer__dialog" role="dialog" aria-modal="true" aria-labelledby="attachmentViewerTitle">'
+            + '<div class="admin-attachment-viewer__header">'
+            + '<div><p class="eyebrow">Anhang</p><h2 id="attachmentViewerTitle" data-attachment-viewer-title>Anhang anzeigen</h2><p class="muted" data-attachment-viewer-meta></p></div>'
+            + '<button type="button" class="button button-secondary" data-attachment-viewer-close>Schliessen</button>'
+            + '</div>'
+            + '<div class="admin-attachment-viewer__content" data-attachment-viewer-content></div>'
+            + '<div class="admin-attachment-viewer__actions"><a class="button button-secondary" href="#" target="_blank" rel="noopener" data-attachment-viewer-open-external>In neuem Tab öffnen</a></div>'
+            + '</div>';
+        document.body.appendChild(viewer);
+
+        return viewer;
+    }
+
+    function openAttachmentViewer(link) {
+        var viewer = ensureAttachmentViewer();
+        var title = viewer.querySelector('[data-attachment-viewer-title]');
+        var meta = viewer.querySelector('[data-attachment-viewer-meta]');
+        var content = viewer.querySelector('[data-attachment-viewer-content]');
+        var external = viewer.querySelector('[data-attachment-viewer-open-external]');
+        var url = link.dataset.previewUrl || link.href;
+        var type = link.dataset.previewType || '';
+        var name = link.dataset.previewName || 'Anhang';
+        var mime = link.dataset.previewMime || '';
+
+        if (title) {
+            title.textContent = name;
+        }
+
+        if (meta) {
+            meta.textContent = mime;
+        }
+
+        if (external) {
+            external.href = url;
+        }
+
+        if (content) {
+            if (type === 'image') {
+                content.innerHTML = '<img class="admin-attachment-viewer__image" src="' + escapeHtml(url) + '" alt="">';
+            } else if (type === 'pdf') {
+                content.innerHTML = '<iframe class="admin-attachment-viewer__frame" src="' + escapeHtml(url) + '" title="' + escapeHtml(name) + '"></iframe>';
+            } else {
+                content.innerHTML = '<p class="muted">Für diese Datei ist keine Vorschau verfuegbar.</p>';
+            }
+        }
+
+        viewer.hidden = false;
+        viewer.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('modal-open');
+
+        var closeButton = viewer.querySelector('[data-attachment-viewer-close]');
+
+        if (closeButton && typeof closeButton.focus === 'function') {
+            closeButton.focus();
+        }
+    }
+
+    function closeAttachmentViewer() {
+        var viewer = document.querySelector('[data-admin-attachment-viewer]');
+
+        if (!viewer || viewer.hidden) {
+            return;
+        }
+
+        var content = viewer.querySelector('[data-attachment-viewer-content]');
+
+        if (content) {
+            content.innerHTML = '';
+        }
+
+        viewer.hidden = true;
+        viewer.setAttribute('aria-hidden', 'true');
+
+        if (!document.querySelector('[data-booking-modal]:not([hidden])')) {
+            document.body.classList.remove('modal-open');
+        }
+    }
+
     function renderAttachments(modal, attachments) {
         var section = modal.querySelector('[data-booking-modal-attachments]');
 
@@ -124,8 +232,9 @@
 
         list.innerHTML = files.map(function (file) {
             var isDeleted = Number(file.is_deleted || 0) === 1;
-            var preview = file.preview_url
-                ? '<a class="booking-attachment__preview" href="' + escapeHtml(file.preview_url) + '" target="_blank" rel="noopener"><img src="' + escapeHtml(file.preview_url) + '" alt="" loading="lazy"></a>'
+            var type = previewType(file);
+            var preview = file.preview_url && type
+                ? '<a class="booking-attachment__preview" href="' + escapeHtml(file.preview_url) + '" target="_blank" rel="noopener" data-attachment-viewer-open data-preview-url="' + escapeHtml(file.preview_url) + '" data-preview-type="' + escapeHtml(type) + '" data-preview-name="' + escapeHtml(file.original_name || 'Anhang') + '" data-preview-mime="' + escapeHtml(file.mime_type || '') + '" aria-label="' + escapeHtml((file.original_name || 'Anhang') + ' gross anzeigen') + '">' + previewMarkup(file, file.preview_url, type) + '</a>'
                 : '<div class="booking-attachment__icon" aria-hidden="true">Datei</div>';
             var openLink = (!isDeleted && file.download_url)
                 ? '<a class="button button-secondary" href="' + escapeHtml(file.download_url) + '" target="_blank" rel="noopener">Öffnen</a>'
@@ -303,6 +412,19 @@
         }
 
         document.addEventListener('click', function (event) {
+            var attachmentPreview = event.target.closest('[data-attachment-viewer-open]');
+
+            if (attachmentPreview) {
+                event.preventDefault();
+                openAttachmentViewer(attachmentPreview);
+                return;
+            }
+
+            if (event.target.closest('[data-attachment-viewer-close]')) {
+                closeAttachmentViewer();
+                return;
+            }
+
             var openButton = event.target.closest('[data-booking-open]');
 
             if (openButton) {
@@ -329,6 +451,13 @@
         });
 
         document.addEventListener('keydown', function (event) {
+            var attachmentViewer = document.querySelector('[data-admin-attachment-viewer]');
+
+            if (event.key === 'Escape' && attachmentViewer && !attachmentViewer.hidden) {
+                closeAttachmentViewer();
+                return;
+            }
+
             if (event.key === 'Escape' && !modal.hidden) {
                 closeModal(modal);
                 return;

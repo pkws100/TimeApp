@@ -135,6 +135,27 @@ final class FileAttachmentServiceTest extends TestCase
         self::assertArrayNotHasKey('stored_name', $descriptor);
     }
 
+    public function testAdminTimesheetDescriptorTreatsPdfAsPreviewableDocument(): void
+    {
+        $service = $this->service();
+        $method = new ReflectionMethod($service, 'adminTimesheetFile');
+        $method->setAccessible(true);
+
+        $descriptor = $method->invoke($service, [
+            'id' => 23,
+            'original_name' => 'beleg.pdf',
+            'mime_type' => 'application/pdf',
+            'size_bytes' => 4096,
+            'uploaded_at' => '2026-05-16 09:30:00',
+            'is_deleted' => 0,
+            'deleted_at' => null,
+        ]);
+
+        self::assertFalse($descriptor['is_image']);
+        self::assertTrue($descriptor['is_previewable']);
+        self::assertSame('/admin/timesheet-files/23/download', $descriptor['preview_url']);
+    }
+
     public function testJpegExifOrientationIsNormalizedWhenSupported(): void
     {
         if (

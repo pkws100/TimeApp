@@ -35,7 +35,8 @@ final class AdminTimesheetAttachmentController
         }
 
         $filename = preg_replace('/[^a-zA-Z0-9._-]/', '-', (string) $file['original_name']) ?: 'download.bin';
-        $disposition = ((bool) ($file['is_image'] ?? false) ? 'inline' : 'attachment') . '; filename="' . $filename . '"';
+        $inlinePreview = (bool) ($file['is_image'] ?? false) || (string) ($file['mime_type'] ?? '') === 'application/pdf';
+        $disposition = ($inlinePreview ? 'inline' : 'attachment') . '; filename="' . $filename . '"';
 
         return new Response($content, 200, [
             'Content-Type' => (string) $file['mime_type'],
