@@ -941,7 +941,10 @@ html[data-theme="dark"] .app-drawer-link:not(.is-active):focus-visible {
 .app-history-breaks div,
 .app-history-breaks strong,
 .app-history-breaks span,
-.app-history-breaks small {
+.app-history-breaks small,
+.app-history-locations div,
+.app-history-locations strong,
+.app-history-locations span {
     min-width: 0;
     overflow-wrap: anywhere;
 }
@@ -963,17 +966,24 @@ html[data-theme="dark"] .app-drawer-link:not(.is-active):focus-visible {
     font-weight: 800;
 }
 
-.app-history-breaks {
+.app-history-breaks,
+.app-history-locations {
     display: grid;
     gap: 0.5rem;
 }
 
-.app-history-breaks div {
+.app-history-breaks div,
+.app-history-locations div {
     display: grid;
     gap: 0.15rem;
     padding: 0.65rem;
     border-radius: 0.85rem;
     background: rgba(255, 255, 255, 0.48);
+}
+
+.app-history-locations a {
+    font-weight: 800;
+    color: var(--app-accent);
 }
 
 .app-timesheet-table-wrap {
@@ -1026,7 +1036,8 @@ html[data-theme="dark"] .app-timesheet-card {
 html[data-theme="dark"] .app-history-metric,
 html[data-theme="dark"] .app-history-day,
 html[data-theme="dark"] .app-history-note,
-html[data-theme="dark"] .app-history-breaks div {
+html[data-theme="dark"] .app-history-breaks div,
+html[data-theme="dark"] .app-history-locations div {
     background: rgba(255, 255, 255, 0.03);
 }
 

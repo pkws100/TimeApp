@@ -77,6 +77,39 @@ final class AdminManagementControllerTest extends TestCase
         self::assertStringContainsString('name="change_reason"', $html);
     }
 
+    public function testUserFormRendersTimeTrackingRequirementCheckbox(): void
+    {
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'renderUserForm');
+        $method->setAccessible(true);
+
+        $html = (string) $method->invoke($controller, '/admin/users', 'User anlegen', null, []);
+
+        self::assertStringContainsString('name="time_tracking_required" value="0"', $html);
+        self::assertStringContainsString('name="time_tracking_required" value="1" checked', $html);
+        self::assertStringContainsString('Zeiterfassung erforderlich', $html);
+    }
+
+    public function testUserFormCanRenderVoluntaryTimeTrackingUnchecked(): void
+    {
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'renderUserForm');
+        $method->setAccessible(true);
+
+        $html = (string) $method->invoke($controller, '/admin/users/5', 'User bearbeiten', [
+            'id' => 5,
+            'first_name' => 'Notfall',
+            'last_name' => 'Admin',
+            'email' => 'notfall@example.test',
+            'employment_status' => 'active',
+            'time_tracking_required' => 0,
+            'role_ids' => [],
+        ], []);
+
+        self::assertStringContainsString('name="time_tracking_required" value="1" >', $html);
+        self::assertStringContainsString('werden aber nicht als fehlend gewertet', $html);
+    }
+
     public function testProjectBookingRouteIsRegistered(): void
     {
         $bootstrap = file_get_contents(base_path('bootstrap/app.php')) ?: '';

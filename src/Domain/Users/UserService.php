@@ -16,6 +16,8 @@ final class UserService
     public function list(string $scope = 'active'): array
     {
         if ($this->connection->tableExists('users')) {
+            $timeTrackingSelect = $this->timeTrackingSelect('users');
+
             return $this->connection->fetchAll(
                 'SELECT
                     users.id,
@@ -28,6 +30,7 @@ final class UserService
                     users.emergency_contact_name,
                     users.emergency_contact_phone,
                     users.target_hours_month,
+                    ' . $timeTrackingSelect . ' AS time_tracking_required,
                     users.is_deleted,
                     GROUP_CONCAT(DISTINCT roles.name ORDER BY roles.name SEPARATOR ", ") AS role_names
                  FROM users
@@ -49,6 +52,7 @@ final class UserService
                 'employment_status' => 'active',
                 'emergency_contact_name' => 'Mario Kluge',
                 'emergency_contact_phone' => '+49 151 20000001',
+                'time_tracking_required' => 1,
                 'role_names' => 'Bauleiter',
                 'is_deleted' => 0,
             ],
@@ -69,8 +73,9 @@ final class UserService
             return null;
         }
 
+        $timeTrackingSelect = $this->timeTrackingSelect();
         $user = $this->connection->fetchOne(
-            'SELECT id, employee_number, first_name, last_name, email, phone, employment_status, emergency_contact_name, emergency_contact_phone, target_hours_month, is_deleted, deleted_at
+            'SELECT id, employee_number, first_name, last_name, email, phone, employment_status, emergency_contact_name, emergency_contact_phone, target_hours_month, ' . $timeTrackingSelect . ' AS time_tracking_required, is_deleted, deleted_at
              FROM users
              WHERE id = :id
              LIMIT 1',
@@ -105,12 +110,18 @@ final class UserService
             return $record;
         }
 
-        return $this->connection->transaction(function () use ($record, $payload) {
+        $timeTrackingColumns = $this->timeTrackingColumnExists() ? ', time_tracking_required' : '';
+        $timeTrackingValues = $this->timeTrackingColumnExists() ? ', :time_tracking_required' : '';
+        $timeTrackingBindings = $this->timeTrackingColumnExists()
+            ? ['time_tracking_required' => $record['time_tracking_required'] ? 1 : 0]
+            : [];
+
+        return $this->connection->transaction(function () use ($record, $payload, $timeTrackingColumns, $timeTrackingValues, $timeTrackingBindings) {
             $this->connection->execute(
                 'INSERT INTO users (
-                    employee_number, first_name, last_name, email, phone, password_hash, employment_status, emergency_contact_name, emergency_contact_phone, target_hours_month, is_deleted, deleted_at, deleted_by_user_id, created_at, updated_at
+                    employee_number, first_name, last_name, email, phone, password_hash, employment_status, emergency_contact_name, emergency_contact_phone, target_hours_month' . $timeTrackingColumns . ', is_deleted, deleted_at, deleted_by_user_id, created_at, updated_at
                 ) VALUES (
-                    :employee_number, :first_name, :last_name, :email, :phone, :password_hash, :employment_status, :emergency_contact_name, :emergency_contact_phone, :target_hours_month, 0, NULL, NULL, NOW(), NOW()
+                    :employee_number, :first_name, :last_name, :email, :phone, :password_hash, :employment_status, :emergency_contact_name, :emergency_contact_phone, :target_hours_month' . $timeTrackingValues . ', 0, NULL, NULL, NOW(), NOW()
                 )',
                 [
                     'employee_number' => $record['employee_number'],
@@ -123,7 +134,7 @@ final class UserService
                     'emergency_contact_name' => $record['emergency_contact_name'],
                     'emergency_contact_phone' => $record['emergency_contact_phone'],
                     'target_hours_month' => $record['target_hours_month'],
-                ]
+                ] + $timeTrackingBindings
             );
 
             $userId = $this->connection->lastInsertId();
@@ -135,6 +146,14 @@ final class UserService
 
     public function update(int $id, array $payload): ?array
     {
+        if (!array_key_exists('time_tracking_required', $payload)) {
+            $existing = $this->find($id);
+
+            if ($existing !== null) {
+                $payload['time_tracking_required'] = $existing['time_tracking_required'] ?? true;
+            }
+        }
+
         $record = $this->normalize($payload);
 
         if (!$this->connection->tableExists('users')) {
@@ -144,7 +163,10 @@ final class UserService
             return $record;
         }
 
-        return $this->connection->transaction(function () use ($id, $record, $payload) {
+        $timeTrackingAssignment = $this->timeTrackingColumnExists() ? ',
+                    time_tracking_required = :time_tracking_required' : '';
+
+        return $this->connection->transaction(function () use ($id, $record, $payload, $timeTrackingAssignment) {
             $bindings = [
                 'id' => $id,
                 'employee_number' => $record['employee_number'],
@@ -157,6 +179,10 @@ final class UserService
                 'emergency_contact_phone' => $record['emergency_contact_phone'],
                 'target_hours_month' => $record['target_hours_month'],
             ];
+
+            if ($timeTrackingAssignment !== '') {
+                $bindings['time_tracking_required'] = $record['time_tracking_required'] ? 1 : 0;
+            }
 
             $passwordSql = '';
 
@@ -175,7 +201,7 @@ final class UserService
                     employment_status = :employment_status,
                     emergency_contact_name = :emergency_contact_name,
                     emergency_contact_phone = :emergency_contact_phone,
-                    target_hours_month = :target_hours_month' . $passwordSql . ',
+                    target_hours_month = :target_hours_month' . $timeTrackingAssignment . $passwordSql . ',
                     updated_at = NOW()
                  WHERE id = :id',
                 $bindings
@@ -230,7 +256,39 @@ final class UserService
             'emergency_contact_name' => $this->nullableString($payload['emergency_contact_name'] ?? null),
             'emergency_contact_phone' => $this->nullableString($payload['emergency_contact_phone'] ?? null),
             'target_hours_month' => (float) ($payload['target_hours_month'] ?? 0),
+            'time_tracking_required' => $this->normalizeBoolean($payload['time_tracking_required'] ?? true),
         ];
+    }
+
+    private function normalizeBoolean(mixed $value): bool
+    {
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        if (is_int($value)) {
+            return $value === 1;
+        }
+
+        $value = strtolower(trim((string) $value));
+
+        return in_array($value, ['1', 'true', 'yes', 'on'], true);
+    }
+
+    private function timeTrackingSelect(string $table = ''): string
+    {
+        if (!$this->timeTrackingColumnExists()) {
+            return '1';
+        }
+
+        $column = $table === '' ? 'time_tracking_required' : $table . '.time_tracking_required';
+
+        return 'COALESCE(' . $column . ', 1)';
+    }
+
+    private function timeTrackingColumnExists(): bool
+    {
+        return $this->connection->columnExists('users', 'time_tracking_required');
     }
 
     private function nullableString(mixed $value): ?string

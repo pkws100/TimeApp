@@ -34,6 +34,14 @@ final class BookingModalRendererTest extends TestCase
                 'version_hint' => 'v12',
                 'attachment_count' => 1,
                 'image_attachment_count' => 1,
+                'geo_count' => 1,
+                'geo_records' => [[
+                    'latitude' => 52.520008,
+                    'longitude' => 13.404954,
+                    'accuracy_meters' => 24,
+                    'recorded_at' => '2026-05-16T10:00:00+02:00',
+                    'map_url' => 'https://www.openstreetmap.org/?mlat=52.5200080&mlon=13.4049540#map=18/52.5200080/13.4049540',
+                ]],
                 'attachments' => [[
                     'id' => 5,
                     'original_name' => 'foto.jpg',
@@ -61,7 +69,9 @@ final class BookingModalRendererTest extends TestCase
         self::assertStringContainsString('data-booking-open', $html);
         self::assertStringContainsString('<th>Herkunft</th>', $html);
         self::assertStringContainsString('<th>Anhänge</th>', $html);
+        self::assertStringContainsString('<th>Standort</th>', $html);
         self::assertStringContainsString('Anhänge: 1', $html);
+        self::assertStringContainsString('Standort: 1', $html);
         self::assertStringContainsString('timesheet-files', $html);
         self::assertStringContainsString('Admin-Nacherfassung', $html);
         self::assertStringNotContainsString('type="date" name="work_date"', $html);
@@ -116,6 +126,13 @@ final class BookingModalRendererTest extends TestCase
                     'note' => '',
                     'is_deleted' => 0,
                     'version_hint' => 'v12',
+                    'geo_records' => [[
+                        'latitude' => 52.520008,
+                        'longitude' => 13.404954,
+                        'accuracy_meters' => 24,
+                        'recorded_at' => '2026-05-16T10:00:00+02:00',
+                        'map_url' => 'https://www.openstreetmap.org/?mlat=52.5200080&mlon=13.4049540#map=18/52.5200080/13.4049540',
+                    ]],
                     'attachments' => [[
                         'id' => 5,
                         'original_name' => 'foto.jpg',
@@ -133,10 +150,13 @@ final class BookingModalRendererTest extends TestCase
         );
 
         self::assertStringContainsString('data-booking-modal-attachments', $html);
+        self::assertStringContainsString('data-booking-modal-locations', $html);
+        self::assertStringContainsString('52,5200080, 13,4049540', $html);
+        self::assertStringContainsString('Karte öffnen', $html);
         self::assertStringContainsString('foto.jpg', $html);
         self::assertStringContainsString('/admin/timesheet-files/5/download', $html);
         self::assertStringContainsString('data-attachment-viewer-open', $html);
-        self::assertStringContainsString('loading="lazy"', $html);
+        self::assertStringNotContainsString('loading="lazy"', $html);
         self::assertStringContainsString('action="/admin/timesheet-files/5"', $html);
         self::assertStringContainsString('name="_method" value="DELETE"', $html);
         self::assertStringContainsString('name="booking_id" value="15"', $html);

@@ -78,6 +78,7 @@ final class MobileAppServiceTest extends TestCase
         self::assertFalse($method->invoke($service, '2026-05-16', null, null));
         self::assertFalse($method->invoke($service, '2026-05-15', ['id' => 1], null));
         self::assertFalse($method->invoke($service, '2026-05-15', null, ['entry_type' => 'sick']));
+        self::assertFalse($method->invoke($service, '2026-05-15', null, null, false));
     }
 
     public function testHistoryMonthBoundsUseFullCalendarMonth(): void
@@ -170,6 +171,39 @@ final class MobileAppServiceTest extends TestCase
         self::assertSame(1, $payload['days'][0]['status_counts']['work']);
         self::assertSame(1, $payload['days'][0]['status_counts']['sick']);
         self::assertSame(2, $payload['days'][0]['attachment_count']);
+    }
+
+    public function testHistoryItemKeepsSafeGeoMetadata(): void
+    {
+        $service = $this->service();
+        $method = new ReflectionMethod($service, 'normalizeHistoryItem');
+        $method->setAccessible(true);
+
+        $item = $method->invoke($service, [
+            'id' => 5,
+            'project_id' => 2,
+            'project_name' => 'Baustelle Mitte',
+            'work_date' => '2026-05-15',
+            'start_time' => '07:30:00',
+            'end_time' => '16:00:00',
+            'break_minutes' => 30,
+            'net_minutes' => 480,
+            'entry_type' => 'work',
+            'note' => null,
+            'updated_at' => '2026-05-15 16:00:00',
+        ], [], [], [[
+            'id' => 9,
+            'latitude' => 52.520008,
+            'longitude' => 13.404954,
+            'accuracy_meters' => 24,
+            'recorded_at' => '2026-05-15T07:30:00+02:00',
+            'map_url' => 'https://www.openstreetmap.org/?mlat=52.5200080&mlon=13.4049540#map=18/52.5200080/13.4049540',
+        ]]);
+
+        self::assertSame(1, $item['geo_count']);
+        self::assertSame(52.520008, $item['latest_geo']['latitude']);
+        self::assertArrayHasKey('map_url', $item['latest_geo']);
+        self::assertArrayNotHasKey('user_id', $item['latest_geo']);
     }
 
     private function service(): MobileAppService

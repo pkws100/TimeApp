@@ -37,6 +37,7 @@ Versionen verteilt, muss die entsprechenden Lizenzpflichten beachten.
 - Session-Status: `GET /api/v1/auth/session`
 - App-Tageskontext: `GET /api/v1/app/me/day`
 - App-Timesheet-Sync: `POST /api/v1/app/timesheets/sync`
+- App-Push-Test: `POST /api/v1/app/push/test`
 - App-Projektdateien: `GET/POST /api/v1/app/projects/{id}/files`
 - App-Buchungsdateien: `GET/POST /api/v1/app/timesheets/{id}/files`
 - Admin-Buchungsdatei-Abruf: `GET /admin/timesheet-files/{id}/download`

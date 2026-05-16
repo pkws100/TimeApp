@@ -28,6 +28,7 @@ use App\Domain\Timesheets\AdminBookingService;
 use App\Domain\Timesheets\AdminCalendarService;
 use App\Domain\Timesheets\AppTimesheetSyncService;
 use App\Domain\Timesheets\TimesheetCalculator;
+use App\Domain\Timesheets\TimesheetGeoLocationService;
 use App\Domain\Timesheets\TimesheetService;
 use App\Domain\Timesheets\WorkdayStateCalculator;
 use App\Domain\Users\PermissionMatrix;
@@ -143,6 +144,7 @@ $workdayStateCalculator = new WorkdayStateCalculator();
 $timesheetService = new TimesheetService($connection, $timesheetCalculator);
 $adminBookingService = new AdminBookingService($connection, $timesheetCalculator);
 $adminCalendarService = new AdminCalendarService($connection, $adminBookingService);
+$timesheetGeoLocationService = new TimesheetGeoLocationService($connection);
 $companySettingsService = new CompanySettingsService($connection, $config->get('uploads', []));
 $pushSettingsService = new PushSettingsService($connection, $config->get('push', []));
 $pushSubscriptionService = new PushSubscriptionService($connection);
@@ -157,7 +159,7 @@ $bookingExportService = new BookingExportService($adminBookingService);
 $accountingExportService = new AccountingExportService($adminBookingService);
 $backupService = new BackupService($connection, $config->get('uploads', []));
 $smtpTestService = new SmtpTestService();
-$mobileAppService = new MobileAppService($connection, $projectService, $companySettingsService, $workdayStateCalculator, $fileService);
+$mobileAppService = new MobileAppService($connection, $projectService, $companySettingsService, $workdayStateCalculator, $fileService, $timesheetGeoLocationService);
 $appTimesheetSyncService = new AppTimesheetSyncService($connection, $timesheetCalculator, $companySettingsService, $workdayStateCalculator);
 $appDisplayName = trim((string) ($companySettingsService->current()['app_display_name'] ?? '')) ?: (string) $config->get('app.name');
 
@@ -183,7 +185,7 @@ $authController = new AuthController($authService);
 $adminAuthController = new AdminAuthController($authService, $companySettingsService);
 $appController = new AppController($appView, $authService, $appDisplayName, $companySettingsService);
 $appApiController = new AppApiController($mobileAppService, $authService);
-$appPushController = new AppPushController($pushSettingsService, $pushSubscriptionService, $authService);
+$appPushController = new AppPushController($pushSettingsService, $pushSubscriptionService, $pushNotificationService, $authService);
 $appTimesheetController = new AppTimesheetController($appTimesheetSyncService, $authService);
 $appTimesheetAttachmentController = new AppTimesheetAttachmentController($fileService, $authService);
 $appProjectAttachmentController = new AppProjectAttachmentController($fileService, $authService);
@@ -207,6 +209,7 @@ $adminBookingController = new AdminBookingController(
     $projectService,
     $userService,
     $fileService,
+    $timesheetGeoLocationService,
     $authService,
     $csrfService
 );
@@ -217,6 +220,7 @@ $adminCalendarController = new AdminCalendarController(
     $projectService,
     $userService,
     $fileService,
+    $timesheetGeoLocationService,
     $authService,
     $csrfService
 );
@@ -325,6 +329,7 @@ $router->get('/api/v1/app/me/timesheets', $api([$appApiController, 'meTimesheets
 $router->get('/api/v1/app/push/status', $api([$appPushController, 'status']));
 $router->post('/api/v1/app/push/subscriptions', $api([$appPushController, 'store'], 'push.receive'));
 $router->delete('/api/v1/app/push/subscriptions/{id}', $api([$appPushController, 'disable'], 'push.receive'));
+$router->post('/api/v1/app/push/test', $api([$appPushController, 'test'], 'push.receive'));
 $router->post('/api/v1/app/timesheets/sync', $api([$appTimesheetController, 'sync'], 'timesheets.create'));
 $router->get('/api/v1/app/projects/{id}/files', $api([$appProjectAttachmentController, 'index'], 'files.view'));
 $router->post('/api/v1/app/projects/{id}/files', $api([$appProjectAttachmentController, 'upload'], 'files.upload'));

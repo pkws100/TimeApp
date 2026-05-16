@@ -502,6 +502,17 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
     font-weight: 700;
 }
 
+.form-grid .checkbox-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.55rem;
+}
+
+.form-grid .checkbox-item input {
+    flex: 0 0 auto;
+    margin-top: 0.2rem;
+}
+
 .settings-field {
     position: relative;
     padding: 0.85rem 0.95rem;
@@ -861,7 +872,8 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
     font-weight: 700;
 }
 
-.booking-attachments {
+.booking-attachments,
+.booking-locations {
     display: grid;
     gap: 0.75rem;
     margin: 1rem 0;
@@ -870,11 +882,13 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
     border-bottom: 1px solid var(--page-line);
 }
 
-.booking-attachments h3 {
+.booking-attachments h3,
+.booking-locations h3 {
     margin: 0;
 }
 
-.booking-attachment-list {
+.booking-attachment-list,
+.booking-location-list {
     display: grid;
     gap: 0.75rem;
     margin: 0;
@@ -931,6 +945,33 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
 
 .booking-attachment__archive {
     display: inline;
+}
+
+.booking-location {
+    display: flex;
+    gap: 0.75rem;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem;
+    border: 1px solid var(--page-line);
+    border-radius: 0.75rem;
+    background: var(--page-surface);
+}
+
+.booking-location.is-empty {
+    display: block;
+}
+
+.booking-location__body {
+    display: grid;
+    min-width: 0;
+    gap: 0.3rem;
+}
+
+.booking-location__body strong,
+.booking-location__body span {
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .admin-attachment-viewer {

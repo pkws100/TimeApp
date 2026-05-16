@@ -89,6 +89,30 @@ final class DatabaseConnection
         return (int) $statement->fetchColumn() > 0;
     }
 
+    public function columnExists(string $table, string $column): bool
+    {
+        $pdo = $this->pdo();
+
+        if (!$pdo instanceof PDO) {
+            return false;
+        }
+
+        $statement = $pdo->prepare(
+            'SELECT COUNT(*)
+             FROM information_schema.columns
+             WHERE table_schema = :schema
+               AND table_name = :table
+               AND column_name = :column'
+        );
+        $statement->execute([
+            'schema' => $this->config['database'] ?? '',
+            'table' => $table,
+            'column' => $column,
+        ]);
+
+        return (int) $statement->fetchColumn() > 0;
+    }
+
     public function fetchAll(string $sql, array $params = []): array
     {
         $pdo = $this->pdo();

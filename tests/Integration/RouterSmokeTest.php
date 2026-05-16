@@ -256,6 +256,23 @@ final class RouterSmokeTest extends TestCase
             || str_contains($pushPayload, '"can_subscribe"'),
             'Die App-Push-Statusroute sollte erreichbar sein und entweder Daten oder einen Auth-Fehler liefern.'
         );
+
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+        $_SERVER['REQUEST_URI'] = '/api/v1/app/push/test';
+        $_GET = [];
+        $_POST = [];
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $pushTestResponse = $router->dispatch($request);
+        $pushTestResponse->send();
+        $pushTestPayload = ob_get_clean() ?: '';
+        $pushTestJson = json_decode($pushTestPayload, true);
+
+        self::assertSame(401, $pushTestResponse->status());
+        self::assertSame(false, $pushTestJson['ok'] ?? null);
+        self::assertSame('auth_required', $pushTestJson['code'] ?? null);
     }
 
     public function testAdminBookingsRoutesAreAvailable(): void

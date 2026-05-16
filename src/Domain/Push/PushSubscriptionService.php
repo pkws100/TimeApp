@@ -99,6 +99,28 @@ final class PushSubscriptionService
         );
     }
 
+    public function activeSubscriptionForUserEndpoint(int $userId, string $endpoint): ?array
+    {
+        $endpoint = trim($endpoint);
+
+        if (!$this->connection->tableExists('push_subscriptions') || $userId <= 0 || $endpoint === '') {
+            return null;
+        }
+
+        return $this->connection->fetchOne(
+            'SELECT *
+             FROM push_subscriptions
+             WHERE user_id = :user_id
+               AND endpoint_hash = :endpoint_hash
+               AND is_enabled = 1
+             LIMIT 1',
+            [
+                'user_id' => $userId,
+                'endpoint_hash' => hash('sha256', $endpoint),
+            ]
+        );
+    }
+
     public function adminList(): array
     {
         if (!$this->connection->tableExists('push_subscriptions')) {

@@ -11,6 +11,7 @@ use App\Domain\Files\FileAttachmentService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Timesheets\AdminBookingService;
 use App\Domain\Timesheets\TimesheetCalculator;
+use App\Domain\Timesheets\TimesheetGeoLocationService;
 use App\Domain\Users\PermissionMatrix;
 use App\Domain\Users\UserService;
 use App\Http\Controllers\AdminBookingController;
@@ -66,6 +67,7 @@ final class AdminBookingControllerTest extends TestCase
             new ProjectService($connection),
             new UserService($connection),
             new FileAttachmentService($connection, []),
+            new TimesheetGeoLocationService($connection),
             new AuthService($connection, $permissions),
             new CsrfService()
         );

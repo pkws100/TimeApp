@@ -50,6 +50,7 @@
         timesheetListUpdatedAt: null,
         timesheetListLoading: false,
         timesheetListOffline: false,
+        timesheetHistoryDirty: false,
         push: null,
         pushLoading: false,
         pushBusy: false,
@@ -1007,6 +1008,22 @@
             : [];
     }
 
+    function timeTrackingRequired() {
+        if (state.today && state.today.user && Object.prototype.hasOwnProperty.call(state.today.user, 'time_tracking_required')) {
+            return state.today.user.time_tracking_required !== false;
+        }
+
+        if (state.session && state.session.user && Object.prototype.hasOwnProperty.call(state.session.user, 'time_tracking_required')) {
+            return state.session.user.time_tracking_required !== false;
+        }
+
+        return true;
+    }
+
+    function isOptionalNotStartedStatus(status) {
+        return !timeTrackingRequired() && (status === 'not_started' || status === 'planned');
+    }
+
     function normalizeProjectSelectionAgainstToday() {
         if (!state.today) {
             return;
@@ -1430,7 +1447,11 @@
             return 'paused';
         }
 
-        if (status === 'not_started' || status === 'planned' || status === 'missing' || status === 'absent') {
+        if (status === 'not_started' || status === 'planned') {
+            return timeTrackingRequired() ? 'missing' : 'neutral';
+        }
+
+        if (status === 'missing' || status === 'absent') {
             return 'missing';
         }
 
@@ -1488,6 +1509,13 @@
         }
 
         if (status === 'not_started' || status === 'planned') {
+            if (isOptionalNotStartedStatus(status)) {
+                return {
+                    project: 'freiwillig',
+                    detail: 'Keine Buchung erforderlich'
+                };
+            }
+
             return {
                 project: 'Heute',
                 detail: 'Keine Buchung'
@@ -1877,6 +1905,31 @@
             + '</div>';
     }
 
+    function timesheetGeoMarkup(item) {
+        const records = Array.isArray(item.geo_records) ? item.geo_records : [];
+
+        if (records.length === 0) {
+            return '<div class="app-history-empty-line">Kein Standort zu dieser Buchung gespeichert.</div>';
+        }
+
+        return '<div class="app-history-locations">'
+            + records.map((record) => {
+                const latitude = Number(record.latitude || 0);
+                const longitude = Number(record.longitude || 0);
+                const accuracy = record.accuracy_meters !== null && typeof record.accuracy_meters !== 'undefined'
+                    ? ' · ca. ' + Number(record.accuracy_meters || 0) + ' m'
+                    : '';
+                const recordedAt = record.recorded_at ? formatDateTimeStamp(record.recorded_at) : 'Zeitpunkt unbekannt';
+                const mapLink = record.map_url
+                    ? '<a href="' + escapeHtml(record.map_url) + '" target="_blank" rel="noopener">Karte öffnen</a>'
+                    : '';
+
+                return '<div><strong>' + escapeHtml(latitude.toFixed(7) + ', ' + longitude.toFixed(7)) + '</strong>'
+                    + '<span>' + escapeHtml(recordedAt + accuracy) + '</span>' + mapLink + '</div>';
+            }).join('')
+            + '</div>';
+    }
+
     function timesheetDetailMarkup(item) {
         const projectName = item.project_name || item.project_label || 'Nicht zugeordnet';
         const note = item.note ? '<p class="app-history-note">' + escapeHtml(item.note) + '</p>' : '';
@@ -1897,9 +1950,11 @@
             + '<div><span class="muted">Ende</span><strong>' + escapeHtml(formatTime(item.end_time)) + '</strong></div>'
             + '<div><span class="muted">Pause</span><strong>' + escapeHtml(formatDurationMinutes(Number(item.break_minutes || 0))) + '</strong></div>'
             + '<div><span class="muted">Dateien</span><strong>' + escapeHtml(String(item.attachment_count || attachments.length || 0)) + '</strong></div>'
+            + '<div><span class="muted">Standort</span><strong>' + escapeHtml(String(item.geo_count || (Array.isArray(item.geo_records) ? item.geo_records.length : 0))) + '</strong></div>'
             + '</div>'
             + note
             + '<details class="app-history-detail"><summary>Pausen anzeigen</summary>' + timesheetBreaksMarkup(item) + '</details>'
+            + '<details class="app-history-detail"><summary>Standort anzeigen</summary>' + timesheetGeoMarkup(item) + '</details>'
             + '<details class="app-history-detail"><summary>Anhaenge anzeigen</summary>' + attachmentMarkup + '</details>'
             + '</article>';
     }
@@ -1942,7 +1997,7 @@
             ? 'Stand: ' + formatDateTimeStamp(state.timesheetListUpdatedAt)
             : 'Noch kein Stand geladen';
         const offlineNote = state.timesheetListOffline
-            ? '<div class="app-empty">Letzter bekannter Stand (offline).</div>'
+            ? '<div class="app-empty">Letzter bekannter Stand (offline' + (state.timesheetHistoryDirty ? ', eventuell veraltet' : '') + ').</div>'
             : '';
         const projectFilter = projectScopeActive
             ? '<label class="app-field"><span>Projektfilter</span><select id="timesheetProjectFilter">' + timesheetProjectFilterOptions() + '</select></label>'
@@ -2027,7 +2082,11 @@
             return 'completed';
         }
 
-        if (status === 'not_started' || status === 'planned' || status === 'missing') {
+        if (status === 'not_started' || status === 'planned') {
+            return timeTrackingRequired() ? 'missing' : 'neutral';
+        }
+
+        if (status === 'missing') {
             return 'missing';
         }
 
@@ -2039,8 +2098,8 @@
             working: 'Eingecheckt',
             paused: 'Pause laeuft',
             completed: 'Einsatz abgeschlossen',
-            not_started: 'Noch nicht eingecheckt',
-            planned: 'Noch nicht eingecheckt',
+            not_started: isOptionalNotStartedStatus(status) ? 'Noch nicht gebucht' : 'Noch nicht eingecheckt',
+            planned: isOptionalNotStartedStatus(status) ? 'Noch nicht gebucht' : 'Noch nicht eingecheckt',
             missing: 'Fehlt'
         };
 
@@ -2052,8 +2111,8 @@
             working: 'Sie sind aktuell in Arbeit.',
             paused: 'Bitte Pause spaeter beenden.',
             completed: 'Dieser Einsatz ist abgeschlossen. Sie koennen einen weiteren Einsatz starten.',
-            not_started: 'Bitte Check-in nicht vergessen.',
-            planned: 'Bitte Check-in nicht vergessen.',
+            not_started: isOptionalNotStartedStatus(status) ? 'Zeiterfassung ist freiwillig. Sie koennen bei Bedarf einchecken.' : 'Bitte Check-in nicht vergessen.',
+            planned: isOptionalNotStartedStatus(status) ? 'Zeiterfassung ist freiwillig. Sie koennen bei Bedarf einchecken.' : 'Bitte Check-in nicht vergessen.',
             sick: 'Heute ist ein Kranktag hinterlegt.',
             vacation: 'Heute ist Urlaub hinterlegt.',
             holiday: 'Heute ist ein Feiertag hinterlegt.',
@@ -2299,6 +2358,7 @@
         const support = pushSupport();
         const push = state.push || {};
         const devices = Array.isArray(push.devices) ? push.devices : [];
+        const hasActiveDevice = devices.some((device) => device && device.is_enabled);
         const permission = support.notification ? Notification.permission : 'unsupported';
         const permissionLabel = permission === 'granted'
             ? 'erlaubt'
@@ -2315,6 +2375,9 @@
             : '';
         const reloadButton = state.online
             ? '<button type="button" id="reloadPushButton">Status aktualisieren</button>'
+            : '';
+        const testButton = state.online && support.supported && push.can_subscribe && permission === 'granted' && hasActiveDevice
+            ? '<button type="button" id="testPushButton" ' + (state.pushBusy ? 'disabled' : '') + '>' + escapeHtml(state.pushBusy ? 'Wird gesendet ...' : 'Push testen') + '</button>'
             : '';
         const deviceMarkup = devices.length > 0
             ? '<div class="app-info-list">' + devices.map((device) => {
@@ -2343,7 +2406,7 @@
             + statusRows
             + deniedHint
             + unsupportedHint
-            + '<div class="app-inline-actions">' + enableButton + reloadButton + '</div>'
+            + '<div class="app-inline-actions">' + enableButton + testButton + reloadButton + '</div>'
             + deviceMarkup
             + '</section>';
     }
@@ -2757,6 +2820,14 @@
             });
         }
 
+        const testPushButton = document.getElementById('testPushButton');
+
+        if (testPushButton) {
+            testPushButton.addEventListener('click', async function () {
+                await testPushNotification();
+            });
+        }
+
         document.querySelectorAll('[data-disable-push-device]').forEach((button) => {
             button.addEventListener('click', async function () {
                 await disablePushDevice(Number(button.getAttribute('data-disable-push-device') || '0'));
@@ -2863,7 +2934,7 @@
         render();
 
         if (state.session.authenticated) {
-            loadOnlineData(false);
+            loadOnlineData(path === '/app/historie' ? true : false);
         }
     }
 
@@ -3060,6 +3131,7 @@
             state.timesheetProjects = Array.isArray(data.projects) ? data.projects : state.timesheetProjects;
             state.timesheetListUpdatedAt = cachedAt;
             state.timesheetListOffline = false;
+            state.timesheetHistoryDirty = false;
 
             try {
                 await cacheSet(cacheKey, {
@@ -3239,6 +3311,59 @@
             }
 
             showFeedback('error', friendlyMessage(error.message, 'Push konnte nicht aktiviert werden.'));
+        } finally {
+            state.pushBusy = false;
+            render();
+        }
+    }
+
+    async function currentPushSubscriptionPayload() {
+        const support = pushSupport();
+
+        if (!support.supported || Notification.permission !== 'granted') {
+            return null;
+        }
+
+        const registration = await navigator.serviceWorker.ready;
+        const subscription = await registration.pushManager.getSubscription();
+
+        return subscription ? subscription.toJSON() : null;
+    }
+
+    async function testPushNotification() {
+        if (!navigator.onLine) {
+            showFeedback('error', 'Push-Tests koennen nur online gesendet werden.');
+            return;
+        }
+
+        state.pushBusy = true;
+        render();
+
+        try {
+            const subscription = await currentPushSubscriptionPayload();
+
+            if (!subscription || !subscription.endpoint) {
+                showFeedback('error', 'Dieses Geraet ist nicht aktiv fuer Push registriert. Bitte Push erneut aktivieren.');
+                return;
+            }
+
+            const payload = await apiJson('/api/v1/app/push/test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ endpoint: subscription.endpoint })
+            });
+
+            state.push = {
+                ...(state.push || {}),
+                devices: payload.data && Array.isArray(payload.data.devices) ? payload.data.devices : (state.push && state.push.devices ? state.push.devices : [])
+            };
+            showFeedback('success', friendlyMessage(payload.message, 'Push-Test wurde gesendet.'));
+        } catch (error) {
+            if (isSessionExpiredError(error)) {
+                return;
+            }
+
+            showFeedback('error', friendlyMessage(error.message, 'Push-Test konnte nicht gesendet werden.'), true);
         } finally {
             state.pushBusy = false;
             render();
@@ -3582,6 +3707,7 @@
         const items = await queueAll();
         let completed = true;
         let sessionExpired = false;
+        let completedAny = false;
 
         for (const item of items) {
             try {
@@ -3596,6 +3722,7 @@
                 });
 
                 await queueRemove(item.id);
+                completedAny = true;
 
                 if (state.today && payload.data) {
                     if (payload.data.today_state) {
@@ -3650,6 +3777,9 @@
 
         state.pendingCount = (await queueAll()).length;
         await cacheSet('today', state.today);
+        if (completedAny) {
+            markTimesheetHistoryDirty();
+        }
         await loadOnlineData(true);
 
         return {
@@ -3695,6 +3825,10 @@
         state.today.attachments = entry.attachments;
         state.today.today_state = state.today.today_state || {};
         state.today.today_state.work_entry = entry;
+    }
+
+    function markTimesheetHistoryDirty() {
+        state.timesheetHistoryDirty = true;
     }
 
     function selectedUploadFile(inputIds) {
@@ -3782,6 +3916,7 @@
 
             updateCurrentAttachments(payload.data && payload.data.files ? payload.data.files : []);
             await cacheSet('today', state.today);
+            markTimesheetHistoryDirty();
             showFeedback('success', friendlyMessage(payload.message, 'Bild erfolgreich hochgeladen.'));
         } catch (error) {
             if (isSessionExpiredError(error)) {
@@ -3876,6 +4011,7 @@
 
             updateCurrentAttachments(payload.data && payload.data.files ? payload.data.files : []);
             await cacheSet('today', state.today);
+            markTimesheetHistoryDirty();
             showFeedback('success', friendlyMessage(payload.message, 'Bild erfolgreich entfernt.'));
         } catch (error) {
             if (isSessionExpiredError(error)) {
@@ -4076,6 +4212,10 @@
     window.addEventListener('popstate', function () {
         state.route = window.location.pathname || '/app';
         render();
+
+        if (state.session.authenticated) {
+            loadOnlineData(routeName() === '/historie');
+        }
     });
 
     window.addEventListener('beforeinstallprompt', function (event) {

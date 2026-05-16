@@ -7,6 +7,7 @@ namespace App\Domain\App;
 use App\Domain\Files\FileAttachmentService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Settings\CompanySettingsService;
+use App\Domain\Timesheets\TimesheetGeoLocationService;
 use App\Domain\Timesheets\WorkdayStateCalculator;
 use App\Infrastructure\Database\DatabaseConnection;
 use InvalidArgumentException;
@@ -18,7 +19,8 @@ final class MobileAppService
         private ProjectService $projectService,
         private CompanySettingsService $companySettingsService,
         private WorkdayStateCalculator $workdayStateCalculator,
-        private FileAttachmentService $fileAttachmentService
+        private FileAttachmentService $fileAttachmentService,
+        private ?TimesheetGeoLocationService $geoLocationService = null
     ) {
     }
 
@@ -28,7 +30,8 @@ final class MobileAppService
         $todayWorkEntries = $this->findTodayWorkEntries((int) $user['id'], $today);
         $workEntry = $this->findLatestEntry((int) $user['id'], $today, 'work');
         $lastStatusEntry = $this->findLatestStatusEntry((int) $user['id'], $today);
-        $isMissing = $this->isMissingWorkday($today, $workEntry, $lastStatusEntry);
+        $timeTrackingRequired = (int) ($user['time_tracking_required'] ?? 1) === 1;
+        $isMissing = $this->isMissingWorkday($today, $workEntry, $lastStatusEntry, $timeTrackingRequired);
         $breaksToday = $workEntry !== null ? $this->findBreaksForTimesheet((int) $workEntry['id']) : [];
         $currentBreak = $this->workdayStateCalculator->currentBreak($breaksToday);
         $status = $isMissing
@@ -56,6 +59,7 @@ final class MobileAppService
                 'employee_number' => $user['employee_number'] ?? null,
                 'display_name' => trim(((string) ($user['first_name'] ?? '')) . ' ' . ((string) ($user['last_name'] ?? ''))),
                 'email' => (string) ($user['email'] ?? ''),
+                'time_tracking_required' => $timeTrackingRequired,
                 'roles' => $user['roles'] ?? [],
             ],
             'today_state' => [
@@ -154,11 +158,13 @@ final class MobileAppService
             $timesheetIds = array_map(static fn (array $row): int => (int) ($row['id'] ?? 0), $rows);
             $attachmentsByTimesheet = $this->fileAttachmentService->listForTimesheetsGrouped($timesheetIds);
             $breaksByTimesheet = $this->findBreaksForTimesheets($timesheetIds);
+            $geoByTimesheet = $this->geoLocationService?->listForTimesheetsGrouped($timesheetIds, (int) ($user['id'] ?? 0)) ?? [];
             $items = array_map(
                 fn (array $row): array => $this->normalizeHistoryItem(
                     $row,
                     $attachmentsByTimesheet[(int) ($row['id'] ?? 0)] ?? [],
-                    $breaksByTimesheet[(int) ($row['id'] ?? 0)] ?? []
+                    $breaksByTimesheet[(int) ($row['id'] ?? 0)] ?? [],
+                    $geoByTimesheet[(int) ($row['id'] ?? 0)] ?? []
                 ),
                 $rows
             );
@@ -183,7 +189,7 @@ final class MobileAppService
         ];
     }
 
-    private function normalizeHistoryItem(array $row, array $attachments, array $breaks): array
+    private function normalizeHistoryItem(array $row, array $attachments, array $breaks, array $geoRecords = []): array
     {
         $id = (int) ($row['id'] ?? 0);
         $entryType = (string) ($row['entry_type'] ?? 'work');
@@ -208,6 +214,9 @@ final class MobileAppService
             'breaks' => $breaks,
             'attachments' => $attachments,
             'attachment_count' => count($attachments),
+            'geo_records' => $geoRecords,
+            'geo_count' => count($geoRecords),
+            'latest_geo' => $geoRecords[0] ?? null,
         ];
     }
 
@@ -545,8 +554,12 @@ final class MobileAppService
         ];
     }
 
-    private function isMissingWorkday(string $workDate, ?array $workEntry, ?array $statusEntry): bool
+    private function isMissingWorkday(string $workDate, ?array $workEntry, ?array $statusEntry, bool $timeTrackingRequired = true): bool
     {
+        if (!$timeTrackingRequired) {
+            return false;
+        }
+
         if ($workEntry !== null || $statusEntry !== null) {
             return false;
         }

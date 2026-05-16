@@ -299,11 +299,17 @@ final class AdminManagementController
         $rows = '';
 
         foreach ($users as $user) {
+            $timeTrackingRequired = (int) ($user['time_tracking_required'] ?? 1) === 1;
+            $timeTrackingBadge = $timeTrackingRequired
+                ? '<span class="badge ok">Pflicht</span>'
+                : '<span class="badge warn">freiwillig</span>';
+
             $rows .= '<tr>'
                 . '<td>' . $this->e(trim(((string) ($user['first_name'] ?? '')) . ' ' . ((string) ($user['last_name'] ?? '')))) . '</td>'
                 . '<td>' . $this->e((string) ($user['email'] ?? '')) . '</td>'
                 . '<td>' . $this->e((string) ($user['phone'] ?? '')) . '</td>'
                 . '<td>' . $this->e((string) ($user['employment_status'] ?? '')) . '</td>'
+                . '<td>' . $timeTrackingBadge . '</td>'
                 . '<td>' . $this->e((string) ($user['role_names'] ?? '')) . '</td>'
                 . '<td class="table-actions">'
                 . '<a class="button" href="/admin/users/' . (int) $user['id'] . '/edit">Bearbeiten</a>'
@@ -319,9 +325,9 @@ final class AdminManagementController
             '/admin/users',
             $scope,
             $this->notice($request),
-            '<table><thead><tr><th>Name</th><th>E-Mail</th><th>Telefon</th><th>Status</th><th>Rollen</th><th>Aktionen</th></tr></thead><tbody>'
-            . ($rows !== '' ? $rows : '<tr><td colspan="6" class="table-empty">Keine User im aktuellen Filter.</td></tr>')
-            . '</tbody></table>'
+            '<div class="table-scroll"><table><thead><tr><th>Name</th><th>E-Mail</th><th>Telefon</th><th>Status</th><th>Zeiterfassung</th><th>Rollen</th><th>Aktionen</th></tr></thead><tbody>'
+            . ($rows !== '' ? $rows : '<tr><td colspan="7" class="table-empty">Keine User im aktuellen Filter.</td></tr>')
+            . '</tbody></table></div>'
         );
 
         return Response::html($this->view->render('User', $content));
@@ -546,6 +552,7 @@ HTML;
         $method = $isEdit ? '<input type="hidden" name="_method" value="PUT">' : '';
         $roleIds = $user['role_ids'] ?? [];
         $roleCheckboxes = '';
+        $timeTrackingChecked = ((int) ($user['time_tracking_required'] ?? 1) === 1) ? 'checked' : '';
 
         foreach ($roles as $role) {
             $roleId = (int) ($role['id'] ?? 0);
@@ -575,6 +582,12 @@ HTML;
     <label><span>Sollstunden / Monat</span><input name="target_hours_month" type="number" step="0.01" value="{$this->field($user, 'target_hours_month')}"></label>
     <label><span>Notfallkontakt</span><input name="emergency_contact_name" value="{$this->field($user, 'emergency_contact_name')}"></label>
     <label><span>Notfalltelefon</span><input name="emergency_contact_phone" value="{$this->field($user, 'emergency_contact_phone')}"></label>
+    <div class="full-span field-group">
+        <span>Zeiterfassung</span>
+        <input type="hidden" name="time_tracking_required" value="0">
+        <label class="checkbox-item"><input type="checkbox" name="time_tracking_required" value="1" {$timeTrackingChecked}> <span>Zeiterfassung erforderlich</span></label>
+        <p class="muted">Bei deaktivierter Pflicht bleiben User aktiv und koennen freiwillig buchen, werden aber nicht als fehlend gewertet.</p>
+    </div>
     <div class="full-span field-group">
         <span>Rollen</span>
         <div class="checkbox-grid">{$roleCheckboxes}</div>

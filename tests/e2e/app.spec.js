@@ -664,7 +664,18 @@ test('mobile history is its own area with project filter', async ({ page }) => {
           preview_url: null
         }
       ],
-      attachment_count: entryType === 'vacation' ? 0 : 1
+      attachment_count: entryType === 'vacation' ? 0 : 1,
+      geo_records: entryType === 'vacation' ? [] : [
+        {
+          id: 3,
+          latitude: 52.520008,
+          longitude: 13.404954,
+          accuracy_meters: 24,
+          recorded_at: '2026-05-14T07:30:00+02:00',
+          map_url: 'https://www.openstreetmap.org/?mlat=52.5200080&mlon=13.4049540#map=18/52.5200080/13.4049540'
+        }
+      ],
+      geo_count: entryType === 'vacation' ? 0 : 1
     };
 
     await route.fulfill({
@@ -749,6 +760,9 @@ test('mobile history is its own area with project filter', async ({ page }) => {
   await expect(page.getByText('stundenzettel.pdf')).toBeVisible();
   await page.getByText('Pausen anzeigen').click();
   await expect(page.getByText('Mittag')).toBeVisible();
+  await page.getByText('Standort anzeigen').click();
+  await expect(page.getByText('52.5200080, 13.4049540')).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Karte öffnen' })).toBeVisible();
   await expect.poll(() => timesheetRequests.some((query) => query.includes('scope=all'))).toBe(true);
   await expect.poll(() => timesheetRequests.some((query) => query.includes('month=2026-05'))).toBe(true);
 

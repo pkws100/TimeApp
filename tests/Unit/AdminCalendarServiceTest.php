@@ -96,6 +96,31 @@ final class AdminCalendarServiceTest extends TestCase
         self::assertSame(0, $summary['missing_count']);
     }
 
+    public function testDaySummaryDoesNotCountUsersWithoutTimeTrackingRequirementAsMissing(): void
+    {
+        $service = $this->serviceWithActiveUserRows([
+            ['id' => 7, 'created_at' => '2026-01-01 00:00:00', 'time_tracking_required' => 1],
+            ['id' => 8, 'created_at' => '2026-01-01 00:00:00', 'time_tracking_required' => 0],
+        ]);
+        $summary = $service->summarizeDay('2026-05-08', [
+            $this->booking(['user_id' => 7]),
+        ]);
+
+        self::assertSame(0, $summary['missing_count']);
+        self::assertSame('ok', $summary['status']);
+    }
+
+    public function testMonthTotalsIgnoreVoluntaryUsersForMissingDays(): void
+    {
+        $service = $this->serviceWithActiveUserRows([
+            ['id' => 7, 'created_at' => '2026-01-01 00:00:00', 'time_tracking_required' => 0],
+        ]);
+        $summary = $service->summarizeDay('2026-05-08', []);
+
+        self::assertSame(0, $summary['missing_count']);
+        self::assertSame('empty', $summary['status']);
+    }
+
     public function testMonthTotalsCountAbsenceAndMissingByCountsNotDominantStatus(): void
     {
         $service = $this->service();

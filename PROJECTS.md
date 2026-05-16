@@ -127,6 +127,10 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - [x] Abwesenheitsstatus fuer Krank, Urlaub, Feiertag und automatisch abgeleitetes Fehlen an Werktagen in Admin, Kalender und App sichtbar gemacht.
 - [x] Mobile App-Topbar zeigt den aktuellen Tagesstatus seitenuebergreifend inklusive Projekt, Startzeit, Pause, Abschluss oder Fehlend-Hinweis.
 - [x] Mobile Historie als Monats-/Tagesansicht mit Summen, Buchungsdetails, Pausen, Anhaengen und Offline-Cache ausgebaut.
+- [x] Mobile Historie repariert: frische Monatsdaten werden nach Sync/Upload geladen, Projektbuchungen und Anhaenge bleiben nicht mehr auf Nullstaenden haengen.
+- [x] Gespeicherte Standortdaten zu Buchungen werden in mobiler Historie sowie in Admin-Buchungen/Kalender mit Kartenlink sichtbar gemacht.
+- [x] Push-Test aus dem mobilen Profil sendet eine echte serverseitige Web-Push-Testnachricht an das aktive Geraet.
+- [x] Zeiterfassungspflicht pro User steuerbar; freiwillige Admin-/Notfalluser bleiben aktiv, werden aber nicht als fehlend gewertet oder erinnert.
 - [x] Möglichkeit schaffen das System auch in Docker-Compose zu deplyen
 - [x] Produktions-Compose fuer VPS/Reverse Proxy mit `timeapp-web`, `timeapp-db`, `timeapp-scheduler`, privaten DB-Netz, Proxy-Netz und stabilen Volumes validiert.
 - [x] Dockerfile fuer `php:8.2-apache` bereinigt: nur fehlende Extensions werden gebaut; bereits enthaltene Core-Extensions werden nicht erneut kompiliert.
@@ -148,6 +152,7 @@ Das geplante Frontend ist eine mobile Mitarbeiter-App als Vanilla-JS-PWA. Es ist
 - Push-Einstellungen: `/admin/settings/push`
 - App-Login API: `POST /api/v1/auth/login`
 - App-Push-Status API: `GET /api/v1/app/push/status`
+- App-Push-Test API: `POST /api/v1/app/push/test`
 - VAPID-Key-Generator: `php bin/generate-vapid-keys.php`
 - Push-Reminder CLI: `php bin/send-push-reminders.php`
 - CLI-Erstadministrator: `php bin/bootstrap-admin.php --email=... --password=... --first-name=... --last-name=...`

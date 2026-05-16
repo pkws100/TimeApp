@@ -170,8 +170,12 @@ final class AttendanceService
             return [];
         }
 
+        $timeTrackingSelect = $this->connection->columnExists('users', 'time_tracking_required')
+            ? 'COALESCE(time_tracking_required, 1)'
+            : '1';
+
         return $this->connection->fetchAll(
-            'SELECT id, employee_number, first_name, last_name, email
+            'SELECT id, employee_number, first_name, last_name, email, ' . $timeTrackingSelect . ' AS time_tracking_required
              FROM users
              WHERE COALESCE(is_deleted, 0) = 0
                AND employment_status = "active"
@@ -191,6 +195,10 @@ final class AttendanceService
             $userId = (int) ($user['id'] ?? 0);
 
             if ($userId <= 0 || isset($usersWithStatus[$userId])) {
+                continue;
+            }
+
+            if ((int) ($user['time_tracking_required'] ?? 1) !== 1) {
                 continue;
             }
 

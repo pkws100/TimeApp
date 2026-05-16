@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Domain\Auth\AuthService;
+use App\Domain\Push\PushNotificationService;
 use App\Domain\Push\PushSettingsService;
 use App\Domain\Push\PushSubscriptionService;
 use App\Http\Request;
@@ -16,6 +17,7 @@ final class AppPushController
     public function __construct(
         private PushSettingsService $settingsService,
         private PushSubscriptionService $subscriptionService,
+        private PushNotificationService $notificationService,
         private AuthService $authService
     ) {
     }
@@ -97,6 +99,60 @@ final class AppPushController
         return Response::json([
             'ok' => true,
             'message' => 'Push wurde fuer dieses Geraet deaktiviert.',
+            'data' => [
+                'devices' => $this->subscriptionService->devicesForUser((int) $user['id']),
+            ],
+        ]);
+    }
+
+    public function test(Request $request): Response
+    {
+        $user = $this->authService->currentUser();
+
+        if ($user === null) {
+            return Response::json(['ok' => false, 'message' => 'Bitte erneut anmelden.'], 401);
+        }
+
+        if (!$this->authService->hasPermission('push.receive')) {
+            return Response::json(['ok' => false, 'message' => 'Push ist fuer Ihre Rolle nicht freigegeben.'], 403);
+        }
+
+        $settings = $this->settingsService->current();
+
+        if (!$settings['enabled'] || !$settings['vapid_configured'] || !$this->notificationService->isConfigured()) {
+            return Response::json(['ok' => false, 'message' => 'Push ist aktuell nicht vollstaendig konfiguriert.'], 409);
+        }
+
+        $subscription = $this->subscriptionService->activeSubscriptionForUserEndpoint(
+            (int) $user['id'],
+            (string) $request->input('endpoint', '')
+        );
+
+        if ($subscription === null) {
+            return Response::json(['ok' => false, 'message' => 'Dieses Geraet ist nicht aktiv fuer Push registriert. Bitte Push erneut aktivieren.'], 404);
+        }
+
+        $result = $this->notificationService->send($subscription, [
+            'type' => 'app_profile_test',
+            'title' => 'Push-Test',
+            'body' => 'Diese Testbenachrichtigung wurde aus Ihrem App-Profil gesendet.',
+            'url' => '/app/profil',
+            'tag' => 'app-profile-push-test',
+        ]);
+
+        if (!($result['ok'] ?? false)) {
+            return Response::json([
+                'ok' => false,
+                'message' => (string) ($result['message'] ?? 'Push-Test konnte nicht gesendet werden.'),
+                'data' => [
+                    'devices' => $this->subscriptionService->devicesForUser((int) $user['id']),
+                ],
+            ], 502);
+        }
+
+        return Response::json([
+            'ok' => true,
+            'message' => 'Push-Test wurde an dieses Geraet gesendet.',
             'data' => [
                 'devices' => $this->subscriptionService->devicesForUser((int) $user['id']),
             ],

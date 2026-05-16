@@ -111,7 +111,7 @@
 
     function previewMarkup(file, url, type) {
         if (type === 'image') {
-            return '<img src="' + escapeHtml(url) + '" alt="" loading="lazy">';
+            return '<img src="' + escapeHtml(url) + '" alt="">';
         }
 
         return '<span>PDF</span>';
@@ -261,6 +261,49 @@
         }).join('');
     }
 
+    function renderLocations(modal, locations) {
+        var section = modal.querySelector('[data-booking-modal-locations]');
+
+        if (!section) {
+            return;
+        }
+
+        var list = section.querySelector('.booking-location-list');
+
+        if (!list) {
+            return;
+        }
+
+        var records = Array.isArray(locations) ? locations : [];
+
+        if (records.length === 0) {
+            list.innerHTML = '<li class="booking-location is-empty"><p class="muted">Kein Standort fuer diese Buchung gespeichert.</p></li>';
+            return;
+        }
+
+        list.innerHTML = records.map(function (record) {
+            var latitude = Number(record.latitude || 0);
+            var longitude = Number(record.longitude || 0);
+            var meta = record.recorded_at || 'Zeitpunkt unbekannt';
+
+            if (record.accuracy_meters !== null && typeof record.accuracy_meters !== 'undefined') {
+                meta += ' · Genauigkeit ca. ' + Number(record.accuracy_meters || 0) + ' m';
+            }
+
+            var mapLink = record.map_url
+                ? '<a class="button button-secondary" href="' + escapeHtml(record.map_url) + '" target="_blank" rel="noopener">Karte öffnen</a>'
+                : '';
+
+            return '<li class="booking-location">'
+                + '<div class="booking-location__body">'
+                + '<strong>' + escapeHtml(latitude.toFixed(7).replace('.', ',') + ', ' + longitude.toFixed(7).replace('.', ',')) + '</strong>'
+                + '<span class="muted">' + escapeHtml(meta) + '</span>'
+                + '</div>'
+                + mapLink
+                + '</li>';
+        }).join('');
+    }
+
     function openModal(modal, row, trigger) {
         var booking = parseBooking(row);
 
@@ -372,6 +415,7 @@
             restoreButton.hidden = !Boolean(booking.is_deleted);
         }
 
+        renderLocations(modal, booking.geo_records);
         renderAttachments(modal, booking.attachments);
 
         document.body.classList.add('modal-open');

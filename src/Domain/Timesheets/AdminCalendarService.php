@@ -343,8 +343,11 @@ final class AdminCalendarService
             if (!$this->connection->tableExists('users')) {
                 $this->activeUsers = [];
             } else {
+                $timeTrackingSelect = $this->connection->columnExists('users', 'time_tracking_required')
+                    ? 'COALESCE(time_tracking_required, 1)'
+                    : '1';
                 $this->activeUsers = $this->connection->fetchAll(
-                    'SELECT id, created_at
+                    'SELECT id, created_at, ' . $timeTrackingSelect . ' AS time_tracking_required
                      FROM users
                      WHERE COALESCE(is_deleted, 0) = 0
                        AND employment_status = "active"
@@ -361,6 +364,10 @@ final class AdminCalendarService
 
         return array_values(array_unique(array_filter(array_map(
             static function (array $row) use ($dayEnd): int {
+                if ((int) ($row['time_tracking_required'] ?? 1) !== 1) {
+                    return 0;
+                }
+
                 $createdAt = trim((string) ($row['created_at'] ?? ''));
 
                 if ($createdAt !== '') {

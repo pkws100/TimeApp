@@ -154,4 +154,48 @@ final class AttendanceServiceTest extends TestCase
         self::assertSame(0, $summary['derived_missing_count']);
         self::assertSame(0, $summary['status_counts']['absent']);
     }
+
+    public function testSummarizeRowsDoesNotDeriveMissingForUsersWithoutTimeTrackingRequirement(): void
+    {
+        $service = new AttendanceService(new DatabaseConnection([]));
+
+        $summary = $service->summarizeRows([
+            [
+                'id' => 2,
+                'user_id' => 10,
+                'entry_type' => 'work',
+                'employee_number' => 'MA-0010',
+                'first_name' => 'Anna',
+                'last_name' => 'Berg',
+                'project_name' => 'Projekt Alpha',
+                'project_is_deleted' => 0,
+                'note' => '',
+                'updated_at' => '2026-05-15 08:00:00',
+                'user_is_deleted' => 0,
+                'start_time' => '07:00',
+                'end_time' => '15:30',
+                'net_minutes' => 480,
+            ],
+        ], '2026-05-15', [
+            [
+                'id' => 10,
+                'employee_number' => 'MA-0010',
+                'first_name' => 'Anna',
+                'last_name' => 'Berg',
+                'email' => 'anna@example.test',
+                'time_tracking_required' => 1,
+            ],
+            [
+                'id' => 11,
+                'employee_number' => 'MA-0011',
+                'first_name' => 'Ben',
+                'last_name' => 'Kurz',
+                'email' => 'ben@example.test',
+                'time_tracking_required' => 0,
+            ],
+        ]);
+
+        self::assertSame(0, $summary['derived_missing_count']);
+        self::assertSame(0, $summary['status_counts']['absent']);
+    }
 }

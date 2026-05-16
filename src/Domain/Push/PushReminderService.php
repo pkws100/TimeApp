@@ -124,6 +124,11 @@ final class PushReminderService
             return [];
         }
 
+        $timeTrackingWhere = $this->connection->columnExists('users', 'time_tracking_required')
+            ? '               AND COALESCE(users.time_tracking_required, 1) = 1
+'
+            : '';
+
         return $this->connection->fetchAll(
             'SELECT DISTINCT users.id, users.first_name, users.last_name, users.email
              FROM users
@@ -134,7 +139,7 @@ final class PushReminderService
              WHERE permissions.code = "push.receive"
                AND COALESCE(users.is_deleted, 0) = 0
                AND users.employment_status = "active"
-               AND NOT EXISTS (
+' . $timeTrackingWhere . '               AND NOT EXISTS (
                    SELECT 1
                    FROM timesheets
                    WHERE timesheets.user_id = users.id

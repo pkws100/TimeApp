@@ -131,6 +131,7 @@ final class AuthService
             'last_name' => (string) ($user['last_name'] ?? ''),
             'email' => (string) ($user['email'] ?? ''),
             'display_name' => trim(((string) ($user['first_name'] ?? '')) . ' ' . ((string) ($user['last_name'] ?? ''))),
+            'time_tracking_required' => (int) ($user['time_tracking_required'] ?? 1) === 1,
             'roles' => $user['roles'] ?? [],
             'permissions' => $user['permissions'] ?? [],
         ];
@@ -139,6 +140,7 @@ final class AuthService
     private function findByEmail(string $email): ?array
     {
         if ($this->connection->tableExists('users')) {
+            $timeTrackingSelect = $this->timeTrackingSelect();
             $user = $this->connection->fetchOne(
                 'SELECT
                     users.id,
@@ -148,6 +150,7 @@ final class AuthService
                     users.email,
                     users.password_hash,
                     users.employment_status,
+                    ' . $timeTrackingSelect . ' AS time_tracking_required,
                     users.is_deleted
                  FROM users
                  WHERE users.email = :email
@@ -171,6 +174,7 @@ final class AuthService
             return null;
         }
 
+        $timeTrackingSelect = $this->timeTrackingSelect();
         $user = $this->connection->fetchOne(
             'SELECT
                 users.id,
@@ -180,6 +184,7 @@ final class AuthService
                 users.email,
                 users.password_hash,
                 users.employment_status,
+                ' . $timeTrackingSelect . ' AS time_tracking_required,
                 users.is_deleted
              FROM users
              WHERE users.id = :id
@@ -235,5 +240,14 @@ final class AuthService
         $user['permissions'] = $permissions;
 
         return $user;
+    }
+
+    private function timeTrackingSelect(): string
+    {
+        if (!$this->connection->columnExists('users', 'time_tracking_required')) {
+            return '1';
+        }
+
+        return 'COALESCE(users.time_tracking_required, 1)';
     }
 }

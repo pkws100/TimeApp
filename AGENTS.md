@@ -120,6 +120,7 @@ Diese Entscheidungen gelten aktuell als gesetzt und sollen nicht ohne expliziten
 - Fahrzeuge und Geraete sind eigene Ressourcen und keine Rollen.
 - Benutzer koennen mehrere Rollen gleichzeitig haben.
 - Effektive Rechte ergeben sich aus allen zugewiesenen Rollen.
+- Aktive Benutzer sind nicht automatisch zeiterfassungspflichtig; `users.time_tracking_required` steuert abgeleitetes Fehlen und Fehlbuchungs-Erinnerungen, freiwilliges Buchen bleibt moeglich.
 - Stammdaten werden nicht physisch geloescht, sondern archiviert.
 - `timesheets` bleiben system-versioniert in MariaDB.
 - Arbeitszeitlogik beruecksichtigt gesetzliche Pausen:

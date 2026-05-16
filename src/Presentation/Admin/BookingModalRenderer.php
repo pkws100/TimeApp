@@ -45,6 +45,7 @@ final class BookingModalRenderer
             $attachmentTotalCount = (int) ($booking['attachment_total_count'] ?? $attachmentCount);
             $archivedAttachmentCount = (int) ($booking['archived_attachment_count'] ?? max(0, $attachmentTotalCount - $attachmentCount));
             $imageAttachmentCount = (int) ($booking['image_attachment_count'] ?? 0);
+            $geoCount = (int) ($booking['geo_count'] ?? (is_array($booking['geo_records'] ?? null) ? count($booking['geo_records']) : 0));
             if ($attachmentCount > 0) {
                 $attachmentDisplay = '<span class="badge">Anhänge: ' . $attachmentCount . '</span>'
                     . ($imageAttachmentCount > 0 ? '<br><span class="muted">' . $imageAttachmentCount . ' Bild(er)</span>' : '')
@@ -54,6 +55,9 @@ final class BookingModalRenderer
             } else {
                 $attachmentDisplay = '<span class="muted">-</span>';
             }
+            $geoDisplay = $geoCount > 0
+                ? '<span class="badge">Standort: ' . $geoCount . '</span>'
+                : '<span class="muted">-</span>';
             $actionLabel = $canManage ? 'Bearbeiten' : 'Ansehen';
             $actionButton = $canOpenModal
                 ? '<a class="button button-secondary booking-edit-trigger" data-booking-open aria-haspopup="dialog" href="' . $this->e($this->openBookingLocation($openBookingLocation, $id)) . '">' . $this->e($actionLabel) . '</a>'
@@ -78,6 +82,7 @@ final class BookingModalRenderer
                 . '<td>' . $this->e((string) ($booking['net_minutes'] ?? 0)) . ' Min</td>'
                 . '<td>' . $noteDisplay . '</td>'
                 . '<td>' . $attachmentDisplay . '</td>'
+                . '<td>' . $geoDisplay . '</td>'
                 . '<td>' . $statusBadge . '</td>'
                 . '<td><span class="muted">' . $this->e((string) ($booking['version_hint'] ?? '')) . '</span></td>'
                 . '<td class="table-actions">' . $actionButton . '</td>'
@@ -85,7 +90,7 @@ final class BookingModalRenderer
         }
 
         if ($rows === '') {
-            $colspan = $showSelection ? '15' : '14';
+            $colspan = $showSelection ? '16' : '15';
             $rows = '<tr><td colspan="' . $colspan . '" class="table-empty">' . $this->e($emptyMessage) . '</td></tr>';
         }
 
@@ -108,6 +113,7 @@ final class BookingModalRenderer
                 <th>Netto</th>
                 <th>Notiz</th>
                 <th>Anhänge</th>
+                <th>Standort</th>
                 <th>Status</th>
                 <th>Version</th>
                 <th>Aktionen</th>
@@ -170,6 +176,9 @@ HTML;
             $returnTo,
             $csrfToken,
             $selectedId
+        );
+        $locationSection = $this->renderLocationSection(
+            is_array($selectedBooking['geo_records'] ?? null) ? $selectedBooking['geo_records'] : []
         );
         $archiveControls = $canArchive
             ? <<<HTML
@@ -236,6 +245,7 @@ HTML
                 {$saveButton}
             </div>
         </form>
+        {$locationSection}
         {$attachmentSection}
         {$archiveControls}
     </div>
@@ -343,7 +353,56 @@ HTML;
             'attachment_total_count' => (int) ($booking['attachment_total_count'] ?? (int) ($booking['attachment_count'] ?? 0)),
             'archived_attachment_count' => (int) ($booking['archived_attachment_count'] ?? 0),
             'image_attachment_count' => (int) ($booking['image_attachment_count'] ?? 0),
+            'geo_records' => is_array($booking['geo_records'] ?? null) ? $booking['geo_records'] : [],
+            'geo_count' => (int) ($booking['geo_count'] ?? (is_array($booking['geo_records'] ?? null) ? count($booking['geo_records']) : 0)),
+            'latest_geo' => is_array($booking['latest_geo'] ?? null) ? $booking['latest_geo'] : null,
         ];
+    }
+
+    private function renderLocationSection(array $locations): string
+    {
+        $items = '';
+
+        foreach ($locations as $location) {
+            $latitude = isset($location['latitude']) ? (float) $location['latitude'] : 0.0;
+            $longitude = isset($location['longitude']) ? (float) $location['longitude'] : 0.0;
+            $recordedAt = (string) ($location['recorded_at'] ?? '');
+            $accuracy = isset($location['accuracy_meters']) ? (int) $location['accuracy_meters'] : null;
+            $mapUrl = (string) ($location['map_url'] ?? '');
+            $meta = trim($recordedAt) !== '' ? $recordedAt : 'Zeitpunkt unbekannt';
+
+            if ($accuracy !== null) {
+                $meta .= ' · Genauigkeit ca. ' . $accuracy . ' m';
+            }
+
+            $mapLink = $mapUrl !== ''
+                ? '<a class="button button-secondary" href="' . $this->e($mapUrl) . '" target="_blank" rel="noopener">Karte öffnen</a>'
+                : '';
+
+            $items .= '<li class="booking-location">'
+                . '<div class="booking-location__body">'
+                . '<strong>' . $this->e(number_format($latitude, 7, ',', '.') . ', ' . number_format($longitude, 7, ',', '.')) . '</strong>'
+                . '<span class="muted">' . $this->e($meta) . '</span>'
+                . '</div>'
+                . $mapLink
+                . '</li>';
+        }
+
+        if ($items === '') {
+            $items = '<li class="booking-location is-empty"><p class="muted">Kein Standort fuer diese Buchung gespeichert.</p></li>';
+        }
+
+        return <<<HTML
+<section class="booking-locations" data-booking-modal-locations>
+    <div>
+        <h3>Standort</h3>
+        <p class="muted">Gespeicherte GEO-Daten der App-Buchung, falls beim Erfassen uebermittelt.</p>
+    </div>
+    <ul class="booking-location-list">
+        {$items}
+    </ul>
+</section>
+HTML;
     }
 
     private function projectAssignmentOptions(array $projects): string
@@ -397,7 +456,7 @@ HTML;
     private function previewMarkup(array $file, string $previewUrl, string $previewType): string
     {
         if ($previewType === 'image') {
-            return '<img src="' . $this->e($previewUrl) . '" alt="" loading="lazy">';
+            return '<img src="' . $this->e($previewUrl) . '" alt="">';
         }
 
         return '<span>PDF</span>';

@@ -11,6 +11,7 @@ use App\Domain\Projects\ProjectService;
 use App\Domain\Timesheets\AdminBookingService;
 use App\Domain\Timesheets\AdminCalendarService;
 use App\Domain\Timesheets\TimesheetCalculator;
+use App\Domain\Timesheets\TimesheetGeoLocationService;
 use App\Domain\Users\PermissionMatrix;
 use App\Domain\Users\UserService;
 use App\Http\Controllers\AdminCalendarController;
@@ -112,6 +113,7 @@ final class AdminCalendarControllerTest extends TestCase
             new ProjectService($connection),
             new UserService($connection),
             new FileAttachmentService($connection, []),
+            new TimesheetGeoLocationService($connection),
             new AuthService($connection, new PermissionMatrix([], [])),
             new CsrfService()
         );
