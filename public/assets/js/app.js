@@ -51,6 +51,8 @@
         timesheetListLoading: false,
         timesheetListOffline: false,
         timesheetHistoryDirty: false,
+        signatureDialog: null,
+        signatureDrawing: null,
         push: null,
         pushLoading: false,
         pushBusy: false,
@@ -257,6 +259,39 @@
         }
 
         return state.today.projects.find((project) => project.id === projectId) || null;
+    }
+
+    function signatureDefaultNameForProject(projectId) {
+        const project = projectById(projectId);
+
+        if (!project) {
+            return { name: '', source: 'manual', required: false };
+        }
+
+        const signatureName = String(project.customer_signature_name || '').trim();
+        const customerName = String(project.customer_name || '').trim();
+
+        return {
+            name: signatureName || customerName,
+            source: signatureName || customerName ? 'project_default' : 'manual',
+            required: project.customer_signature_required === true || project.customer_signature_required === 1 || project.customer_signature_required === '1'
+        };
+    }
+
+    function timesheetSignatureDefault(item) {
+        if (!item) {
+            return { name: '', source: 'manual', required: false };
+        }
+
+        const signatureName = String(item.customer_signature_name || '').trim();
+        const customerName = String(item.project_customer_name || '').trim();
+        const projectDefault = signatureDefaultNameForProject(item.project_id === undefined ? null : item.project_id);
+
+        return {
+            name: signatureName || customerName || projectDefault.name || '',
+            source: signatureName || customerName || projectDefault.name ? 'project_default' : 'manual',
+            required: item.customer_signature_required === true || item.customer_signature_required === 1 || item.customer_signature_required === '1' || projectDefault.required
+        };
     }
 
     function hasPermission(permission) {
@@ -809,7 +844,64 @@
                 + '</div>';
         }
 
+        if (state.dialog.type === 'signature-prompt') {
+            const payload = state.dialog.payload || {};
+            const projectName = payload.project_name || 'Zeitbuchung';
+
+            return '<div class="app-dialog-layer">'
+                + '<button type="button" class="app-dialog-overlay" id="dialogCancel" aria-label="Dialog schliessen"></button>'
+                + '<section class="app-dialog">'
+                + '<p class="muted">Kundenbestätigung</p>'
+                + '<h2>Kundenunterschrift einholen?</h2>'
+                + '<p>Für ' + escapeHtml(projectName) + ' ist nach Abschluss normalerweise eine Kundenbestätigung vorgesehen.</p>'
+                + '<div class="app-inline-actions">'
+                + '<button type="button" id="signaturePromptOpen" data-timesheet-signature-open="' + escapeHtml(payload.id || '') + '">Kundenunterschrift einholen</button>'
+                + '<button type="button" id="dialogConfirmSecondary" class="app-button app-button-secondary">Später</button>'
+                + '</div>'
+                + '</section>'
+                + '</div>';
+        }
+
         return '';
+    }
+
+    function signatureDialogMarkup() {
+        const dialog = state.signatureDialog;
+
+        if (!dialog || !dialog.timesheet) {
+            return '';
+        }
+
+        const timesheet = dialog.timesheet;
+        const name = typeof dialog.customerName === 'string' ? dialog.customerName : '';
+        const source = dialog.customerNameSource || 'manual';
+        const disabled = isBusy('signature_save') ? ' disabled' : '';
+
+        return '<section class="app-signature-layer" role="dialog" aria-modal="true" aria-labelledby="signatureDialogTitle">'
+            + '<div class="app-signature-panel">'
+            + '<div class="app-signature-head">'
+            + '<div><p class="muted">Kundenbestätigung</p><h2 id="signatureDialogTitle">Unterschrift erfassen</h2></div>'
+            + '<button type="button" class="app-button app-button-secondary" id="signatureCancel"' + disabled + '>Abbrechen</button>'
+            + '</div>'
+            + '<div class="app-signature-summary">'
+            + '<div><span class="muted">Projekt</span><strong>' + escapeHtml(timesheet.project_name || 'Nicht zugeordnet') + '</strong></div>'
+            + '<div><span class="muted">Datum</span><strong>' + escapeHtml(formatDate(timesheet.work_date || '')) + '</strong></div>'
+            + '<div><span class="muted">Start</span><strong>' + escapeHtml(formatTime(timesheet.start_time)) + '</strong></div>'
+            + '<div><span class="muted">Ende</span><strong>' + escapeHtml(formatTime(timesheet.end_time)) + '</strong></div>'
+            + '<div><span class="muted">Pause</span><strong>' + escapeHtml(formatDurationMinutes(Number(timesheet.break_minutes || 0))) + '</strong></div>'
+            + '<div><span class="muted">Netto</span><strong>' + escapeHtml(formatDurationMinutes(Number(timesheet.net_minutes || 0))) + '</strong></div>'
+            + '<div><span class="muted">Mitarbeiter</span><strong>' + escapeHtml(timesheet.employee_name || (state.today && state.today.user ? state.today.user.display_name : '')) + '</strong></div>'
+            + '</div>'
+            + '<label class="app-field"><span>Name in Druckbuchstaben</span><input id="signatureCustomerName" value="' + escapeHtml(name) + '" data-name-source="' + escapeHtml(source) + '"' + disabled + '></label>'
+            + '<p class="app-signature-confirmation">Ich bestätige, dass die angezeigten Zeiten für diese Leistung stimmen.</p>'
+            + '<div class="app-signature-rotate-hint">Bitte das Gerät für die Unterschrift quer halten, falls die Fläche zu schmal ist.</div>'
+            + '<div class="app-signature-canvas-wrap"><canvas id="signatureCanvas" data-empty="1"></canvas></div>'
+            + '<div class="app-inline-actions app-signature-actions">'
+            + '<button type="button" id="signatureReset" class="app-button app-button-secondary"' + disabled + '>Zurücksetzen</button>'
+            + '<button type="button" id="signatureSave"' + disabled + '>' + escapeHtml(buttonLabel('signature_save', 'Bestätigung speichern')) + '</button>'
+            + '</div>'
+            + '</div>'
+            + '</section>';
     }
 
     function buttonLabel(action, defaultLabel) {
@@ -825,6 +917,7 @@
             pause: 'Wird gespeichert ...',
             upload_attachment: 'Wird hochgeladen ...',
             upload_project_attachment: 'Wird hochgeladen ...',
+            signature_save: 'Wird gespeichert ...',
         };
 
         return labels[action] || 'Wird verarbeitet ...';
@@ -1604,6 +1697,7 @@
             + drawerMenuMarkup()
             + feedbackMarkup()
             + dialogMarkup()
+            + signatureDialogMarkup()
             + '<main class="app-layout">' + inner + '</main>'
             + '<nav class="app-nav">' + appNav() + '</nav>'
             + '</div>';
@@ -1930,6 +2024,36 @@
             + '</div>';
     }
 
+    function timesheetSignatureMarkup(item) {
+        const signature = item && item.customer_signature ? item.customer_signature : null;
+        const canRequest = item
+            && item.entry_type === 'work'
+            && item.end_time
+            && !signature;
+
+        if (signature) {
+            const signedAt = signature.signed_at ? formatDateTimeStamp(signature.signed_at) : '-';
+            const imageLink = signature.image_url
+                ? '<a href="' + escapeHtml(signature.image_url) + '" target="_blank" rel="noopener">Unterschrift anzeigen</a>'
+                : '';
+
+            return '<div class="app-history-locations"><div><strong>Kundenbestätigung vorhanden</strong><span>'
+                + escapeHtml((signature.customer_name || '-') + ' · ' + signedAt)
+                + '</span>' + imageLink + '</div></div>';
+        }
+
+        if (canRequest) {
+            if (!state.online || state.timesheetListOffline) {
+                return '<div class="app-history-empty-line">Kundenunterschrift kann aktuell nur online gespeichert werden.</div>';
+            }
+
+            return '<div class="app-history-empty-line">Noch keine Kundenbestätigung vorhanden.</div>'
+                + '<button type="button" class="app-button app-button-secondary" data-timesheet-signature-open="' + escapeHtml(item.id || '') + '">Kundenunterschrift nachholen</button>';
+        }
+
+        return '<div class="app-history-empty-line">Für diese Buchung ist keine Kundenbestätigung möglich.</div>';
+    }
+
     function timesheetDetailMarkup(item) {
         const projectName = item.project_name || item.project_label || 'Nicht zugeordnet';
         const note = item.note ? '<p class="app-history-note">' + escapeHtml(item.note) + '</p>' : '';
@@ -1955,6 +2079,7 @@
             + note
             + '<details class="app-history-detail"><summary>Pausen anzeigen</summary>' + timesheetBreaksMarkup(item) + '</details>'
             + '<details class="app-history-detail"><summary>Standort anzeigen</summary>' + timesheetGeoMarkup(item) + '</details>'
+            + '<details class="app-history-detail"><summary>Kundenbestätigung anzeigen</summary>' + timesheetSignatureMarkup(item) + '</details>'
             + '<details class="app-history-detail"><summary>Anhaenge anzeigen</summary>' + attachmentMarkup + '</details>'
             + '</article>';
     }
@@ -2622,6 +2747,12 @@
 
         if (dialogConfirmSecondary) {
             dialogConfirmSecondary.addEventListener('click', function () {
+                if (state.dialog && state.dialog.type === 'signature-prompt') {
+                    state.dialog = null;
+                    render();
+                    return;
+                }
+
                 state.dialog = null;
                 navigate('/app/projektwahl');
             });
@@ -2783,6 +2914,61 @@
                 loadTimesheetList(false);
             });
         });
+
+        document.querySelectorAll('[data-timesheet-signature-open]').forEach((button) => {
+            button.addEventListener('click', async function () {
+                const id = Number(button.getAttribute('data-timesheet-signature-open') || '0');
+                const item = Array.isArray(state.timesheetList)
+                    ? state.timesheetList.find((entry) => Number(entry.id || 0) === id)
+                    : null;
+
+                if (state.dialog && state.dialog.type === 'signature-prompt') {
+                    state.dialog = null;
+                }
+
+                await openSignatureDialogForTimesheet(item || id);
+            });
+        });
+
+        const signatureCancel = document.getElementById('signatureCancel');
+
+        if (signatureCancel) {
+            signatureCancel.addEventListener('click', function () {
+                closeSignatureDialog();
+            });
+        }
+
+        const signatureReset = document.getElementById('signatureReset');
+
+        if (signatureReset) {
+            signatureReset.addEventListener('click', function () {
+                resetSignatureCanvas();
+            });
+        }
+
+        const signatureSave = document.getElementById('signatureSave');
+
+        if (signatureSave) {
+            signatureSave.addEventListener('click', async function () {
+                await saveSignatureDialog();
+            });
+        }
+
+        setupSignatureCanvas();
+
+        if (!window.__timeappSignatureResizeBound) {
+            window.__timeappSignatureResizeBound = true;
+            window.addEventListener('resize', function () {
+                if (state.signatureDialog) {
+                    resizeSignatureCanvasPreservingDrawing();
+                }
+            });
+            window.addEventListener('orientationchange', function () {
+                if (state.signatureDialog) {
+                    window.setTimeout(resizeSignatureCanvasPreservingDrawing, 200);
+                }
+            });
+        }
 
         document.querySelectorAll('[data-theme-mode-button]').forEach((button) => {
             button.addEventListener('click', function () {
@@ -3583,7 +3769,6 @@
                 return false;
             }
 
-            await registerBackgroundSync();
             succeeded = true;
         } catch (error) {
             showFeedback('error', friendlyMessage(error.message, 'Die Aktion konnte nicht vorbereitet werden. Bitte erneut versuchen.'), true);
@@ -3759,6 +3944,7 @@
                     syncTodayStateStatus();
                 }
 
+                maybePromptForSignatureAfterSync(item, payload);
                 showFeedback('success', friendlyMessage(payload.message || (payload.data ? payload.data.message : ''), 'Aenderung erfolgreich gespeichert.'));
             } catch (error) {
                 if (isSessionExpiredError(error)) {
@@ -4025,6 +4211,390 @@
         }
     }
 
+    function normalizeSignatureTimesheet(timesheet, status) {
+        const summary = status && status.timesheet_summary ? status.timesheet_summary : {};
+        const base = {
+            ...(timesheet || {}),
+            ...(summary || {})
+        };
+
+        if (!base.employee_name && state.today && state.today.user) {
+            base.employee_name = state.today.user.display_name || '';
+        }
+
+        return base;
+    }
+
+    async function openSignatureDialogForTimesheet(timesheetOrId) {
+        if (!state.online || !navigator.onLine) {
+            showFeedback('error', 'Unterschrift kann aktuell nur online gespeichert werden. Bitte erneut versuchen, sobald Verbindung besteht.', true);
+            return;
+        }
+
+        const timesheetId = typeof timesheetOrId === 'object'
+            ? Number(timesheetOrId.id || 0)
+            : Number(timesheetOrId || 0);
+
+        if (!timesheetId) {
+            showFeedback('error', 'Diese Buchung kann nicht bestätigt werden.');
+            return;
+        }
+
+        try {
+            const payload = await apiJson('/api/v1/app/timesheets/' + timesheetId + '/signature');
+            const status = payload.data || {};
+
+            if (status.signature) {
+                showFeedback('success', 'Kundenbestätigung ist bereits vorhanden.');
+                await refreshAfterSignatureChange();
+                return;
+            }
+
+            if (!status.can_sign) {
+                showFeedback('error', 'Kundenbestätigungen sind nur für abgeschlossene Arbeitsbuchungen möglich.');
+                return;
+            }
+
+            const localDefault = typeof timesheetOrId === 'object'
+                ? timesheetSignatureDefault(timesheetOrId)
+                : { name: '', source: 'manual' };
+            const suggestedName = String(status.suggested_customer_name || localDefault.name || '').trim();
+            const source = status.suggested_customer_name_source || localDefault.source || 'manual';
+
+            state.dialog = null;
+            state.signatureDialog = {
+                timesheet: normalizeSignatureTimesheet(typeof timesheetOrId === 'object' ? timesheetOrId : null, status),
+                customerName: suggestedName,
+                customerNameSource: source,
+                signaturePng: null,
+                hasDrawing: false
+            };
+            render();
+            tryOrientationLock();
+        } catch (error) {
+            if (isSessionExpiredError(error)) {
+                return;
+            }
+
+            showFeedback('error', friendlyMessage(error.message, 'Kundenbestätigung konnte nicht vorbereitet werden.'), true);
+        }
+    }
+
+    function closeSignatureDialog() {
+        state.signatureDialog = null;
+        state.signatureDrawing = null;
+        unlockOrientation();
+        render();
+    }
+
+    function tryOrientationLock() {
+        try {
+            if (screen.orientation && typeof screen.orientation.lock === 'function') {
+                screen.orientation.lock('landscape').catch(function () {});
+            }
+        } catch (error) {
+            return;
+        }
+    }
+
+    function unlockOrientation() {
+        try {
+            if (screen.orientation && typeof screen.orientation.unlock === 'function') {
+                screen.orientation.unlock();
+            }
+        } catch (error) {
+            return;
+        }
+    }
+
+    function setupSignatureCanvas() {
+        const canvas = document.getElementById('signatureCanvas');
+
+        if (!canvas) {
+            return;
+        }
+
+        const context = canvas.getContext('2d');
+
+        if (!context) {
+            return;
+        }
+
+        const ratio = Math.max(1, window.devicePixelRatio || 1);
+        const bounds = canvas.getBoundingClientRect();
+        const width = Math.max(320, Math.floor(bounds.width || 720));
+        const height = Math.max(180, Math.floor(bounds.height || 260));
+
+        canvas.width = Math.floor(width * ratio);
+        canvas.height = Math.floor(height * ratio);
+        context.setTransform(ratio, 0, 0, ratio, 0, 0);
+        context.fillStyle = '#ffffff';
+        context.fillRect(0, 0, width, height);
+        context.lineCap = 'round';
+        context.lineJoin = 'round';
+        context.lineWidth = 3;
+        context.strokeStyle = '#111827';
+        canvas.dataset.empty = state.signatureDialog && state.signatureDialog.hasDrawing ? '0' : '1';
+        canvas.dataset.ready = '1';
+
+        if (state.signatureDialog && state.signatureDialog.signaturePng) {
+            const image = new Image();
+            image.onload = function () {
+                context.drawImage(image, 0, 0, width, height);
+                canvas.dataset.empty = '0';
+            };
+            image.src = state.signatureDialog.signaturePng;
+        }
+
+        if (canvas.dataset.listenersBound === '1') {
+            state.signatureDrawing = { canvas };
+            return;
+        }
+
+        let drawing = false;
+        let lastPoint = null;
+
+        const pointFromCoordinates = function (clientX, clientY) {
+            const rect = canvas.getBoundingClientRect();
+
+            return {
+                x: clientX - rect.left,
+                y: clientY - rect.top
+            };
+        };
+
+        const startDrawing = function (event, pointSource) {
+            if (event && typeof event.preventDefault === 'function') {
+                event.preventDefault();
+            }
+            const source = pointSource || event;
+
+            if (!source) {
+                return;
+            }
+
+            drawing = true;
+            lastPoint = pointFromCoordinates(source.clientX, source.clientY);
+            canvas.dataset.empty = '0';
+            if (state.signatureDialog) {
+                state.signatureDialog.hasDrawing = true;
+                state.signatureDialog.signaturePng = null;
+            }
+
+            if (event && typeof canvas.setPointerCapture === 'function' && event.pointerId !== undefined) {
+                canvas.setPointerCapture(event.pointerId);
+            }
+        };
+
+        const continueDrawing = function (event, pointSource) {
+            if (!drawing || !lastPoint) {
+                return;
+            }
+
+            if (event && typeof event.preventDefault === 'function') {
+                event.preventDefault();
+            }
+            const source = pointSource || event;
+
+            if (!source) {
+                return;
+            }
+
+            const nextPoint = pointFromCoordinates(source.clientX, source.clientY);
+            const activeContext = canvas.getContext('2d');
+
+            if (activeContext) {
+                activeContext.beginPath();
+                activeContext.moveTo(lastPoint.x, lastPoint.y);
+                activeContext.lineTo(nextPoint.x, nextPoint.y);
+                activeContext.stroke();
+            }
+            lastPoint = nextPoint;
+        };
+
+        const stop = function () {
+            drawing = false;
+            lastPoint = null;
+        };
+
+        if ('PointerEvent' in window) {
+            canvas.addEventListener('pointerdown', startDrawing);
+            canvas.addEventListener('pointermove', continueDrawing);
+            canvas.addEventListener('pointerup', stop);
+            canvas.addEventListener('pointercancel', stop);
+        } else {
+            canvas.addEventListener('mousedown', startDrawing);
+            canvas.addEventListener('mousemove', continueDrawing);
+            window.addEventListener('mouseup', stop);
+            canvas.addEventListener('touchstart', function (event) {
+                startDrawing(event, event.touches[0] || event);
+            }, { passive: false });
+            canvas.addEventListener('touchmove', function (event) {
+                continueDrawing(event, event.touches[0] || event);
+            }, { passive: false });
+            canvas.addEventListener('touchend', stop);
+            canvas.addEventListener('touchcancel', stop);
+        }
+        canvas.dataset.listenersBound = '1';
+        state.signatureDrawing = { canvas };
+    }
+
+    function resetSignatureCanvas() {
+        if (state.signatureDialog) {
+            state.signatureDialog.signaturePng = null;
+            state.signatureDialog.hasDrawing = false;
+        }
+        const canvas = document.getElementById('signatureCanvas');
+        if (canvas) {
+            canvas.dataset.ready = '0';
+        }
+        setupSignatureCanvas();
+    }
+
+    function resizeSignatureCanvasPreservingDrawing() {
+        const canvas = document.getElementById('signatureCanvas');
+
+        if (!canvas || !state.signatureDialog) {
+            return;
+        }
+
+        if (canvas.dataset.empty !== '1') {
+            state.signatureDialog.signaturePng = canvas.toDataURL('image/png');
+            state.signatureDialog.hasDrawing = true;
+        }
+
+        canvas.dataset.ready = '0';
+        window.requestAnimationFrame(setupSignatureCanvas);
+    }
+
+    async function saveSignatureDialog() {
+        const dialog = state.signatureDialog;
+        const canvas = document.getElementById('signatureCanvas');
+        const nameField = document.getElementById('signatureCustomerName');
+
+        if (!dialog || !dialog.timesheet || !canvas || !nameField) {
+            return;
+        }
+
+        if (!state.online || !navigator.onLine) {
+            showFeedback('error', 'Unterschrift kann aktuell nur online gespeichert werden. Bitte erneut versuchen, sobald Verbindung besteht.', true);
+            return;
+        }
+
+        const customerName = String(nameField.value || '').trim();
+
+        if (customerName.length < 2) {
+            showFeedback('error', 'Bitte den Namen in Druckbuchstaben eintragen.', true);
+            nameField.focus();
+            return;
+        }
+
+        if (canvas.dataset.empty === '1') {
+            showFeedback('error', 'Bitte zuerst auf der Fläche unterschreiben.', true);
+            return;
+        }
+
+        const signaturePng = canvas.toDataURL('image/png');
+        dialog.signaturePng = signaturePng;
+        dialog.hasDrawing = true;
+        state.pendingAction = 'signature_save';
+        render();
+
+        try {
+            const payload = await apiJson('/api/v1/app/timesheets/' + Number(dialog.timesheet.id) + '/signature', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    client_request_id: createClientId().replace(/^app-/, 'sig-'),
+                    customer_name: customerName,
+                    customer_name_source: nameField.dataset.nameSource || dialog.customerNameSource || 'manual',
+                    confirmation_text: 'Ich bestätige, dass die angezeigten Zeiten für diese Leistung stimmen.',
+                    signature_png: signaturePng,
+                    client_signed_at: new Date().toISOString()
+                })
+            });
+
+            applySignatureResult(Number(dialog.timesheet.id), payload.data && payload.data.signature ? payload.data.signature : null);
+            state.signatureDialog = null;
+            state.signatureDrawing = null;
+            unlockOrientation();
+            markTimesheetHistoryDirty();
+            showFeedback('success', friendlyMessage(payload.message, 'Kundenbestätigung gespeichert.'));
+            await refreshAfterSignatureChange();
+        } catch (error) {
+            if (isSessionExpiredError(error)) {
+                return;
+            }
+
+            showFeedback('error', friendlyMessage(error.message, 'Kundenbestätigung konnte nicht gespeichert werden.'), true);
+        } finally {
+            state.pendingAction = null;
+            render();
+        }
+    }
+
+    function applySignatureResult(timesheetId, signature) {
+        if (!signature || !timesheetId) {
+            return;
+        }
+
+        if (state.today && state.today.today_state && state.today.today_state.work_entry && Number(state.today.today_state.work_entry.id || 0) === timesheetId) {
+            state.today.today_state.work_entry.customer_signature = signature;
+            state.today.today_state.work_entry.customer_signature_present = true;
+        }
+
+        if (state.today && Array.isArray(state.today.project_day_summaries)) {
+            state.today.project_day_summaries.forEach((summary) => {
+                if (summary.work_entry && Number(summary.work_entry.id || 0) === timesheetId) {
+                    summary.work_entry.customer_signature = signature;
+                    summary.work_entry.customer_signature_present = true;
+                }
+            });
+        }
+
+        if (Array.isArray(state.timesheetList)) {
+            state.timesheetList.forEach((item) => {
+                if (Number(item.id || 0) === timesheetId) {
+                    item.customer_signature = signature;
+                    item.customer_signature_present = true;
+                }
+            });
+            state.timesheetDays = buildTimesheetHistoryDays(state.timesheetList);
+            state.timesheetSummary = buildTimesheetHistorySummary(state.timesheetList);
+        }
+    }
+
+    async function refreshAfterSignatureChange() {
+        await loadOnlineData(true);
+
+        if (state.session.authenticated && routeName() === '/historie') {
+            await loadTimesheetList(true);
+        }
+    }
+
+    function maybePromptForSignatureAfterSync(item, responsePayload) {
+        const action = item && item.payload ? item.payload.action : null;
+
+        if (action !== 'check_out' && action !== 'day_close') {
+            return;
+        }
+
+        const timesheet = responsePayload && responsePayload.data ? responsePayload.data.timesheet : null;
+        const defaults = timesheetSignatureDefault(timesheet);
+
+        if (!timesheet || !timesheet.id || !timesheet.end_time || !defaults.required || timesheet.customer_signature_present || timesheet.customer_signature) {
+            return;
+        }
+
+        state.dialog = {
+            type: 'signature-prompt',
+            payload: {
+                id: timesheet.id,
+                project_name: timesheet.project_name || projectNameForId(timesheet.project_id || null)
+            }
+        };
+    }
+
     function readGeoAck() {
         try {
             return window.localStorage.getItem(GEO_ACK_KEY) === '1';
@@ -4042,22 +4612,6 @@
             await navigator.serviceWorker.register('/app/sw.js');
         } catch (error) {
             console.warn('Service Worker konnte nicht registriert werden.', error);
-        }
-    }
-
-    async function registerBackgroundSync() {
-        if (!('serviceWorker' in navigator) || !('SyncManager' in window)) {
-            return;
-        }
-
-        try {
-            const registration = await navigator.serviceWorker.ready;
-
-            if (registration.sync) {
-                await registration.sync.register('timesheet-sync');
-            }
-        } catch (error) {
-            console.warn('Background Sync konnte nicht registriert werden.', error);
         }
     }
 

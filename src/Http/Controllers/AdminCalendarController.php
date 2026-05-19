@@ -12,6 +12,7 @@ use App\Domain\Projects\ProjectService;
 use App\Domain\Timesheets\AdminBookingService;
 use App\Domain\Timesheets\AdminCalendarService;
 use App\Domain\Timesheets\TimesheetGeoLocationService;
+use App\Domain\Timesheets\TimesheetSignatureService;
 use App\Domain\Users\UserService;
 use App\Http\Request;
 use App\Http\Response;
@@ -31,7 +32,8 @@ final class AdminCalendarController
         private DocumentStatusService $documentStatusService,
         private TimesheetGeoLocationService $geoLocationService,
         private AuthService $authService,
-        private CsrfService $csrfService
+        private CsrfService $csrfService,
+        private ?TimesheetSignatureService $timesheetSignatureService = null
     ) {
     }
 
@@ -361,6 +363,7 @@ HTML;
     {
         $timesheetIds = array_map(static fn (array $booking): int => (int) ($booking['id'] ?? 0), $bookings);
         $geoByTimesheet = $this->geoLocationService->listForTimesheetsGrouped($timesheetIds);
+        $signatureByTimesheet = $this->timesheetSignatureService?->listForTimesheetsGrouped($timesheetIds) ?? [];
 
         foreach ($bookings as $index => $booking) {
             $timesheetId = (int) ($booking['id'] ?? 0);
@@ -387,6 +390,8 @@ HTML;
             $bookings[$index]['geo_records'] = $geoByTimesheet[$timesheetId] ?? [];
             $bookings[$index]['geo_count'] = count($bookings[$index]['geo_records']);
             $bookings[$index]['latest_geo'] = $bookings[$index]['geo_records'][0] ?? null;
+            $bookings[$index]['customer_signature'] = $signatureByTimesheet[$timesheetId] ?? null;
+            $bookings[$index]['customer_signature_present'] = isset($signatureByTimesheet[$timesheetId]);
         }
 
         return $bookings;

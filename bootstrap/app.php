@@ -32,6 +32,7 @@ use App\Domain\Timesheets\AdminCalendarService;
 use App\Domain\Timesheets\AppTimesheetSyncService;
 use App\Domain\Timesheets\TimesheetCalculator;
 use App\Domain\Timesheets\TimesheetGeoLocationService;
+use App\Domain\Timesheets\TimesheetSignatureService;
 use App\Domain\Timesheets\TimesheetService;
 use App\Domain\Timesheets\WorkdayStateCalculator;
 use App\Domain\Users\PermissionMatrix;
@@ -46,12 +47,14 @@ use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminManagementController;
 use App\Http\Controllers\AdminPushController;
 use App\Http\Controllers\AdminTimesheetAttachmentController;
+use App\Http\Controllers\AdminTimesheetSignatureController;
 use App\Http\Controllers\AppApiController;
 use App\Http\Controllers\AppController;
 use App\Http\Controllers\AppProjectAttachmentController;
 use App\Http\Controllers\AppPushController;
 use App\Http\Controllers\AppTimesheetAttachmentController;
 use App\Http\Controllers\AppTimesheetController;
+use App\Http\Controllers\AppTimesheetSignatureController;
 use App\Http\Controllers\AssetController;
 use App\Http\Controllers\AttendanceController;
 use App\Http\Controllers\AuthController;
@@ -147,8 +150,9 @@ $projectService = new ProjectService($connection);
 $assetService = new AssetService($connection);
 $timesheetCalculator = new TimesheetCalculator();
 $workdayStateCalculator = new WorkdayStateCalculator();
+$timesheetSignatureService = new TimesheetSignatureService($connection, $config->get('uploads', []), (string) $config->get('app.settings_encryption_key', ''));
 $timesheetService = new TimesheetService($connection, $timesheetCalculator);
-$adminBookingService = new AdminBookingService($connection, $timesheetCalculator);
+$adminBookingService = new AdminBookingService($connection, $timesheetCalculator, $timesheetSignatureService);
 $adminCalendarService = new AdminCalendarService($connection, $adminBookingService, $calendarPolicyService);
 $timesheetGeoLocationService = new TimesheetGeoLocationService($connection);
 $settingsSecretService = new SettingsSecretService((string) $config->get('app.settings_encryption_key', ''));
@@ -167,8 +171,8 @@ $bookingExportService = new BookingExportService($adminBookingService);
 $accountingExportService = new AccountingExportService($adminBookingService);
 $backupService = new BackupService($connection, $config->get('uploads', []));
 $smtpTestService = new SmtpTestService();
-$mobileAppService = new MobileAppService($connection, $projectService, $companySettingsService, $workdayStateCalculator, $fileService, $timesheetGeoLocationService, $calendarPolicyService);
-$appTimesheetSyncService = new AppTimesheetSyncService($connection, $timesheetCalculator, $companySettingsService, $workdayStateCalculator);
+$mobileAppService = new MobileAppService($connection, $projectService, $companySettingsService, $workdayStateCalculator, $fileService, $timesheetGeoLocationService, $calendarPolicyService, $timesheetSignatureService);
+$appTimesheetSyncService = new AppTimesheetSyncService($connection, $timesheetCalculator, $companySettingsService, $workdayStateCalculator, $timesheetSignatureService);
 $appDisplayName = trim((string) ($companySettingsService->current()['app_display_name'] ?? '')) ?: (string) $config->get('app.name');
 
 $adminContextService = new AdminContextService(
@@ -196,8 +200,10 @@ $appApiController = new AppApiController($mobileAppService, $authService);
 $appPushController = new AppPushController($pushSettingsService, $pushSubscriptionService, $pushNotificationService, $authService);
 $appTimesheetController = new AppTimesheetController($appTimesheetSyncService, $authService);
 $appTimesheetAttachmentController = new AppTimesheetAttachmentController($fileService, $authService);
+$appTimesheetSignatureController = new AppTimesheetSignatureController($timesheetSignatureService, $authService);
 $appProjectAttachmentController = new AppProjectAttachmentController($fileService, $authService);
 $adminTimesheetAttachmentController = new AdminTimesheetAttachmentController($fileService, $authService, $csrfService);
+$adminTimesheetSignatureController = new AdminTimesheetSignatureController($timesheetSignatureService, $authService, $csrfService);
 $adminController = new AdminController($adminView, $dashboardService, $databaseSettings);
 $adminManagementController = new AdminManagementController(
     $adminView,
@@ -209,7 +215,8 @@ $adminManagementController = new AdminManagementController(
     $documentStatusService,
     $adminBookingService,
     $authService,
-    $csrfService
+    $csrfService,
+    $timesheetSignatureService
 );
 $adminBookingController = new AdminBookingController(
     $adminView,
@@ -221,7 +228,8 @@ $adminBookingController = new AdminBookingController(
     $documentStatusService,
     $timesheetGeoLocationService,
     $authService,
-    $csrfService
+    $csrfService,
+    $timesheetSignatureService
 );
 $adminCalendarController = new AdminCalendarController(
     $adminView,
@@ -233,7 +241,8 @@ $adminCalendarController = new AdminCalendarController(
     $documentStatusService,
     $timesheetGeoLocationService,
     $authService,
-    $csrfService
+    $csrfService,
+    $timesheetSignatureService
 );
 $companySettingsController = new CompanySettingsController($adminView, $companySettingsService, $smtpTestService, $csrfService, $config->get('maps', []));
 $calendarSettingsController = new CalendarSettingsController($adminView, $calendarPolicyService, $authService, $csrfService);
@@ -288,6 +297,8 @@ $router->post('/admin/bookings/{id}/restore', $admin([$adminBookingController, '
 $router->get('/admin/timesheet-files/{id}/download', $admin([$adminTimesheetAttachmentController, 'download'], 'timesheets.view'));
 $router->delete('/admin/timesheet-files/{id}', $admin([$adminTimesheetAttachmentController, 'archive'], 'timesheets.archive'));
 $router->post('/admin/timesheet-files/{id}/status', $admin([$adminTimesheetAttachmentController, 'status'], 'timesheets.manage'));
+$router->get('/admin/timesheet-signatures/{id}/image', $admin([$adminTimesheetSignatureController, 'image'], 'timesheets.view'));
+$router->post('/admin/timesheet-signatures/{id}/archive', $admin([$adminTimesheetSignatureController, 'archive'], 'timesheets.archive'));
 $router->get('/admin/projects/create', $admin([$adminManagementController, 'projectCreate'], 'projects.manage'));
 $router->get('/admin/projects/{id}/edit', $admin([$adminManagementController, 'projectEdit'], 'projects.manage'));
 $router->post('/admin/projects', $admin([$adminManagementController, 'projectStore'], 'projects.manage'));
@@ -366,6 +377,9 @@ $router->get('/api/v1/app/timesheets/{id}/files', $api([$appTimesheetAttachmentC
 $router->post('/api/v1/app/timesheets/{id}/files', $api([$appTimesheetAttachmentController, 'upload'], 'timesheets.create'));
 $router->get('/api/v1/app/timesheet-files/{id}/download', $api([$appTimesheetAttachmentController, 'download'], 'timesheets.view_own'));
 $router->delete('/api/v1/app/timesheet-files/{id}', $api([$appTimesheetAttachmentController, 'archive'], 'timesheets.create'));
+$router->get('/api/v1/app/timesheets/{id}/signature', $api([$appTimesheetSignatureController, 'status'], 'timesheets.view_own'));
+$router->post('/api/v1/app/timesheets/{id}/signature', $api([$appTimesheetSignatureController, 'store'], 'timesheets.create'));
+$router->get('/api/v1/app/timesheet-signatures/{id}/image', $api([$appTimesheetSignatureController, 'image'], 'timesheets.view_own'));
 
 $router->get('/api/v1/attendance/today', $api([$attendanceController, 'today'], 'attendance.view'));
 $router->get('/api/v1/dashboard/overview', $api([new DashboardController($dashboardService), 'overview'], 'dashboard.view'));

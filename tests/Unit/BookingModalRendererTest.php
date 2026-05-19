@@ -35,6 +35,14 @@ final class BookingModalRendererTest extends TestCase
                 'attachment_count' => 1,
                 'image_attachment_count' => 1,
                 'geo_count' => 1,
+                'customer_signature' => [
+                    'id' => 8,
+                    'customer_name' => 'Max Auftraggeber',
+                    'signed_at' => '2026-05-19 18:30:00',
+                    'image_url' => '/admin/timesheet-signatures/8/image',
+                    'sha256' => str_repeat('a', 64),
+                ],
+                'customer_signature_present' => true,
                 'geo_records' => [[
                     'latitude' => 52.520008,
                     'longitude' => 13.404954,
@@ -70,8 +78,11 @@ final class BookingModalRendererTest extends TestCase
         self::assertStringContainsString('<th>Herkunft</th>', $html);
         self::assertStringContainsString('<th>Anhänge</th>', $html);
         self::assertStringContainsString('<th>Standort</th>', $html);
+        self::assertStringContainsString('<th>Bestätigung</th>', $html);
         self::assertStringContainsString('Anhänge: 1', $html);
         self::assertStringContainsString('Standort: 1', $html);
+        self::assertStringContainsString('Bestaetigt', $html);
+        self::assertStringContainsString('Max Auftraggeber', $html);
         self::assertStringContainsString('timesheet-files', $html);
         self::assertStringContainsString('Admin-Nacherfassung', $html);
         self::assertStringNotContainsString('type="date" name="work_date"', $html);
@@ -137,6 +148,13 @@ final class BookingModalRendererTest extends TestCase
                         'recorded_at' => '2026-05-16T10:00:00+02:00',
                         'map_url' => 'https://www.openstreetmap.org/?mlat=52.5200080&mlon=13.4049540#map=18/52.5200080/13.4049540',
                     ]],
+                    'customer_signature' => [
+                        'id' => 8,
+                        'customer_name' => 'Max Auftraggeber',
+                        'signed_at' => '2026-05-19 18:30:00',
+                        'image_url' => '/admin/timesheet-signatures/8/image',
+                        'sha256' => str_repeat('b', 64),
+                    ],
                     'attachments' => [[
                         'id' => 5,
                         'original_name' => 'foto.jpg',
@@ -161,6 +179,9 @@ final class BookingModalRendererTest extends TestCase
 
         self::assertStringContainsString('data-booking-modal-attachments', $html);
         self::assertStringContainsString('data-booking-modal-locations', $html);
+        self::assertStringContainsString('data-booking-modal-signature', $html);
+        self::assertStringContainsString('/admin/timesheet-signatures/8/image', $html);
+        self::assertStringContainsString('Bestätigung archivieren', $html);
         self::assertStringContainsString('52,5200080, 13,4049540', $html);
         self::assertStringContainsString('Karte öffnen', $html);
         self::assertStringContainsString('foto.jpg', $html);

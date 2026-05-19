@@ -349,6 +349,53 @@
         }).join('');
     }
 
+    function renderSignature(modal, signature) {
+        var section = modal.querySelector('[data-booking-modal-signature]');
+
+        if (!section) {
+            return;
+        }
+
+        var list = section.querySelector('.booking-attachment-list');
+
+        if (!list) {
+            return;
+        }
+
+        var canArchive = section.dataset.canArchiveSignature === '1';
+
+        if (!signature || !signature.id) {
+            list.innerHTML = '<li class="booking-attachment is-empty"><p class="muted">Keine Kundenbestätigung fuer diese Buchung vorhanden.</p></li>';
+            return;
+        }
+
+        var imageUrl = signature.image_url || '';
+        var preview = imageUrl
+            ? '<a class="booking-attachment__preview" href="' + escapeHtml(imageUrl) + '" target="_blank" rel="noopener" data-attachment-viewer-open data-preview-url="' + escapeHtml(imageUrl) + '" data-preview-type="image" data-preview-name="Kundenbestätigung" data-preview-mime="image/png"><img src="' + escapeHtml(imageUrl) + '" alt=""></a>'
+            : '<div class="booking-attachment__icon" aria-hidden="true">PNG</div>';
+        var openLink = imageUrl
+            ? '<a class="button button-secondary" href="' + escapeHtml(imageUrl) + '" target="_blank" rel="noopener">Öffnen</a>'
+            : '';
+        var sha = signature.sha256 ? ' · SHA-256 ' + String(signature.sha256).slice(0, 12) + '...' : '';
+        var archiveForm = canArchive
+            ? '<form method="post" action="/admin/timesheet-signatures/' + escapeHtml(signature.id) + '/archive" class="booking-attachment__archive">'
+                + '<input type="hidden" name="return_to" value="' + escapeHtml(currentReturnTo()) + '">'
+                + '<input type="hidden" name="booking_id" value="' + escapeHtml(modal.dataset.activeBookingId || '') + '">'
+                + '<input type="hidden" name="csrf_token" value="' + escapeHtml(csrfToken(modal)) + '">'
+                + '<button type="submit" class="button button-danger">Bestätigung archivieren</button>'
+                + '</form>'
+            : '';
+
+        list.innerHTML = '<li class="booking-attachment">'
+            + preview
+            + '<div class="booking-attachment__body">'
+            + '<strong>' + escapeHtml(signature.customer_name || '') + '</strong>'
+            + '<span class="muted">' + escapeHtml((signature.signed_at || '') + sha) + '</span>'
+            + '<div class="booking-attachment__actions">' + openLink + archiveForm + '</div>'
+            + '</div>'
+            + '</li>';
+    }
+
     function openModal(modal, row, trigger) {
         var booking = parseBooking(row);
 
@@ -461,6 +508,7 @@
         }
 
         renderLocations(modal, booking.geo_records);
+        renderSignature(modal, booking.customer_signature);
         renderAttachments(modal, booking.attachments);
 
         document.body.classList.add('modal-open');

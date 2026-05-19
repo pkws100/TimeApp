@@ -39,8 +39,26 @@ final class ProjectServiceTest extends TestCase
 
         foreach ($projects as $project) {
             self::assertArrayHasKey('tracked_net_minutes', $project);
+            self::assertArrayHasKey('customer_signature_required', $project);
+            self::assertArrayHasKey('customer_signature_name', $project);
             self::assertSame(0, $project['tracked_net_minutes']);
         }
+    }
+
+    public function testFallbackCreateNormalizesCustomerSignatureFields(): void
+    {
+        $service = new ProjectService(new DatabaseConnection([]));
+
+        $project = $service->create([
+            'project_number' => 'P-10',
+            'name' => 'Rathaus',
+            'customer_name' => 'Gemeinde Mitte',
+            'customer_signature_required' => '1',
+            'customer_signature_name' => 'Bauherr Mustermann',
+        ]);
+
+        self::assertSame(1, $project['customer_signature_required']);
+        self::assertSame('Bauherr Mustermann', $project['customer_signature_name']);
     }
 
     public function testArchiveAndRestoreFallbackWithoutDatabase(): void

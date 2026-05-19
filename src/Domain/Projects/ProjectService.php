@@ -17,6 +17,7 @@ final class ProjectService
         if ($this->connection->tableExists('projects')) {
             $trackedSelect = '0 AS tracked_net_minutes';
             $trackedJoin = '';
+            $signatureColumns = $this->signatureColumnsSelect();
 
             if ($this->connection->tableExists('timesheets')) {
                 $trackedSelect = 'COALESCE(tracked.tracked_net_minutes, 0) AS tracked_net_minutes';
@@ -31,7 +32,7 @@ final class ProjectService
             }
 
             return $this->connection->fetchAll(
-                'SELECT projects.id, projects.project_number, projects.name, projects.customer_name, projects.status, projects.address_line_1, projects.postal_code, projects.city, projects.starts_on, projects.ends_on, projects.is_deleted, projects.deleted_at, ' . $trackedSelect . '
+                'SELECT projects.id, projects.project_number, projects.name, projects.customer_name, ' . $signatureColumns . ', projects.status, projects.address_line_1, projects.postal_code, projects.city, projects.starts_on, projects.ends_on, projects.is_deleted, projects.deleted_at, ' . $trackedSelect . '
                  FROM projects
                  ' . $trackedJoin . '
                  WHERE ' . $this->scopeWhereClause($scope) . '
@@ -45,6 +46,8 @@ final class ProjectService
                 'project_number' => '2026-001',
                 'name' => 'Neubau Kita Nord',
                 'customer_name' => 'Stadtwerke Nord',
+                'customer_signature_required' => 0,
+                'customer_signature_name' => null,
                 'status' => 'active',
                 'city' => 'Hamburg',
                 'is_deleted' => 0,
@@ -55,6 +58,8 @@ final class ProjectService
                 'project_number' => '2026-002',
                 'name' => 'Sanierung Rathaus',
                 'customer_name' => 'Gemeinde Mitte',
+                'customer_signature_required' => 0,
+                'customer_signature_name' => null,
                 'status' => 'planning',
                 'city' => 'Lueneburg',
                 'is_deleted' => 0,
@@ -101,7 +106,7 @@ final class ProjectService
         }
 
         return $this->connection->fetchOne(
-            'SELECT id, project_number, name, customer_name, status, address_line_1, postal_code, city, starts_on, ends_on, is_deleted, deleted_at
+            'SELECT id, project_number, name, customer_name, ' . $this->signatureColumnsSelect() . ', status, address_line_1, postal_code, city, starts_on, ends_on, is_deleted, deleted_at
              FROM projects
              WHERE id = :id
              LIMIT 1',
@@ -114,13 +119,60 @@ final class ProjectService
         $record = $this->normalize($payload);
 
         if ($this->connection->tableExists('projects')) {
+            $hasSignatureRequired = $this->connection->columnExists('projects', 'customer_signature_required');
+            $hasSignatureName = $this->connection->columnExists('projects', 'customer_signature_name');
+            $columns = [
+                'project_number',
+                'name',
+                'customer_name',
+                'status',
+                'address_line_1',
+                'postal_code',
+                'city',
+                'starts_on',
+                'ends_on',
+                'is_deleted',
+                'deleted_at',
+                'deleted_by_user_id',
+                'created_at',
+                'updated_at',
+            ];
+            $values = [
+                ':project_number',
+                ':name',
+                ':customer_name',
+                ':status',
+                ':address_line_1',
+                ':postal_code',
+                ':city',
+                ':starts_on',
+                ':ends_on',
+                '0',
+                'NULL',
+                'NULL',
+                'NOW()',
+                'NOW()',
+            ];
+            $bindings = $record;
+
+            if ($hasSignatureRequired) {
+                array_splice($columns, 3, 0, 'customer_signature_required');
+                array_splice($values, 3, 0, ':customer_signature_required');
+            } else {
+                unset($bindings['customer_signature_required']);
+            }
+
+            if ($hasSignatureName) {
+                $offset = $hasSignatureRequired ? 4 : 3;
+                array_splice($columns, $offset, 0, 'customer_signature_name');
+                array_splice($values, $offset, 0, ':customer_signature_name');
+            } else {
+                unset($bindings['customer_signature_name']);
+            }
+
             $this->connection->execute(
-                'INSERT INTO projects (
-                    project_number, name, customer_name, status, address_line_1, postal_code, city, starts_on, ends_on, is_deleted, deleted_at, deleted_by_user_id, created_at, updated_at
-                ) VALUES (
-                    :project_number, :name, :customer_name, :status, :address_line_1, :postal_code, :city, :starts_on, :ends_on, 0, NULL, NULL, NOW(), NOW()
-                )',
-                $record
+                'INSERT INTO projects (' . implode(', ', $columns) . ') VALUES (' . implode(', ', $values) . ')',
+                $bindings
             );
 
             return $this->find($this->connection->lastInsertId()) ?? $record;
@@ -143,20 +195,38 @@ final class ProjectService
             return $record;
         }
 
+        $set = [
+            'project_number = :project_number',
+            'name = :name',
+            'customer_name = :customer_name',
+            'status = :status',
+            'address_line_1 = :address_line_1',
+            'postal_code = :postal_code',
+            'city = :city',
+            'starts_on = :starts_on',
+            'ends_on = :ends_on',
+            'updated_at = NOW()',
+        ];
+        $bindings = $record;
+
+        if ($this->connection->columnExists('projects', 'customer_signature_required')) {
+            array_splice($set, 3, 0, 'customer_signature_required = :customer_signature_required');
+        } else {
+            unset($bindings['customer_signature_required']);
+        }
+
+        if ($this->connection->columnExists('projects', 'customer_signature_name')) {
+            $offset = $this->connection->columnExists('projects', 'customer_signature_required') ? 4 : 3;
+            array_splice($set, $offset, 0, 'customer_signature_name = :customer_signature_name');
+        } else {
+            unset($bindings['customer_signature_name']);
+        }
+
         $this->connection->execute(
             'UPDATE projects SET
-                project_number = :project_number,
-                name = :name,
-                customer_name = :customer_name,
-                status = :status,
-                address_line_1 = :address_line_1,
-                postal_code = :postal_code,
-                city = :city,
-                starts_on = :starts_on,
-                ends_on = :ends_on,
-                updated_at = NOW()
+                ' . implode(",\n                ", $set) . '
              WHERE id = :id',
-            [...$record, 'id' => $id]
+            [...$bindings, 'id' => $id]
         );
 
         return $this->find($id);
@@ -194,6 +264,8 @@ final class ProjectService
             'project_number' => trim((string) ($payload['project_number'] ?? '')),
             'name' => trim((string) ($payload['name'] ?? '')),
             'customer_name' => $this->nullableString($payload['customer_name'] ?? null),
+            'customer_signature_required' => $this->truthy($payload['customer_signature_required'] ?? false) ? 1 : 0,
+            'customer_signature_name' => $this->nullableString($payload['customer_signature_name'] ?? null),
             'status' => trim((string) ($payload['status'] ?? 'planning')),
             'address_line_1' => $this->nullableString($payload['address_line_1'] ?? null),
             'postal_code' => $this->nullableString($payload['postal_code'] ?? null),
@@ -208,6 +280,23 @@ final class ProjectService
         $value = trim((string) ($value ?? ''));
 
         return $value === '' ? null : $value;
+    }
+
+    private function truthy(mixed $value): bool
+    {
+        return in_array($value, [true, 1, '1', 'on', 'yes'], true);
+    }
+
+    private function signatureColumnsSelect(): string
+    {
+        $required = $this->connection->columnExists('projects', 'customer_signature_required')
+            ? 'COALESCE(projects.customer_signature_required, 0) AS customer_signature_required'
+            : '0 AS customer_signature_required';
+        $name = $this->connection->columnExists('projects', 'customer_signature_name')
+            ? 'projects.customer_signature_name'
+            : 'NULL';
+
+        return $required . ', ' . $name . ' AS customer_signature_name';
     }
 
     private function scopeWhereClause(string $scope): string

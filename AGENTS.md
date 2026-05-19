@@ -108,6 +108,7 @@ Bereits umgesetzt:
 - geschuetzte Preview-/Download-Endpunkte fuer AGB- und Datenschutz-PDFs im Admin
 - Kalender-Settings fuer gesetzliche Feiertage je Bundesland und Betriebsurlaub
 - Dokumentstatusprofile fuer Projekt-, Geraete- und Buchungsanhaenge
+- optionale Kundenbestaetigung fuer abgeschlossene Arbeitsbuchungen mit Druckbuchstaben-Name, geschuetztem PNG-Storage, Hash und Admin-/App-Abruf
 
 Noch nicht final umgesetzt:
 

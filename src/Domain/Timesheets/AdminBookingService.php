@@ -12,7 +12,8 @@ final class AdminBookingService
 {
     public function __construct(
         private DatabaseConnection $connection,
-        private TimesheetCalculator $calculator
+        private TimesheetCalculator $calculator,
+        private ?TimesheetSignatureService $signatureService = null
     ) {
     }
 
@@ -264,6 +265,10 @@ final class AdminBookingService
         $normalized = $this->normalizeBookingPayload($payload, $before);
 
         $this->connection->transaction(function () use ($id, $normalized, $changedByUserId, $reason, $before): void {
+            if ($this->signatureRelevantChanges($before, $normalized)) {
+                $this->signatureService?->archiveActiveForTimesheet($id, $changedByUserId);
+            }
+
             $this->connection->execute(
                 'UPDATE timesheets SET
                     project_id = :project_id,
@@ -316,6 +321,10 @@ final class AdminBookingService
                     continue;
                 }
 
+                if ((int) ($before['project_id'] ?? 0) !== (int) ($projectId ?? 0)) {
+                    $this->signatureService?->archiveActiveForTimesheet($bookingId, $changedByUserId);
+                }
+
                 $this->connection->execute(
                     'UPDATE timesheets SET project_id = :project_id, updated_at = NOW() WHERE id = :id',
                     [
@@ -345,8 +354,19 @@ final class AdminBookingService
 
     public function exportRows(array $filters): array
     {
+        $rows = $this->list($filters);
+        $timesheetIds = array_map(static fn (array $row): int => (int) ($row['id'] ?? 0), $rows);
+        $signatures = $this->signatureService?->listForTimesheetsGrouped($timesheetIds) ?? [];
+
         return array_map(
-            fn (array $row): array => [
+            fn (array $row): array => $this->exportRow($row, $signatures[(int) ($row['id'] ?? 0)] ?? null),
+            $rows
+        );
+    }
+
+    private function exportRow(array $row, ?array $signature): array
+    {
+        return [
                 'Datum' => (string) ($row['work_date'] ?? ''),
                 'Mitarbeiter' => (string) ($row['employee_name'] ?? ''),
                 'Mitarbeiter-Nr' => (string) ($row['employee_number'] ?? ''),
@@ -359,12 +379,13 @@ final class AdminBookingService
                 'Pause (Min)' => (int) ($row['break_minutes'] ?? 0),
                 'Netto (Min)' => (int) ($row['net_minutes'] ?? 0),
                 'Status' => (int) ($row['is_deleted'] ?? 0) === 1 ? 'Archiviert' : 'Aktiv',
+                'Kundenbestaetigung' => $signature !== null ? 'Ja' : 'Nein',
+                'Kundenbestaetigung Name' => (string) ($signature['customer_name'] ?? ''),
+                'Kundenbestaetigung Datum/Uhrzeit' => (string) ($signature['signed_at'] ?? ''),
                 'Aenderungen' => (int) ($row['change_count'] ?? 0),
                 'Hinweis' => (string) ($row['version_hint'] ?? ''),
                 'Notiz' => (string) ($row['note'] ?? ''),
-            ],
-            $this->list($filters)
-        );
+        ];
     }
 
     public function accountingRows(string $period, string $profile = 'basic', bool $includeArchived = false): array
@@ -444,6 +465,10 @@ final class AdminBookingService
                     'deleted_by_user_id' => $archived ? $changedByUserId : null,
                 ]
             );
+
+            if ($archived) {
+                $this->signatureService?->archiveActiveForTimesheet($id, $changedByUserId);
+            }
 
             $after = $this->find($id);
             $this->logChange($id, $archived ? 'archived' : 'restored', $changedByUserId, $reason, $before, $after);
@@ -670,6 +695,41 @@ final class AdminBookingService
             'last_change_reason' => (string) ($row['last_change_reason'] ?? ''),
             'version_hint' => $versionHint,
         ];
+    }
+
+    private function signatureRelevantChanges(array $before, array $after): bool
+    {
+        if (!$this->signatureService instanceof TimesheetSignatureService) {
+            return false;
+        }
+
+        foreach (['project_id', 'work_date', 'start_time', 'end_time', 'break_minutes', 'net_minutes', 'entry_type'] as $key) {
+            $beforeValue = $before[$key] ?? null;
+            $afterValue = $after[$key] ?? null;
+
+            if (in_array($key, ['break_minutes', 'net_minutes'], true)) {
+                if ((int) $beforeValue !== (int) $afterValue) {
+                    return true;
+                }
+
+                continue;
+            }
+
+            if ($this->normalizedComparableValue($beforeValue) !== $this->normalizedComparableValue($afterValue)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function normalizedComparableValue(mixed $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        return (string) $value;
     }
 
     private function sourceLabel(string $source): string

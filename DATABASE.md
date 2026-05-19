@@ -10,12 +10,14 @@
 - `projects`, `project_memberships`, `project_files`
 - `assets`, `asset_assignments`, `asset_files`
 - `company_settings`
-- `timesheets`
+- `timesheets`, `timesheet_customer_signatures`
 
 ## Fachliche Leitlinien
 - Rollen und Berechtigungen sind getrennt modelliert, damit Backend-Rechte, Projektrechte und Exportrechte sauber kombiniert werden koennen.
 - Fahrzeuge und Geraete sind eigene Stammdaten, nicht Teil des Rollenmodells.
 - Projekt- und Geraetedateien werden mit Metadaten in der Datenbank und physisch ausserhalb des finalen Webroots gespeichert.
+- Kundenbestaetigungs-Unterschriften zu abgeschlossenen Arbeitsbuchungen werden als PNG ausserhalb von `public/` gespeichert; die Tabelle `timesheet_customer_signatures` haelt Name, Timesheet-/Projektbezug, Hash, Client-Metadaten und Archivierungsfelder.
+- Projekte koennen ueber `customer_signature_required` eine Kundenunterschrift beim Abschluss nahelegen und ueber `customer_signature_name` einen Standardnamen fuer die Vorbelegung liefern.
 - `company_settings` haelt genau ein globales Firmenprofil fuer Reports, E-Mails, Rechtstexte und spaetere Frontend-Policies.
 - Firmenlogo sowie AGB-/Datenschutz-PDFs werden nur per Dateireferenz gespeichert und physisch geschuetzt abgelegt.
 - `timesheets` deckt `work`, `sick`, `vacation`, `holiday` und `absent` ab.

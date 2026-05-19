@@ -160,7 +160,14 @@ Das Frontend ist als mobile Mitarbeiter-App unter `/app` als Vanilla-JS-PWA umge
 ### Spaetere Komfortfunktionen
 - [ ] Reports in der mobilen App nachgelagert einordnen.
 - [ ] Erweiterte GEO-Funktionen wie Karten-/Distanzansichten ausbauen.
-- [ ] Kunden/Auftraggeber koennen eine Zeiterfassung mit Unterschrift auf dem Touchscreen bestaetigen.
+- [x] Kunden/Auftraggeber koennen abgeschlossene Arbeitsbuchungen optional mit Namen und Touchscreen-Unterschrift bestaetigen; MVP bewusst online-only ohne Offline-Signaturqueue.
+
+### Letzte Checks Kundenbestaetigung
+- [x] `composer test` erfolgreich: 141 Tests, 537 Assertions, 1 bekannter Skip.
+- [x] Phinx-Migrationen auf bestehender Datenbank erfolgreich; erneuter Lauf bleibt sauber.
+- [x] Phinx-Migrationen auf frischer Testdatenbank erfolgreich; erneuter Lauf bleibt sauber.
+- [x] `node --check public/assets/js/app.js` erfolgreich.
+- [x] UI-/Mobile-UX-, Workflow- und Code-Review durchgefuehrt; gefundene Punkte zu Touch-Fallback, Canvas-Resize, Modal-Kontext, PNG-Dimensionsschutz, Idempotenz, Projektzugriff und Signatur-Archivierung bei Buchungsaenderungen behoben.
 
 ## Sofort nutzbare Einstiegspunkte
 - Admin-Backend: `/admin`
@@ -182,9 +189,13 @@ Das Frontend ist als mobile Mitarbeiter-App unter `/app` als Vanilla-JS-PWA umge
 - App-Projektdatei-Abruf: `GET /api/v1/app/project-files/{id}/download`
 - App-Buchungsdateien API: `GET/POST /api/v1/app/timesheets/{id}/files`
 - App-Buchungsdatei-Abruf: `GET /api/v1/app/timesheet-files/{id}/download`
+- App-Kundenbestaetigung: `GET/POST /api/v1/app/timesheets/{id}/signature`
+- App-Kundenbestaetigungsbild: `GET /api/v1/app/timesheet-signatures/{id}/image`
 - Admin-Buchungsdatei-Abruf: `GET /admin/timesheet-files/{id}/download`
 - Admin-Buchungsdatei-Archivierung: `DELETE /admin/timesheet-files/{id}`
 - Admin-Buchungsdatei-Status: `POST /admin/timesheet-files/{id}/status`
+- Admin-Kundenbestaetigungsbild: `GET /admin/timesheet-signatures/{id}/image`
+- Admin-Kundenbestaetigungsarchivierung: `POST /admin/timesheet-signatures/{id}/archive`
 - Timesheets API: `/api/v1/timesheets`
 - Timesheet-Kalkulation: `POST /api/v1/timesheets/calculate`
 - CSV-Export: `/api/v1/reports/export?format=csv&period=month`

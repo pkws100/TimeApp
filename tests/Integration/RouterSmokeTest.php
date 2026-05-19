@@ -196,6 +196,23 @@ final class RouterSmokeTest extends TestCase
         self::assertSame('Bitte erneut anmelden.', $attachmentJson['message'] ?? null);
 
         $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/api/v1/app/timesheets/1/signature';
+        $_GET = [];
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $signatureResponse = $router->dispatch($request);
+        $signatureResponse->send();
+        $signaturePayload = ob_get_clean() ?: '';
+        $signatureJson = json_decode($signaturePayload, true);
+
+        self::assertSame(401, $signatureResponse->status());
+        self::assertIsArray($signatureJson);
+        self::assertSame(false, $signatureJson['ok'] ?? null);
+        self::assertSame('auth_required', $signatureJson['code'] ?? null);
+
+        $_SERVER['REQUEST_METHOD'] = 'GET';
         $_SERVER['REQUEST_URI'] = '/api/v1/app/projects/1/files';
         $_GET = [];
 

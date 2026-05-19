@@ -58,6 +58,10 @@ final class BookingModalRenderer
             $geoDisplay = $geoCount > 0
                 ? '<span class="badge">Standort: ' . $geoCount . '</span>'
                 : '<span class="muted">-</span>';
+            $signature = is_array($booking['customer_signature'] ?? null) ? $booking['customer_signature'] : null;
+            $signatureDisplay = $signature !== null
+                ? '<span class="badge ok">Bestaetigt</span><br><span class="muted">' . $this->e((string) ($signature['customer_name'] ?? '')) . '</span>'
+                : '<span class="muted">-</span>';
             $actionLabel = $canManage ? 'Bearbeiten' : 'Ansehen';
             $actionButton = $canOpenModal
                 ? '<a class="button button-secondary booking-edit-trigger" data-booking-open aria-haspopup="dialog" href="' . $this->e($this->openBookingLocation($openBookingLocation, $id)) . '">' . $this->e($actionLabel) . '</a>'
@@ -83,6 +87,7 @@ final class BookingModalRenderer
                 . '<td>' . $noteDisplay . '</td>'
                 . '<td>' . $attachmentDisplay . '</td>'
                 . '<td>' . $geoDisplay . '</td>'
+                . '<td>' . $signatureDisplay . '</td>'
                 . '<td>' . $statusBadge . '</td>'
                 . '<td><span class="muted">' . $this->e((string) ($booking['version_hint'] ?? '')) . '</span></td>'
                 . '<td class="table-actions">' . $actionButton . '</td>'
@@ -90,7 +95,7 @@ final class BookingModalRenderer
         }
 
         if ($rows === '') {
-            $colspan = $showSelection ? '16' : '15';
+            $colspan = $showSelection ? '17' : '16';
             $rows = '<tr><td colspan="' . $colspan . '" class="table-empty">' . $this->e($emptyMessage) . '</td></tr>';
         }
 
@@ -114,6 +119,7 @@ final class BookingModalRenderer
                 <th>Notiz</th>
                 <th>Anhänge</th>
                 <th>Standort</th>
+                <th>Bestätigung</th>
                 <th>Status</th>
                 <th>Version</th>
                 <th>Aktionen</th>
@@ -183,6 +189,13 @@ HTML;
         $locationSection = $this->renderLocationSection(
             is_array($selectedBooking['geo_records'] ?? null) ? $selectedBooking['geo_records'] : []
         );
+        $signatureSection = $this->renderSignatureSection(
+            is_array($selectedBooking['customer_signature'] ?? null) ? $selectedBooking['customer_signature'] : null,
+            $canArchive,
+            $returnTo,
+            $csrfToken,
+            $selectedId
+        );
         $archiveControls = $canArchive
             ? <<<HTML
 <div class="admin-modal__divider"></div>
@@ -249,6 +262,7 @@ HTML
             </div>
         </form>
         {$locationSection}
+        {$signatureSection}
         {$attachmentSection}
         {$archiveControls}
     </div>
@@ -377,7 +391,62 @@ HTML;
             'geo_records' => is_array($booking['geo_records'] ?? null) ? $booking['geo_records'] : [],
             'geo_count' => (int) ($booking['geo_count'] ?? (is_array($booking['geo_records'] ?? null) ? count($booking['geo_records']) : 0)),
             'latest_geo' => is_array($booking['latest_geo'] ?? null) ? $booking['latest_geo'] : null,
+            'customer_signature' => is_array($booking['customer_signature'] ?? null) ? $booking['customer_signature'] : null,
+            'customer_signature_present' => (bool) ($booking['customer_signature_present'] ?? is_array($booking['customer_signature'] ?? null)),
         ];
+    }
+
+    private function renderSignatureSection(?array $signature, bool $canArchive, string $returnTo, string $csrfToken, int $bookingId): string
+    {
+        $body = $this->signatureMarkup($signature, $canArchive, $returnTo, $csrfToken, $bookingId);
+
+        return <<<HTML
+<section class="booking-attachments" data-booking-modal-signature data-can-archive-signature="{$this->e($canArchive ? '1' : '0')}">
+    <div>
+        <h3>Kundenbestätigung</h3>
+        <p class="muted">Einfache Kundenbestätigung zur angezeigten Zeitbuchung; keine qualifizierte elektronische Signatur.</p>
+    </div>
+    <ul class="booking-attachment-list">
+        {$body}
+    </ul>
+</section>
+HTML;
+    }
+
+    private function signatureMarkup(?array $signature, bool $canArchive, string $returnTo, string $csrfToken, int $bookingId): string
+    {
+        if ($signature === null) {
+            return '<li class="booking-attachment is-empty"><p class="muted">Keine Kundenbestätigung fuer diese Buchung vorhanden.</p></li>';
+        }
+
+        $imageUrl = (string) ($signature['image_url'] ?? '');
+        $name = (string) ($signature['customer_name'] ?? '');
+        $signedAt = (string) ($signature['signed_at'] ?? '');
+        $sha = (string) ($signature['sha256'] ?? '');
+        $signatureId = (int) ($signature['id'] ?? 0);
+        $archiveForm = ($canArchive && $signatureId > 0)
+            ? '<form method="post" action="/admin/timesheet-signatures/' . $signatureId . '/archive" class="booking-attachment__archive">'
+                . '<input type="hidden" name="return_to" value="' . $this->e($returnTo) . '">'
+                . '<input type="hidden" name="booking_id" value="' . $bookingId . '">'
+                . '<input type="hidden" name="csrf_token" value="' . $this->e($csrfToken) . '">'
+                . '<button type="submit" class="button button-danger">Bestätigung archivieren</button>'
+                . '</form>'
+            : '';
+        $preview = $imageUrl !== ''
+            ? '<a class="booking-attachment__preview" href="' . $this->e($imageUrl) . '" target="_blank" rel="noopener" data-attachment-viewer-open data-preview-url="' . $this->e($imageUrl) . '" data-preview-type="image" data-preview-name="Kundenbestätigung" data-preview-mime="image/png"><img src="' . $this->e($imageUrl) . '" alt=""></a>'
+            : '<div class="booking-attachment__icon" aria-hidden="true">PNG</div>';
+        $openLink = $imageUrl !== ''
+            ? '<a class="button button-secondary" href="' . $this->e($imageUrl) . '" target="_blank" rel="noopener">Öffnen</a>'
+            : '';
+
+        return '<li class="booking-attachment">'
+            . $preview
+            . '<div class="booking-attachment__body">'
+            . '<strong>' . $this->e($name) . '</strong>'
+            . '<span class="muted">' . $this->e(trim($signedAt . ($sha !== '' ? ' · SHA-256 ' . substr($sha, 0, 12) . '...' : ''))) . '</span>'
+            . '<div class="booking-attachment__actions">' . $openLink . $archiveForm . '</div>'
+            . '</div>'
+            . '</li>';
     }
 
     private function renderLocationSection(array $locations): string

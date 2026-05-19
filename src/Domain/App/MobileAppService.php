@@ -9,6 +9,7 @@ use App\Domain\Files\FileAttachmentService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Settings\CompanySettingsService;
 use App\Domain\Timesheets\TimesheetGeoLocationService;
+use App\Domain\Timesheets\TimesheetSignatureService;
 use App\Domain\Timesheets\WorkdayStateCalculator;
 use App\Infrastructure\Database\DatabaseConnection;
 use InvalidArgumentException;
@@ -22,7 +23,8 @@ final class MobileAppService
         private WorkdayStateCalculator $workdayStateCalculator,
         private FileAttachmentService $fileAttachmentService,
         private ?TimesheetGeoLocationService $geoLocationService = null,
-        private ?CalendarPolicyService $calendarPolicyService = null
+        private ?CalendarPolicyService $calendarPolicyService = null,
+        private ?TimesheetSignatureService $signatureService = null
     ) {
     }
 
@@ -49,6 +51,9 @@ final class MobileAppService
                 'project_number' => (string) ($project['project_number'] ?? ''),
                 'name' => (string) ($project['name'] ?? ''),
                 'city' => (string) ($project['city'] ?? ''),
+                'customer_signature_required' => (int) ($project['customer_signature_required'] ?? 0) === 1,
+                'customer_signature_name' => (string) ($project['customer_signature_name'] ?? ''),
+                'customer_name' => (string) ($project['customer_name'] ?? ''),
             ],
             $this->activeProjectsForUser($user)
         );
@@ -112,6 +117,7 @@ final class MobileAppService
         $items = [];
 
         if ($this->connection->tableExists('timesheets')) {
+            $signatureColumns = $this->projectSignatureColumns();
             $sql = 'SELECT
                     timesheets.id,
                     timesheets.project_id,
@@ -123,7 +129,10 @@ final class MobileAppService
                     timesheets.entry_type,
                     timesheets.note,
                     timesheets.updated_at,
-                    projects.name AS project_name
+                    projects.name AS project_name,
+                    projects.customer_name AS project_customer_name,
+                    ' . $signatureColumns['required'] . ' AS customer_signature_required,
+                    ' . $signatureColumns['name'] . ' AS customer_signature_name
                  FROM timesheets
                  LEFT JOIN projects ON projects.id = timesheets.project_id
                  WHERE timesheets.user_id = :user_id';
@@ -163,12 +172,14 @@ final class MobileAppService
             $attachmentsByTimesheet = $this->fileAttachmentService->listForTimesheetsGrouped($timesheetIds);
             $breaksByTimesheet = $this->findBreaksForTimesheets($timesheetIds);
             $geoByTimesheet = $this->geoLocationService?->listForTimesheetsGrouped($timesheetIds, (int) ($user['id'] ?? 0)) ?? [];
+            $signatureByTimesheet = $this->signatureService?->listForTimesheetsGrouped($timesheetIds, false) ?? [];
             $items = array_map(
                 fn (array $row): array => $this->normalizeHistoryItem(
                     $row,
                     $attachmentsByTimesheet[(int) ($row['id'] ?? 0)] ?? [],
                     $breaksByTimesheet[(int) ($row['id'] ?? 0)] ?? [],
-                    $geoByTimesheet[(int) ($row['id'] ?? 0)] ?? []
+                    $geoByTimesheet[(int) ($row['id'] ?? 0)] ?? [],
+                    $signatureByTimesheet[(int) ($row['id'] ?? 0)] ?? null
                 ),
                 $rows
             );
@@ -193,7 +204,7 @@ final class MobileAppService
         ];
     }
 
-    private function normalizeHistoryItem(array $row, array $attachments, array $breaks, array $geoRecords = []): array
+    private function normalizeHistoryItem(array $row, array $attachments, array $breaks, array $geoRecords = [], ?array $customerSignature = null): array
     {
         $id = (int) ($row['id'] ?? 0);
         $entryType = (string) ($row['entry_type'] ?? 'work');
@@ -221,6 +232,11 @@ final class MobileAppService
             'geo_records' => $geoRecords,
             'geo_count' => count($geoRecords),
             'latest_geo' => $geoRecords[0] ?? null,
+            'customer_signature' => $customerSignature,
+            'customer_signature_present' => $customerSignature !== null,
+            'customer_signature_required' => (int) ($row['customer_signature_required'] ?? 0) === 1,
+            'customer_signature_name' => (string) ($row['customer_signature_name'] ?? ''),
+            'project_customer_name' => (string) ($row['project_customer_name'] ?? ''),
         ];
     }
 
@@ -457,8 +473,10 @@ final class MobileAppService
             return [];
         }
 
+        $signatureColumns = $this->projectSignatureColumns();
+
         return $this->connection->fetchAll(
-            'SELECT DISTINCT projects.id, projects.project_number, projects.name, projects.city
+            'SELECT DISTINCT projects.id, projects.project_number, projects.name, projects.city, projects.customer_name, ' . $signatureColumns['required'] . ' AS customer_signature_required, ' . $signatureColumns['name'] . ' AS customer_signature_name
              FROM projects
              INNER JOIN project_memberships ON project_memberships.project_id = projects.id
              WHERE project_memberships.user_id = :user_id
@@ -477,6 +495,7 @@ final class MobileAppService
             return null;
         }
 
+        $signatureColumns = $this->projectSignatureColumns();
         $entry = $this->connection->fetchOne(
             'SELECT
                 timesheets.id,
@@ -487,7 +506,10 @@ final class MobileAppService
                 timesheets.break_minutes,
                 timesheets.net_minutes,
                 timesheets.note,
-                projects.name AS project_name
+                projects.name AS project_name,
+                projects.customer_name AS project_customer_name,
+                ' . $signatureColumns['required'] . ' AS customer_signature_required,
+                ' . $signatureColumns['name'] . ' AS customer_signature_name
              FROM timesheets
              LEFT JOIN projects ON projects.id = timesheets.project_id
              WHERE timesheets.user_id = :user_id
@@ -515,6 +537,9 @@ final class MobileAppService
             'id' => (int) ($entry['id'] ?? 0),
             'project_id' => isset($entry['project_id']) ? (int) $entry['project_id'] : null,
             'project_name' => $entry['project_name'] ?? null,
+            'project_customer_name' => $entry['project_customer_name'] ?? null,
+            'customer_signature_required' => (int) ($entry['customer_signature_required'] ?? 0) === 1,
+            'customer_signature_name' => $entry['customer_signature_name'] ?? null,
             'work_date' => (string) ($entry['work_date'] ?? ''),
             'start_time' => $entry['start_time'] ?? null,
             'end_time' => $entry['end_time'] ?? null,
@@ -606,6 +631,7 @@ final class MobileAppService
             return [];
         }
 
+        $signatureColumns = $this->projectSignatureColumns();
         $rows = $this->connection->fetchAll(
             'SELECT
                 timesheets.id,
@@ -618,7 +644,10 @@ final class MobileAppService
                 timesheets.net_minutes,
                 timesheets.note,
                 timesheets.updated_at,
-                projects.name AS project_name
+                projects.name AS project_name,
+                projects.customer_name AS project_customer_name,
+                ' . $signatureColumns['required'] . ' AS customer_signature_required,
+                ' . $signatureColumns['name'] . ' AS customer_signature_name
              FROM timesheets
              LEFT JOIN projects ON projects.id = timesheets.project_id
              WHERE timesheets.user_id = :user_id
@@ -641,6 +670,9 @@ final class MobileAppService
                 'id' => (int) ($row['id'] ?? 0),
                 'project_id' => isset($row['project_id']) ? (int) $row['project_id'] : null,
                 'project_name' => trim((string) ($row['project_name'] ?? '')) !== '' ? (string) $row['project_name'] : 'Nicht zugeordnet',
+                'project_customer_name' => (string) ($row['project_customer_name'] ?? ''),
+                'customer_signature_required' => (int) ($row['customer_signature_required'] ?? 0) === 1,
+                'customer_signature_name' => (string) ($row['customer_signature_name'] ?? ''),
                 'work_date' => (string) ($row['work_date'] ?? ''),
                 'start_time' => $row['start_time'] ?? null,
                 'end_time' => $row['end_time'] ?? null,
@@ -700,6 +732,21 @@ final class MobileAppService
     private function projectSummaryKey(?int $projectId): string
     {
         return $projectId === null ? 'project:none' : 'project:' . $projectId;
+    }
+
+    private function projectSignatureColumns(): array
+    {
+        $required = $this->connection->columnExists('projects', 'customer_signature_required')
+            ? 'COALESCE(projects.customer_signature_required, 0)'
+            : '0';
+        $name = $this->connection->columnExists('projects', 'customer_signature_name')
+            ? 'projects.customer_signature_name'
+            : 'NULL';
+
+        return [
+            'required' => $required,
+            'name' => $name,
+        ];
     }
 
     private static function dateTimeOrNull(mixed $value): ?string

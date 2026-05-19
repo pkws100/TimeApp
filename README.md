@@ -41,9 +41,13 @@ Versionen verteilt, muss die entsprechenden Lizenzpflichten beachten.
 - App-Push-Test: `POST /api/v1/app/push/test`
 - App-Projektdateien: `GET/POST /api/v1/app/projects/{id}/files`
 - App-Buchungsdateien: `GET/POST /api/v1/app/timesheets/{id}/files`
+- App-Kundenbestaetigung: `GET/POST /api/v1/app/timesheets/{id}/signature`
+- App-Kundenbestaetigungsbild: `GET /api/v1/app/timesheet-signatures/{id}/image`
 - Admin-Buchungsdatei-Abruf: `GET /admin/timesheet-files/{id}/download`
 - Admin-Buchungsdatei-Archivierung: `DELETE /admin/timesheet-files/{id}`
 - Admin-Buchungsdatei-Status: `POST /admin/timesheet-files/{id}/status`
+- Admin-Kundenbestaetigungsbild: `GET /admin/timesheet-signatures/{id}/image`
+- Admin-Kundenbestaetigungsarchivierung: `POST /admin/timesheet-signatures/{id}/archive`
 - Admin-AGB-PDF: `GET /admin/settings/company/agb-pdf/preview` und `GET /admin/settings/company/agb-pdf/download`
 - Admin-Datenschutz-PDF: `GET /admin/settings/company/datenschutz-pdf/preview` und `GET /admin/settings/company/datenschutz-pdf/download`
 - Dashboard-Overview: `GET /api/v1/dashboard/overview`

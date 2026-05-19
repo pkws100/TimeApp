@@ -31,7 +31,7 @@ final class AppTimesheetController
         }
 
         try {
-            $result = $this->syncService->sync((int) $user['id'], $request->input());
+            $result = $this->syncService->sync($user, $request->input());
 
             return Response::json([
                 'ok' => true,

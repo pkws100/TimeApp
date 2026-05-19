@@ -15,19 +15,22 @@ final class AppTimesheetSyncService
         private DatabaseConnection $connection,
         private TimesheetCalculator $calculator,
         private CompanySettingsService $companySettingsService,
-        private WorkdayStateCalculator $workdayStateCalculator
+        private WorkdayStateCalculator $workdayStateCalculator,
+        private ?TimesheetSignatureService $signatureService = null
     ) {
     }
 
-    public function sync(int $userId, array $payload): array
+    public function sync(int|array $user, array $payload): array
     {
+        $userId = is_array($user) ? (int) ($user['id'] ?? 0) : $user;
+        $permissions = is_array($user) && is_array($user['permissions'] ?? null) ? $user['permissions'] : [];
         $clientRequestId = trim((string) ($payload['client_request_id'] ?? ''));
 
         if ($clientRequestId === '') {
             throw new RuntimeException('Eine client_request_id ist erforderlich.');
         }
 
-        $existingOperation = $this->findSyncOperation($clientRequestId);
+        $existingOperation = $this->findSyncOperation($clientRequestId, $userId);
 
         if ($existingOperation !== null) {
             $response = json_decode((string) ($existingOperation['response_json'] ?? ''), true);
@@ -41,6 +44,19 @@ final class AppTimesheetSyncService
             throw new RuntimeException('Die Aktion ist ungueltig.');
         }
 
+        return $this->connection->transaction(function () use ($userId, $permissions, $clientRequestId, $payload, $action): array {
+            $existingClaim = $this->claimSyncOperation($clientRequestId, $userId, $action);
+
+            if ($existingClaim !== null) {
+                return $existingClaim;
+            }
+
+            return $this->performSync($userId, $permissions, $clientRequestId, $payload, $action);
+        });
+    }
+
+    private function performSync(int $userId, array $permissions, string $clientRequestId, array $payload, string $action): array
+    {
         $workDate = trim((string) ($payload['work_date'] ?? (new \DateTimeImmutable('today'))->format('Y-m-d')));
         $entry = $this->findDailyWorkEntry($userId, $workDate);
         $latestDailyEntry = $this->findLatestDailyWorkEntryAnyState($userId, $workDate);
@@ -58,6 +74,7 @@ final class AppTimesheetSyncService
         $existingBreaks = $entry !== null ? $this->findBreaksForTimesheet((int) $entry['id']) : [];
         $currentBreak = $this->workdayStateCalculator->currentBreak($existingBreaks);
         $projectId = $this->normalizeProjectId($payload['project_id'] ?? ($entry['project_id'] ?? null));
+        $this->assertProjectVisibleToUser($projectId, $userId, $permissions, $workDate);
         $note = $this->nullableTrimmed($payload['note'] ?? ($entry['note'] ?? null));
         $manualBreakMinutes = isset($entry['break_minutes']) ? (int) $entry['break_minutes'] : $this->workdayStateCalculator->completedBreakMinutes($existingBreaks);
 
@@ -154,7 +171,7 @@ final class AppTimesheetSyncService
             'server_time' => (new DateTimeImmutable())->format(DATE_ATOM),
         ];
 
-        $this->recordSyncOperation($clientRequestId, $userId, $action, $response);
+        $this->updateSyncOperationResponse($clientRequestId, $userId, $action, $response);
 
         return $response;
     }
@@ -249,6 +266,14 @@ final class AppTimesheetSyncService
             return $this->connection->lastInsertId();
         }
 
+        $shouldArchiveSignature = $this->signatureRelevantChanges($entry, [
+            'project_id' => $projectId,
+            'start_time' => $startTime,
+            'end_time' => $endTime,
+            'break_minutes' => (int) ($calculated['break_minutes'] ?? 0),
+            'net_minutes' => (int) ($calculated['net_minutes'] ?? 0),
+        ]);
+
         $this->connection->execute(
             'UPDATE timesheets SET
                 project_id = :project_id,
@@ -272,6 +297,10 @@ final class AppTimesheetSyncService
                 'id' => (int) $entry['id'],
             ]
         );
+
+        if ($shouldArchiveSignature) {
+            $this->signatureService?->archiveActiveForTimesheet((int) $entry['id'], $userId);
+        }
 
         return (int) $entry['id'];
     }
@@ -321,18 +350,54 @@ final class AppTimesheetSyncService
         return true;
     }
 
-    private function recordSyncOperation(string $clientRequestId, int $userId, string $action, array $response): void
+    private function claimSyncOperation(string $clientRequestId, int $userId, string $action): ?array
+    {
+        if (!$this->connection->tableExists('app_sync_operations')) {
+            return null;
+        }
+
+        try {
+            $this->connection->execute(
+                'INSERT INTO app_sync_operations (
+                    user_id, client_request_id, operation_type, response_json, created_at
+                 ) VALUES (
+                    :user_id, :client_request_id, :operation_type, :response_json, NOW()
+                 )',
+                [
+                    'user_id' => $userId,
+                    'client_request_id' => $clientRequestId,
+                    'operation_type' => $action,
+                    'response_json' => json_encode(['status' => 'processing'], JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR),
+                ]
+            );
+
+            return null;
+        } catch (\Throwable $throwable) {
+            if (!$this->isDuplicateKeyException($throwable)) {
+                throw $throwable;
+            }
+
+            $existingOperation = $this->findSyncOperation($clientRequestId, $userId);
+            $response = is_array($existingOperation)
+                ? json_decode((string) ($existingOperation['response_json'] ?? ''), true)
+                : null;
+
+            return is_array($response) ? $response : ['status' => 'synced'];
+        }
+    }
+
+    private function updateSyncOperationResponse(string $clientRequestId, int $userId, string $action, array $response): void
     {
         if (!$this->connection->tableExists('app_sync_operations')) {
             return;
         }
 
         $this->connection->execute(
-            'INSERT INTO app_sync_operations (
-                user_id, client_request_id, operation_type, response_json, created_at
-             ) VALUES (
-                :user_id, :client_request_id, :operation_type, :response_json, NOW()
-             )',
+            'UPDATE app_sync_operations
+             SET operation_type = :operation_type,
+                 response_json = :response_json
+             WHERE user_id = :user_id
+               AND client_request_id = :client_request_id',
             [
                 'user_id' => $userId,
                 'client_request_id' => $clientRequestId,
@@ -342,15 +407,18 @@ final class AppTimesheetSyncService
         );
     }
 
-    private function findSyncOperation(string $clientRequestId): ?array
+    private function findSyncOperation(string $clientRequestId, int $userId): ?array
     {
         if (!$this->connection->tableExists('app_sync_operations')) {
             return null;
         }
 
         return $this->connection->fetchOne(
-            'SELECT * FROM app_sync_operations WHERE client_request_id = :client_request_id LIMIT 1',
-            ['client_request_id' => $clientRequestId]
+            'SELECT * FROM app_sync_operations WHERE client_request_id = :client_request_id AND user_id = :user_id LIMIT 1',
+            [
+                'client_request_id' => $clientRequestId,
+                'user_id' => $userId,
+            ]
         );
     }
 
@@ -443,9 +511,11 @@ final class AppTimesheetSyncService
             return null;
         }
 
+        $signatureColumns = $this->projectSignatureColumns();
         $row = $this->connection->fetchOne(
             'SELECT
                 timesheets.id,
+                timesheets.user_id,
                 timesheets.project_id,
                 timesheets.work_date,
                 timesheets.start_time,
@@ -454,7 +524,10 @@ final class AppTimesheetSyncService
                 timesheets.break_minutes,
                 timesheets.net_minutes,
                 timesheets.note,
-                projects.name AS project_name
+                projects.name AS project_name,
+                projects.customer_name AS project_customer_name,
+                ' . $signatureColumns['required'] . ' AS customer_signature_required,
+                ' . $signatureColumns['name'] . ' AS customer_signature_name
              FROM timesheets
              LEFT JOIN projects ON projects.id = timesheets.project_id
              WHERE timesheets.id = :id
@@ -469,8 +542,12 @@ final class AppTimesheetSyncService
 
         return [
             'id' => (int) ($row['id'] ?? 0),
+            'user_id' => (int) ($row['user_id'] ?? 0),
             'project_id' => isset($row['project_id']) ? (int) $row['project_id'] : null,
             'project_name' => $row['project_name'] ?? null,
+            'project_customer_name' => $row['project_customer_name'] ?? null,
+            'customer_signature_required' => (int) ($row['customer_signature_required'] ?? 0) === 1,
+            'customer_signature_name' => $row['customer_signature_name'] ?? null,
             'work_date' => (string) ($row['work_date'] ?? ''),
             'start_time' => $row['start_time'] ?? null,
             'end_time' => $row['end_time'] ?? null,
@@ -492,6 +569,16 @@ final class AppTimesheetSyncService
         if ($timesheetId <= 0 || !$this->connection->tableExists('timesheets')) {
             return;
         }
+
+        $before = $this->findTimesheetById($timesheetId);
+
+        $shouldArchiveSignature = $before !== null && $this->signatureRelevantChanges($before, [
+            'project_id' => $projectId,
+            'start_time' => $startTime,
+            'end_time' => $endTime,
+            'break_minutes' => (int) ($calculated['break_minutes'] ?? 0),
+            'net_minutes' => (int) ($calculated['net_minutes'] ?? 0),
+        ]);
 
         $this->connection->execute(
             'UPDATE timesheets SET
@@ -515,6 +602,25 @@ final class AppTimesheetSyncService
                 'note' => $note,
             ]
         );
+
+        if ($shouldArchiveSignature) {
+            $this->signatureService?->archiveActiveForTimesheet($timesheetId, (int) ($before['user_id'] ?? 0) ?: null);
+        }
+    }
+
+    private function projectSignatureColumns(): array
+    {
+        $required = $this->connection->columnExists('projects', 'customer_signature_required')
+            ? 'COALESCE(projects.customer_signature_required, 0)'
+            : '0';
+        $name = $this->connection->columnExists('projects', 'customer_signature_name')
+            ? 'projects.customer_signature_name'
+            : 'NULL';
+
+        return [
+            'required' => $required,
+            'name' => $name,
+        ];
     }
 
     private function calculatedValues(string $workDate, ?string $startTime, ?string $endTime, int $manualBreakMinutes): array
@@ -547,6 +653,97 @@ final class AppTimesheetSyncService
         $id = (int) $value;
 
         return $id > 0 ? $id : null;
+    }
+
+    private function assertProjectVisibleToUser(?int $projectId, int $userId, array $permissions, string $workDate): void
+    {
+        if ($projectId === null) {
+            return;
+        }
+
+        if (!$this->connection->tableExists('projects')) {
+            throw new RuntimeException('Das ausgewaehlte Projekt ist nicht verfuegbar.');
+        }
+
+        if (
+            in_array('*', $permissions, true)
+            || in_array('projects.manage', $permissions, true)
+            || in_array('timesheets.manage', $permissions, true)
+            || in_array('files.manage', $permissions, true)
+        ) {
+            $count = $this->connection->fetchColumn(
+                'SELECT COUNT(*)
+                 FROM projects
+                 WHERE id = :project_id
+                   AND COALESCE(is_deleted, 0) = 0
+                   AND status <> "archived"
+                 LIMIT 1',
+                ['project_id' => $projectId]
+            );
+
+            if ((int) ($count ?? 0) > 0) {
+                return;
+            }
+        } elseif ($this->connection->tableExists('project_memberships')) {
+            $count = $this->connection->fetchColumn(
+                'SELECT COUNT(*)
+                 FROM project_memberships
+                 INNER JOIN projects ON projects.id = project_memberships.project_id
+                 WHERE project_memberships.project_id = :project_id
+                   AND project_memberships.user_id = :user_id
+                   AND COALESCE(projects.is_deleted, 0) = 0
+                   AND projects.status <> "archived"
+                   AND (project_memberships.assigned_from IS NULL OR project_memberships.assigned_from <= :work_date)
+                   AND (project_memberships.assigned_until IS NULL OR project_memberships.assigned_until >= :work_date)
+                 LIMIT 1',
+                [
+                    'project_id' => $projectId,
+                    'user_id' => $userId,
+                    'work_date' => $workDate,
+                ]
+            );
+
+            if ((int) ($count ?? 0) > 0) {
+                return;
+            }
+        }
+
+        throw new RuntimeException('Das ausgewaehlte Projekt ist fuer Ihre App nicht freigegeben.');
+    }
+
+    private function signatureRelevantChanges(?array $before, array $after): bool
+    {
+        if ($before === null || !$this->signatureService instanceof TimesheetSignatureService) {
+            return false;
+        }
+
+        foreach (['project_id', 'start_time', 'end_time', 'break_minutes', 'net_minutes'] as $key) {
+            $beforeValue = $before[$key] ?? null;
+            $afterValue = $after[$key] ?? null;
+
+            if (in_array($key, ['break_minutes', 'net_minutes'], true)) {
+                if ((int) $beforeValue !== (int) $afterValue) {
+                    return true;
+                }
+
+                continue;
+            }
+
+            if ($this->normalizedComparableValue($beforeValue) !== $this->normalizedComparableValue($afterValue)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function normalizedComparableValue(mixed $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        return (string) $value;
     }
 
     private function normalizeBreakMinutes(mixed $value): int
@@ -624,5 +821,17 @@ final class AppTimesheetSyncService
             'pause_end' => 'Pause erfolgreich beendet.',
             default => 'Aenderung erfolgreich gespeichert.',
         };
+    }
+
+    private function isDuplicateKeyException(\Throwable $throwable): bool
+    {
+        if (!$throwable instanceof \PDOException) {
+            return false;
+        }
+
+        $errorInfo = $throwable->errorInfo ?? [];
+
+        return (string) ($errorInfo[0] ?? $throwable->getCode()) === '23000'
+            || (int) ($errorInfo[1] ?? 0) === 1062;
     }
 }

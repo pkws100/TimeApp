@@ -11,6 +11,7 @@ use App\Domain\Files\DocumentStatusService;
 use App\Domain\Files\FileAttachmentService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Timesheets\AdminBookingService;
+use App\Domain\Timesheets\TimesheetSignatureService;
 use App\Domain\Users\RoleService;
 use App\Domain\Users\UserService;
 use App\Http\Request;
@@ -32,7 +33,8 @@ final class AdminManagementController
         private DocumentStatusService $documentStatusService,
         private AdminBookingService $bookingService,
         private AuthService $authService,
-        private CsrfService $csrfService
+        private CsrfService $csrfService,
+        private ?TimesheetSignatureService $timesheetSignatureService = null
     ) {
     }
 
@@ -98,7 +100,7 @@ final class AdminManagementController
 
         if ($this->authService->hasPermission('timesheets.view')) {
             $bookingFilters = $this->bookingService->normalizeFilters($request->query(), (int) $project['id']);
-            $bookings = $this->bookingService->list($bookingFilters);
+            $bookings = $this->withCustomerSignatures($this->bookingService->list($bookingFilters));
             $allProjects = $this->projectService->list('all');
 
             if ($this->authService->hasPermission('timesheets.manage')) {
@@ -547,6 +549,7 @@ HTML;
         $isEdit = $project !== null;
         $method = $isEdit ? '<input type="hidden" name="_method" value="PUT">' : '';
         $hint = $isEdit ? '' : '<p class="muted">Dateianhaenge koennen direkt nach dem ersten Speichern zugewiesen werden.</p>';
+        $signatureRequiredChecked = (int) ($project['customer_signature_required'] ?? 0) === 1 ? 'checked' : '';
 
         return <<<HTML
 <header class="page-header">
@@ -563,6 +566,8 @@ HTML;
     <label><span>Projektnummer</span><input name="project_number" value="{$this->field($project, 'project_number')}" required></label>
     <label><span>Name</span><input name="name" value="{$this->field($project, 'name')}" required></label>
     <label><span>Kunde</span><input name="customer_name" value="{$this->field($project, 'customer_name')}"></label>
+    <label class="checkbox-item full-span"><input type="checkbox" name="customer_signature_required" value="1" {$signatureRequiredChecked}> <span>Kundenunterschrift bei Abschluss anfordern</span></label>
+    <label><span>Standardname für Kundenbestätigung</span><input name="customer_signature_name" value="{$this->field($project, 'customer_signature_name')}"></label>
     <label><span>Status</span>{$this->select('status', ['planning' => 'Planung', 'active' => 'Aktiv', 'paused' => 'Pausiert', 'completed' => 'Abgeschlossen', 'archived' => 'Archiviert'], $project['status'] ?? 'planning')}</label>
     <label><span>Adresse</span><input name="address_line_1" value="{$this->field($project, 'address_line_1')}"></label>
     <label><span>PLZ</span><input name="postal_code" value="{$this->field($project, 'postal_code')}"></label>
@@ -948,7 +953,25 @@ HTML;
             return null;
         }
 
-        return (int) ($booking['project_id'] ?? 0) === $projectId ? $booking : null;
+        if ((int) ($booking['project_id'] ?? 0) !== $projectId) {
+            return null;
+        }
+
+        return $this->withCustomerSignatures([$booking])[0] ?? $booking;
+    }
+
+    private function withCustomerSignatures(array $bookings): array
+    {
+        $timesheetIds = array_map(static fn (array $booking): int => (int) ($booking['id'] ?? 0), $bookings);
+        $signatureByTimesheet = $this->timesheetSignatureService?->listForTimesheetsGrouped($timesheetIds) ?? [];
+
+        foreach ($bookings as $index => $booking) {
+            $timesheetId = (int) ($booking['id'] ?? 0);
+            $bookings[$index]['customer_signature'] = $signatureByTimesheet[$timesheetId] ?? null;
+            $bookings[$index]['customer_signature_present'] = isset($signatureByTimesheet[$timesheetId]);
+        }
+
+        return $bookings;
     }
 
     private function archiveForm(string $action, bool $alreadyArchived): string
