@@ -362,6 +362,25 @@ textarea {
     color: var(--page-warn);
 }
 
+.document-status-badge {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+    max-width: min(100%, 20rem);
+    min-height: 2rem;
+    padding: 0.35rem 0.65rem;
+    border: 1px solid color-mix(in srgb, var(--document-status-color, #64748b) 42%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--document-status-color, #64748b) 14%, transparent);
+    color: var(--page-ink);
+    font-size: 0.82rem;
+    font-weight: 800;
+    line-height: 1.1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 table {
     width: 100%;
     border-collapse: collapse;
@@ -898,8 +917,8 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
 
 .booking-attachment {
     display: grid;
-    grid-template-columns: 5.5rem minmax(0, 1fr);
-    gap: 0.75rem;
+    grid-template-columns: 5rem minmax(0, 1fr);
+    gap: 0.85rem;
     align-items: start;
     padding: 0.75rem;
     border: 1px solid var(--page-line);
@@ -915,7 +934,7 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
 .booking-attachment__icon {
     display: grid;
     place-items: center;
-    width: 5.5rem;
+    width: 5rem;
     aspect-ratio: 1;
     overflow: hidden;
     border: 1px solid var(--page-line);
@@ -936,7 +955,7 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
 .booking-attachment__body {
     display: grid;
     min-width: 0;
-    gap: 0.4rem;
+    gap: 0.55rem;
 }
 
 .booking-attachment__body strong {
@@ -945,6 +964,54 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
 
 .booking-attachment__archive {
     display: inline;
+}
+
+.booking-attachment__status-line,
+.booking-attachment__actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.booking-attachment__label,
+.booking-attachment__status-control span {
+    color: var(--page-muted);
+    font-size: 0.82rem;
+    font-weight: 800;
+}
+
+.booking-attachment__status-form {
+    display: grid;
+    grid-template-columns: minmax(13rem, 1fr) auto;
+    gap: 0.5rem;
+    align-items: end;
+}
+
+.booking-attachment__status-control {
+    display: grid;
+    min-width: 0;
+    gap: 0.25rem;
+}
+
+.booking-attachment__status-form select {
+    min-height: 42px;
+    padding-block: 0.6rem;
+}
+
+.booking-attachment__status-form button {
+    min-height: 42px;
+    padding: 0.65rem 0.85rem;
+    white-space: nowrap;
+}
+
+.booking-attachment__archive-badge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2rem;
+    line-height: 1.1;
+    white-space: nowrap;
 }
 
 .booking-location {
@@ -1175,6 +1242,14 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
     background: #dc2626;
 }
 
+.calendar-dot.is-holiday {
+    background: #0ea5e9;
+}
+
+.calendar-dot.is-closure {
+    background: #8b5cf6;
+}
+
 .calendar-weekdays,
 .calendar-grid {
     display: grid;
@@ -1246,6 +1321,16 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
     border-color: rgba(220, 38, 38, 0.34);
 }
 
+.calendar-day.is-holiday {
+    background: linear-gradient(180deg, var(--page-surface-strong) 0%, rgba(14, 165, 233, 0.13) 100%);
+    border-color: rgba(14, 165, 233, 0.34);
+}
+
+.calendar-day.is-closure {
+    background: linear-gradient(180deg, var(--page-surface-strong) 0%, rgba(139, 92, 246, 0.14) 100%);
+    border-color: rgba(139, 92, 246, 0.34);
+}
+
 .calendar-day.is-today .calendar-day__number {
     color: var(--page-accent);
 }
@@ -1292,6 +1377,16 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
     color: #b91c1c;
 }
 
+.calendar-status-badge.is-holiday {
+    background: rgba(14, 165, 233, 0.16);
+    color: #0369a1;
+}
+
+.calendar-status-badge.is-closure {
+    background: rgba(139, 92, 246, 0.16);
+    color: #6d28d9;
+}
+
 html[data-theme="dark"] .calendar-status-badge.is-absence {
     background: rgba(96, 165, 250, 0.2);
     color: #bfdbfe;
@@ -1305,6 +1400,16 @@ html[data-theme="dark"] .calendar-status-badge.is-missing {
 html[data-theme="dark"] .calendar-status-badge.is-issue {
     background: rgba(248, 113, 113, 0.2);
     color: #fecaca;
+}
+
+html[data-theme="dark"] .calendar-status-badge.is-holiday {
+    background: rgba(56, 189, 248, 0.2);
+    color: #bae6fd;
+}
+
+html[data-theme="dark"] .calendar-status-badge.is-closure {
+    background: rgba(167, 139, 250, 0.22);
+    color: #ddd6fe;
 }
 
 .calendar-detail {
@@ -1482,8 +1587,11 @@ html[data-theme="dark"] .calendar-status-badge.is-issue {
 
     .booking-attachment__preview,
     .booking-attachment__icon {
-        width: 100%;
-        max-width: 12rem;
+        width: 5rem;
+    }
+
+    .booking-attachment__status-form {
+        grid-template-columns: 1fr;
     }
 
     .admin-attachment-viewer__dialog {

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\App;
 
+use App\Domain\Calendar\CalendarPolicyService;
 use App\Domain\Files\FileAttachmentService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Settings\CompanySettingsService;
@@ -20,7 +21,8 @@ final class MobileAppService
         private CompanySettingsService $companySettingsService,
         private WorkdayStateCalculator $workdayStateCalculator,
         private FileAttachmentService $fileAttachmentService,
-        private ?TimesheetGeoLocationService $geoLocationService = null
+        private ?TimesheetGeoLocationService $geoLocationService = null,
+        private ?CalendarPolicyService $calendarPolicyService = null
     ) {
     }
 
@@ -31,6 +33,7 @@ final class MobileAppService
         $workEntry = $this->findLatestEntry((int) $user['id'], $today, 'work');
         $lastStatusEntry = $this->findLatestStatusEntry((int) $user['id'], $today);
         $timeTrackingRequired = (int) ($user['time_tracking_required'] ?? 1) === 1;
+        $dayPolicy = $this->dayPolicy($today);
         $isMissing = $this->isMissingWorkday($today, $workEntry, $lastStatusEntry, $timeTrackingRequired);
         $breaksToday = $workEntry !== null ? $this->findBreaksForTimesheet((int) $workEntry['id']) : [];
         $currentBreak = $this->workdayStateCalculator->currentBreak($breaksToday);
@@ -72,6 +75,7 @@ final class MobileAppService
                 'status' => $status,
                 'is_missing' => $isMissing,
                 'status_source' => $isMissing ? 'derived_missing' : ($lastStatusEntry !== null ? 'stored' : null),
+                'calendar_policy' => $dayPolicy,
             ],
             'current_break' => $currentBreak,
             'breaks_today' => $breaksToday,
@@ -572,7 +576,28 @@ final class MobileAppService
 
         $today = new \DateTimeImmutable('today');
 
-        return (int) $date->format('N') <= 5 && $date <= $today;
+        if ((int) $date->format('N') > 5 || $date > $today) {
+            return false;
+        }
+
+        return !$this->calendarPolicyService instanceof CalendarPolicyService
+            || $this->calendarPolicyService->requiresTimeTracking($workDate);
+    }
+
+    private function dayPolicy(string $date): array
+    {
+        if (!$this->calendarPolicyService instanceof CalendarPolicyService) {
+            return [
+                'date' => $date,
+                'is_public_holiday' => false,
+                'holiday_name' => null,
+                'is_company_closure' => false,
+                'closure_titles' => [],
+                'time_tracking_required' => true,
+            ];
+        }
+
+        return $this->calendarPolicyService->dayPolicy($date);
     }
 
     private function findTodayWorkEntries(int $userId, string $workDate): array

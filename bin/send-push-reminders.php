@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use App\Config\ConfigRepository;
 use App\Config\EnvironmentLoader;
+use App\Domain\Calendar\CalendarPolicyService;
 use App\Domain\Push\PushNotificationService;
 use App\Domain\Push\PushReminderService;
 use App\Domain\Push\PushSettingsService;
@@ -26,12 +27,14 @@ $connection = new DatabaseConnection($databaseSettings->current());
 $settingsService = new PushSettingsService($connection, $config->get('push', []));
 $subscriptionService = new PushSubscriptionService($connection);
 $notificationService = new PushNotificationService($connection, $settingsService, $subscriptionService);
+$calendarPolicyService = new CalendarPolicyService($connection);
 $reminderService = new PushReminderService(
     $connection,
     $settingsService,
     $subscriptionService,
     $notificationService,
-    (string) $config->get('app.timezone', 'Europe/Berlin')
+    (string) $config->get('app.timezone', 'Europe/Berlin'),
+    $calendarPolicyService
 );
 
 $summary = $reminderService->sendDueReminders(null, $dryRun);

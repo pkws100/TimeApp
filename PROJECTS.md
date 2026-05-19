@@ -27,6 +27,7 @@ Das Frontend ist als mobile Mitarbeiter-App unter `/app` als Vanilla-JS-PWA umge
 - [x] Projekt- bzw. Baustellenwahl in der App vorsehen.
 - [x] `Meine Zeiten` bzw. Historie als mobiler Bereich einplanen.
 - [x] Abwesenheitsstatus fuer krank, Urlaub, Feiertag oder fehlend sichtbar machen.
+- [x] Gesetzliche Feiertage je Bundesland und Betriebsurlaub im Admin-Kalender sichtbar machen und aus der Pflicht-/Fehlt-Logik ausnehmen.
 - [x] Projektdateien und mobile Uploads als Frontend-Baustein umsetzen.
 - [x] Profilbereich fuer Theme, Firmenprofil, Rechtstexte, Datenschutz und GEO-Hinweise vorsehen.
 
@@ -134,6 +135,8 @@ Das Frontend ist als mobile Mitarbeiter-App unter `/app` als Vanilla-JS-PWA umge
 - [x] Backup-Import-Validierung als sicherer Dry-Run gehaertet: Manifest, Version, Schema, Tabellen-JSON und Pfade werden geprueft; Restore-Apply bleibt getrennt.
 - [x] SMTP-Passwoerter werden als verschluesselte Settings-Secrets gespeichert, im Admin nicht mehr als Klartext ausgegeben und fuer den SMTP-Test nur serverseitig entschluesselt.
 - [x] AGB- und Datenschutz-PDFs koennen im Admin ueber geschuetzte Preview-/Download-Endpunkte abgerufen werden, ohne direkte Storage-URLs offenzulegen.
+- [x] Kalender-Settings fuer Bundesland-Feiertage und Betriebsurlaub umgesetzt; Feiertage/Betriebsurlaub erzeugen keine automatischen Fehlbuchungen und werden im Kalender markiert.
+- [x] Dokumentstatusprofile fuer Uploads eingefuehrt: Standardstatus `Unbearbeitet`, weitere Profile `Bearbeitet` und `Verrechnet`, Admin-Verwaltung und Statuswechsel fuer Projekt-, Geraete- und Buchungsanhaenge.
 - [x] Möglichkeit schaffen das System auch in Docker-Compose zu deplyen
 - [x] Produktions-Compose fuer VPS/Reverse Proxy mit `timeapp-web`, `timeapp-db`, `timeapp-scheduler`, privaten DB-Netz, Proxy-Netz und stabilen Volumes validiert.
 - [x] Dockerfile fuer `php:8.2-apache` bereinigt: nur fehlende Extensions werden gebaut; bereits enthaltene Core-Extensions werden nicht erneut kompiliert.
@@ -162,6 +165,8 @@ Das Frontend ist als mobile Mitarbeiter-App unter `/app` als Vanilla-JS-PWA umge
 ## Sofort nutzbare Einstiegspunkte
 - Admin-Backend: `/admin`
 - Settings: `/admin/settings/company`
+- Kalender-Settings: `/admin/settings/calendar`
+- Dokumentstatusprofile: `/admin/settings/document-statuses`
 - Datenbankeinstellungen: `/admin/settings/database`
 - Push-Einstellungen: `/admin/settings/push`
 - App-Login API: `POST /api/v1/auth/login`
@@ -179,6 +184,7 @@ Das Frontend ist als mobile Mitarbeiter-App unter `/app` als Vanilla-JS-PWA umge
 - App-Buchungsdatei-Abruf: `GET /api/v1/app/timesheet-files/{id}/download`
 - Admin-Buchungsdatei-Abruf: `GET /admin/timesheet-files/{id}/download`
 - Admin-Buchungsdatei-Archivierung: `DELETE /admin/timesheet-files/{id}`
+- Admin-Buchungsdatei-Status: `POST /admin/timesheet-files/{id}/status`
 - Timesheets API: `/api/v1/timesheets`
 - Timesheet-Kalkulation: `POST /api/v1/timesheets/calculate`
 - CSV-Export: `/api/v1/reports/export?format=csv&period=month`

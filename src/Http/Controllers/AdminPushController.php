@@ -152,6 +152,8 @@ HTML;
     {
         return '<section class="section-toolbar"><div class="scope-switch">'
             . '<a class="scope-link" href="/admin/settings/company">Settings</a>'
+            . '<a class="scope-link" href="/admin/settings/calendar">Kalender</a>'
+            . '<a class="scope-link" href="/admin/settings/document-statuses">Datei-Status</a>'
             . '<a class="scope-link" href="/admin/settings/database">Datenbank</a>'
             . '<a class="scope-link is-active" href="/admin/settings/push">Push</a>'
             . '</div></section>';

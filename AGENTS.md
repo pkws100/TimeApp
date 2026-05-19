@@ -105,11 +105,13 @@ Bereits umgesetzt:
 - Service Worker, IndexedDB-Cache und Sync-Warteschlange fuer Offline-/Wiederverbindungsfaelle
 - optionales GEO-Mitsenden bei App-Zeiterfassung, wenn global aktiviert und lokal bestaetigt
 - Backup-Export und Restore-Validate-Dry-Run; ein produktiver Restore-Apply ist bewusst noch nicht implementiert
+- geschuetzte Preview-/Download-Endpunkte fuer AGB- und Datenschutz-PDFs im Admin
+- Kalender-Settings fuer gesetzliche Feiertage je Bundesland und Betriebsurlaub
+- Dokumentstatusprofile fuer Projekt-, Geraete- und Buchungsanhaenge
 
 Noch nicht final umgesetzt:
 
 - Secret-Haertung fuer weitere sensible Settings ausserhalb des SMTP-Passworts
-- Download-/Preview-Endpunkte fuer Settings-Dateien inklusive Rechtepruefung
 - finales mPDF-Berichtslayout und produktionsreife Excel-Templates
 - tiefere Offline-Konfliktbehandlung und vollstaendige Offline-Datei-Upload-Queue
 - produktiver Restore-Apply mit explizitem Admin-Gate und Sicherheitskonzept
@@ -130,6 +132,7 @@ Diese Entscheidungen gelten aktuell als gesetzt und sollen nicht ohne expliziten
   - 45 Minuten bei mehr als 9 Stunden
 - `timesheets` decken mindestens `work`, `sick`, `vacation`, `holiday` und `absent` ab.
 - Fehlende Tagesbuchungen koennen fuer aktive Mitarbeiter an Werktagen als Status angezeigt werden; dieser abgeleitete Fehlend-Status erzeugt keine automatische `timesheets`-Buchung.
+- Gesetzliche Feiertage und Betriebsurlaub sind Anzeige- und Pflichtlogik; sie erzeugen keine automatischen `timesheets`-Buchungen und deaktivieren abgeleitetes Fehlen bzw. Fehlbuchungs-Pushes.
 - Das Firmenprofil ist ein globaler Singleton-Datensatz in `company_settings`.
 - SMTP-Settings liegen aktuell in MariaDB; `smtp_password` wird verschluesselt gespeichert und nutzt `SETTINGS_ENCRYPTION_KEY` bzw. `APP_SECRET` aus der Umgebung.
 - GEO ist fachlich vorbereitet, aber noch nicht produktiv Teil der Zeiterfassung.
@@ -195,6 +198,7 @@ Verbindliche Regeln:
 - Settings-Dateien wie Logo, AGB-PDF und Datenschutz-PDF ebenfalls geschuetzt speichern
 - Archivierung bedeutet auch bei Dateien keine unkontrollierte physische Loeschung
 - Dateiabrufe fuer App/Admin muessen ueber geschuetzte Controller-Endpunkte laufen und duerfen Uploads nicht direkt aus `public/` ausliefern
+- Dokumentstatusprofile sind globale Metadaten fuer hochgeladene Projekt-, Geraete- und Buchungsdateien; neue Uploads erhalten den aktiven Defaultstatus, archivierte Status bleiben an Altdateien sichtbar.
 - Mobile Projektdateien duerfen nur fuer global berechtigte Projekt-/Dateiverwalter oder fuer Benutzer mit aktiver Projektmitgliedschaft sichtbar bzw. hochladbar sein
 - JPEG-Uploads werden serverseitig anhand vorhandener EXIF-Orientation normalisiert, sofern `exif` und `gd` verfuegbar sind; andere erlaubte Bildtypen bleiben gueltige Uploads ohne erzwungene Rotation
 - Backup-Import darf nur validieren, nicht automatisch anwenden; Runtime-Overrides duerfen nicht ungefragt zurueckgespielt werden und ein Restore-Apply braucht einen separaten, expliziten Auftrag.
@@ -299,6 +303,7 @@ Beim Implementieren:
 - Admin-Muster, Theme-Muster und Settings-Muster konsistent weiterverwenden
 - Geschaeftslogik von Praesentation trennen
 - PDO mit vorbereiteten Statements nutzen
+- Named PDO-Placeholder innerhalb einer SQL-Query nicht mehrfach verwenden; auch bei gleichem Wert eindeutige Namen wie `:date_from` und `:date_to` nutzen, weil native PDO/MariaDB-Prepared-Statements sonst mit `SQLSTATE[HY093]` scheitern koennen.
 - Migrationen nur ueber Phinx anlegen
 - keine physische Loeschung fuer archivierte Stammdaten einbauen
 - geschuetzte Uploads ausserhalb des Webroots halten

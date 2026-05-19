@@ -440,4 +440,37 @@ final class RouterSmokeTest extends TestCase
             self::assertSame('/admin/login?next=' . rawurlencode($uri), $headers['Location'] ?? null);
         }
     }
+
+    public function testAdminCalendarAndDocumentStatusSettingsRoutesAreProtected(): void
+    {
+        foreach ([
+            'GET' => [
+                '/admin/settings/calendar',
+                '/admin/settings/document-statuses',
+            ],
+            'POST' => [
+                '/admin/settings/calendar',
+                '/admin/settings/calendar/closures',
+                '/admin/settings/calendar/closures/1/archive',
+                '/admin/settings/document-statuses',
+                '/admin/settings/document-statuses/1',
+                '/admin/settings/document-statuses/1/archive',
+                '/admin/timesheet-files/1/status',
+            ],
+        ] as $method => $uris) {
+            foreach ($uris as $uri) {
+                $_SERVER['REQUEST_METHOD'] = $method;
+                $_SERVER['REQUEST_URI'] = $uri;
+                $_GET = [];
+                $_POST = [];
+                $_FILES = [];
+
+                [$request, $router] = require base_path('bootstrap/app.php');
+
+                $response = $router->dispatch($request);
+
+                self::assertSame(302, $response->status(), 'Die Admin-Route sollte zum Login umleiten: ' . $method . ' ' . $uri);
+            }
+        }
+    }
 }

@@ -7,6 +7,7 @@ namespace Tests\Unit;
 use App\Domain\Assets\AssetService;
 use App\Domain\Auth\AuthService;
 use App\Domain\Auth\CsrfService;
+use App\Domain\Files\DocumentStatusService;
 use App\Domain\Files\FileAttachmentService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Timesheets\AdminBookingService;
@@ -140,6 +141,7 @@ final class AdminManagementControllerTest extends TestCase
             new RoleService($connection, $permissions),
             new AssetService($connection),
             new FileAttachmentService($connection, []),
+            new DocumentStatusService($connection),
             new AdminBookingService($connection, new TimesheetCalculator()),
             new AuthService($connection, $permissions),
             new CsrfService()

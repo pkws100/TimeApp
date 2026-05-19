@@ -111,6 +111,10 @@ final class BookingModalRendererTest extends TestCase
                 'csrf_token' => 'abc123',
                 'can_manage' => true,
                 'can_archive' => true,
+                'document_statuses' => [
+                    ['id' => 1, 'label' => 'Unbearbeitet', 'color' => '#f59e0b'],
+                    ['id' => 2, 'label' => 'Bearbeitet', 'color' => '#2563eb'],
+                ],
                 'selected_booking' => [
                     'id' => 15,
                     'work_date' => '2026-04-24',
@@ -144,6 +148,12 @@ final class BookingModalRendererTest extends TestCase
                         'download_url' => '/admin/timesheet-files/5/download',
                         'preview_url' => '/admin/timesheet-files/5/download',
                         'archive_url' => '/admin/timesheet-files/5',
+                        'status_update_url' => '/admin/timesheet-files/5/status',
+                        'document_status' => [
+                            'id' => 1,
+                            'label' => 'Unbearbeitet',
+                            'color' => '#f59e0b',
+                        ],
                     ]],
                 ],
             ]
@@ -161,6 +171,13 @@ final class BookingModalRendererTest extends TestCase
         self::assertStringContainsString('name="_method" value="DELETE"', $html);
         self::assertStringContainsString('name="booking_id" value="15"', $html);
         self::assertStringContainsString('name="csrf_token" value="abc123"', $html);
+        self::assertStringContainsString('booking-attachment__status-line', $html);
+        self::assertStringContainsString('booking-attachment__status-form', $html);
+        self::assertStringContainsString('booking-attachment__status-control', $html);
+        self::assertStringContainsString('Dokumentenstatus', $html);
+        self::assertStringContainsString('Unbearbeitet', $html);
+        self::assertStringContainsString('/admin/timesheet-files/5/status', $html);
+        self::assertStringNotContainsString('<span class="badge ok">Aktiv</span>', $html);
     }
 
     public function testRenderModalAllowsViewOnlyAttachmentAccessWithoutArchiveControls(): void
@@ -243,6 +260,46 @@ final class BookingModalRendererTest extends TestCase
         self::assertStringContainsString('data-preview-type="pdf"', $html);
         self::assertStringContainsString('>PDF</span>', $html);
         self::assertStringNotContainsString('<iframe', $html);
+    }
+
+    public function testRenderModalShowsArchiveBadgeOnlyForArchivedAttachment(): void
+    {
+        $renderer = new BookingModalRenderer();
+        $html = $renderer->renderModal(
+            [],
+            ['work' => 'Arbeit'],
+            [
+                'return_to' => '/admin/bookings',
+                'csrf_token' => 'abc123',
+                'can_manage' => true,
+                'can_archive' => true,
+                'selected_booking' => [
+                    'id' => 15,
+                    'employee_name' => 'Max Mustermann',
+                    'project_id' => null,
+                    'entry_type' => 'work',
+                    'is_deleted' => 0,
+                    'attachments' => [[
+                        'id' => 7,
+                        'original_name' => 'alter-beleg.pdf',
+                        'mime_type' => 'application/pdf',
+                        'size_bytes' => 2048,
+                        'uploaded_at' => '2026-05-16 10:00:00',
+                        'is_deleted' => 1,
+                        'is_image' => false,
+                        'download_url' => '/admin/timesheet-files/7/download',
+                        'preview_url' => '/admin/timesheet-files/7/download',
+                        'archive_url' => '/admin/timesheet-files/7',
+                        'status_update_url' => '/admin/timesheet-files/7/status',
+                    ]],
+                ],
+            ]
+        );
+
+        self::assertStringContainsString('booking-attachment__archive-badge', $html);
+        self::assertStringContainsString('Archiviert', $html);
+        self::assertStringNotContainsString('booking-attachment__status-form', $html);
+        self::assertStringNotContainsString('Anhang archivieren', $html);
     }
 
     public function testRenderTableHighlightsOpenProjectAssignments(): void

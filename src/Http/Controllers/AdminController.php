@@ -183,11 +183,15 @@ HTML;
     private function settingsTabs(string $active): string
     {
         $companyClass = $active === 'company' ? 'scope-link is-active' : 'scope-link';
+        $calendarClass = $active === 'calendar' ? 'scope-link is-active' : 'scope-link';
+        $documentStatusClass = $active === 'document-statuses' ? 'scope-link is-active' : 'scope-link';
         $databaseClass = $active === 'database' ? 'scope-link is-active' : 'scope-link';
         $pushClass = $active === 'push' ? 'scope-link is-active' : 'scope-link';
 
         return '<section class="section-toolbar"><div class="scope-switch">'
             . '<a class="' . $companyClass . '" href="/admin/settings/company">Settings</a>'
+            . '<a class="' . $calendarClass . '" href="/admin/settings/calendar">Kalender</a>'
+            . '<a class="' . $documentStatusClass . '" href="/admin/settings/document-statuses">Datei-Status</a>'
             . '<a class="' . $databaseClass . '" href="/admin/settings/database">Datenbank</a>'
             . '<a class="' . $pushClass . '" href="/admin/settings/push">Push</a>'
             . '</div></section>';

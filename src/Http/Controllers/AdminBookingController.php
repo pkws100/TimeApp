@@ -7,6 +7,7 @@ namespace App\Http\Controllers;
 use App\Domain\Auth\AuthService;
 use App\Domain\Auth\CsrfService;
 use App\Domain\Exports\BookingExportService;
+use App\Domain\Files\DocumentStatusService;
 use App\Domain\Files\FileAttachmentService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Timesheets\AdminBookingService;
@@ -28,6 +29,7 @@ final class AdminBookingController
         private ProjectService $projectService,
         private UserService $userService,
         private FileAttachmentService $fileAttachmentService,
+        private DocumentStatusService $documentStatusService,
         private TimesheetGeoLocationService $geoLocationService,
         private AuthService $authService,
         private CsrfService $csrfService
@@ -201,6 +203,7 @@ final class AdminBookingController
                 'can_manage' => $canManage,
                 'can_archive' => $canArchive,
                 'can_view_attachments' => true,
+                'document_statuses' => $this->documentStatusService->activeList(),
                 'open_booking_location' => $returnTo,
             ]
         );
@@ -213,6 +216,7 @@ final class AdminBookingController
                 'can_manage' => $canManage,
                 'can_archive' => $canArchive,
                 'can_view_attachments' => true,
+                'document_statuses' => $this->documentStatusService->activeList(),
                 'selected_booking' => $this->selectedBooking($request),
             ]
         );
@@ -489,6 +493,7 @@ HTML;
                 'export' => 'Der Export konnte nicht erstellt werden. Bitte Format oder Serverabhaengigkeiten pruefen.',
                 'attachment-csrf' => 'Die Anhangsaktion konnte nicht bestaetigt werden. Bitte die Seite neu laden und erneut versuchen.',
                 'attachment-missing' => 'Der Anhang wurde nicht gefunden oder ist bereits archiviert.',
+                'attachment-status' => 'Der Dokumentstatus konnte nicht gespeichert werden.',
                 'csrf' => 'Die Buchungsaktion konnte nicht bestaetigt werden. Bitte die Seite neu laden und erneut versuchen.',
                 default => 'Beim Vorgang ist ein Fehler aufgetreten.',
             };
@@ -507,6 +512,7 @@ HTML;
             'archived' => 'Buchung erfolgreich archiviert.',
             'restored' => 'Buchung erfolgreich wiederhergestellt.',
             'attachment-archived' => 'Anhang erfolgreich archiviert.',
+            'attachment-status-updated' => 'Dokumentstatus erfolgreich gespeichert.',
             'selection-missing' => 'Es wurde keine passende Buchung fuer die Sammelaktion geaendert.',
             default => 'Vorgang erfolgreich ausgefuehrt.',
         };

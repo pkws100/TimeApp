@@ -70,6 +70,42 @@ final class AdminTimesheetAttachmentController
         return Response::redirect($bookingId > 0 ? $this->withBookingContext($location, $bookingId) : $location);
     }
 
+    public function status(Request $request, array $params): Response
+    {
+        $returnTo = $this->returnTo($request);
+        $fileId = (int) ($params['id'] ?? 0);
+
+        if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+            return Response::redirect($this->withQueryValue($returnTo, 'error', 'attachment-csrf'));
+        }
+
+        $file = $this->fileAttachmentService->findTimesheetFile($fileId);
+
+        if ($file === null) {
+            return Response::redirect($this->withQueryValue($returnTo, 'error', 'attachment-missing'));
+        }
+
+        if ((int) ($file['is_deleted'] ?? 0) === 1) {
+            return Response::redirect($this->withQueryValue($returnTo, 'error', 'attachment-status'));
+        }
+
+        try {
+            $statusId = trim((string) $request->input('document_status_id', ''));
+            $updated = $this->fileAttachmentService->updateTimesheetFileStatus($fileId, $statusId === '' ? null : (int) $statusId);
+
+            if (!$updated) {
+                return Response::redirect($this->withQueryValue($returnTo, 'error', 'attachment-status'));
+            }
+        } catch (\RuntimeException) {
+            return Response::redirect($this->withQueryValue($returnTo, 'error', 'attachment-status'));
+        }
+
+        $bookingId = (int) $request->input('booking_id', (int) ($file['timesheet_id'] ?? 0));
+        $location = $this->withQueryValue($returnTo, 'notice', 'attachment-status-updated');
+
+        return Response::redirect($bookingId > 0 ? $this->withBookingContext($location, $bookingId) : $location);
+    }
+
     private function returnTo(Request $request): string
     {
         $returnTo = trim((string) $request->input('return_to', '/admin/bookings'));

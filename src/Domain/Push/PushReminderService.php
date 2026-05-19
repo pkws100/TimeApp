@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Push;
 
+use App\Domain\Calendar\CalendarPolicyService;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
 use DateTimeZone;
@@ -15,7 +16,8 @@ final class PushReminderService
         private PushSettingsService $settingsService,
         private PushSubscriptionService $subscriptionService,
         private PushNotificationService $notificationService,
-        private string $timezone
+        private string $timezone,
+        private ?CalendarPolicyService $calendarPolicyService = null
     ) {
     }
 
@@ -47,6 +49,13 @@ final class PushReminderService
 
         if (!$this->isDue($now, $settings)) {
             $summary['messages'][] = 'Reminder-Zeitfenster ist noch nicht erreicht oder der Wochentag ist deaktiviert.';
+
+            return $summary;
+        }
+
+        if ($this->calendarPolicyService instanceof CalendarPolicyService
+            && !$this->calendarPolicyService->requiresTimeTracking($now->format('Y-m-d'))) {
+            $summary['messages'][] = 'Heute ist wegen Feiertag oder Betriebsurlaub keine Pflichtbuchung notwendig.';
 
             return $summary;
         }

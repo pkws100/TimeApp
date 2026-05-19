@@ -4,13 +4,17 @@ declare(strict_types=1);
 
 namespace App\Domain\Attendance;
 
+use App\Domain\Calendar\CalendarPolicyService;
 use App\Infrastructure\Database\DatabaseConnection;
 
 final class AttendanceService
 {
     private const ABSENCE_TYPES = ['sick', 'vacation', 'holiday', 'absent'];
 
-    public function __construct(private DatabaseConnection $connection)
+    public function __construct(
+        private DatabaseConnection $connection,
+        private ?CalendarPolicyService $calendarPolicyService = null
+    )
     {
     }
 
@@ -112,6 +116,7 @@ final class AttendanceService
 
         return [
             'today' => $today,
+            'calendar_policy' => $this->dayPolicy($today),
             'present_count' => count($present),
             'present' => $present,
             'status_counts' => $this->statusCounts($statuses),
@@ -156,6 +161,7 @@ final class AttendanceService
 
         return [
             'today' => $today,
+            'calendar_policy' => $this->dayPolicy($today),
             'present_count' => count($present),
             'present' => $present,
             'status_counts' => $this->statusCounts($statuses),
@@ -232,7 +238,28 @@ final class AttendanceService
 
         $currentDay = new \DateTimeImmutable('today');
 
-        return (int) $date->format('N') <= 5 && $date <= $currentDay;
+        if ((int) $date->format('N') > 5 || $date > $currentDay) {
+            return false;
+        }
+
+        return !$this->calendarPolicyService instanceof CalendarPolicyService
+            || $this->calendarPolicyService->requiresTimeTracking($today);
+    }
+
+    private function dayPolicy(string $today): array
+    {
+        if (!$this->calendarPolicyService instanceof CalendarPolicyService) {
+            return [
+                'date' => $today,
+                'is_public_holiday' => false,
+                'holiday_name' => null,
+                'is_company_closure' => false,
+                'closure_titles' => [],
+                'time_tracking_required' => true,
+            ];
+        }
+
+        return $this->calendarPolicyService->dayPolicy($today);
     }
 
     private function mapRow(array $row): array

@@ -59,11 +59,12 @@ final class FileAttachmentService
         }
 
         $rows = $this->connection->fetchAll(
-            'SELECT timesheet_id, id, original_name, stored_name, mime_type, size_bytes, storage_path, uploaded_at, is_deleted, deleted_at
+            'SELECT timesheet_id, ' . $this->fileSelectColumns('timesheet_files') . '
              FROM timesheet_files
+             ' . $this->documentStatusJoin('timesheet_files') . '
              WHERE timesheet_id IN (' . implode(', ', $placeholders) . ')
-               AND ' . $this->scopeWhereClause($scope) . '
-             ORDER BY timesheet_id ASC, is_deleted ASC, uploaded_at DESC',
+               AND ' . $this->scopeWhereClause($scope, 'timesheet_files') . '
+             ORDER BY timesheet_files.timesheet_id ASC, timesheet_files.is_deleted ASC, timesheet_files.uploaded_at DESC',
             $bindings
         );
 
@@ -133,6 +134,21 @@ final class FileAttachmentService
     public function archiveTimesheetFile(int $fileId, ?int $deletedByUserId = null): bool
     {
         return $this->archiveFile('timesheet_files', $fileId, $deletedByUserId);
+    }
+
+    public function updateProjectFileStatus(int $fileId, ?int $statusId): bool
+    {
+        return $this->updateFileStatus('project_files', $fileId, $statusId);
+    }
+
+    public function updateAssetFileStatus(int $fileId, ?int $statusId): bool
+    {
+        return $this->updateFileStatus('asset_files', $fileId, $statusId);
+    }
+
+    public function updateTimesheetFileStatus(int $fileId, ?int $statusId): bool
+    {
+        return $this->updateFileStatus('timesheet_files', $fileId, $statusId);
     }
 
     public function downloadableProjectFile(int $fileId): ?array
@@ -260,11 +276,12 @@ final class FileAttachmentService
         }
 
         return $this->connection->fetchAll(
-            'SELECT id, original_name, stored_name, mime_type, size_bytes, storage_path, uploaded_at, is_deleted, deleted_at
+            'SELECT ' . $this->fileSelectColumns($table) . '
              FROM ' . $table . '
+             ' . $this->documentStatusJoin($table) . '
              WHERE ' . $ownerColumn . ' = :owner_id
-               AND ' . $this->scopeWhereClause($scope) . '
-             ORDER BY is_deleted ASC, uploaded_at DESC',
+               AND ' . $this->scopeWhereClause($scope, $table) . '
+             ORDER BY ' . $table . '.is_deleted ASC, ' . $table . '.uploaded_at DESC',
             ['owner_id' => $ownerId]
         );
     }
@@ -333,6 +350,7 @@ final class FileAttachmentService
         clearstatcache(true, $targetPath);
         $size = is_file($targetPath) ? (int) filesize($targetPath) : $size;
 
+        $documentStatusId = $this->defaultDocumentStatusId();
         $bindings = [
             'owner_id' => $ownerId,
             'original_name' => (string) $file['name'],
@@ -341,15 +359,42 @@ final class FileAttachmentService
             'size_bytes' => $size,
             'storage_path' => $targetPath,
             'uploaded_by_user_id' => $userId,
+            'document_status_id' => $documentStatusId,
         ];
 
         if ($this->connection->tableExists($table)) {
+            $hasStatusColumn = $this->connection->columnExists($table, 'document_status_id');
+            $columns = [
+                $ownerColumn,
+                'original_name',
+                'stored_name',
+                'mime_type',
+                'size_bytes',
+                'storage_path',
+                'uploaded_by_user_id',
+            ];
+            $placeholders = [
+                ':owner_id',
+                ':original_name',
+                ':stored_name',
+                ':mime_type',
+                ':size_bytes',
+                ':storage_path',
+                ':uploaded_by_user_id',
+            ];
+
+            if ($hasStatusColumn) {
+                $columns[] = 'document_status_id';
+                $placeholders[] = ':document_status_id';
+            } else {
+                unset($bindings['document_status_id']);
+            }
+
+            $columns = array_merge($columns, ['uploaded_at', 'is_deleted', 'deleted_at', 'deleted_by_user_id']);
+            $placeholders = array_merge($placeholders, ['NOW()', '0', 'NULL', 'NULL']);
+
             $this->connection->execute(
-                'INSERT INTO ' . $table . ' (
-                    ' . $ownerColumn . ', original_name, stored_name, mime_type, size_bytes, storage_path, uploaded_by_user_id, uploaded_at, is_deleted, deleted_at, deleted_by_user_id
-                ) VALUES (
-                    :owner_id, :original_name, :stored_name, :mime_type, :size_bytes, :storage_path, :uploaded_by_user_id, NOW(), 0, NULL, NULL
-                )',
+                'INSERT INTO ' . $table . ' (' . implode(', ', $columns) . ') VALUES (' . implode(', ', $placeholders) . ')',
                 $bindings
             );
         }
@@ -362,6 +407,7 @@ final class FileAttachmentService
             'mime_type' => $mimeType,
             'size_bytes' => $size,
             'uploaded_at' => (new \DateTimeImmutable())->format(DATE_ATOM),
+            'document_status_id' => $documentStatusId,
         ];
 
         return $this->publicFile($stored, $this->fileTypeForTable($table));
@@ -428,12 +474,33 @@ final class FileAttachmentService
         );
     }
 
-    private function scopeWhereClause(string $scope): string
+    private function updateFileStatus(string $table, int $fileId, ?int $statusId): bool
     {
+        if (!$this->connection->tableExists($table) || !$this->connection->columnExists($table, 'document_status_id')) {
+            return false;
+        }
+
+        if ($statusId !== null && $statusId > 0 && !$this->documentStatusExists($statusId)) {
+            throw new RuntimeException('Der gewaehlte Dokumentstatus ist nicht aktiv.');
+        }
+
+        return $this->connection->execute(
+            'UPDATE ' . $table . ' SET document_status_id = :status_id WHERE id = :id AND is_deleted = 0',
+            [
+                'id' => $fileId,
+                'status_id' => $statusId !== null && $statusId > 0 ? $statusId : null,
+            ]
+        );
+    }
+
+    private function scopeWhereClause(string $scope, ?string $table = null): string
+    {
+        $prefix = $table !== null && $table !== '' ? $table . '.' : '';
+
         return match ($scope) {
-            'archived' => 'is_deleted = 1',
+            'archived' => $prefix . 'is_deleted = 1',
             'all' => '1 = 1',
-            default => 'is_deleted = 0',
+            default => $prefix . 'is_deleted = 0',
         };
     }
 
@@ -460,6 +527,7 @@ final class FileAttachmentService
             'is_image' => $isImage,
             'download_url' => $downloadUrl,
             'preview_url' => $isImage ? $downloadUrl : null,
+            'document_status' => $this->documentStatusFromRow($file),
         ];
     }
 
@@ -485,6 +553,8 @@ final class FileAttachmentService
             'download_url' => $downloadUrl,
             'preview_url' => $isPreviewable ? $downloadUrl : null,
             'archive_url' => $fileId > 0 ? '/admin/timesheet-files/' . $fileId : null,
+            'status_update_url' => $fileId > 0 ? '/admin/timesheet-files/' . $fileId . '/status' : null,
+            'document_status' => $this->documentStatusFromRow($file),
         ];
     }
 
@@ -608,5 +678,90 @@ final class FileAttachmentService
     private function isImageMimeType(string $mimeType): bool
     {
         return in_array($mimeType, self::IMAGE_MIME_TYPES, true);
+    }
+
+    private function fileSelectColumns(string $table): string
+    {
+        $columns = [
+            $table . '.id',
+            $table . '.original_name',
+            $table . '.stored_name',
+            $table . '.mime_type',
+            $table . '.size_bytes',
+            $table . '.storage_path',
+            $table . '.uploaded_at',
+            $table . '.is_deleted',
+            $table . '.deleted_at',
+        ];
+
+        if ($this->connection->columnExists($table, 'document_status_id')) {
+            $columns[] = $table . '.document_status_id';
+        }
+
+        if ($this->connection->tableExists('document_status_profiles') && $this->connection->columnExists($table, 'document_status_id')) {
+            $columns[] = 'document_status_profiles.label AS document_status_label';
+            $columns[] = 'document_status_profiles.slug AS document_status_slug';
+            $columns[] = 'document_status_profiles.color AS document_status_color';
+            $columns[] = 'document_status_profiles.is_default AS document_status_is_default';
+            $columns[] = 'document_status_profiles.is_deleted AS document_status_is_deleted';
+        }
+
+        return implode(', ', $columns);
+    }
+
+    private function documentStatusJoin(string $table): string
+    {
+        if (!$this->connection->tableExists('document_status_profiles') || !$this->connection->columnExists($table, 'document_status_id')) {
+            return '';
+        }
+
+        return 'LEFT JOIN document_status_profiles ON document_status_profiles.id = ' . $table . '.document_status_id';
+    }
+
+    private function defaultDocumentStatusId(): ?int
+    {
+        if (!$this->connection->tableExists('document_status_profiles')) {
+            return null;
+        }
+
+        $id = $this->connection->fetchColumn(
+            'SELECT id
+             FROM document_status_profiles
+             WHERE is_deleted = 0
+             ORDER BY is_default DESC, sort_order ASC, id ASC
+             LIMIT 1'
+        );
+
+        return is_numeric($id) ? (int) $id : null;
+    }
+
+    private function documentStatusExists(int $statusId): bool
+    {
+        if (!$this->connection->tableExists('document_status_profiles')) {
+            return false;
+        }
+
+        return (int) ($this->connection->fetchColumn(
+            'SELECT COUNT(*) FROM document_status_profiles WHERE id = :id AND is_deleted = 0',
+            ['id' => $statusId]
+        ) ?? 0) > 0;
+    }
+
+    private function documentStatusFromRow(array $file): ?array
+    {
+        $statusId = (int) ($file['document_status_id'] ?? 0);
+
+        if ($statusId <= 0) {
+            return null;
+        }
+
+        return [
+            'id' => $statusId,
+            'label' => (string) ($file['document_status_label'] ?? 'Unbearbeitet'),
+            'slug' => (string) ($file['document_status_slug'] ?? ''),
+            'color' => (string) ($file['document_status_color'] ?? '#64748b'),
+            'is_default' => (int) ($file['document_status_is_default'] ?? 0) === 1,
+            'is_deleted' => (int) ($file['document_status_is_deleted'] ?? 0),
+        ];
     }
 }

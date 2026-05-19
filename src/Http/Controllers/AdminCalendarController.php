@@ -6,6 +6,7 @@ namespace App\Http\Controllers;
 
 use App\Domain\Auth\AuthService;
 use App\Domain\Auth\CsrfService;
+use App\Domain\Files\DocumentStatusService;
 use App\Domain\Files\FileAttachmentService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Timesheets\AdminBookingService;
@@ -27,6 +28,7 @@ final class AdminCalendarController
         private ProjectService $projectService,
         private UserService $userService,
         private FileAttachmentService $fileAttachmentService,
+        private DocumentStatusService $documentStatusService,
         private TimesheetGeoLocationService $geoLocationService,
         private AuthService $authService,
         private CsrfService $csrfService
@@ -66,6 +68,7 @@ final class AdminCalendarController
                 'can_manage' => $canManage,
                 'can_archive' => $canArchive,
                 'can_view_attachments' => true,
+                'document_statuses' => $this->documentStatusService->activeList(),
                 'selected_booking' => $this->selectedBooking($request),
             ]
         );
@@ -100,7 +103,7 @@ final class AdminCalendarController
                     $users,
                     $returnTo,
                     $this->csrfService->token(),
-                    $this->authService->hasPermission('timesheets.manage'),
+                   $this->authService->hasPermission('timesheets.manage'),
                     $this->authService->hasPermission('timesheets.archive')
                 ),
             ],
@@ -137,6 +140,8 @@ final class AdminCalendarController
             <span><i class="calendar-dot is-empty"></i>Keine Buchung</span>
             <span><i class="calendar-dot is-absence"></i>Abwesenheit</span>
             <span><i class="calendar-dot is-missing"></i>Fehlend</span>
+            <span><i class="calendar-dot is-holiday"></i>Feiertag</span>
+            <span><i class="calendar-dot is-closure"></i>Betriebsurlaub</span>
             <span><i class="calendar-dot is-issue"></i>Pruefen</span>
         </div>
         <div class="calendar-weekdays" aria-hidden="true">
@@ -188,6 +193,14 @@ HTML;
                 $meta[] = (int) $day['missing_count'] . ' fehlt';
             }
 
+            if ((bool) ($day['is_public_holiday'] ?? false)) {
+                $meta[] = (string) ($day['holiday_name'] ?? 'Feiertag');
+            }
+
+            if ((bool) ($day['is_company_closure'] ?? false)) {
+                $meta[] = 'Betriebsurlaub';
+            }
+
             $html .= '<button type="button" class="' . trim(implode(' ', array_filter($classes))) . '" data-calendar-date="' . $this->e($date) . '" aria-pressed="' . ($date === $selectedDate ? 'true' : 'false') . '">'
                 . '<span class="calendar-day__number">' . $this->e((string) ($day['day_number'] ?? '')) . '</span>'
                 . '<span class="calendar-day__status">' . $this->e((string) ($day['status_label'] ?? '')) . '</span>'
@@ -215,10 +228,13 @@ HTML;
                 'can_manage' => $canManage,
                 'can_archive' => $canArchive,
                 'can_view_attachments' => true,
+                'document_statuses' => $this->documentStatusService->activeList(),
                 'open_booking_location' => $returnTo,
             ]
         );
         $createForm = $canManage ? $this->renderManualBookingForm($date, $projects, $users, $returnTo, $csrfToken) : '';
+        $calendarPolicy = is_array($summary['calendar_policy'] ?? null) ? $summary['calendar_policy'] : [];
+        $policyNotice = $this->renderCalendarPolicyNotice($calendarPolicy);
 
         return <<<HTML
 <div class="calendar-detail__header">
@@ -228,6 +244,7 @@ HTML;
     </div>
     <span class="badge calendar-status-badge is-{$this->e((string) ($summary['status'] ?? 'empty'))}">{$this->e((string) ($summary['status_label'] ?? 'Keine Buchung'))}</span>
 </div>
+{$policyNotice}
 <div class="calendar-stats">
     <div><span>Buchungen</span><strong>{$this->e((string) ($summary['active_booking_count'] ?? 0))}</strong></div>
     <div><span>Mitarbeiter</span><strong>{$this->e((string) ($summary['employee_count'] ?? 0))}</strong></div>
@@ -236,6 +253,7 @@ HTML;
     <div><span>Urlaub</span><strong>{$this->e((string) ($summary['vacation_count'] ?? 0))}</strong></div>
     <div><span>Feiertag</span><strong>{$this->e((string) ($summary['holiday_count'] ?? 0))}</strong></div>
     <div><span>Fehlt</span><strong>{$this->e((string) ((int) ($summary['stored_absent_count'] ?? 0) + (int) ($summary['missing_count'] ?? 0)))}</strong></div>
+    <div><span>Kalender</span><strong>{$this->e(((bool) ($summary['time_tracking_required'] ?? true)) ? 'Pflicht' : 'frei')}</strong></div>
 </div>
 {$this->renderAssetList($assets)}
 {$createForm}
@@ -289,6 +307,26 @@ HTML;
         }
 
         return '<section class="calendar-assets"><h3>Fahrzeuge und Geraete</h3><ul>' . $items . '</ul></section>';
+    }
+
+    private function renderCalendarPolicyNotice(array $policy): string
+    {
+        $messages = [];
+
+        if ((bool) ($policy['is_public_holiday'] ?? false)) {
+            $messages[] = 'Gesetzlicher Feiertag: ' . (string) ($policy['holiday_name'] ?? 'Feiertag');
+        }
+
+        if ((bool) ($policy['is_company_closure'] ?? false)) {
+            $titles = array_values(array_filter(array_map('strval', $policy['closure_titles'] ?? [])));
+            $messages[] = 'Betriebsurlaub' . ($titles !== [] ? ': ' . implode(', ', $titles) : '');
+        }
+
+        if ($messages === []) {
+            return '';
+        }
+
+        return '<p class="notice info">' . $this->e(implode(' · ', $messages)) . '<br><span class="muted">An diesem Tag wird kein automatisches Fehlt erzeugt; freiwillige Buchungen bleiben moeglich.</span></p>';
     }
 
     private function selectedDate(Request $request): string
@@ -414,6 +452,7 @@ HTML;
                 'validation' => 'Die Buchung konnte nicht gespeichert werden. Bitte Datum, Zeiten und Begruendung pruefen.',
                 'attachment-csrf' => 'Die Anhangsaktion konnte nicht bestaetigt werden. Bitte die Seite neu laden und erneut versuchen.',
                 'attachment-missing' => 'Der Anhang wurde nicht gefunden oder ist bereits archiviert.',
+                'attachment-status' => 'Der Dokumentstatus konnte nicht gespeichert werden.',
                 'csrf' => 'Die Buchungsaktion konnte nicht bestaetigt werden. Bitte die Seite neu laden und erneut versuchen.',
                 default => 'Beim Vorgang ist ein Fehler aufgetreten.',
             };
@@ -431,6 +470,7 @@ HTML;
             'archived' => 'Buchung erfolgreich archiviert.',
             'restored' => 'Buchung erfolgreich wiederhergestellt.',
             'attachment-archived' => 'Anhang erfolgreich archiviert.',
+            'attachment-status-updated' => 'Dokumentstatus erfolgreich gespeichert.',
             default => 'Vorgang erfolgreich ausgefuehrt.',
         };
 

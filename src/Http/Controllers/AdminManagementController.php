@@ -7,6 +7,7 @@ namespace App\Http\Controllers;
 use App\Domain\Assets\AssetService;
 use App\Domain\Auth\AuthService;
 use App\Domain\Auth\CsrfService;
+use App\Domain\Files\DocumentStatusService;
 use App\Domain\Files\FileAttachmentService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Timesheets\AdminBookingService;
@@ -28,6 +29,7 @@ final class AdminManagementController
         private RoleService $roleService,
         private AssetService $assetService,
         private FileAttachmentService $fileAttachmentService,
+        private DocumentStatusService $documentStatusService,
         private AdminBookingService $bookingService,
         private AuthService $authService,
         private CsrfService $csrfService
@@ -187,6 +189,33 @@ final class AdminManagementController
         return Response::redirect('/admin/projects?error=file-not-found');
     }
 
+    public function projectFileStatus(Request $request, array $params): Response
+    {
+        $file = $this->fileAttachmentService->findProjectFile((int) $params['id']);
+
+        if ($file === null) {
+            return Response::redirect('/admin/projects?error=file-not-found');
+        }
+
+        if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+            return Response::redirect('/admin/projects/' . (int) $file['project_id'] . '/edit?error=csrf');
+        }
+
+        if ((int) ($file['is_deleted'] ?? 0) === 1) {
+            return Response::redirect('/admin/projects/' . (int) $file['project_id'] . '/edit?error=file-status');
+        }
+
+        try {
+            if (!$this->fileAttachmentService->updateProjectFileStatus((int) $params['id'], $this->nullableStatusId($request))) {
+                return Response::redirect('/admin/projects/' . (int) $file['project_id'] . '/edit?error=file-status');
+            }
+
+            return Response::redirect('/admin/projects/' . (int) $file['project_id'] . '/edit?notice=file-status-updated');
+        } catch (RuntimeException) {
+            return Response::redirect('/admin/projects/' . (int) $file['project_id'] . '/edit?error=file-status');
+        }
+    }
+
     public function assets(Request $request): Response
     {
         $scope = $this->scope($request);
@@ -290,6 +319,33 @@ final class AdminManagementController
         }
 
         return Response::redirect('/admin/assets?error=file-not-found');
+    }
+
+    public function assetFileStatus(Request $request, array $params): Response
+    {
+        $file = $this->fileAttachmentService->findAssetFile((int) $params['id']);
+
+        if ($file === null) {
+            return Response::redirect('/admin/assets?error=file-not-found');
+        }
+
+        if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+            return Response::redirect('/admin/assets/' . (int) $file['asset_id'] . '/edit?error=csrf');
+        }
+
+        if ((int) ($file['is_deleted'] ?? 0) === 1) {
+            return Response::redirect('/admin/assets/' . (int) $file['asset_id'] . '/edit?error=file-status');
+        }
+
+        try {
+            if (!$this->fileAttachmentService->updateAssetFileStatus((int) $params['id'], $this->nullableStatusId($request))) {
+                return Response::redirect('/admin/assets/' . (int) $file['asset_id'] . '/edit?error=file-status');
+            }
+
+            return Response::redirect('/admin/assets/' . (int) $file['asset_id'] . '/edit?notice=file-status-updated');
+        } catch (RuntimeException) {
+            return Response::redirect('/admin/assets/' . (int) $file['asset_id'] . '/edit?error=file-status');
+        }
     }
 
     public function users(Request $request): Response
@@ -641,19 +697,34 @@ HTML;
     private function renderAttachmentSection(string $title, string $uploadAction, array $files, string $type): string
     {
         $rows = '';
+        $csrfToken = $this->csrfService->token();
+        $statusOptions = $this->documentStatusOptions();
 
         foreach ($files as $file) {
             $archiveAction = $type === 'project'
                 ? '/admin/project-files/' . (int) $file['id']
                 : '/admin/asset-files/' . (int) $file['id'];
+            $statusAction = $archiveAction . '/status';
+            $status = is_array($file['document_status'] ?? null) ? $file['document_status'] : null;
+            $statusBadge = $status !== null
+                ? '<span class="document-status-badge" style="--document-status-color: ' . $this->e((string) ($status['color'] ?? '#64748b')) . '">' . $this->e((string) ($status['label'] ?? 'Unbearbeitet')) . '</span>'
+                : '<span class="muted">Kein Status</span>';
+            $statusForm = ((int) ($file['is_deleted'] ?? 0) === 0)
+                ? '<form method="post" action="' . $this->e($statusAction) . '" class="inline-form">'
+                    . '<input type="hidden" name="csrf_token" value="' . $this->e($csrfToken) . '">'
+                    . '<select name="document_status_id">' . $this->markSelectedOption($statusOptions, (string) ($status['id'] ?? '')) . '</select>'
+                    . '<button class="button button-secondary" type="submit">Status speichern</button>'
+                    . '</form>'
+                : '';
 
             $rows .= '<tr>'
                 . '<td>' . $this->e((string) $file['original_name']) . '</td>'
                 . '<td>' . $this->e((string) $file['mime_type']) . '</td>'
                 . '<td>' . $this->e((string) $file['size_bytes']) . '</td>'
                 . '<td>' . $this->e((string) $file['uploaded_at']) . '</td>'
+                . '<td>' . $statusBadge . '</td>'
                 . '<td>' . (((int) ($file['is_deleted'] ?? 0) === 1) ? '<span class="badge warn">Archiviert</span>' : '<span class="badge ok">Aktiv</span>') . '</td>'
-                . '<td class="table-actions">' . $this->archiveForm($archiveAction, (int) ($file['is_deleted'] ?? 0) === 1) . '</td>'
+                . '<td class="table-actions">' . $statusForm . $this->archiveForm($archiveAction, (int) ($file['is_deleted'] ?? 0) === 1) . '</td>'
                 . '</tr>';
         }
 
@@ -670,11 +741,40 @@ HTML;
         <button class="button" type="submit">Datei hochladen</button>
     </form>
     <table>
-        <thead><tr><th>Datei</th><th>MIME</th><th>Bytes</th><th>Hochgeladen</th><th>Status</th><th>Aktionen</th></tr></thead>
+        <thead><tr><th>Datei</th><th>MIME</th><th>Bytes</th><th>Hochgeladen</th><th>Dokumentstatus</th><th>Archiv</th><th>Aktionen</th></tr></thead>
         <tbody>{$rows}</tbody>
     </table>
 </section>
 HTML;
+    }
+
+    private function documentStatusOptions(): string
+    {
+        $html = '<option value="">Kein Status</option>';
+
+        foreach ($this->documentStatusService->activeList() as $status) {
+            $html .= '<option value="' . $this->e((string) ($status['id'] ?? '')) . '">' . $this->e((string) ($status['label'] ?? '')) . '</option>';
+        }
+
+        return $html;
+    }
+
+    private function nullableStatusId(Request $request): ?int
+    {
+        $value = trim((string) $request->input('document_status_id', ''));
+
+        return $value === '' ? null : (int) $value;
+    }
+
+    private function markSelectedOption(string $optionsHtml, string $selectedValue): string
+    {
+        if ($selectedValue === '') {
+            return str_replace('value=""', 'value="" selected', $optionsHtml);
+        }
+
+        $quoted = 'value="' . $this->e($selectedValue) . '"';
+
+        return str_replace($quoted, $quoted . ' selected', $optionsHtml);
     }
 
     private function renderProjectBookingsSection(array $project, array $bookings, array $projects, array $users, Request $request): string
@@ -715,6 +815,7 @@ HTML;
                 'csrf_token' => $csrfToken,
                 'can_manage' => $canManageBookings,
                 'can_archive' => $canArchiveBookings,
+                'document_statuses' => $this->documentStatusService->activeList(),
                 'selected_booking' => $this->selectedProjectBooking($request, (int) $project['id']),
             ]
         );

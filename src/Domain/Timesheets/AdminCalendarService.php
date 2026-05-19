@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Timesheets;
 
+use App\Domain\Calendar\CalendarPolicyService;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
 
@@ -13,7 +14,8 @@ final class AdminCalendarService
 
     public function __construct(
         private DatabaseConnection $connection,
-        private AdminBookingService $bookingService
+        private AdminBookingService $bookingService,
+        private ?CalendarPolicyService $calendarPolicyService = null
     ) {
     }
 
@@ -118,6 +120,7 @@ final class AdminCalendarService
             $bookings,
             static fn (array $booking): bool => (int) ($booking['is_deleted'] ?? 0) === 0
         ));
+        $dayPolicy = $this->dayPolicy($date);
         $activeWorkBookings = array_values(array_filter(
             $activeBookings,
             static fn (array $booking): bool => (string) ($booking['entry_type'] ?? 'work') === 'work'
@@ -168,12 +171,24 @@ final class AdminCalendarService
         } elseif ($activeWorkBookings !== []) {
             $status = 'ok';
             $statusLabel = 'Sauber';
+        } elseif ((bool) ($dayPolicy['is_company_closure'] ?? false)) {
+            $status = 'closure';
+            $statusLabel = 'Betriebsurlaub';
+        } elseif ((bool) ($dayPolicy['is_public_holiday'] ?? false)) {
+            $status = 'holiday';
+            $statusLabel = 'Feiertag';
         }
 
         return [
             'date' => $date,
             'status' => $status,
             'status_label' => $statusLabel,
+            'calendar_policy' => $dayPolicy,
+            'is_public_holiday' => (bool) ($dayPolicy['is_public_holiday'] ?? false),
+            'holiday_name' => $dayPolicy['holiday_name'] ?? null,
+            'is_company_closure' => (bool) ($dayPolicy['is_company_closure'] ?? false),
+            'closure_titles' => $dayPolicy['closure_titles'] ?? [],
+            'time_tracking_required' => (bool) ($dayPolicy['time_tracking_required'] ?? true),
             'booking_count' => count($bookings),
             'active_booking_count' => count($activeBookings),
             'work_booking_count' => count($activeWorkBookings),
@@ -303,6 +318,8 @@ final class AdminCalendarService
             'issue_days' => count(array_filter($currentMonthDays, static fn (array $day): bool => $day['status'] === 'issue')),
             'absence_days' => count(array_filter($currentMonthDays, static fn (array $day): bool => (int) ($day['absence_count'] ?? 0) > 0)),
             'missing_days' => count(array_filter($currentMonthDays, static fn (array $day): bool => (int) ($day['missing_count'] ?? 0) > 0)),
+            'holiday_days' => count(array_filter($currentMonthDays, static fn (array $day): bool => (bool) ($day['is_public_holiday'] ?? false))),
+            'closure_days' => count(array_filter($currentMonthDays, static fn (array $day): bool => (bool) ($day['is_company_closure'] ?? false))),
             'empty_days' => count(array_filter($currentMonthDays, static fn (array $day): bool => $day['status'] === 'empty')),
             'net_minutes' => array_sum(array_map(static fn (array $day): int => (int) ($day['net_minutes'] ?? 0), $currentMonthDays)),
         ];
@@ -334,7 +351,29 @@ final class AdminCalendarService
             return 0;
         }
 
+        if ($this->calendarPolicyService instanceof CalendarPolicyService && !$this->calendarPolicyService->requiresTimeTracking($date)) {
+            return 0;
+        }
+
         return count(array_diff($this->activeUserIds($date), $bookedUserIds));
+    }
+
+    private function dayPolicy(string $date): array
+    {
+        if (!$this->calendarPolicyService instanceof CalendarPolicyService) {
+            return [
+                'date' => $date,
+                'holiday_region' => '',
+                'is_public_holiday' => false,
+                'holiday_name' => null,
+                'is_company_closure' => false,
+                'closure_titles' => [],
+                'closures' => [],
+                'time_tracking_required' => true,
+            ];
+        }
+
+        return $this->calendarPolicyService->dayPolicy($date);
     }
 
     private function activeUserIds(string $date): array

@@ -125,12 +125,20 @@ final class FileAttachmentServiceTest extends TestCase
             'uploaded_at' => '2026-05-16 09:30:00',
             'is_deleted' => 0,
             'deleted_at' => null,
+            'document_status_id' => 5,
+            'document_status_label' => 'Bearbeitet',
+            'document_status_slug' => 'bearbeitet',
+            'document_status_color' => '#2563eb',
+            'document_status_is_default' => 0,
+            'document_status_is_deleted' => 0,
         ]);
 
         self::assertSame('/admin/timesheet-files/22/download', $descriptor['download_url']);
         self::assertSame('/admin/timesheet-files/22/download', $descriptor['preview_url']);
         self::assertSame('/admin/timesheet-files/22', $descriptor['archive_url']);
         self::assertTrue($descriptor['is_image']);
+        self::assertSame('Bearbeitet', $descriptor['document_status']['label']);
+        self::assertSame('#2563eb', $descriptor['document_status']['color']);
         self::assertArrayNotHasKey('storage_path', $descriptor);
         self::assertArrayNotHasKey('stored_name', $descriptor);
     }

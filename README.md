@@ -32,6 +32,8 @@ Versionen verteilt, muss die entsprechenden Lizenzpflichten beachten.
 ## Wichtige URLs
 - Admin-Login: `/admin/login`
 - Company-Settings: `/admin/settings/company`
+- Kalender-Settings: `/admin/settings/calendar`
+- Dokumentstatusprofile: `/admin/settings/document-statuses`
 - Datenbank-Settings: `/admin/settings/database`
 - Session-Status: `GET /api/v1/auth/session`
 - App-Tageskontext: `GET /api/v1/app/me/day`
@@ -41,6 +43,7 @@ Versionen verteilt, muss die entsprechenden Lizenzpflichten beachten.
 - App-Buchungsdateien: `GET/POST /api/v1/app/timesheets/{id}/files`
 - Admin-Buchungsdatei-Abruf: `GET /admin/timesheet-files/{id}/download`
 - Admin-Buchungsdatei-Archivierung: `DELETE /admin/timesheet-files/{id}`
+- Admin-Buchungsdatei-Status: `POST /admin/timesheet-files/{id}/status`
 - Admin-AGB-PDF: `GET /admin/settings/company/agb-pdf/preview` und `GET /admin/settings/company/agb-pdf/download`
 - Admin-Datenschutz-PDF: `GET /admin/settings/company/datenschutz-pdf/preview` und `GET /admin/settings/company/datenschutz-pdf/download`
 - Dashboard-Overview: `GET /api/v1/dashboard/overview`
@@ -136,6 +139,11 @@ Details stehen in `DEPLOY.md`. Wiederkehrende Updates laufen ueber
 - Firmenlogo wird weiterhin ueber den bestehenden oeffentlichen Logo-Endpunkt fuer Branding ausgeliefert.
 - AGB- und Datenschutz-PDFs werden im Admin unter `settings.manage` ueber geschuetzte Preview-/Download-Endpunkte ausgeliefert.
 - Die Dateien bleiben im geschuetzten Upload-Storage; Admin-HTML enthaelt keine direkte `storage/`- oder `public/`-Datei-URL.
+
+## Kalender- und Dokumentstatus-Settings
+- Gesetzliche Feiertage werden lokal je eingestelltem Bundesland berechnet und im Admin-Kalender sichtbar gemacht.
+- Feiertage und geplanter Betriebsurlaub erzeugen keine automatische `Fehlt`-Wertung und keine Fehlbuchungs-Pushes; freiwillige Buchungen bleiben moeglich.
+- Dokumentstatusprofile fuer Uploads werden unter `/admin/settings/document-statuses` verwaltet. Neue Uploads erhalten den aktiven Defaultstatus, bestehende Dateien ohne Status bleiben gueltig.
 
 ## Wichtige Composer-Befehle
 ```bash

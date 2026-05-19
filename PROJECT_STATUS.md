@@ -6,6 +6,8 @@
 - Docker-Compose ist lokal und fuer Produktion vorbereitet; Produktionsbetrieb nutzt `docker-compose.prod.yml` mit `timeapp-web`, `timeapp-db` und `timeapp-scheduler`.
 - SMTP-Passwoerter werden verschluesselt in den Settings gespeichert. `SETTINGS_ENCRYPTION_KEY` oder `APP_SECRET` muss in Produktion stabil gesetzt und getrennt gesichert werden. Legacy-Klartextwerte aus frueheren Versionen werden beim naechsten gezielten SMTP-Speichern verschluesselt.
 - AGB- und Datenschutz-PDFs bleiben im geschuetzten Upload-Storage und sind im Admin ueber `settings.manage` als Preview oder Download abrufbar.
+- Kalender-Settings fuer gesetzliche Feiertage je Bundesland und Betriebsurlaub sind umgesetzt. Diese Tage werden im Admin-Kalender markiert und aus der automatischen Pflicht-/Fehlt-Logik sowie fehlende-Buchung-Pushes herausgenommen.
+- Dokumentstatusprofile fuer Uploads sind umgesetzt. Projekt-, Geraete- und Buchungsanhaenge koennen im Admin mit flexiblen Status wie `Unbearbeitet`, `Bearbeitet` und `Verrechnet` versehen werden.
 
 ## Backup und Restore
 - Backup-Export erzeugt ein ZIP mit `manifest.json`, Datenbank-JSON-Dateien, Upload-Kandidaten und optionalem Runtime-Hinweis.
@@ -18,6 +20,7 @@
 ## Zuletzt validierte Checks
 - `composer validate --strict`
 - `vendor/bin/phinx migrate -c phinx.php`
+- `vendor/bin/phpunit tests/Unit/CalendarPolicyServiceTest.php tests/Unit/FileAttachmentServiceTest.php`
 - `vendor/bin/phpunit tests/Unit/SettingsSecretServiceTest.php tests/Unit/CompanySettingsServiceTest.php tests/Unit/SmtpTestServiceTest.php`
 - `vendor/bin/phpunit tests/Unit/CompanySettingsServiceTest.php tests/Integration/RouterSmokeTest.php`
 - `vendor/bin/phpunit tests/Unit/BackupServiceTest.php`
@@ -30,3 +33,4 @@
 - Versionshistorie und Archivierungsstrategie fuer Settings-Dateien.
 - Exportlayouts und produktionsreife Berichtstemplates finalisieren.
 - Tiefere Offline-Konfliktbehandlung und vollstaendige Offline-Datei-Upload-Queue.
+- Optional spaeter: Feiertags-Sonderregeln auf Gemeindeebene, z. B. Mariae Himmelfahrt in Teilen Bayerns oder Augsburger Friedensfest.

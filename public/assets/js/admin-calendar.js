@@ -106,6 +106,14 @@
                 meta.push(String(day.missing_count) + ' fehlt');
             }
 
+            if (day.is_public_holiday) {
+                meta.push(day.holiday_name || 'Feiertag');
+            }
+
+            if (day.is_company_closure) {
+                meta.push('Betriebsurlaub');
+            }
+
             return '<button type="button" class="' + escapeHtml(classes) + '" data-calendar-date="' + escapeHtml(day.date || '') + '" aria-pressed="' + (day.date === selectedDate ? 'true' : 'false') + '">'
                 + '<span class="calendar-day__number">' + escapeHtml(day.day_number || '') + '</span>'
                 + '<span class="calendar-day__status">' + escapeHtml(day.status_label || '') + '</span>'

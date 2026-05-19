@@ -1,4 +1,6 @@
 (function () {
+    var lastAttachmentTrigger = null;
+
     function isInteractive(target) {
         return Boolean(target.closest('button, a, input, select, textarea, label, form'));
     }
@@ -155,6 +157,8 @@
         var name = link.dataset.previewName || 'Anhang';
         var mime = link.dataset.previewMime || '';
 
+        lastAttachmentTrigger = link;
+
         if (title) {
             title.textContent = name;
         }
@@ -207,6 +211,12 @@
         if (!document.querySelector('[data-booking-modal]:not([hidden])')) {
             document.body.classList.remove('modal-open');
         }
+
+        if (lastAttachmentTrigger && typeof lastAttachmentTrigger.focus === 'function') {
+            lastAttachmentTrigger.focus();
+        }
+
+        lastAttachmentTrigger = null;
     }
 
     function renderAttachments(modal, attachments) {
@@ -224,6 +234,15 @@
 
         var files = Array.isArray(attachments) ? attachments : [];
         var canArchive = section.dataset.canArchiveFiles === '1';
+        var canManageStatus = section.dataset.canManageFileStatus === '1';
+        var statusOptions = [];
+
+        try {
+            var statusPayload = JSON.parse(section.dataset.documentStatusOptions || '{"items":[]}');
+            statusOptions = Array.isArray(statusPayload.items) ? statusPayload.items : [];
+        } catch (error) {
+            statusOptions = [];
+        }
 
         if (files.length === 0) {
             list.innerHTML = '<li class="booking-attachment is-empty"><p class="muted">Keine Anhänge fuer diese Buchung vorhanden.</p></li>';
@@ -248,17 +267,43 @@
                     + '<button type="submit" class="button button-danger">Anhang archivieren</button>'
                     + '</form>'
                 : '';
-            var status = isDeleted ? '<span class="badge warn">Archiviert</span>' : '<span class="badge ok">Aktiv</span>';
+            var archiveBadge = isDeleted ? '<span class="badge warn booking-attachment__archive-badge">Archiviert</span>' : '';
+            var documentStatus = file.document_status || null;
+            var documentStatusBadge = documentStatus
+                ? '<span class="document-status-badge" style="--document-status-color: ' + escapeHtml(documentStatus.color || '#64748b') + '">' + escapeHtml(documentStatus.label || 'Unbearbeitet') + '</span>'
+                : '<span class="muted">Kein Status</span>';
+            var statusForm = (canManageStatus && !isDeleted && file.status_update_url)
+                ? '<form method="post" action="' + escapeHtml(file.status_update_url) + '" class="booking-attachment__status-form">'
+                    + '<input type="hidden" name="return_to" value="' + escapeHtml(currentReturnTo()) + '">'
+                    + '<input type="hidden" name="booking_id" value="' + escapeHtml(modal.dataset.activeBookingId || '') + '">'
+                    + '<input type="hidden" name="csrf_token" value="' + escapeHtml(csrfToken(modal)) + '">'
+                    + '<label class="booking-attachment__status-control"><span>Dokumentenstatus</span><select name="document_status_id">' + documentStatusOptionsMarkup(statusOptions, documentStatus ? String(documentStatus.id || '') : '') + '</select></label>'
+                    + '<button type="submit" class="button button-secondary">Speichern</button>'
+                    + '</form>'
+                : '';
 
             return '<li class="booking-attachment">'
                 + preview
                 + '<div class="booking-attachment__body">'
                 + '<strong>' + escapeHtml(file.original_name || 'Anhang') + '</strong>'
                 + '<span class="muted">' + escapeHtml(fileMeta(file)) + '</span>'
-                + '<div class="table-actions">' + status + openLink + archiveForm + '</div>'
+                + '<div class="booking-attachment__status-line"><span class="booking-attachment__label">Dokumentenstatus</span>' + documentStatusBadge + '</div>'
+                + statusForm
+                + '<div class="booking-attachment__actions">' + archiveBadge + openLink + archiveForm + '</div>'
                 + '</div>'
                 + '</li>';
         }).join('');
+    }
+
+    function documentStatusOptionsMarkup(statuses, selected) {
+        var options = '<option value=""' + (selected === '' ? ' selected' : '') + '>Kein Status</option>';
+
+        statuses.forEach(function (status) {
+            var id = String(status.id || '');
+            options += '<option value="' + escapeHtml(id) + '"' + (id === selected ? ' selected' : '') + '>' + escapeHtml(status.label || '') + '</option>';
+        });
+
+        return options;
     }
 
     function renderLocations(modal, locations) {
@@ -499,6 +544,35 @@
 
             if (event.key === 'Escape' && attachmentViewer && !attachmentViewer.hidden) {
                 closeAttachmentViewer();
+                return;
+            }
+
+            if (event.key === 'Tab' && attachmentViewer && !attachmentViewer.hidden) {
+                var viewerFocusable = Array.prototype.slice.call(
+                    attachmentViewer.querySelectorAll('a[href], button:not([disabled]), iframe, [tabindex]:not([tabindex="-1"])')
+                ).filter(function (node) {
+                    return !node.hidden && node.offsetParent !== null;
+                });
+
+                if (viewerFocusable.length === 0) {
+                    return;
+                }
+
+                var viewerFirst = viewerFocusable[0];
+                var viewerLast = viewerFocusable[viewerFocusable.length - 1];
+
+                if (event.shiftKey && document.activeElement === viewerFirst) {
+                    event.preventDefault();
+                    viewerLast.focus();
+                    return;
+                }
+
+                if (!event.shiftKey && document.activeElement === viewerLast) {
+                    event.preventDefault();
+                    viewerFirst.focus();
+                    return;
+                }
+
                 return;
             }
 

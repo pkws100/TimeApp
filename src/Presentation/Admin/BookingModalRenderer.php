@@ -137,6 +137,7 @@ HTML;
         $canArchive = (bool) ($options['can_archive'] ?? false);
         $canViewAttachments = (bool) ($options['can_view_attachments'] ?? false);
         $selectedBooking = is_array($options['selected_booking'] ?? null) ? $options['selected_booking'] : null;
+        $documentStatuses = is_array($options['document_statuses'] ?? null) ? $options['document_statuses'] : [];
 
         if (!$canManage && !$canArchive && !$canViewAttachments) {
             return '';
@@ -175,7 +176,9 @@ HTML;
             $canArchive,
             $returnTo,
             $csrfToken,
-            $selectedId
+            $selectedId,
+            $documentStatuses,
+            $canManage
         );
         $locationSection = $this->renderLocationSection(
             is_array($selectedBooking['geo_records'] ?? null) ? $selectedBooking['geo_records'] : []
@@ -268,15 +271,19 @@ HTML;
         return $label !== '' ? $label : 'Nicht zugeordnet';
     }
 
-    private function renderAttachmentSection(array $attachments, bool $canArchive, string $returnTo, string $csrfToken, int $bookingId): string
+    private function renderAttachmentSection(array $attachments, bool $canArchive, string $returnTo, string $csrfToken, int $bookingId, array $documentStatuses = [], bool $canManageStatus = false): string
     {
         $items = '';
+        $statusOptions = $this->documentStatusOptions($documentStatuses);
+        $statusOptionsJson = $this->dataJson(['items' => array_values($documentStatuses)]);
 
         foreach ($attachments as $file) {
             $isDeleted = (int) ($file['is_deleted'] ?? 0) === 1;
             $downloadUrl = (string) ($file['download_url'] ?? '');
             $previewUrl = (string) ($file['preview_url'] ?? '');
             $archiveUrl = (string) ($file['archive_url'] ?? '');
+            $statusUpdateUrl = (string) ($file['status_update_url'] ?? '');
+            $documentStatus = is_array($file['document_status'] ?? null) ? $file['document_status'] : null;
             $previewType = $this->previewType($file);
             $previewAttributes = $previewUrl !== '' && $previewType !== ''
                 ? ' data-attachment-viewer-open data-preview-url="' . $this->e($previewUrl) . '" data-preview-type="' . $this->e($previewType) . '" data-preview-name="' . $this->e((string) ($file['original_name'] ?? 'Anhang')) . '" data-preview-mime="' . $this->e((string) ($file['mime_type'] ?? '')) . '"'
@@ -296,14 +303,28 @@ HTML;
                     . '<button type="submit" class="button button-danger">Anhang archivieren</button>'
                     . '</form>'
                 : '';
-            $status = $isDeleted ? '<span class="badge warn">Archiviert</span>' : '<span class="badge ok">Aktiv</span>';
+            $archiveBadge = $isDeleted ? '<span class="badge warn booking-attachment__archive-badge">Archiviert</span>' : '';
+            $documentStatusBadge = $documentStatus !== null
+                ? '<span class="document-status-badge" style="--document-status-color: ' . $this->e((string) ($documentStatus['color'] ?? '#64748b')) . '">' . $this->e((string) ($documentStatus['label'] ?? 'Unbearbeitet')) . '</span>'
+                : '<span class="muted">Kein Status</span>';
+            $statusForm = ($canManageStatus && !$isDeleted && $statusUpdateUrl !== '')
+                ? '<form method="post" action="' . $this->e($statusUpdateUrl) . '" class="booking-attachment__status-form">'
+                    . '<input type="hidden" name="return_to" value="' . $this->e($returnTo) . '">'
+                    . '<input type="hidden" name="booking_id" value="' . $bookingId . '">'
+                    . '<input type="hidden" name="csrf_token" value="' . $this->e($csrfToken) . '">'
+                    . '<label class="booking-attachment__status-control"><span>Dokumentenstatus</span><select name="document_status_id">' . $this->markSelectedOption($statusOptions, (string) ($documentStatus['id'] ?? '')) . '</select></label>'
+                    . '<button type="submit" class="button button-secondary">Speichern</button>'
+                    . '</form>'
+                : '';
 
             $items .= '<li class="booking-attachment">'
                 . $preview
                 . '<div class="booking-attachment__body">'
                 . '<strong>' . $this->e((string) ($file['original_name'] ?? 'Anhang')) . '</strong>'
                 . '<span class="muted">' . $this->e($this->formatFileMeta($file)) . '</span>'
-                . '<div class="table-actions">' . $status . $openLink . $archiveForm . '</div>'
+                . '<div class="booking-attachment__status-line"><span class="booking-attachment__label">Dokumentenstatus</span>' . $documentStatusBadge . '</div>'
+                . $statusForm
+                . '<div class="booking-attachment__actions">' . $archiveBadge . $openLink . $archiveForm . '</div>'
                 . '</div>'
                 . '</li>';
         }
@@ -313,7 +334,7 @@ HTML;
         }
 
         return <<<HTML
-<section class="booking-attachments" data-booking-modal-attachments data-can-archive-files="{$this->e($canArchive ? '1' : '0')}">
+<section class="booking-attachments" data-booking-modal-attachments data-can-archive-files="{$this->e($canArchive ? '1' : '0')}" data-can-manage-file-status="{$this->e($canManageStatus ? '1' : '0')}" data-document-status-options="{$statusOptionsJson}">
     <div>
         <h3>Anhänge</h3>
         <p class="muted">Bilder werden direkt aus dem geschuetzten Storage geladen; Dateien koennen geoeffnet oder archiviert werden.</p>
@@ -460,6 +481,17 @@ HTML;
         }
 
         return '<span>PDF</span>';
+    }
+
+    private function documentStatusOptions(array $statuses): string
+    {
+        $html = '<option value="">Kein Status</option>';
+
+        foreach ($statuses as $status) {
+            $html .= '<option value="' . $this->e((string) ($status['id'] ?? '')) . '">' . $this->e((string) ($status['label'] ?? '')) . '</option>';
+        }
+
+        return $html;
     }
 
     private function formatBytes(int $bytes): string
