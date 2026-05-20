@@ -84,6 +84,7 @@ Das Frontend ist als mobile Mitarbeiter-App unter `/app` als Vanilla-JS-PWA umge
 - [ ] Möglichkeit Kunden/Auftraggeber eine Zeiterfassung (Start und Ende) mit Unterschrift auf dem Touchscreen bestätigen zu lassen
 
 ## Bereits umgesetzt
+- [x] GitHub-Actions-Basis-CI fuer PHP-/Node-Checks, PHPUnit und produktionsnahen Docker-Kalender-Smoke eingerichtet.
 - [x] Composer-, PHPUnit- und Phinx-Grundkonfiguration angelegt.
 - [x] Front Controller unter `public/index.php` und Root-Bridge ueber `index.php` eingerichtet.
 - [x] Konfigurationslayer fuer App, Datenbank, Rechte, Uploads und Exporte aufgebaut.
