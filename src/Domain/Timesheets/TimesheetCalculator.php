@@ -41,7 +41,7 @@ final class TimesheetCalculator
         $start = new DateTimeImmutable($workDate . ' ' . $startTime);
         $end = new DateTimeImmutable($workDate . ' ' . $endTime);
 
-        if ($end <= $start) {
+        if ($end < $start) {
             $end = $end->modify('+1 day');
         }
 
@@ -73,4 +73,3 @@ final class TimesheetCalculator
         return 0;
     }
 }
-

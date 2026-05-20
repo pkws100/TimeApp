@@ -46,6 +46,36 @@ final class UserServiceTest extends TestCase
         self::assertTrue($record['time_tracking_required']);
     }
 
+    public function testNormalizeDefaultsAppUiSettingsToVisibleWidgets(): void
+    {
+        $record = $this->normalize([
+            'first_name' => 'Ada',
+            'last_name' => 'Admin',
+            'email' => 'ada@example.test',
+        ]);
+
+        self::assertTrue($record['app_ui_settings']['show_today_total_minutes']);
+        self::assertTrue($record['app_ui_settings']['show_project_today_minutes']);
+        self::assertTrue($record['app_ui_settings']['show_history']);
+    }
+
+    public function testNormalizeKeepsDisabledAppUiSettingFalse(): void
+    {
+        $record = $this->normalize([
+            'first_name' => 'Ada',
+            'last_name' => 'Admin',
+            'email' => 'ada@example.test',
+            'app_ui_settings' => [
+                'show_today_total_minutes' => '0',
+                'show_project_today_minutes' => '1',
+            ],
+        ]);
+
+        self::assertFalse($record['app_ui_settings']['show_today_total_minutes']);
+        self::assertTrue($record['app_ui_settings']['show_project_today_minutes']);
+        self::assertTrue($record['app_ui_settings']['show_history']);
+    }
+
     private function normalize(array $payload): array
     {
         $service = new UserService(new DatabaseConnection([]));

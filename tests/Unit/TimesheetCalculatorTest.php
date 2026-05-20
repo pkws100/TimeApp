@@ -29,6 +29,26 @@ final class TimesheetCalculatorTest extends TestCase
         self::assertSame(555, $result['net_minutes']);
     }
 
+    public function testSameStartAndEndMinuteDoesNotBecomeOvernightShift(): void
+    {
+        $calculator = new TimesheetCalculator();
+        $result = $calculator->calculate('2026-05-08', '15:23', '15:23', 0, 'work');
+
+        self::assertSame(0, $result['gross_minutes']);
+        self::assertSame(0, $result['break_minutes']);
+        self::assertSame(0, $result['net_minutes']);
+    }
+
+    public function testEarlierEndTimeStillCountsAsOvernightShift(): void
+    {
+        $calculator = new TimesheetCalculator();
+        $result = $calculator->calculate('2026-05-08', '22:00', '06:00', 30, 'work');
+
+        self::assertSame(480, $result['gross_minutes']);
+        self::assertSame(30, $result['break_minutes']);
+        self::assertSame(450, $result['net_minutes']);
+    }
+
     public function testNonWorkEntriesKeepTimeValuesAtZero(): void
     {
         $calculator = new TimesheetCalculator();
@@ -38,4 +58,3 @@ final class TimesheetCalculatorTest extends TestCase
         self::assertSame(0, $result['break_minutes']);
     }
 }
-

@@ -111,6 +111,35 @@ final class AdminManagementControllerTest extends TestCase
         self::assertStringContainsString('werden aber nicht als fehlend gewertet', $html);
     }
 
+    public function testUserFormRendersAppDisplaySettings(): void
+    {
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'renderUserForm');
+        $method->setAccessible(true);
+
+        $html = (string) $method->invoke($controller, '/admin/users/5', 'User bearbeiten', [
+            'id' => 5,
+            'first_name' => 'Anzeige',
+            'last_name' => 'Test',
+            'email' => 'anzeige@example.test',
+            'employment_status' => 'active',
+            'time_tracking_required' => 1,
+            'role_ids' => [],
+            'app_ui_settings' => [
+                'show_today_total_minutes' => false,
+                'show_project_today_minutes' => true,
+            ],
+        ], []);
+
+        self::assertStringContainsString('Mitarbeiter-App Anzeige', $html);
+        self::assertStringContainsString('name="app_ui_settings[show_today_total_minutes]" value="0"', $html);
+        self::assertStringContainsString('name="app_ui_settings[show_today_total_minutes]" value="1" >', $html);
+        self::assertStringContainsString('name="app_ui_settings[show_project_today_minutes]" value="1" checked', $html);
+        self::assertStringContainsString('Zusatzkachel Aktueller Einsatz', $html);
+        self::assertStringNotContainsString('name="app_ui_settings[show_project_total_minutes]"', $html);
+        self::assertStringContainsString('Tagesstatus, Start, Ende, Pausen, Nettozeit, Projekt und Zeiterfassungsaktionen bleiben immer sichtbar', $html);
+    }
+
     public function testProjectBookingRouteIsRegistered(): void
     {
         $bootstrap = file_get_contents(base_path('bootstrap/app.php')) ?: '';

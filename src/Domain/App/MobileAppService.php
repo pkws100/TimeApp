@@ -35,6 +35,7 @@ final class MobileAppService
         $workEntry = $this->findLatestEntry((int) $user['id'], $today, 'work');
         $lastStatusEntry = $this->findLatestStatusEntry((int) $user['id'], $today);
         $timeTrackingRequired = (int) ($user['time_tracking_required'] ?? 1) === 1;
+        $appUiSettings = AppUiSettings::normalize($user['app_ui_settings'] ?? null);
         $dayPolicy = $this->dayPolicy($today);
         $isMissing = $this->isMissingWorkday($today, $workEntry, $lastStatusEntry, $timeTrackingRequired);
         $breaksToday = $workEntry !== null ? $this->findBreaksForTimesheet((int) $workEntry['id']) : [];
@@ -68,6 +69,7 @@ final class MobileAppService
                 'display_name' => trim(((string) ($user['first_name'] ?? '')) . ' ' . ((string) ($user['last_name'] ?? ''))),
                 'email' => (string) ($user['email'] ?? ''),
                 'time_tracking_required' => $timeTrackingRequired,
+                'app_ui_settings' => $appUiSettings,
                 'roles' => $user['roles'] ?? [],
             ],
             'today_state' => [
@@ -87,6 +89,8 @@ final class MobileAppService
             'tracked_minutes_live_basis' => $trackedMinutesLiveBasis,
             'attachments' => $attachments,
             'project_day_summaries' => $projectDaySummaries,
+            'app_ui_settings' => $appUiSettings,
+            'mandatory_app_widgets' => AppUiSettings::MANDATORY_WIDGETS,
             'projects' => $projects,
             'sync' => [
                 'server_pending_count' => 0,

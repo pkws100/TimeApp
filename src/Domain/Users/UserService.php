@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Users;
 
+use App\Domain\App\AppUiSettings;
 use App\Infrastructure\Database\DatabaseConnection;
 use InvalidArgumentException;
 
@@ -17,8 +18,9 @@ final class UserService
     {
         if ($this->connection->tableExists('users')) {
             $timeTrackingSelect = $this->timeTrackingSelect('users');
+            $appUiSettingsSelect = $this->appUiSettingsSelect('users');
 
-            return $this->connection->fetchAll(
+            $users = $this->connection->fetchAll(
                 'SELECT
                     users.id,
                     users.employee_number,
@@ -31,6 +33,7 @@ final class UserService
                     users.emergency_contact_phone,
                     users.target_hours_month,
                     ' . $timeTrackingSelect . ' AS time_tracking_required,
+                    ' . $appUiSettingsSelect . ' AS app_ui_settings,
                     users.is_deleted,
                     GROUP_CONCAT(DISTINCT roles.name ORDER BY roles.name SEPARATOR ", ") AS role_names
                  FROM users
@@ -40,6 +43,8 @@ final class UserService
                  GROUP BY users.id
                  ORDER BY users.is_deleted ASC, users.last_name, users.first_name'
             );
+
+            return array_map(fn (array $user): array => $this->normalizeUserSettings($user), $users);
         }
 
         return [
@@ -53,6 +58,7 @@ final class UserService
                 'emergency_contact_name' => 'Mario Kluge',
                 'emergency_contact_phone' => '+49 151 20000001',
                 'time_tracking_required' => 1,
+                'app_ui_settings' => AppUiSettings::defaults(),
                 'role_names' => 'Bauleiter',
                 'is_deleted' => 0,
             ],
@@ -74,8 +80,9 @@ final class UserService
         }
 
         $timeTrackingSelect = $this->timeTrackingSelect();
+        $appUiSettingsSelect = $this->appUiSettingsSelect();
         $user = $this->connection->fetchOne(
-            'SELECT id, employee_number, first_name, last_name, email, phone, employment_status, emergency_contact_name, emergency_contact_phone, target_hours_month, ' . $timeTrackingSelect . ' AS time_tracking_required, is_deleted, deleted_at
+            'SELECT id, employee_number, first_name, last_name, email, phone, employment_status, emergency_contact_name, emergency_contact_phone, target_hours_month, ' . $timeTrackingSelect . ' AS time_tracking_required, ' . $appUiSettingsSelect . ' AS app_ui_settings, is_deleted, deleted_at
              FROM users
              WHERE id = :id
              LIMIT 1',
@@ -92,7 +99,7 @@ final class UserService
         );
         $user['role_ids'] = array_map(static fn (array $row): int => (int) $row['role_id'], $roleIds);
 
-        return $user;
+        return $this->normalizeUserSettings($user);
     }
 
     public function create(array $payload): array
@@ -115,13 +122,18 @@ final class UserService
         $timeTrackingBindings = $this->timeTrackingColumnExists()
             ? ['time_tracking_required' => $record['time_tracking_required'] ? 1 : 0]
             : [];
+        $appUiSettingsColumns = $this->appUiSettingsColumnExists() ? ', app_ui_settings' : '';
+        $appUiSettingsValues = $this->appUiSettingsColumnExists() ? ', :app_ui_settings' : '';
+        $appUiSettingsBindings = $this->appUiSettingsColumnExists()
+            ? ['app_ui_settings' => AppUiSettings::encode($record['app_ui_settings'])]
+            : [];
 
-        return $this->connection->transaction(function () use ($record, $payload, $timeTrackingColumns, $timeTrackingValues, $timeTrackingBindings) {
+        return $this->connection->transaction(function () use ($record, $payload, $timeTrackingColumns, $timeTrackingValues, $timeTrackingBindings, $appUiSettingsColumns, $appUiSettingsValues, $appUiSettingsBindings) {
             $this->connection->execute(
                 'INSERT INTO users (
-                    employee_number, first_name, last_name, email, phone, password_hash, employment_status, emergency_contact_name, emergency_contact_phone, target_hours_month' . $timeTrackingColumns . ', is_deleted, deleted_at, deleted_by_user_id, created_at, updated_at
+                    employee_number, first_name, last_name, email, phone, password_hash, employment_status, emergency_contact_name, emergency_contact_phone, target_hours_month' . $timeTrackingColumns . $appUiSettingsColumns . ', is_deleted, deleted_at, deleted_by_user_id, created_at, updated_at
                 ) VALUES (
-                    :employee_number, :first_name, :last_name, :email, :phone, :password_hash, :employment_status, :emergency_contact_name, :emergency_contact_phone, :target_hours_month' . $timeTrackingValues . ', 0, NULL, NULL, NOW(), NOW()
+                    :employee_number, :first_name, :last_name, :email, :phone, :password_hash, :employment_status, :emergency_contact_name, :emergency_contact_phone, :target_hours_month' . $timeTrackingValues . $appUiSettingsValues . ', 0, NULL, NULL, NOW(), NOW()
                 )',
                 [
                     'employee_number' => $record['employee_number'],
@@ -134,7 +146,7 @@ final class UserService
                     'emergency_contact_name' => $record['emergency_contact_name'],
                     'emergency_contact_phone' => $record['emergency_contact_phone'],
                     'target_hours_month' => $record['target_hours_month'],
-                ] + $timeTrackingBindings
+                ] + $timeTrackingBindings + $appUiSettingsBindings
             );
 
             $userId = $this->connection->lastInsertId();
@@ -154,6 +166,14 @@ final class UserService
             }
         }
 
+        if (!array_key_exists('app_ui_settings', $payload)) {
+            $existing = $existing ?? $this->find($id);
+
+            if ($existing !== null) {
+                $payload['app_ui_settings'] = $existing['app_ui_settings'] ?? AppUiSettings::defaults();
+            }
+        }
+
         $record = $this->normalize($payload);
 
         if (!$this->connection->tableExists('users')) {
@@ -165,8 +185,10 @@ final class UserService
 
         $timeTrackingAssignment = $this->timeTrackingColumnExists() ? ',
                     time_tracking_required = :time_tracking_required' : '';
+        $appUiSettingsAssignment = $this->appUiSettingsColumnExists() ? ',
+                    app_ui_settings = :app_ui_settings' : '';
 
-        return $this->connection->transaction(function () use ($id, $record, $payload, $timeTrackingAssignment) {
+        return $this->connection->transaction(function () use ($id, $record, $payload, $timeTrackingAssignment, $appUiSettingsAssignment) {
             $bindings = [
                 'id' => $id,
                 'employee_number' => $record['employee_number'],
@@ -182,6 +204,10 @@ final class UserService
 
             if ($timeTrackingAssignment !== '') {
                 $bindings['time_tracking_required'] = $record['time_tracking_required'] ? 1 : 0;
+            }
+
+            if ($appUiSettingsAssignment !== '') {
+                $bindings['app_ui_settings'] = AppUiSettings::encode($record['app_ui_settings']);
             }
 
             $passwordSql = '';
@@ -201,7 +227,7 @@ final class UserService
                     employment_status = :employment_status,
                     emergency_contact_name = :emergency_contact_name,
                     emergency_contact_phone = :emergency_contact_phone,
-                    target_hours_month = :target_hours_month' . $timeTrackingAssignment . $passwordSql . ',
+                    target_hours_month = :target_hours_month' . $timeTrackingAssignment . $appUiSettingsAssignment . $passwordSql . ',
                     updated_at = NOW()
                  WHERE id = :id',
                 $bindings
@@ -257,6 +283,7 @@ final class UserService
             'emergency_contact_phone' => $this->nullableString($payload['emergency_contact_phone'] ?? null),
             'target_hours_month' => (float) ($payload['target_hours_month'] ?? 0),
             'time_tracking_required' => $this->normalizeBoolean($payload['time_tracking_required'] ?? true),
+            'app_ui_settings' => AppUiSettings::normalize($payload['app_ui_settings'] ?? null),
         ];
     }
 
@@ -289,6 +316,29 @@ final class UserService
     private function timeTrackingColumnExists(): bool
     {
         return $this->connection->columnExists('users', 'time_tracking_required');
+    }
+
+    private function appUiSettingsSelect(string $table = ''): string
+    {
+        if (!$this->appUiSettingsColumnExists()) {
+            return 'NULL';
+        }
+
+        $column = $table === '' ? 'app_ui_settings' : $table . '.app_ui_settings';
+
+        return $column;
+    }
+
+    private function appUiSettingsColumnExists(): bool
+    {
+        return $this->connection->columnExists('users', 'app_ui_settings');
+    }
+
+    private function normalizeUserSettings(array $user): array
+    {
+        $user['app_ui_settings'] = AppUiSettings::normalize($user['app_ui_settings'] ?? null);
+
+        return $user;
     }
 
     private function nullableString(mixed $value): ?string

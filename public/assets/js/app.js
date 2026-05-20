@@ -7,6 +7,18 @@
     const TIMESHEET_FILTER_MONTH_KEY = 'app.timesheetFilterMonth';
     const TIMESHEET_FILTER_ENTRY_TYPE_KEY = 'app.timesheetFilterEntryType';
     const TIMESHEET_ENTRY_TYPES = ['all', 'work', 'sick', 'vacation', 'holiday', 'absent'];
+    const APP_UI_SETTING_FLAGS = [
+        'show_today_total_minutes',
+        'show_project_today_minutes',
+        'show_current_shift_minutes',
+        'show_month_summary',
+        'show_history',
+        'show_project_files',
+        'show_timesheet_files',
+        'show_geo_section',
+        'show_customer_signature',
+        'show_project_total_minutes'
+    ];
     const ALLOWED_THEME_MODES = ['light', 'dark', 'system'];
     const THEME_LABELS = {
         light: 'Hell',
@@ -331,7 +343,7 @@
     }
 
     function projectFilesCacheKey(projectId) {
-        return 'project_files_' + String(projectId);
+        return 'project_files_user_' + currentSessionUserCachePart() + '_' + String(projectId);
     }
 
     function currentSessionUserCachePart() {
@@ -361,6 +373,27 @@
         const projectPart = projectId === null ? 'none' : String(projectId);
 
         return 'timesheets_user_' + currentSessionUserCachePart() + '_project_' + projectPart + '_' + month + '_' + entryType;
+    }
+
+    function todayCacheKey() {
+        return 'today_user_' + currentSessionUserCachePart();
+    }
+
+    function clearSessionScopedState() {
+        state.today = null;
+        state.projects = [];
+        state.projectFiles = {};
+        state.projectFilesLoading = false;
+        state.timesheetList = [];
+        state.timesheetDays = [];
+        state.timesheetSummary = null;
+        state.timesheetFilters = null;
+        state.timesheetProjects = [];
+        state.timesheetListUpdatedAt = null;
+        state.timesheetListLoading = false;
+        state.timesheetListOffline = false;
+        state.timesheetHistoryDirty = false;
+        state.signatureDialog = null;
     }
 
     function currentTimesheetFilterLabel() {
@@ -571,6 +604,7 @@
             return;
         }
 
+        const previousTodayCacheKey = todayCacheKey();
         state.sessionExpiredHandled = true;
         state.session = { authenticated: false, user: null };
         state.menuOpen = false;
@@ -578,8 +612,10 @@
         state.pendingAction = null;
         state.uploadingTimesheetId = null;
         state.uploadingProjectId = null;
+        clearSessionScopedState();
 
         await cacheSet('session', state.session);
+        await cacheDelete(previousTodayCacheKey);
 
         state.route = '/app/login';
 
@@ -676,6 +712,17 @@
             const request = tx.objectStore('cache').get(key);
             request.onsuccess = () => resolve(request.result ? request.result.value : null);
             request.onerror = () => reject(request.error);
+        });
+    }
+
+    async function cacheDelete(key) {
+        const database = await db();
+
+        await new Promise((resolve, reject) => {
+            const tx = database.transaction('cache', 'readwrite');
+            tx.objectStore('cache').delete(key);
+            tx.oncomplete = resolve;
+            tx.onerror = () => reject(tx.error);
         });
     }
 
@@ -868,7 +915,7 @@
     function signatureDialogMarkup() {
         const dialog = state.signatureDialog;
 
-        if (!dialog || !dialog.timesheet) {
+        if (!dialog || !dialog.timesheet || !showAppWidget('show_customer_signature')) {
             return '';
         }
 
@@ -934,7 +981,7 @@
             { href: '/app/historie', label: 'Historie' },
             { href: '/app/projektwahl', label: 'Projekt' },
             { href: '/app/profil', label: 'Profil' }
-        ];
+        ].filter((item) => item.href !== '/app/historie' || showAppWidget('show_history'));
     }
 
     function appNav(className) {
@@ -1099,6 +1146,32 @@
         return state.today && Array.isArray(state.today.project_day_summaries)
             ? state.today.project_day_summaries
             : [];
+    }
+
+    function appUiSettings() {
+        if (state.today && state.today.app_ui_settings && typeof state.today.app_ui_settings === 'object') {
+            return state.today.app_ui_settings;
+        }
+
+        if (state.today && state.today.user && state.today.user.app_ui_settings && typeof state.today.user.app_ui_settings === 'object') {
+            return state.today.user.app_ui_settings;
+        }
+
+        if (state.session && state.session.user && state.session.user.app_ui_settings && typeof state.session.user.app_ui_settings === 'object') {
+            return state.session.user.app_ui_settings;
+        }
+
+        return {};
+    }
+
+    function showAppWidget(flag) {
+        if (!APP_UI_SETTING_FLAGS.includes(flag)) {
+            return true;
+        }
+
+        const settings = appUiSettings();
+
+        return !Object.prototype.hasOwnProperty.call(settings, flag) || settings[flag] !== false;
     }
 
     function timeTrackingRequired() {
@@ -1333,6 +1406,20 @@
         return Number(currentProjectDayView().total_break_minutes || 0);
     }
 
+    function todayTotalBreakMinutes() {
+        return projectDaySummaries().reduce((minutes, view) => {
+            return minutes + Number(view.total_break_minutes || 0);
+        }, 0);
+    }
+
+    function currentBreakFromCollection(items) {
+        return items.reduce((current, item) => {
+            return item && (item.break_ended_at === null || item.break_ended_at === '')
+                ? item
+                : current;
+        }, null);
+    }
+
     function breakMinutesFromCollection(items) {
         return items.reduce((minutes, item) => {
             const startedAt = parseDateTime(item.break_started_at);
@@ -1344,6 +1431,29 @@
 
             return minutes + Math.max(0, Math.floor((endedAt.getTime() - startedAt.getTime()) / 60000));
         }, 0);
+    }
+
+    function completedBreakMinutesForEntry(entry, breaks) {
+        return Array.isArray(breaks) && breaks.length > 0
+            ? breakMinutesFromCollection(breaks)
+            : Number(entry && entry.break_minutes ? entry.break_minutes : 0);
+    }
+
+    function calculatedNetMinutesForEntry(entry, breaks) {
+        if (!state.today || !entry || !entry.start_time || !entry.end_time) {
+            return Number(entry && entry.net_minutes ? entry.net_minutes : 0);
+        }
+
+        const startedAt = parseDateTime(combineWorkDateTime(state.today.today, entry.start_time));
+        const endedAt = parseDateTime(combineWorkDateTime(state.today.today, entry.end_time, entry.start_time));
+
+        if (!startedAt || !endedAt || endedAt < startedAt) {
+            return Number(entry.net_minutes || 0);
+        }
+
+        const grossMinutes = Math.floor((endedAt.getTime() - startedAt.getTime()) / 60000);
+
+        return Math.max(0, grossMinutes - completedBreakMinutesForEntry(entry, breaks));
     }
 
     function combineWorkDateTime(workDate, time, startTime) {
@@ -1360,7 +1470,7 @@
         if (startTime) {
             const start = new Date(workDate + 'T' + String(startTime).slice(0, 5) + ':00');
 
-            if (!Number.isNaN(start.getTime()) && value.getTime() <= start.getTime()) {
+            if (!Number.isNaN(start.getTime()) && value.getTime() < start.getTime()) {
                 value.setDate(value.getDate() + 1);
             }
         }
@@ -1368,19 +1478,20 @@
         return value.toISOString();
     }
 
-    function rebuildTodayLiveBasis() {
+    function rebuildTodayLiveBasis(entryOverride, activeBreakOverride, statusOverride, breaksOverride) {
         if (!state.today) {
             return;
         }
 
-        const entry = workEntry();
-        const activeBreak = currentBreak();
-        const status = currentStatus();
+        const entry = typeof entryOverride === 'undefined' ? workEntry() : entryOverride;
+        const breaks = Array.isArray(breaksOverride) ? breaksOverride : breaksToday();
+        const activeBreak = typeof activeBreakOverride === 'undefined' ? currentBreak() : activeBreakOverride;
+        const status = typeof statusOverride === 'undefined' ? currentStatus() : statusOverride;
 
         state.today.tracked_minutes_live_basis = {
             work_started_at: combineWorkDateTime(state.today.today, entry ? entry.start_time : null),
             work_ended_at: combineWorkDateTime(state.today.today, entry ? entry.end_time : null, entry ? entry.start_time : null),
-            completed_break_minutes: breakMinutesFromCollection(breaksToday()),
+            completed_break_minutes: completedBreakMinutesForEntry(entry, breaks),
             current_break_started_at: activeBreak ? activeBreak.break_started_at : null,
             is_running: status === 'working',
             is_paused: status === 'paused'
@@ -1394,7 +1505,8 @@
 
         const todayState = state.today.today_state || {};
         const entry = todayState.work_entry || null;
-        const activeBreak = currentBreak();
+        const stateBreaks = Array.isArray(state.today.breaks_today) ? state.today.breaks_today : [];
+        const activeBreak = currentBreakFromCollection(stateBreaks) || currentBreak();
         let status = todayState.status_entry && todayState.status_entry.entry_type
             ? todayState.status_entry.entry_type
             : (todayState.is_missing ? 'missing' : 'not_started');
@@ -1411,10 +1523,10 @@
         todayState.status = status;
         state.today.current_break = activeBreak;
         state.today.today_state = todayState;
-        rebuildTodayLiveBasis();
+        rebuildTodayLiveBasis(entry, activeBreak, status, stateBreaks);
     }
 
-    function syncSelectedProjectSummaryFromTodayState() {
+    function syncSelectedProjectSummaryFromTodayState(previousProjectId) {
         if (!state.today) {
             return;
         }
@@ -1425,8 +1537,17 @@
         const projectId = entry && Object.prototype.hasOwnProperty.call(entry, 'project_id')
             ? entry.project_id
             : activeProjectId();
-        const previousSummary = summaries.find((item) => item.project_id === projectId) || null;
-        const filtered = summaries.filter((item) => item.project_id !== projectId);
+        const previousProjectIdProvided = typeof previousProjectId !== 'undefined';
+        const previousSummary = summaries.find((item) => item.project_id === projectId)
+            || (previousProjectIdProvided ? summaries.find((item) => item.project_id === previousProjectId) : null)
+            || null;
+        const filtered = summaries.filter((item) => {
+            if (item.project_id === projectId) {
+                return false;
+            }
+
+            return !(previousProjectIdProvided && item.project_id === previousProjectId);
+        });
 
         if (!entry || !entry.start_time) {
             state.today.project_day_summaries = filtered;
@@ -1468,9 +1589,9 @@
         state.today.project_day_summaries = filtered;
     }
 
-    function liveWorkMinutes() {
-        const view = currentProjectDayView();
-        const basis = trackedBasis();
+    function liveWorkMinutesForView(view) {
+        view = view || emptyProjectDayView();
+        const basis = view.tracked_minutes_live_basis || null;
         const accumulatedNetMinutes = Number(view.total_net_minutes || 0);
 
         if (!basis || !basis.work_started_at || (!basis.is_running && !basis.is_paused)) {
@@ -1486,7 +1607,7 @@
         const endedAt = basis.work_ended_at ? parseDateTime(basis.work_ended_at) : new Date(state.now);
         const completedBreakMinutes = Number(basis.completed_break_minutes || 0);
 
-        if (!endedAt || endedAt <= startedAt) {
+        if (!endedAt || endedAt < startedAt) {
             return accumulatedNetMinutes;
         }
 
@@ -1501,6 +1622,60 @@
         }
 
         return Math.max(0, accumulatedNetMinutes + grossMinutes - completedBreakMinutes);
+    }
+
+    function liveCurrentEntryMinutesForView(view) {
+        view = view || emptyProjectDayView();
+        const entry = view.work_entry || null;
+        const basis = view.tracked_minutes_live_basis || null;
+        const entryNetMinutes = Number(entry && entry.net_minutes ? entry.net_minutes : 0);
+
+        if (!basis || !basis.work_started_at || (!basis.is_running && !basis.is_paused)) {
+            return entryNetMinutes;
+        }
+
+        const startedAt = parseDateTime(basis.work_started_at);
+
+        if (!startedAt) {
+            return entryNetMinutes;
+        }
+
+        const endedAt = basis.work_ended_at ? parseDateTime(basis.work_ended_at) : new Date(state.now);
+        const completedBreakMinutes = Number(basis.completed_break_minutes || 0);
+
+        if (!endedAt || endedAt < startedAt) {
+            return entryNetMinutes;
+        }
+
+        let grossMinutes = Math.floor((endedAt.getTime() - startedAt.getTime()) / 60000);
+
+        if (basis.current_break_started_at) {
+            const breakStartedAt = parseDateTime(basis.current_break_started_at);
+
+            if (breakStartedAt) {
+                grossMinutes -= Math.floor((endedAt.getTime() - breakStartedAt.getTime()) / 60000);
+            }
+        }
+
+        return Math.max(0, grossMinutes - completedBreakMinutes);
+    }
+
+    function liveWorkMinutes() {
+        return liveWorkMinutesForView(currentProjectDayView());
+    }
+
+    function currentEntryWorkMinutes() {
+        return liveCurrentEntryMinutesForView(currentProjectDayView());
+    }
+
+    function todayTotalWorkMinutes() {
+        return projectDaySummaries().reduce((minutes, view) => {
+            return minutes + liveWorkMinutesForView(view);
+        }, 0);
+    }
+
+    function currentProjectTodayWorkMinutes() {
+        return liveWorkMinutesForView(currentProjectDayView());
     }
 
     function liveCurrentBreakMinutes() {
@@ -1815,6 +1990,10 @@
     }
 
     function attachmentSectionMarkup() {
+        if (!showAppWidget('show_timesheet_files')) {
+            return '';
+        }
+
         const entry = workEntry();
         const attachments = currentAttachments();
 
@@ -1840,6 +2019,10 @@
     }
 
     function projectAttachmentSectionMarkup() {
+        if (!showAppWidget('show_project_files')) {
+            return '';
+        }
+
         const projectId = projectFileContextId();
 
         if (projectId === null) {
@@ -2025,6 +2208,10 @@
     }
 
     function timesheetSignatureMarkup(item) {
+        if (!showAppWidget('show_customer_signature')) {
+            return '';
+        }
+
         const signature = item && item.customer_signature ? item.customer_signature : null;
         const canRequest = item
             && item.entry_type === 'work'
@@ -2058,11 +2245,29 @@
         const projectName = item.project_name || item.project_label || 'Nicht zugeordnet';
         const note = item.note ? '<p class="app-history-note">' + escapeHtml(item.note) + '</p>' : '';
         const attachments = Array.isArray(item.attachments) ? item.attachments : [];
+        const showFiles = showAppWidget('show_timesheet_files');
+        const showGeo = showAppWidget('show_geo_section');
+        const showSignature = showAppWidget('show_customer_signature');
         const attachmentMarkup = attachments.length > 0
             ? '<div class="app-timesheet-attachments">' + attachmentListMarkup(attachments, {
                 emptyText: ''
             }) + '</div>'
             : '<div class="app-history-empty-line">Keine Anhaenge vorhanden.</div>';
+        const filesStat = showFiles
+            ? '<div><span class="muted">Dateien</span><strong>' + escapeHtml(String(item.attachment_count || attachments.length || 0)) + '</strong></div>'
+            : '';
+        const geoStat = showGeo
+            ? '<div><span class="muted">Standort</span><strong>' + escapeHtml(String(item.geo_count || (Array.isArray(item.geo_records) ? item.geo_records.length : 0))) + '</strong></div>'
+            : '';
+        const geoDetails = showGeo
+            ? '<details class="app-history-detail"><summary>Standort anzeigen</summary>' + timesheetGeoMarkup(item) + '</details>'
+            : '';
+        const signatureDetails = showSignature
+            ? '<details class="app-history-detail"><summary>Kundenbestätigung anzeigen</summary>' + timesheetSignatureMarkup(item) + '</details>'
+            : '';
+        const attachmentDetails = showFiles
+            ? '<details class="app-history-detail"><summary>Anhaenge anzeigen</summary>' + attachmentMarkup + '</details>'
+            : '';
 
         return '<article class="app-timesheet-card app-history-entry">'
             + '<div class="app-history-entry-head">'
@@ -2073,14 +2278,14 @@
             + '<div><span class="muted">Start</span><strong>' + escapeHtml(formatTime(item.start_time)) + '</strong></div>'
             + '<div><span class="muted">Ende</span><strong>' + escapeHtml(formatTime(item.end_time)) + '</strong></div>'
             + '<div><span class="muted">Pause</span><strong>' + escapeHtml(formatDurationMinutes(Number(item.break_minutes || 0))) + '</strong></div>'
-            + '<div><span class="muted">Dateien</span><strong>' + escapeHtml(String(item.attachment_count || attachments.length || 0)) + '</strong></div>'
-            + '<div><span class="muted">Standort</span><strong>' + escapeHtml(String(item.geo_count || (Array.isArray(item.geo_records) ? item.geo_records.length : 0))) + '</strong></div>'
+            + filesStat
+            + geoStat
             + '</div>'
             + note
             + '<details class="app-history-detail"><summary>Pausen anzeigen</summary>' + timesheetBreaksMarkup(item) + '</details>'
-            + '<details class="app-history-detail"><summary>Standort anzeigen</summary>' + timesheetGeoMarkup(item) + '</details>'
-            + '<details class="app-history-detail"><summary>Kundenbestätigung anzeigen</summary>' + timesheetSignatureMarkup(item) + '</details>'
-            + '<details class="app-history-detail"><summary>Anhaenge anzeigen</summary>' + attachmentMarkup + '</details>'
+            + geoDetails
+            + signatureDetails
+            + attachmentDetails
             + '</article>';
     }
 
@@ -2100,12 +2305,15 @@
         return '<div class="app-history-days">'
             + days.map((day, index) => {
                 const items = Array.isArray(day.items) ? day.items : [];
+                const attachmentSummary = showAppWidget('show_timesheet_files')
+                    ? '<span><strong>' + escapeHtml(String(day.attachment_count || 0)) + '</strong><small>Dateien</small></span>'
+                    : '';
 
                 return '<details class="app-history-day"' + (index === 0 ? ' open' : '') + '>'
                     + '<summary>'
                     + '<span><strong>' + escapeHtml(day.date_label || formatDate(day.date)) + '</strong><small>' + escapeHtml(day.weekday || '') + '</small></span>'
                     + '<span><strong>' + escapeHtml(formatDurationMinutes(Number(day.total_net_minutes || 0))) + '</strong><small>' + escapeHtml(timesheetDayStatusLabel(day)) + '</small></span>'
-                    + '<span><strong>' + escapeHtml(String(day.attachment_count || 0)) + '</strong><small>Dateien</small></span>'
+                    + attachmentSummary
                     + '</summary>'
                     + '<div class="app-timesheet-cards">' + items.map((item) => timesheetDetailMarkup(item)).join('') + '</div>'
                     + '</details>';
@@ -2134,13 +2342,15 @@
             + '<button type="button" data-history-month="' + escapeHtml(currentMonthValue()) + '">Aktuell</button>'
             + '</div>';
         const typeFilter = '<label class="app-field"><span>Typfilter</span><select id="timesheetEntryTypeFilter">' + timesheetEntryTypeOptions() + '</select></label>';
-        const summaryMarkup = '<div class="app-history-summary">'
-            + historySummaryMetric('Arbeitszeit', formatDurationMinutes(Number(summary.total_net_minutes || 0)), 'Netto im Monat')
-            + historySummaryMetric('Pausen', formatDurationMinutes(Number(summary.total_break_minutes || 0)), 'Gesamt')
-            + historySummaryMetric('Buchungen', String(summary.entry_count || 0), String(summary.work_entry_count || 0) + ' Arbeit')
-            + historySummaryMetric('Abwesenheit', String(summary.absence_entry_count || 0), 'Krank/Urlaub/Fehlt')
-            + historySummaryMetric('Dateien', String(summary.attachment_count || 0), String(summary.project_count || 0) + ' Projekte')
-            + '</div>';
+        const summaryMarkup = showAppWidget('show_month_summary')
+            ? '<div class="app-history-summary">'
+                + historySummaryMetric('Arbeitszeit', formatDurationMinutes(Number(summary.total_net_minutes || 0)), 'Netto im Monat')
+                + historySummaryMetric('Pausen', formatDurationMinutes(Number(summary.total_break_minutes || 0)), 'Gesamt')
+                + historySummaryMetric('Buchungen', String(summary.entry_count || 0), String(summary.work_entry_count || 0) + ' Arbeit')
+                + historySummaryMetric('Abwesenheit', String(summary.absence_entry_count || 0), 'Krank/Urlaub/Fehlt')
+                + (showAppWidget('show_timesheet_files') ? historySummaryMetric('Dateien', String(summary.attachment_count || 0), String(summary.project_count || 0) + ' Projekte') : '')
+                + '</div>'
+            : '';
 
         return '<section class="app-card app-grid">'
             + '<div>'
@@ -2292,9 +2502,21 @@
         const canCheckIn = !blockedByOtherProject && status !== 'working' && status !== 'paused';
         const canPause = !blockedByOtherProject && status === 'working';
         const canCheckOut = !blockedByOtherProject && (status === 'working' || status === 'paused');
-        const totalBreakMinutes = currentTotalBreakMinutes();
+        const totalBreakMinutes = todayTotalBreakMinutes();
         const otherProjectHint = blockedByOtherProject
             ? '<div class="app-empty">Auf <strong>' + escapeHtml(otherActiveProjectName() || 'einem anderen Projekt') + '</strong> laeuft noch ein Einsatz. Bitte zuerst dorthin wechseln.</div>'
+            : '';
+        const todayTotalRow = showAppWidget('show_today_total_minutes')
+            ? '<div class="app-stat-row"><span class="muted">Heute gesamt</span><strong data-live-today-duration>' + escapeHtml(formatDurationMinutes(todayTotalWorkMinutes())) + '</strong></div>'
+            : '';
+        const projectTodayRow = showAppWidget('show_project_today_minutes')
+            ? '<div class="app-stat-row"><span class="muted">Heute aktuelles Projekt</span><strong data-live-project-today-duration>' + escapeHtml(formatDurationMinutes(currentProjectTodayWorkMinutes())) + '</strong></div>'
+            : '';
+        const geoSection = showAppWidget('show_geo_section')
+            ? '<section class="app-card">'
+                + '<h2>GEO</h2>'
+                + geoPolicyMarkup()
+                + '</section>'
             : '';
 
         return shell(
@@ -2306,10 +2528,12 @@
             + '<section class="app-card app-grid">'
             + '<div><p class="muted">Heute</p><h1>Tagesstatus</h1><p>Der zuletzt bekannte Stand bleibt auch offline sichtbar.</p></div>'
             + '<div class="app-stat-list">'
-            + '<div class="app-stat-row"><span class="muted">Start</span><strong data-live-start-time>' + escapeHtml(currentStartTimeValue()) + '</strong></div>'
-            + '<div class="app-stat-row"><span class="muted">Ende</span><strong data-live-end-time>' + escapeHtml(currentEndTimeValue()) + '</strong></div>'
-            + '<div class="app-stat-row"><span class="muted">Einsatzzeit</span><strong data-live-work-duration>' + escapeHtml(formatDurationMinutes(liveWorkMinutes())) + '</strong></div>'
-            + '<div class="app-stat-row"><span class="muted">Pausen gesamt</span><strong data-live-break-total>' + escapeHtml(formatDurationMinutes(totalBreakMinutes)) + '</strong></div>'
+            + todayTotalRow
+            + projectTodayRow
+            + '<div class="app-stat-row"><span class="muted">Start aktuelles Projekt</span><strong data-live-start-time>' + escapeHtml(currentStartTimeValue()) + '</strong></div>'
+            + '<div class="app-stat-row"><span class="muted">Ende aktuelles Projekt</span><strong data-live-end-time>' + escapeHtml(currentEndTimeValue()) + '</strong></div>'
+            + '<div class="app-stat-row"><span class="muted">Aktueller Einsatz</span><strong data-live-work-duration>' + escapeHtml(formatDurationMinutes(currentEntryWorkMinutes())) + '</strong></div>'
+            + '<div class="app-stat-row"><span class="muted">Pausen heute</span><strong data-live-today-break-total>' + escapeHtml(formatDurationMinutes(totalBreakMinutes)) + '</strong></div>'
             + '<div class="app-stat-row"><span class="muted">Projekt</span><strong data-live-project-name>' + escapeHtml(currentProjectName()) + '</strong></div>'
             + '</div>'
             + '<div class="app-inline-actions">'
@@ -2324,10 +2548,7 @@
             + '<button type="button" id="saveUpsert" ' + (isBusy('upsert') || blockedByOtherProject ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Stand speichern')) + '</button>'
             + '</div>'
             + '</section>'
-            + '<section class="app-card">'
-            + '<h2>GEO</h2>'
-            + geoPolicyMarkup()
-            + '</section>'
+            + geoSection
         );
     }
 
@@ -2341,20 +2562,32 @@
         const otherProjectHint = blockedByOtherProject
             ? '<div class="app-empty">Auf <strong>' + escapeHtml(otherActiveProjectName() || 'einem anderen Projekt') + '</strong> laeuft noch ein Einsatz. Bitte zuerst dorthin wechseln.</div>'
             : '';
+        const optionalMetrics = [
+            showAppWidget('show_current_shift_minutes')
+                ? metric('Aktueller Einsatz', '<span data-live-work-duration>' + escapeHtml(formatDurationMinutes(currentEntryWorkMinutes())) + '</span>', 'Nettozeit fuer den laufenden oder letzten Einsatz')
+                : '',
+            showAppWidget('show_project_today_minutes')
+                ? metric('Heute aktuelles Projekt', '<span data-live-project-today-duration>' + escapeHtml(formatDurationMinutes(currentProjectTodayWorkMinutes())) + '</span>', 'Nettozeit heute auf diesem Projekt')
+                : '',
+            showAppWidget('show_today_total_minutes')
+                ? metric('Heute gesamt', '<span data-live-today-duration>' + escapeHtml(formatDurationMinutes(todayTotalWorkMinutes())) + '</span>', 'Nettozeit heute ueber alle Projekte')
+                : ''
+        ].join('');
 
         return shell(
             '<section class="app-card app-grid">'
             + '<div><p class="muted">Zeiterfassung</p><h1>Arbeitszeiten</h1></div>'
             + '<div class="app-grid app-metrics">'
             + metric('Status', statusValueMarkup(), 'Aktueller Tagesstatus')
-            + metric('Einsatzzeit', '<span data-live-work-duration>' + escapeHtml(formatDurationMinutes(liveWorkMinutes())) + '</span>', 'Nettozeit fuer den aktuellen Einsatz')
+            + optionalMetrics
             + metric('Pause gesamt', totalBreakValueMarkup(), 'Abgeschlossene Pausen')
             + metric('Laufende Pause', '<span data-live-break-duration>' + escapeHtml(currentBreak() ? formatDurationMinutes(liveCurrentBreakMinutes()) : '--:--') + '</span>', 'Wird waehrend der Pause live aktualisiert')
             + '</div>'
             + '<div class="app-stat-list">'
             + '<div class="app-stat-row"><span class="muted">Projekt</span><strong data-live-project-name>' + escapeHtml(currentProjectName()) + '</strong></div>'
-            + '<div class="app-stat-row"><span class="muted">Start</span><strong data-live-start-time>' + escapeHtml(currentStartTimeValue()) + '</strong></div>'
-            + '<div class="app-stat-row"><span class="muted">Ende</span><strong data-live-end-time>' + escapeHtml(currentEndTimeValue()) + '</strong></div>'
+            + '<div class="app-stat-row"><span class="muted">Start aktuelles Projekt</span><strong data-live-start-time>' + escapeHtml(currentStartTimeValue()) + '</strong></div>'
+            + '<div class="app-stat-row"><span class="muted">Ende aktuelles Projekt</span><strong data-live-end-time>' + escapeHtml(currentEndTimeValue()) + '</strong></div>'
+            + '<div class="app-stat-row"><span class="muted">Aktueller Einsatz</span><strong data-live-work-duration>' + escapeHtml(formatDurationMinutes(currentEntryWorkMinutes())) + '</strong></div>'
             + '</div>'
             + '<div class="app-grid">'
             + '<label class="app-field"><span>Projekt</span><select id="projectSelect">' + projectOptions() + '</select></label>'
@@ -2373,6 +2606,14 @@
     }
 
     function historyView() {
+        if (!showAppWidget('show_history')) {
+            return shell(
+                '<section class="app-card app-grid">'
+                + '<div><p class="muted">Historie</p><h1>Meine Zeiten</h1><p>Dieser Bereich ist fuer Ihr App-Anzeigeprofil ausgeblendet.</p></div>'
+                + '</section>'
+            );
+        }
+
         return shell(
             '<section class="app-card app-grid">'
             + '<div><p class="muted">Historie</p><h1>Meine Zeiten</h1><p>Ihre erfassten Zeiten bleiben mit dem letzten bekannten Stand auch offline sichtbar.</p></div>'
@@ -2436,7 +2677,7 @@
                     ? ''
                     : '<div class="app-empty"><strong>Nicht zugeordnet:</strong> Diese Buchung kann spaeter im Buero einem Projekt zugeordnet werden.</div>'))
             + '</section>'
-            + projectAttachmentSectionMarkup()
+            + (showAppWidget('show_project_files') ? projectAttachmentSectionMarkup() : '')
         );
     }
 
@@ -2470,10 +2711,12 @@
             + '</section>'
             + legalTextSection('AGB', company.agb_text)
             + legalTextSection('Datenschutz', company.datenschutz_text)
-            + '<section class="app-card app-grid">'
-            + '<div><p class="muted">GEO</p><h2>Standortfreigabe</h2></div>'
-            + geoPolicyMarkup()
-            + '</section>'
+            + (showAppWidget('show_geo_section')
+                ? '<section class="app-card app-grid">'
+                    + '<div><p class="muted">GEO</p><h2>Standortfreigabe</h2></div>'
+                    + geoPolicyMarkup()
+                    + '</section>'
+                : '')
             + pushProfileSection()
             + installProfileSection()
         );
@@ -3032,12 +3275,16 @@
 
         if (logoutButton) {
             logoutButton.addEventListener('click', async function () {
+                const previousTodayCacheKey = todayCacheKey();
                 await fetch('/api/v1/auth/logout', { method: 'POST' });
                 state.session = { authenticated: false, user: null };
                 state.sessionExpiredHandled = false;
                 state.menuOpen = false;
                 resetProjectSelectionState();
+                clearSessionScopedState();
                 await cacheSet('session', state.session);
+                await cacheDelete(previousTodayCacheKey);
+                await cacheDelete('today');
                 showFeedback('success', 'Sie wurden erfolgreich abgemeldet.');
                 navigate('/app/login');
             });
@@ -3125,7 +3372,7 @@
     }
 
     async function applyCachedData() {
-        const cachedToday = await cacheGet('today');
+        const cachedToday = await cacheGet(todayCacheKey());
         const cachedCompany = await cacheGet('company');
 
         if (cachedToday) {
@@ -3138,7 +3385,7 @@
             state.company = cachedCompany;
         }
 
-        if (routeName() !== '/historie') {
+        if (routeName() !== '/historie' || !showAppWidget('show_history')) {
             return;
         }
 
@@ -3170,7 +3417,7 @@
 
         if (!navigator.onLine) {
             await applyCachedData();
-            if (routeName() === '/projektwahl') {
+            if (routeName() === '/projektwahl' && showAppWidget('show_project_files')) {
                 await loadProjectFiles(projectFileContextId(), force);
             }
             render();
@@ -3197,9 +3444,20 @@
                 normalizeTimesheetFilterAgainstToday();
 
                 try {
-                    await cacheSet('today', state.today);
+                    await cacheSet(todayCacheKey(), state.today);
                 } catch (cacheError) {
                     console.warn('Today-Cache konnte nicht geschrieben werden.', cacheError);
+                }
+            } else if (failures.length > 0) {
+                const cachedToday = await cacheGet(todayCacheKey());
+
+                if (cachedToday) {
+                    state.today = cachedToday;
+                    syncTodayStateStatus();
+                    normalizeProjectSelectionAgainstToday();
+                    normalizeTimesheetFilterAgainstToday();
+                } else {
+                    state.today = null;
                 }
             }
 
@@ -3217,11 +3475,11 @@
                 state.push = pushResult.value.data || null;
             }
 
-            if (routeName() === '/historie') {
+            if (routeName() === '/historie' && showAppWidget('show_history')) {
                 await loadTimesheetList(force);
             }
 
-            if (routeName() === '/projektwahl') {
+            if (routeName() === '/projektwahl' && showAppWidget('show_project_files')) {
                 await loadProjectFiles(projectFileContextId(), force);
             }
 
@@ -3761,7 +4019,7 @@
 
             state.pendingCount = (await queueAll()).length;
             applyOptimisticPayload(payload);
-            await cacheSet('today', state.today);
+            await cacheSet(todayCacheKey(), state.today);
             render();
             const syncResult = await syncQueue();
 
@@ -3787,10 +4045,14 @@
 
         const todayState = state.today.today_state || {};
         const previousEntry = todayState.work_entry || null;
+        const previousProjectId = previousEntry && Object.prototype.hasOwnProperty.call(previousEntry, 'project_id')
+            ? previousEntry.project_id
+            : undefined;
         const startsFreshEntry = payload.action === 'check_in'
             && previousEntry
             && previousEntry.start_time
             && previousEntry.end_time;
+        const summaryPreviousProjectId = startsFreshEntry ? undefined : previousProjectId;
         const workEntry = startsFreshEntry ? {
             id: null,
             project_id: null,
@@ -3873,11 +4135,28 @@
         state.today.breaks_today = todayBreaks;
         state.today.attachments = workEntry.attachments || [];
         state.today.today_state = todayState;
+        const collectedBreakMinutes = breakMinutesFromCollection(todayBreaks);
         workEntry.break_minutes = payload.action === 'pause'
             ? Number(payload.manual_break_minutes || 0)
-            : breakMinutesFromCollection(todayBreaks);
+            : (collectedBreakMinutes > 0
+                ? collectedBreakMinutes
+                : Number(payload.manual_break_minutes || workEntry.break_minutes || 0));
+        if (workEntry.start_time && workEntry.end_time) {
+            workEntry.net_minutes = calculatedNetMinutesForEntry(workEntry, todayBreaks);
+        }
         syncTodayStateStatus();
-        syncSelectedProjectSummaryFromTodayState();
+        syncSelectedProjectSummaryFromTodayState(summaryPreviousProjectId);
+    }
+
+    function syncPayloadForCurrentSettings(payload) {
+        const sanitized = { ...(payload || {}) };
+
+        if (!showAppWidget('show_geo_section')) {
+            delete sanitized.geo;
+            delete sanitized.geo_acknowledged;
+        }
+
+        return sanitized;
     }
 
     async function syncQueue() {
@@ -3896,13 +4175,14 @@
 
         for (const item of items) {
             try {
-                await queueUpdate({ ...item, status: 'syncing' });
+                const sanitizedPayload = syncPayloadForCurrentSettings(item.payload);
+                await queueUpdate({ ...item, payload: sanitizedPayload, status: 'syncing' });
                 const payload = await apiJson(item.endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         client_request_id: item.client_request_id,
-                        ...item.payload
+                        ...sanitizedPayload
                     })
                 });
 
@@ -3962,7 +4242,7 @@
         }
 
         state.pendingCount = (await queueAll()).length;
-        await cacheSet('today', state.today);
+        await cacheSet(todayCacheKey(), state.today);
         if (completedAny) {
             markTimesheetHistoryDirty();
         }
@@ -3978,7 +4258,7 @@
     async function currentGeoPayload() {
         const policy = geoPolicy();
 
-        if (!policy || !policy.enabled || !readGeoAck() || !navigator.geolocation) {
+        if (!showAppWidget('show_geo_section') || !policy || !policy.enabled || !readGeoAck() || !navigator.geolocation) {
             return null;
         }
 
@@ -4101,7 +4381,7 @@
             });
 
             updateCurrentAttachments(payload.data && payload.data.files ? payload.data.files : []);
-            await cacheSet('today', state.today);
+            await cacheSet(todayCacheKey(), state.today);
             markTimesheetHistoryDirty();
             showFeedback('success', friendlyMessage(payload.message, 'Bild erfolgreich hochgeladen.'));
         } catch (error) {
@@ -4196,7 +4476,7 @@
             });
 
             updateCurrentAttachments(payload.data && payload.data.files ? payload.data.files : []);
-            await cacheSet('today', state.today);
+            await cacheSet(todayCacheKey(), state.today);
             markTimesheetHistoryDirty();
             showFeedback('success', friendlyMessage(payload.message, 'Bild erfolgreich entfernt.'));
         } catch (error) {
@@ -4567,12 +4847,16 @@
     async function refreshAfterSignatureChange() {
         await loadOnlineData(true);
 
-        if (state.session.authenticated && routeName() === '/historie') {
+        if (state.session.authenticated && routeName() === '/historie' && showAppWidget('show_history')) {
             await loadTimesheetList(true);
         }
     }
 
     function maybePromptForSignatureAfterSync(item, responsePayload) {
+        if (!showAppWidget('show_customer_signature')) {
+            return;
+        }
+
         const action = item && item.payload ? item.payload.action : null;
 
         if (action !== 'check_out' && action !== 'day_close') {
@@ -4690,7 +4974,19 @@
         refreshTopbarStatus();
 
         document.querySelectorAll('[data-live-work-duration]').forEach((element) => {
-            element.textContent = formatDurationMinutes(liveWorkMinutes());
+            element.textContent = formatDurationMinutes(currentEntryWorkMinutes());
+        });
+
+        document.querySelectorAll('[data-live-today-duration]').forEach((element) => {
+            element.textContent = formatDurationMinutes(todayTotalWorkMinutes());
+        });
+
+        document.querySelectorAll('[data-live-project-today-duration]').forEach((element) => {
+            element.textContent = formatDurationMinutes(currentProjectTodayWorkMinutes());
+        });
+
+        document.querySelectorAll('[data-live-today-break-total]').forEach((element) => {
+            element.textContent = formatDurationMinutes(todayTotalBreakMinutes());
         });
 
         document.querySelectorAll('[data-live-break-duration]').forEach((element) => {
@@ -4754,8 +5050,8 @@
 
     window.addEventListener('online', async function () {
         state.online = true;
+        await loadOnlineData(true);
         await syncQueue();
-        await loadOnlineData(false);
     });
 
     window.addEventListener('offline', function () {
