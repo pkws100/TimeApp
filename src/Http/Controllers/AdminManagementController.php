@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Domain\Assets\AssetService;
+use App\Domain\App\AppUiSettings;
 use App\Domain\Auth\AuthService;
 use App\Domain\Auth\CsrfService;
 use App\Domain\Files\DocumentStatusService;
@@ -614,11 +615,19 @@ HTML;
         $roleIds = $user['role_ids'] ?? [];
         $roleCheckboxes = '';
         $timeTrackingChecked = ((int) ($user['time_tracking_required'] ?? 1) === 1) ? 'checked' : '';
+        $appUiSettings = AppUiSettings::normalize($user['app_ui_settings'] ?? null);
+        $appUiSettingsCheckboxes = '';
 
         foreach ($roles as $role) {
             $roleId = (int) ($role['id'] ?? 0);
             $checked = in_array($roleId, $roleIds, true) ? 'checked' : '';
             $roleCheckboxes .= '<label class="checkbox-item"><input type="checkbox" name="role_ids[]" value="' . $roleId . '" ' . $checked . '> <span>' . $this->e((string) ($role['name'] ?? '')) . '</span></label>';
+        }
+
+        foreach (AppUiSettings::ADMIN_FLAGS as $flag) {
+            $label = AppUiSettings::FLAGS[$flag] ?? $flag;
+            $checked = ($appUiSettings[$flag] ?? true) ? 'checked' : '';
+            $appUiSettingsCheckboxes .= '<label class="checkbox-item"><input type="hidden" name="app_ui_settings[' . $this->e($flag) . ']" value="0"><input type="checkbox" name="app_ui_settings[' . $this->e($flag) . ']" value="1" ' . $checked . '> <span>' . $this->e($label) . '</span></label>';
         }
 
         return <<<HTML
@@ -648,6 +657,11 @@ HTML;
         <input type="hidden" name="time_tracking_required" value="0">
         <label class="checkbox-item"><input type="checkbox" name="time_tracking_required" value="1" {$timeTrackingChecked}> <span>Zeiterfassung erforderlich</span></label>
         <p class="muted">Bei deaktivierter Pflicht bleiben User aktiv und koennen freiwillig buchen, werden aber nicht als fehlend gewertet.</p>
+    </div>
+    <div class="full-span field-group">
+        <span>Mitarbeiter-App Anzeige</span>
+        <div class="checkbox-grid">{$appUiSettingsCheckboxes}</div>
+        <p class="muted">Diese Optionen steuern nur optionale Karten in der mobilen App. Tagesstatus, Start, Ende, Pausen, Nettozeit, Projekt und Zeiterfassungsaktionen bleiben immer sichtbar.</p>
     </div>
     <div class="full-span field-group">
         <span>Rollen</span>

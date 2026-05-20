@@ -306,6 +306,1097 @@ test('mobile topbar shows active work status on every app page', async ({ page }
   await expect(page.locator('[data-live-topbar-project]')).toContainText(projectName);
 });
 
+test('mobile today screen separates total day time from selected project time', async ({ page }) => {
+  const projects = [
+    { id: 1, project_number: 'P-001', name: 'Baustelle A', city: 'Berlin' },
+    { id: 2, project_number: 'P-002', name: 'Baustelle B', city: 'Potsdam' }
+  ];
+  const latestEntry = {
+    id: 22,
+    project_id: 2,
+    project_name: 'Baustelle B',
+    work_date: '2026-05-15',
+    start_time: '12:30:00',
+    end_time: '14:00:00',
+    break_minutes: 0,
+    net_minutes: 90,
+    note: null,
+    attachments: []
+  };
+
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test',
+          permissions: ['timesheets.create', 'timesheets.view_own']
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          today: '2026-05-15',
+          server_time: '2026-05-15T14:05:00+02:00',
+          projects,
+          attachments: [],
+          today_state: {
+            status: 'completed',
+            is_missing: false,
+            status_source: null,
+            work_entry: latestEntry,
+            status_entry: null,
+            current_break: null
+          },
+          current_break: null,
+          breaks_today: [],
+          tracked_minutes_live_basis: null,
+          project_day_summaries: [
+            {
+              project_id: 2,
+              project_name: 'Baustelle B',
+              status: 'completed',
+              start_time: '12:30:00',
+              end_time: '14:00:00',
+              total_break_minutes: 0,
+              total_net_minutes: 90,
+              historical_total_net_minutes: 7200,
+              current_break: null,
+              tracked_minutes_live_basis: null,
+              work_entry: latestEntry,
+              breaks_today: [],
+              attachments: []
+            },
+            {
+              project_id: 1,
+              project_name: 'Baustelle A',
+              status: 'completed',
+              start_time: '08:00:00',
+              end_time: '10:00:00',
+              total_break_minutes: 0,
+              total_net_minutes: 120,
+              historical_total_net_minutes: 7200,
+              current_break: null,
+              tracked_minutes_live_basis: null,
+              work_entry: {
+                id: 21,
+                project_id: 1,
+                project_name: 'Baustelle A',
+                work_date: '2026-05-15',
+                start_time: '08:00:00',
+                end_time: '10:00:00',
+                break_minutes: 0,
+                net_minutes: 120,
+                note: null,
+                attachments: []
+              },
+              breaks_today: [],
+              attachments: []
+            }
+          ],
+          sync: { server_pending_count: 0 },
+          geo_policy: {
+            enabled: false,
+            notice_text: '',
+            requires_acknowledgement: false
+          },
+          company: {
+            app_display_name: 'TimeApp',
+            company_name: 'Muster Bau'
+          }
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { company_name: 'Muster Bau' } })
+    });
+  });
+
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { enabled: false, can_subscribe: false, devices: [] } })
+    });
+  });
+
+  await page.goto('/app/heute');
+
+  await expect(page.locator('main [data-live-today-duration]')).toHaveText('03:30');
+  await expect(page.locator('main [data-live-project-today-duration]')).toHaveText('01:30');
+  await expect(page.getByText('120:00')).toHaveCount(0);
+
+  await page.locator('#projectSelect').selectOption('1');
+
+  await expect(page.locator('main [data-live-today-duration]')).toHaveText('03:30');
+  await expect(page.locator('main [data-live-project-today-duration]')).toHaveText('02:00');
+  await expect(page.locator('main strong[data-live-project-name]')).toHaveText('Baustelle A');
+});
+
+test('mobile app display settings hide optional day widgets but keep mandatory status values', async ({ page }) => {
+  const latestEntry = {
+    id: 22,
+    project_id: 2,
+    project_name: 'Baustelle B',
+    work_date: '2026-05-15',
+    start_time: '12:30:00',
+    end_time: '14:00:00',
+    break_minutes: 0,
+    net_minutes: 90,
+    note: null,
+    attachments: []
+  };
+
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test',
+          permissions: ['timesheets.create', 'timesheets.view_own']
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          today: '2026-05-15',
+          server_time: '2026-05-15T14:05:00+02:00',
+          user: {
+            id: 7,
+            display_name: 'Max Mustermann',
+            email: 'max@example.test',
+            roles: [],
+            app_ui_settings: {
+              show_today_total_minutes: false,
+              show_project_today_minutes: false,
+              show_history: false
+            }
+          },
+          app_ui_settings: {
+            show_today_total_minutes: false,
+            show_project_today_minutes: false,
+            show_history: false
+          },
+          mandatory_app_widgets: ['day_status', 'start_time', 'end_time', 'breaks', 'current_net_minutes', 'current_project', 'time_actions'],
+          projects: [
+            { id: 2, project_number: 'P-002', name: 'Baustelle B', city: 'Potsdam' }
+          ],
+          attachments: [],
+          today_state: {
+            status: 'completed',
+            is_missing: false,
+            status_source: null,
+            work_entry: latestEntry,
+            status_entry: null,
+            current_break: null
+          },
+          current_break: null,
+          breaks_today: [],
+          tracked_minutes_live_basis: null,
+          project_day_summaries: [
+            {
+              project_id: 2,
+              project_name: 'Baustelle B',
+              status: 'completed',
+              start_time: '12:30:00',
+              end_time: '14:00:00',
+              total_break_minutes: 0,
+              total_net_minutes: 90,
+              current_break: null,
+              tracked_minutes_live_basis: null,
+              work_entry: latestEntry,
+              breaks_today: [],
+              attachments: []
+            }
+          ],
+          sync: { server_pending_count: 0 },
+          geo_policy: {
+            enabled: false,
+            notice_text: '',
+            requires_acknowledgement: false
+          },
+          company: {
+            app_display_name: 'TimeApp',
+            company_name: 'Muster Bau'
+          }
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { company_name: 'Muster Bau' } })
+    });
+  });
+
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { enabled: false, can_subscribe: false, devices: [] } })
+    });
+  });
+
+  await page.goto('/app/heute');
+
+  await expect(page.getByText('Heute gesamt')).toHaveCount(0);
+  await expect(page.getByText('Heute aktuelles Projekt')).toHaveCount(0);
+  await expect(page.locator('main [data-live-start-time]')).toHaveText('12:30');
+  await expect(page.locator('main [data-live-end-time]')).toHaveText('14:00');
+  await expect(page.locator('main [data-live-work-duration]')).toHaveText('01:30');
+  await expect(page.locator('main strong[data-live-project-name]')).toHaveText('Baustelle B');
+  await expect(page.getByRole('button', { name: 'Check-in' })).toBeVisible();
+  await expect(page.locator('nav.app-nav a[href="/app/historie"]')).toHaveCount(0);
+});
+
+test('mobile history hides timesheet file counters when timesheet files are disabled', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem('app.timesheetFilterMonth', '2026-05');
+  });
+
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test',
+          permissions: ['timesheets.view_own']
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          today: '2026-05-15',
+          app_ui_settings: {
+            show_history: true,
+            show_timesheet_files: false
+          },
+          user: {
+            id: 7,
+            display_name: 'Max Mustermann',
+            email: 'max@example.test',
+            roles: [],
+            app_ui_settings: {
+              show_history: true,
+              show_timesheet_files: false
+            }
+          },
+          projects: [],
+          attachments: [],
+          today_state: {
+            status: 'not_started',
+            work_entry: null,
+            active_break: null
+          },
+          geo_policy: {
+            enabled: false,
+            notice_text: '',
+            requires_acknowledgement: false
+          }
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { company_name: 'Muster Bau' } })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/timesheets**', async (route) => {
+    const item = {
+      id: 10,
+      project_id: null,
+      project_name: 'Nicht zugeordnet',
+      work_date: '2026-05-14',
+      date_label: '14.05.2026',
+      weekday: 'Donnerstag',
+      start_time: '07:30:00',
+      end_time: '16:00:00',
+      break_minutes: 30,
+      net_minutes: 480,
+      entry_type: 'work',
+      note: 'Gesamtansicht',
+      breaks: [],
+      attachments: [
+        {
+          id: 5,
+          original_name: 'stundenzettel.pdf',
+          mime_type: 'application/pdf',
+          size_bytes: 12000,
+          is_image: false,
+          download_url: '/api/v1/app/timesheet-files/5/download',
+          preview_url: null
+        }
+      ],
+      attachment_count: 1,
+      geo_records: [],
+      geo_count: 0
+    };
+
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          items: [item],
+          summary: {
+            total_net_minutes: 480,
+            total_break_minutes: 30,
+            entry_count: 1,
+            work_entry_count: 1,
+            absence_entry_count: 0,
+            attachment_count: 1,
+            project_count: 1
+          },
+          days: [
+            {
+              date: '2026-05-14',
+              date_label: '14.05.2026',
+              weekday: 'Donnerstag',
+              total_net_minutes: 480,
+              total_break_minutes: 30,
+              entry_count: 1,
+              status_counts: { work: 1, sick: 0, vacation: 0, holiday: 0, absent: 0 },
+              attachment_count: 1,
+              items: [item]
+            }
+          ],
+          projects: [],
+          filters: {
+            scope: 'all',
+            project_id: null,
+            month: '2026-05',
+            entry_type: 'all'
+          },
+          scope: 'all',
+          project_id: null,
+          cached_at: '2026-05-15 10:00:00'
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { enabled: false, can_subscribe: false, devices: [] } })
+    });
+  });
+
+  await page.goto('/app/historie');
+
+  await expect(page.getByRole('heading', { name: 'Monatshistorie' })).toBeVisible();
+  await expect(page.locator('.app-history-summary')).not.toContainText('Dateien');
+  await expect(page.locator('.app-history-day > summary').first()).not.toContainText('Dateien');
+  await expect(page.getByText('Anhaenge anzeigen')).toHaveCount(0);
+  await expect(page.getByText('stundenzettel.pdf')).toHaveCount(0);
+});
+
+test('mobile today totals count unassigned running work live', async ({ page, context }) => {
+  await page.addInitScript(() => {
+    const RealDate = Date;
+    let mockedNow = new RealDate('2026-05-15T10:00:00+02:00').getTime();
+
+    class MockDate extends RealDate {
+      constructor(...args) {
+        if (args.length === 0) {
+          super(mockedNow);
+          return;
+        }
+
+        super(...args);
+      }
+
+      static now() {
+        return mockedNow;
+      }
+
+      static parse(value) {
+        return RealDate.parse(value);
+      }
+
+      static UTC(...args) {
+        return RealDate.UTC(...args);
+      }
+    }
+
+    window.Date = MockDate;
+    window.__setMockNow = (value) => {
+      mockedNow = new RealDate(value).getTime();
+    };
+  });
+
+  const workEntry = {
+    id: 31,
+    project_id: null,
+    project_name: 'Nicht zugeordnet',
+    work_date: '2026-05-15',
+    start_time: '09:45:00',
+    end_time: null,
+    break_minutes: 0,
+    net_minutes: 0,
+    note: null,
+    attachments: []
+  };
+  const liveBasis = {
+    work_started_at: '2026-05-15T09:45:00+02:00',
+    work_ended_at: null,
+    completed_break_minutes: 0,
+    current_break_started_at: null,
+    is_running: true,
+    is_paused: false
+  };
+
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test',
+          permissions: ['timesheets.create', 'timesheets.view_own']
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          today: '2026-05-15',
+          server_time: '2026-05-15T10:00:00+02:00',
+          projects: [
+            { id: 1, project_number: 'P-001', name: 'Baustelle A', city: 'Berlin' }
+          ],
+          attachments: [],
+          today_state: {
+            status: 'working',
+            is_missing: false,
+            status_source: null,
+            work_entry: workEntry,
+            status_entry: null,
+            current_break: null
+          },
+          current_break: null,
+          breaks_today: [],
+          tracked_minutes_live_basis: liveBasis,
+          project_day_summaries: [
+            {
+              project_id: null,
+              project_name: 'Nicht zugeordnet',
+              status: 'working',
+              start_time: '09:45:00',
+              end_time: null,
+              total_break_minutes: 0,
+              total_net_minutes: 0,
+              current_break: null,
+              tracked_minutes_live_basis: liveBasis,
+              work_entry: workEntry,
+              breaks_today: [],
+              attachments: []
+            }
+          ],
+          sync: { server_pending_count: 0 },
+          geo_policy: {
+            enabled: false,
+            notice_text: '',
+            requires_acknowledgement: false
+          },
+          company: {
+            app_display_name: 'TimeApp',
+            company_name: 'Muster Bau'
+          }
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { company_name: 'Muster Bau' } })
+    });
+  });
+
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { enabled: false, can_subscribe: false, devices: [] } })
+    });
+  });
+
+  await page.goto('/app/heute');
+
+  await expect(page.locator('main [data-live-today-duration]')).toHaveText('00:15');
+  await expect(page.locator('main [data-live-project-today-duration]')).toHaveText('00:15');
+  await expect(page.locator('main strong[data-live-project-name]')).toHaveText('Nicht zugeordnet');
+
+  await page.evaluate(() => window.__setMockNow('2026-05-15T10:02:00+02:00'));
+
+  await expect(page.locator('main [data-live-today-duration]')).toHaveText('00:17');
+  await expect(page.locator('main [data-live-project-today-duration]')).toHaveText('00:17');
+
+  await context.setOffline(true);
+  await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+  await page.evaluate(() => {
+    window.history.pushState({}, '', '/app/projektwahl');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  });
+
+  await expect(page.getByRole('heading', { name: 'Baustelle waehlen' })).toBeVisible();
+  await page.locator('#projectSelect').selectOption('1');
+  await page.getByRole('button', { name: 'Laufenden Einsatz zuordnen' }).click();
+
+  await expect(page.locator('main [data-live-today-duration]')).toHaveText('00:17');
+  await expect(page.locator('main [data-live-project-today-duration]')).toHaveText('00:17');
+  await expect(page.locator('main strong[data-live-project-name]')).toHaveText('Baustelle A');
+});
+
+test('mobile today totals keep manual pause and offline checkout duration', async ({ page, context }) => {
+  await page.addInitScript(() => {
+    const RealDate = Date;
+    const mockedNow = new RealDate('2026-05-15T10:00:00+02:00').getTime();
+
+    class MockDate extends RealDate {
+      constructor(...args) {
+        if (args.length === 0) {
+          super(mockedNow);
+          return;
+        }
+
+        super(...args);
+      }
+
+      static now() {
+        return mockedNow;
+      }
+
+      static parse(value) {
+        return RealDate.parse(value);
+      }
+
+      static UTC(...args) {
+        return RealDate.UTC(...args);
+      }
+    }
+
+    window.Date = MockDate;
+  });
+
+  const project = { id: 1, project_number: 'P-001', name: 'Baustelle A', city: 'Berlin' };
+  const workEntry = {
+    id: 41,
+    project_id: 1,
+    project_name: project.name,
+    work_date: '2026-05-15',
+    start_time: '09:00:00',
+    end_time: null,
+    break_minutes: 0,
+    net_minutes: 0,
+    note: null,
+    attachments: []
+  };
+  const liveBasis = {
+    work_started_at: '2026-05-15T09:00:00+02:00',
+    work_ended_at: null,
+    completed_break_minutes: 0,
+    current_break_started_at: null,
+    is_running: true,
+    is_paused: false
+  };
+
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test',
+          permissions: ['timesheets.create', 'timesheets.view_own']
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          today: '2026-05-15',
+          server_time: '2026-05-15T10:00:00+02:00',
+          projects: [project],
+          attachments: [],
+          today_state: {
+            status: 'working',
+            is_missing: false,
+            status_source: null,
+            work_entry: workEntry,
+            status_entry: null,
+            current_break: null
+          },
+          current_break: null,
+          breaks_today: [],
+          tracked_minutes_live_basis: liveBasis,
+          project_day_summaries: [
+            {
+              project_id: 1,
+              project_name: project.name,
+              status: 'working',
+              start_time: '09:00:00',
+              end_time: null,
+              total_break_minutes: 0,
+              total_net_minutes: 0,
+              current_break: null,
+              tracked_minutes_live_basis: liveBasis,
+              work_entry: workEntry,
+              breaks_today: [],
+              attachments: []
+            }
+          ],
+          sync: { server_pending_count: 0 },
+          geo_policy: {
+            enabled: false,
+            notice_text: '',
+            requires_acknowledgement: false
+          },
+          company: {
+            app_display_name: 'TimeApp',
+            company_name: 'Muster Bau'
+          }
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { company_name: 'Muster Bau' } })
+    });
+  });
+
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { enabled: false, can_subscribe: false, devices: [] } })
+    });
+  });
+
+  await page.goto('/app/heute');
+  await expect(page.getByRole('button', { name: 'Pause buchen' })).toBeVisible();
+  await expect(page.locator('main [data-live-today-duration]')).toHaveText('01:00');
+  await context.setOffline(true);
+  await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+
+  await page.getByRole('button', { name: 'Pause buchen' }).click();
+  await page.getByRole('button', { name: '30 Minuten' }).click();
+
+  await expect(page.locator('main [data-live-work-duration]')).toHaveText('00:30');
+  await expect(page.locator('main [data-live-today-duration]')).toHaveText('00:30');
+  await expect(page.locator('main [data-live-project-today-duration]')).toHaveText('00:30');
+  await expect(page.locator('main [data-live-today-break-total]')).toHaveText('00:30');
+
+  await page.getByRole('button', { name: 'Check-out' }).click();
+
+  await expect(page.locator('main [data-live-end-time]')).toHaveText('10:00');
+  await expect(page.locator('main [data-live-work-duration]')).toHaveText('00:30');
+  await expect(page.locator('main [data-live-today-duration]')).toHaveText('00:30');
+  await expect(page.locator('main [data-live-project-today-duration]')).toHaveText('00:30');
+
+  await page.evaluate(() => {
+    window.history.pushState({}, '', '/app/zeiten');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  });
+
+  await page.locator('#manualStartTime').fill('10:00');
+  await page.locator('#manualEndTime').fill('10:00');
+  await page.getByRole('button', { name: 'Zeiten speichern' }).click();
+
+  await expect(page.locator('main [data-live-work-duration]').first()).toHaveText('00:00');
+  await expect(page.locator('main [data-live-today-duration]')).toHaveText('00:00');
+  await expect(page.locator('main [data-live-project-today-duration]')).toHaveText('00:00');
+});
+
+test('mobile app does not send geo when geo section is hidden', async ({ page }) => {
+  const syncPayloads = [];
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem('app.geoAck', '1');
+
+    Object.defineProperty(navigator, 'geolocation', {
+      configurable: true,
+      value: {
+        getCurrentPosition(success) {
+          success({
+            coords: {
+              latitude: 52.520008,
+              longitude: 13.404954,
+              accuracy: 12
+            },
+            timestamp: Date.parse('2026-05-15T10:00:00+02:00')
+          });
+        }
+      }
+    });
+  });
+
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test',
+          permissions: ['timesheets.create', 'timesheets.view_own']
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          today: '2026-05-15',
+          server_time: '2026-05-15T10:00:00+02:00',
+          app_ui_settings: {
+            show_geo_section: false
+          },
+          user: {
+            id: 7,
+            display_name: 'Max Mustermann',
+            email: 'max@example.test',
+            roles: [],
+            app_ui_settings: {
+              show_geo_section: false
+            }
+          },
+          projects: [],
+          attachments: [],
+          today_state: {
+            status: 'not_started',
+            is_missing: false,
+            status_source: null,
+            work_entry: null,
+            status_entry: null,
+            current_break: null
+          },
+          current_break: null,
+          breaks_today: [],
+          tracked_minutes_live_basis: null,
+          project_day_summaries: [],
+          sync: { server_pending_count: 0 },
+          geo_policy: {
+            enabled: true,
+            notice_text: 'GEO ist aktiv.',
+            requires_acknowledgement: true
+          },
+          company: {
+            app_display_name: 'TimeApp',
+            company_name: 'Muster Bau'
+          }
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { company_name: 'Muster Bau' } })
+    });
+  });
+
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { enabled: false, can_subscribe: false, devices: [] } })
+    });
+  });
+
+  await page.route('**/api/v1/app/timesheets/sync', async (route) => {
+    syncPayloads.push(route.request().postDataJSON());
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        message: 'Gespeichert.',
+        data: {
+          today_state: {
+            status: 'working',
+            work_entry: {
+              id: 50,
+              project_id: null,
+              project_name: 'Nicht zugeordnet',
+              work_date: '2026-05-15',
+              start_time: '10:00:00',
+              end_time: null,
+              break_minutes: 0,
+              net_minutes: 0,
+              note: null,
+              attachments: []
+            },
+            current_break: null
+          },
+          breaks_today: [],
+          current_break: null,
+          tracked_minutes_live_basis: {
+            work_started_at: '2026-05-15T10:00:00+02:00',
+            work_ended_at: null,
+            completed_break_minutes: 0,
+            current_break_started_at: null,
+            is_running: true,
+            is_paused: false
+          }
+        }
+      })
+    });
+  });
+
+  await page.goto('/app/heute');
+
+  await expect(page.getByText('GEO ist aktiv.')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Check-in' }).click();
+  await page.locator('#projectlessDialogNote').fill('Kurztest ohne Projekt');
+  await page.getByRole('button', { name: 'Ohne Projekt starten' }).click();
+
+  await expect.poll(() => syncPayloads.length).toBe(1);
+  expect(syncPayloads[0]).not.toHaveProperty('geo');
+  expect(syncPayloads[0]).not.toHaveProperty('geo_acknowledged');
+});
+
+test('mobile app strips queued geo after geo section is disabled before reconnect sync', async ({ page }) => {
+  const syncPayloads = [];
+
+  await page.addInitScript(async () => {
+    await new Promise((resolve, reject) => {
+      const request = indexedDB.open('zeiterfassung-app', 1);
+
+      request.onupgradeneeded = () => {
+        const database = request.result;
+
+        if (!database.objectStoreNames.contains('cache')) {
+          database.createObjectStore('cache', { keyPath: 'key' });
+        }
+
+        if (!database.objectStoreNames.contains('queue')) {
+          const store = database.createObjectStore('queue', { keyPath: 'id' });
+          store.createIndex('status', 'status', { unique: false });
+        }
+      };
+
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const database = request.result;
+        const tx = database.transaction(['cache', 'queue'], 'readwrite');
+
+        tx.objectStore('cache').put({
+          key: 'session',
+          value: {
+            authenticated: true,
+            bootstrap_required: false,
+            user: {
+              id: 7,
+              display_name: 'Max Mustermann',
+              permissions: ['timesheets.create', 'timesheets.view_own']
+            }
+          },
+          updatedAt: Date.now()
+        });
+        tx.objectStore('queue').put({
+          id: 'queued-geo-entry',
+          client_request_id: 'queued-geo-entry',
+          endpoint: '/api/v1/app/timesheets/sync',
+          payload: {
+            action: 'check_in',
+            work_date: '2026-05-15',
+            start_time: '10:00',
+            project_id: null,
+            note: 'queued geo',
+            geo: {
+              latitude: 52.520008,
+              longitude: 13.404954,
+              accuracy_meters: 12,
+              recorded_at: '2026-05-15T10:00:00+02:00'
+            },
+            geo_acknowledged: true
+          },
+          status: 'pending',
+          createdAt: Date.now()
+        });
+
+        tx.oncomplete = () => {
+          database.close();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      };
+    });
+  });
+
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test',
+          permissions: ['timesheets.create', 'timesheets.view_own']
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          today: '2026-05-15',
+          server_time: '2026-05-15T10:00:00+02:00',
+          app_ui_settings: {
+            show_geo_section: false
+          },
+          user: {
+            id: 7,
+            display_name: 'Max Mustermann',
+            email: 'max@example.test',
+            roles: [],
+            app_ui_settings: {
+              show_geo_section: false
+            }
+          },
+          projects: [],
+          attachments: [],
+          today_state: {
+            status: 'not_started',
+            is_missing: false,
+            status_source: null,
+            work_entry: null,
+            status_entry: null,
+            current_break: null
+          },
+          current_break: null,
+          breaks_today: [],
+          tracked_minutes_live_basis: null,
+          project_day_summaries: [],
+          sync: { server_pending_count: 0 },
+          geo_policy: {
+            enabled: true,
+            notice_text: 'GEO ist aktiv.',
+            requires_acknowledgement: true
+          },
+          company: {
+            app_display_name: 'TimeApp',
+            company_name: 'Muster Bau'
+          }
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { company_name: 'Muster Bau' } })
+    });
+  });
+
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { enabled: false, can_subscribe: false, devices: [] } })
+    });
+  });
+
+  await page.route('**/api/v1/app/timesheets/sync', async (route) => {
+    syncPayloads.push(route.request().postDataJSON());
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        message: 'Gespeichert.',
+        data: {
+          today_state: {
+            status: 'working',
+            work_entry: {
+              id: 51,
+              project_id: null,
+              project_name: 'Nicht zugeordnet',
+              work_date: '2026-05-15',
+              start_time: '10:00:00',
+              end_time: null,
+              break_minutes: 0,
+              net_minutes: 0,
+              note: 'queued geo',
+              attachments: []
+            },
+            current_break: null
+          },
+          breaks_today: [],
+          current_break: null
+        }
+      })
+    });
+  });
+
+  await page.goto('/app/heute');
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+
+  await expect.poll(() => syncPayloads.length).toBe(1);
+  expect(syncPayloads[0]).not.toHaveProperty('geo');
+  expect(syncPayloads[0]).not.toHaveProperty('geo_acknowledged');
+});
+
 test('mobile topbar updates after check-in without a page reload', async ({ page }) => {
   let checkedIn = false;
   const project = { id: 2, project_number: 'P-002', name: 'Baustelle Mitte', city: 'Berlin' };
@@ -915,11 +2006,17 @@ test('dark drawer keeps active navigation link readable after login', async ({ p
   await page.locator('input[name="password"]').fill(password);
   await page.getByRole('button', { name: 'Anmelden' }).click();
 
+  await page.waitForURL('**/app/heute');
   await expect(page.locator('#appMenuToggle')).toBeVisible();
   await page.locator('#appMenuToggle').click();
 
+  if (await page.locator('.app-drawer-layer').count() === 0) {
+    await page.locator('#appMenuToggle').click();
+  }
+
   const activeDrawerLink = page.locator('.app-drawer-link.is-active').first();
 
+  await expect(page.locator('.app-drawer-layer')).toBeVisible();
   await expect(activeDrawerLink).toBeVisible();
   await expect(activeDrawerLink).toHaveCSS('color', 'rgb(27, 27, 27)');
 

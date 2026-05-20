@@ -129,6 +129,8 @@ Das Frontend ist als mobile Mitarbeiter-App unter `/app` als Vanilla-JS-PWA umge
 - [x] Mobile App-Topbar zeigt den aktuellen Tagesstatus seitenuebergreifend inklusive Projekt, Startzeit, Pause, Abschluss oder Fehlend-Hinweis.
 - [x] Mobile Historie als Monats-/Tagesansicht mit Summen, Buchungsdetails, Pausen, Anhaengen und Offline-Cache ausgebaut.
 - [x] Mobile Historie repariert: frische Monatsdaten werden nach Sync/Upload geladen, Projektbuchungen und Anhaenge bleiben nicht mehr auf Nullstaenden haengen.
+- [x] Mobile Heute- und Zeiten-Screens zeigen die Netto-Arbeitszeit fuer heute gesamt und fuer das aktuell gewaehlte Projekt klar getrennt und live-faehig an.
+- [x] Konfigurierbare Mitarbeiter-App-Anzeige vorbereitet: optionale App-Karten wie Tages-/Projektzeiten, Historie, Dateien, GEO und Kundenbestaetigung sind pro Benutzer ausblendbar, waehrend Pflichtwerte der Zeiterfassung sichtbar bleiben.
 - [x] Gespeicherte Standortdaten zu Buchungen werden in mobiler Historie sowie in Admin-Buchungen/Kalender mit Kartenlink sichtbar gemacht.
 - [x] Push-Test aus dem mobilen Profil sendet eine echte serverseitige Web-Push-Testnachricht an das aktive Geraet.
 - [x] Zeiterfassungspflicht pro User steuerbar; freiwillige Admin-/Notfalluser bleiben aktiv, werden aber nicht als fehlend gewertet oder erinnert.

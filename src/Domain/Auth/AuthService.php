@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Auth;
 
+use App\Domain\App\AppUiSettings;
 use App\Domain\Users\PermissionMatrix;
 use App\Infrastructure\Database\DatabaseConnection;
 
@@ -132,6 +133,7 @@ final class AuthService
             'email' => (string) ($user['email'] ?? ''),
             'display_name' => trim(((string) ($user['first_name'] ?? '')) . ' ' . ((string) ($user['last_name'] ?? ''))),
             'time_tracking_required' => (int) ($user['time_tracking_required'] ?? 1) === 1,
+            'app_ui_settings' => AppUiSettings::normalize($user['app_ui_settings'] ?? null),
             'roles' => $user['roles'] ?? [],
             'permissions' => $user['permissions'] ?? [],
         ];
@@ -141,6 +143,7 @@ final class AuthService
     {
         if ($this->connection->tableExists('users')) {
             $timeTrackingSelect = $this->timeTrackingSelect();
+            $appUiSettingsSelect = $this->appUiSettingsSelect();
             $user = $this->connection->fetchOne(
                 'SELECT
                     users.id,
@@ -151,6 +154,7 @@ final class AuthService
                     users.password_hash,
                     users.employment_status,
                     ' . $timeTrackingSelect . ' AS time_tracking_required,
+                    ' . $appUiSettingsSelect . ' AS app_ui_settings,
                     users.is_deleted
                  FROM users
                  WHERE users.email = :email
@@ -175,6 +179,7 @@ final class AuthService
         }
 
         $timeTrackingSelect = $this->timeTrackingSelect();
+        $appUiSettingsSelect = $this->appUiSettingsSelect();
         $user = $this->connection->fetchOne(
             'SELECT
                 users.id,
@@ -185,6 +190,7 @@ final class AuthService
                 users.password_hash,
                 users.employment_status,
                 ' . $timeTrackingSelect . ' AS time_tracking_required,
+                ' . $appUiSettingsSelect . ' AS app_ui_settings,
                 users.is_deleted
              FROM users
              WHERE users.id = :id
@@ -249,5 +255,14 @@ final class AuthService
         }
 
         return 'COALESCE(users.time_tracking_required, 1)';
+    }
+
+    private function appUiSettingsSelect(): string
+    {
+        if (!$this->connection->columnExists('users', 'app_ui_settings')) {
+            return 'NULL';
+        }
+
+        return 'users.app_ui_settings';
     }
 }
