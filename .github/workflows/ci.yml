@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  php-and-node-checks:
+    name: PHP, PHPUnit and Node checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: curl, gd, mbstring, pdo_mysql, zip
+          coverage: none
+          tools: composer:v2
+
+      - name: Install Composer dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: PHP syntax check
+        run: |
+          find . \
+            -path ./vendor -prune -o \
+            -path ./node_modules -prune -o \
+            -path ./storage -prune -o \
+            -name '*.php' -print0 \
+            | xargs -0 -n 1 php -l
+
+      - name: Run PHPUnit
+        env:
+          APP_ENV: testing
+          APP_DEBUG: 'true'
+          APP_SECRET: ci-test-secret
+          SETTINGS_ENCRYPTION_KEY: ci-test-settings-key
+        run: COMPOSER_ALLOW_SUPERUSER=1 composer test
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: JavaScript syntax check
+        run: |
+          node --check public/assets/js/app.js
+          node --check tests/e2e/app.spec.js
+
+  docker-production-smoke:
+    name: Production Docker image smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build production image
+        run: docker build --pull -t timeapp-ci:${{ github.sha }} .
+
+      - name: Calendar policy smoke inside production image
+        run: |
+          docker run --rm -i timeapp-ci:${{ github.sha }} php <<'PHP'
+          <?php
+
+          declare(strict_types=1);
+
+          require 'bootstrap/autoload.php';
+
+          $service = new App\Domain\Calendar\CalendarPolicyService(
+              new App\Infrastructure\Database\DatabaseConnection([])
+          );
+
+          $holidays = $service->publicHolidays(2026, 'NW');
+          $expected = [
+              '2026-04-03' => 'Karfreitag',
+              '2026-04-06' => 'Ostermontag',
+              '2026-05-14' => 'Christi Himmelfahrt',
+              '2026-05-25' => 'Pfingstmontag',
+              '2026-06-04' => 'Fronleichnam',
+          ];
+
+          foreach ($expected as $date => $name) {
+              if (($holidays[$date]['name'] ?? null) !== $name) {
+                  fwrite(STDERR, sprintf("Calendar smoke failed for %s\n", $date));
+                  exit(1);
+              }
+          }
+
+          echo "Calendar smoke passed\n";
+          PHP
