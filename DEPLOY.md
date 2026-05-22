@@ -191,10 +191,22 @@ Uploads und Konfigurationsdateien liegen im Storage-Volume. Dieses Volume nicht
 loeschen, wenn nur ein neues Image deployed wird.
 
 SMTP-Passwoerter liegen in der Datenbank verschluesselt. Das Backup enthaelt
-den gespeicherten Wert, aber nicht den benoetigten Settings-Key aus `.env`.
+verschluesselte `enc:v1`-Werte, aber nicht den benoetigten Settings-Key aus `.env`.
 Nach einem Upgrade von einer Version mit Klartext-SMTP-Passwort die
 SMTP-Settings einmal mit gesetztem Key speichern, bevor ein Backup erstellt
-wird; dabei wird ein vorhandener Legacy-Wert verschluesselt.
+wird; dabei wird ein vorhandener Legacy-Wert verschluesselt. Falls dennoch ein
+Legacy-Klartextwert im Backup-Export gefunden wird, wird er im Datenbank-JSON
+redigiert und im Manifest unter `security.redacted_database_fields` ausgewiesen.
+Betriebsnotwendiges Credential-Material wie Passwort-Hashes und Push-Subscription-
+Daten bleibt fuer einen spaeteren Restore erhalten, wird aber im Manifest unter
+`security.retained_sensitive_database_fields` klassifiziert. App-Backup-ZIPs sind
+deshalb insgesamt wie Secrets zu behandeln.
+
+`storage/config/database.override.php` kann lokale DB-Zugangsdaten enthalten und
+wird deshalb nicht mehr in App-Backup-ZIPs aufgenommen. Der Export vermerkt eine
+vorhandene Override-Datei nur im Manifest unter `runtime` und `security.warnings`.
+Die produktive `.env`, der stabile `APP_SECRET` bzw. `SETTINGS_ENCRYPTION_KEY`
+und notwendige Runtime-Konfigurationen muessen getrennt gesichert werden.
 
 ## Restore-Status
 
@@ -211,6 +223,8 @@ Validiert werden insbesondere:
 - unsichere Archivpfade wie `../`
 - Upload-Kandidaten ohne Extraktion
 - Runtime-Hinweise ohne automatisches Zurueckspielen
+- Security-Hinweise zu ausgeschlossenen Runtime-Overrides und redigierten
+  Secret-Feldern
 
 Ein produktiver Restore-Apply braucht einen separaten Auftrag mit explizitem
 Admin-Gate, Wartungs-/Rollback-Konzept und klarer Freigabe. Runtime-Overrides

@@ -11,11 +11,38 @@ use ZipArchive;
 final class BackupService
 {
     private const BACKUP_VERSION = 1;
+    private const REDACTED_SECRET = '[redacted:backup-secret]';
+    private const RUNTIME_OVERRIDE_EXCLUDED_WARNING = 'storage/config/database.override.php wurde erkannt, aber nicht ins Backup-Archiv aufgenommen.';
+    private const RETAINED_SENSITIVE_FIELDS_WARNING = 'Das Backup enthaelt betriebsnotwendige sensible Datenbankfelder und muss wie ein Secret behandelt werden.';
+    private const REDACTED_FIELDS_WARNING = 'Einige bekannte Secret-Felder wurden im Datenbank-JSON redigiert.';
+    private const SECRET_FIELD_POLICIES = [
+        'company_settings' => [
+            'smtp_password' => 'keep-encrypted-redact-legacy-cleartext',
+        ],
+        'users' => [
+            'password_hash' => 'retain-sensitive',
+        ],
+        'push_subscriptions' => [
+            'endpoint' => 'retain-sensitive',
+            'endpoint_hash' => 'retain-sensitive',
+            'public_key' => 'retain-sensitive',
+            'auth_token' => 'retain-sensitive',
+        ],
+    ];
+    private BackupDatabaseSource $databaseSource;
+    private string $backupRoot;
+    private string $runtimeOverridePath;
 
     public function __construct(
         private DatabaseConnection $connection,
-        private array $uploadConfig
+        private array $uploadConfig,
+        ?BackupDatabaseSource $databaseSource = null,
+        ?string $backupRoot = null,
+        ?string $runtimeOverridePath = null
     ) {
+        $this->databaseSource = $databaseSource ?? new PdoBackupDatabaseSource($this->connection);
+        $this->backupRoot = rtrim($backupRoot ?? storage_path('cache/backups'), '/');
+        $this->runtimeOverridePath = $runtimeOverridePath ?? storage_path('config/database.override.php');
     }
 
     public function export(): array
@@ -24,11 +51,11 @@ final class BackupService
             throw new RuntimeException('Die ZIP-Erweiterung ist nicht verfuegbar.');
         }
 
-        $workspace = storage_path('cache/backups/' . uniqid('backup_', true));
+        $workspace = $this->backupRoot . '/' . uniqid('backup_', true);
         $zipPath = $workspace . '.zip';
         $databaseDir = $workspace . '/database';
         $uploadsRoot = rtrim((string) ($this->uploadConfig['root'] ?? storage_path('app/uploads')), '/');
-        $runtimeOverride = storage_path('config/database.override.php');
+        $runtimeOverride = $this->runtimeOverridePath;
 
         $this->ensureDirectory($workspace);
         $this->ensureDirectory($databaseDir);
@@ -38,7 +65,8 @@ final class BackupService
 
         foreach ($tables as $table) {
             $filename = $databaseDir . '/' . $table . '.json';
-            $rows = $this->connection->fetchAll('SELECT * FROM `' . $table . '`');
+            $sanitized = $this->sanitizeDatabaseRows($table, $this->databaseSource->fetchRows($table));
+            $rows = $sanitized['rows'];
             file_put_contents(
                 $filename,
                 json_encode($rows, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)
@@ -48,12 +76,14 @@ final class BackupService
                 'filename' => 'database/' . $table . '.json',
                 'rows' => count($rows),
                 'size_bytes' => filesize($filename) ?: 0,
+                'redacted_fields' => $sanitized['redactions'],
             ];
         }
 
         $uploadFiles = $this->collectFiles($uploadsRoot, 'uploads');
-        $runtimeFiles = is_file($runtimeOverride) ? [['path' => $runtimeOverride, 'name' => 'runtime/database.override.php']] : [];
-        $manifest = $this->buildManifest($databaseFiles, $uploadFiles, $runtimeFiles !== []);
+        $hasRuntimeOverride = is_file($runtimeOverride);
+        $runtimeFiles = [];
+        $manifest = $this->buildManifest($databaseFiles, $uploadFiles, $hasRuntimeOverride);
         $manifestPath = $workspace . '/manifest.json';
         file_put_contents(
             $manifestPath,
@@ -175,17 +205,21 @@ final class BackupService
 
     public function buildManifest(array $databaseFiles, array $uploadFiles, bool $hasRuntimeOverride): array
     {
+        $redactedFields = $this->manifestRedactedFields($databaseFiles);
+        $retainedSensitiveFields = $this->retainedSensitiveFields();
+
         return [
             'backup_version' => self::BACKUP_VERSION,
             'created_at' => (new \DateTimeImmutable())->format(DATE_ATOM),
             'schema_version' => $this->schemaVersion(),
             'database' => [
                 'tables' => array_map(
-                    static fn (array $file): array => [
+                    fn (array $file): array => [
                         'table' => (string) ($file['table'] ?? ''),
                         'filename' => (string) ($file['filename'] ?? ''),
                         'rows' => (int) ($file['rows'] ?? 0),
                         'size_bytes' => (int) ($file['size_bytes'] ?? 0),
+                        'redacted_fields' => $this->tableRedactionManifest($file['redacted_fields'] ?? []),
                     ],
                     $databaseFiles
                 ),
@@ -195,7 +229,20 @@ final class BackupService
                 'size_bytes' => array_sum(array_map(static fn (array $file): int => (int) ($file['size_bytes'] ?? 0), $uploadFiles)),
             ],
             'runtime' => [
-                'database_override_included' => $hasRuntimeOverride,
+                'database_override_detected' => $hasRuntimeOverride,
+                'database_override_included' => false,
+                'database_override_policy' => $hasRuntimeOverride ? 'excluded_sensitive_runtime_config' : 'not_present',
+            ],
+            'security' => [
+                'runtime_secret_policy' => 'exclude_runtime_overrides',
+                'database_secret_fields' => $this->secretFieldPolicies(),
+                'retained_sensitive_database_fields' => $retainedSensitiveFields,
+                'redacted_database_fields' => $redactedFields,
+                'warnings' => array_values(array_filter([
+                    $hasRuntimeOverride ? self::RUNTIME_OVERRIDE_EXCLUDED_WARNING : null,
+                    $retainedSensitiveFields !== [] ? self::RETAINED_SENSITIVE_FIELDS_WARNING : null,
+                    $redactedFields !== [] ? self::REDACTED_FIELDS_WARNING : null,
+                ])),
             ],
             'compatibility' => [
                 'import_apply_supported' => false,
@@ -206,24 +253,7 @@ final class BackupService
 
     private function applicationTables(): array
     {
-        if (!$this->connection->isAvailable()) {
-            return [];
-        }
-
-        $rows = $this->connection->fetchAll(
-            'SELECT table_name
-             FROM information_schema.tables
-             WHERE table_schema = DATABASE()
-               AND table_type = "BASE TABLE"
-             ORDER BY table_name ASC'
-        );
-
-        return array_values(
-            array_filter(
-                array_map(static fn (array $row): string => (string) ($row['table_name'] ?? ''), $rows),
-                static fn (string $table): bool => $table !== ''
-            )
-        );
+        return $this->databaseSource->applicationTables();
     }
 
     private function collectFiles(string $root, string $prefix): array
@@ -316,18 +346,23 @@ final class BackupService
         $uploadFiles = $this->uploadEntries($archiveEntries);
         $this->validateUploadManifest($manifest['uploads'], $uploadFiles);
         $runtimeFiles = $this->runtimeEntries($archiveEntries);
-        $this->validateRuntimeEntries($runtimeFiles);
+        $this->validateRuntimeEntries($runtimeFiles, $manifest['runtime']);
+        $securityWarnings = $this->knownSecurityWarnings($manifest['security']['warnings'] ?? []);
 
         return [
             'database_files' => $databaseFiles,
             'upload_files' => $uploadFiles,
             'runtime_files' => $runtimeFiles,
-            'warnings' => array_values(array_filter([
+            'warnings' => array_values(array_unique(array_filter([
+                ...$securityWarnings,
+                ($manifest['runtime']['database_override_detected'] ?? false) && !($manifest['runtime']['database_override_included'] ?? false)
+                    ? self::RUNTIME_OVERRIDE_EXCLUDED_WARNING
+                    : null,
                 ($manifest['runtime']['database_override_included'] ?? false)
-                    ? 'runtime/database.override.php ist enthalten, wird aber im Validate-Dry-Run nicht angewendet.'
+                    ? 'runtime/database.override.php ist in diesem aelteren Backup enthalten, wird aber im Validate-Dry-Run nicht angewendet.'
                     : null,
                 'Restore-Apply ist nicht implementiert; dieser Endpunkt validiert nur.',
-            ])),
+            ]))),
         ];
     }
 
@@ -428,12 +463,26 @@ final class BackupService
         }
     }
 
-    private function validateRuntimeEntries(array $runtimeFiles): void
+    private function validateRuntimeEntries(array $runtimeFiles, array $runtimeManifest): void
     {
         foreach ($runtimeFiles as $runtimeFile) {
             if ($runtimeFile !== 'runtime/database.override.php') {
                 throw new RuntimeException('Unbekannte Runtime-Datei im Backup: ' . $runtimeFile);
             }
+        }
+
+        $overrideIncluded = $runtimeManifest['database_override_included'] ?? false;
+
+        if (!is_bool($overrideIncluded)) {
+            throw new RuntimeException('Im Backup-Manifest ist runtime.database_override_included ungueltig.');
+        }
+
+        if ($runtimeFiles !== [] && !$overrideIncluded) {
+            throw new RuntimeException('Das Backup enthaelt Runtime-Dateien, die nicht im Manifest freigegeben sind.');
+        }
+
+        if ($runtimeFiles === [] && $overrideIncluded) {
+            throw new RuntimeException('Das Backup-Manifest meldet eine Runtime-Override-Datei, aber sie fehlt im Archiv.');
         }
     }
 
@@ -488,6 +537,140 @@ final class BackupService
                 throw new RuntimeException('Unsicherer Pfad im Backup-Archiv: ' . $path);
             }
         }
+    }
+
+    private function sanitizeDatabaseRows(string $table, array $rows): array
+    {
+        $policies = self::SECRET_FIELD_POLICIES[$table] ?? [];
+        $redactions = [];
+
+        if ($policies === []) {
+            return ['rows' => $rows, 'redactions' => []];
+        }
+
+        foreach ($rows as &$row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            foreach ($policies as $field => $policy) {
+                if (!array_key_exists($field, $row) || $row[$field] === null || (string) $row[$field] === '') {
+                    continue;
+                }
+
+                if ($this->shouldRedactDatabaseValue($policy, (string) $row[$field])) {
+                    $row[$field] = self::REDACTED_SECRET;
+                    $redactions[$field] = ($redactions[$field] ?? 0) + 1;
+                }
+            }
+        }
+        unset($row);
+
+        return ['rows' => $rows, 'redactions' => $redactions];
+    }
+
+    private function shouldRedactDatabaseValue(string $policy, string $value): bool
+    {
+        return match ($policy) {
+            'keep-encrypted-redact-legacy-cleartext' => !str_starts_with($value, 'enc:v1:'),
+            'retain-sensitive' => false,
+            'redact' => true,
+            default => true,
+        };
+    }
+
+    private function manifestRedactedFields(array $databaseFiles): array
+    {
+        $fields = [];
+
+        foreach ($databaseFiles as $file) {
+            foreach ($this->tableRedactionManifest($file['redacted_fields'] ?? []) as $field) {
+                $fields[] = [
+                    'table' => (string) ($file['table'] ?? ''),
+                    ...$field,
+                ];
+            }
+        }
+
+        return $fields;
+    }
+
+    private function tableRedactionManifest(mixed $redactions): array
+    {
+        if (!is_array($redactions)) {
+            return [];
+        }
+
+        $fields = [];
+
+        foreach ($redactions as $field => $count) {
+            if ((int) $count <= 0) {
+                continue;
+            }
+
+            $fields[] = [
+                'field' => (string) $field,
+                'rows' => (int) $count,
+            ];
+        }
+
+        return $fields;
+    }
+
+    private function secretFieldPolicies(): array
+    {
+        $fields = [];
+
+        foreach (self::SECRET_FIELD_POLICIES as $table => $policies) {
+            foreach ($policies as $field => $policy) {
+                $fields[] = [
+                    'table' => $table,
+                    'field' => $field,
+                    'policy' => $policy,
+                ];
+            }
+        }
+
+        return $fields;
+    }
+
+    private function retainedSensitiveFields(): array
+    {
+        $fields = [];
+
+        foreach (self::SECRET_FIELD_POLICIES as $table => $policies) {
+            foreach ($policies as $field => $policy) {
+                if ($policy !== 'retain-sensitive') {
+                    continue;
+                }
+
+                $fields[] = [
+                    'table' => $table,
+                    'field' => $field,
+                    'policy' => $policy,
+                ];
+            }
+        }
+
+        return $fields;
+    }
+
+    private function knownSecurityWarnings(mixed $warnings): array
+    {
+        if (!is_array($warnings)) {
+            return [];
+        }
+
+        $allowed = [
+            self::RUNTIME_OVERRIDE_EXCLUDED_WARNING,
+            self::RETAINED_SENSITIVE_FIELDS_WARNING,
+            self::REDACTED_FIELDS_WARNING,
+        ];
+
+        return array_values(array_filter(
+            $warnings,
+            static fn (mixed $warning): bool => is_string($warning) && in_array($warning, $allowed, true)
+        ));
     }
 
     private function ensureDirectory(string $path): void

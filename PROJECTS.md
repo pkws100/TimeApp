@@ -6,7 +6,7 @@ Erledigte Implementierungsdetails werden hier nicht als Historie gepflegt; die
 aktuelle Wahrheit liegt im Code, in Tests und in der Git-Historie.
 
 ## Prioritaeten
-- Secret-Haertung fuer weitere sensible Settings pruefen und bei Bedarf auf das bestehende Settings-Secret-Konzept erweitern.
+- Secret-Haertung regelmaessig nachziehen, wenn neue Settings, Tokens oder anderes Credential-Material dauerhaft in MariaDB gespeichert werden; App-Backups redigieren bekannte Legacy-Klartext-Secrets, klassifizieren retained sensitive Fields und schliessen Runtime-DB-Overrides aus.
 - Restore-Apply als separaten produktiven Auftrag konzipieren und bauen: explizites Admin-Gate, Dry-Run-Protokoll, Wartungsmodus, Rollback-Konzept und klare Freigabe.
 - Monatsberichte mit produktionsreifem mPDF-Layout und finalen Excel-Templates ausbauen.
 - Versionshistorie und Archivierungsstrategie fuer Settings-Dateien wie Logo, AGB-PDF und Datenschutz-PDF vervollstaendigen.

@@ -102,8 +102,9 @@ HTML;
 
     public function databaseSettings(Request $request): Response
     {
-        $settings = $this->databaseSettingsManager->current();
-        $status = (new DatabaseConnection($settings))->statusSummary();
+        $connectionSettings = $this->databaseSettingsManager->current();
+        $settings = $this->databaseSettingsManager->currentForOutput();
+        $status = (new DatabaseConnection($connectionSettings))->statusSummary();
         $badgeClass = $status['connected'] ? 'ok' : 'warn';
         $notice = $this->databaseNotice($request);
         $settingsTabs = $this->settingsTabs('database');
@@ -145,7 +146,7 @@ HTML;
     <label><span>Port</span><input name="port" type="number" value="{$this->escape((string) ($settings['port'] ?? 3306))}" required></label>
     <label><span>Datenbank</span><input name="database" value="{$this->escape($settings['database'] ?? '')}" required></label>
     <label><span>Benutzer</span><input name="username" value="{$this->escape($settings['username'] ?? '')}" required></label>
-    <label><span>Passwort</span><input name="password" type="password" value="{$this->escape($settings['password'] ?? '')}"></label>
+    <label><span>Passwort</span><input name="password" type="password" value="" placeholder="{$this->escape(($settings['password_is_set'] ?? false) ? 'Gespeichert - leer lassen zum Beibehalten' : '')}" autocomplete="off"></label>
     <label><span>Socket</span><input name="socket" value="{$this->escape($settings['socket'] ?? '')}"></label>
     <label><span>Charset</span><input name="charset" value="{$this->escape($settings['charset'] ?? 'utf8mb4')}"></label>
     <label><span>Collation</span><input name="collation" value="{$this->escape($settings['collation'] ?? 'utf8mb4_unicode_ci')}"></label>

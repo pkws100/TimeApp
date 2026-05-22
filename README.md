@@ -131,13 +131,13 @@ Details stehen in `DEPLOY.md`. Wiederkehrende Updates laufen ueber
 `bin/deploy-prod-check.sh`.
 
 ## Backup und Restore-Status
-- `GET /api/v1/system/backup/export` erstellt ein ZIP mit Manifest, Datenbank-JSON, Upload-Kandidaten und optionalem Runtime-Hinweis.
+- `GET /api/v1/system/backup/export` erstellt ein ZIP mit Manifest, Datenbank-JSON, Upload-Kandidaten und Security-/Runtime-Hinweisen.
 - `POST /api/v1/system/backup/import/validate` validiert ein hochgeladenes Backup als Dry-Run.
 - Der Validate-Endpunkt prueft Manifest, `backup_version`, `schema_version`, deklarierte Tabellen-JSON-Dateien und unsichere Archivpfade.
 - Es gibt bewusst noch keinen produktiven Restore-Apply. Ein Upload fuehrt niemals automatisch einen Restore aus.
-- Runtime-Overrides wie `storage/config/database.override.php` werden im Restore-Plan nur erkannt und nicht ungefragt zurueckgespielt.
+- Runtime-Overrides wie `storage/config/database.override.php` werden aus App-Backup-ZIPs ausgeschlossen und nur im Manifest als Hinweis gefuehrt.
 - Backup- und Restore-Validierung sind mit `settings.database.manage` geschuetzt.
-- Verschluesselte Settings-Secrets wie SMTP-Passwoerter bleiben im Backup verschluesselt; der passende `.env`-Key wird nicht im Backup mitgeliefert. Nach einem Upgrade mit altem Klartext-SMTP-Passwort die SMTP-Settings einmal mit gesetztem Key speichern, bevor ein Backup erstellt wird.
+- Verschluesselte Settings-Secrets wie SMTP-Passwoerter bleiben im Backup verschluesselt; Legacy-Klartextwerte werden redigiert und im Manifest unter `security.redacted_database_fields` ausgewiesen. Passwort-Hashes und Push-Subscription-Daten bleiben fuer einen spaeteren Restore erhalten, werden aber unter `security.retained_sensitive_database_fields` klassifiziert. Der passende `.env`-Key wird nicht im Backup mitgeliefert. Nach einem Upgrade mit altem Klartext-SMTP-Passwort die SMTP-Settings einmal mit gesetztem Key speichern, bevor ein Backup erstellt wird.
 
 ## Geschuetzte Settings-Dateien
 - Firmenlogo wird weiterhin ueber den bestehenden oeffentlichen Logo-Endpunkt fuer Branding ausgeliefert.
@@ -187,9 +187,11 @@ vendor/bin/phinx seed:run -c phinx.php -s DemoDataSeeder
 - `APP_SECRET` muss in Produktion auf einen langen Zufallswert gesetzt werden.
 - Optional kann `SETTINGS_ENCRYPTION_KEY` als dedizierter Key fuer verschluesselte Settings-Secrets gesetzt werden; wenn er leer ist, wird `APP_SECRET` verwendet.
 - SMTP-Passwoerter werden in `company_settings.smtp_password` verschluesselt gespeichert und im Admin nie als Klartext ausgegeben. Das Passwortfeld leer lassen, um ein bestehendes Secret beizubehalten; ein neuer Wert ersetzt es verschluesselt. Bestehende Klartextwerte aus frueheren Versionen werden beim naechsten gezielten SMTP-Speichern verschluesselt.
-- Backups enthalten den jeweils gespeicherten SMTP-Wert. Fuer neue bzw. erneut gespeicherte SMTP-Settings ist das der verschluesselte Wert; der passende `APP_SECRET` bzw. `SETTINGS_ENCRYPTION_KEY` muss getrennt und sicher aufbewahrt werden, sonst kann ein wiederhergestelltes SMTP-Secret nicht genutzt werden.
+- Backups enthalten verschluesselte `enc:v1`-SMTP-Werte sowie betriebsnotwendige sensible Werte wie Passwort-Hashes und Push-Subscription-Daten. Legacy-Klartextwerte werden beim Backup-Export redigiert; der passende `APP_SECRET` bzw. `SETTINGS_ENCRYPTION_KEY` muss getrennt und sicher aufbewahrt werden, sonst kann ein wiederhergestelltes SMTP-Secret nicht genutzt werden.
 - Die aktive DB-Override-Datei kann lokale Verbindungsdaten enthalten:
   `storage/config/database.override.php`
+- Diese DB-Override-Datei wird nicht in App-Backup-ZIPs aufgenommen und muss,
+  falls fuer den Betrieb noetig, getrennt gesichert werden.
 - Vor einer Veroeffentlichung muessen `.env`, Datenbank-Dumps, Uploads,
   Session-Dateien und sonstige Runtime-Daten ausserhalb des Git-Repos bleiben.
 

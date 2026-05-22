@@ -24,6 +24,11 @@ final class DatabaseSettingsManager
         return [...$this->defaults, ...$override];
     }
 
+    public function currentForOutput(): array
+    {
+        return $this->sanitizeForOutput($this->current());
+    }
+
     public function save(array $payload): array
     {
         $sanitized = $this->sanitize($payload);
@@ -39,12 +44,22 @@ final class DatabaseSettingsManager
         return $sanitized;
     }
 
+    public function saveForOutput(array $payload): array
+    {
+        return $this->sanitizeForOutput($this->save($payload));
+    }
+
     public function sanitize(array $payload): array
     {
         $data = [];
+        $current = $this->current();
 
         foreach (self::ALLOWED_KEYS as $key) {
             $data[$key] = trim((string) ($payload[$key] ?? $this->defaults[$key] ?? ''));
+        }
+
+        if (($payload['password'] ?? '') === '') {
+            $data['password'] = trim((string) ($current['password'] ?? ''));
         }
 
         $data['port'] = (int) ($data['port'] !== '' ? $data['port'] : 3306);
@@ -56,5 +71,12 @@ final class DatabaseSettingsManager
     {
         return $this->overrideFile;
     }
-}
 
+    private function sanitizeForOutput(array $settings): array
+    {
+        $settings['password_is_set'] = trim((string) ($settings['password'] ?? '')) !== '';
+        $settings['password'] = '';
+
+        return $settings;
+    }
+}

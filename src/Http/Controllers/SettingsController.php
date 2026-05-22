@@ -17,7 +17,7 @@ final class SettingsController
 
     public function show(Request $request): Response
     {
-        return Response::json(['data' => $this->databaseSettingsManager->current()]);
+        return Response::json(['data' => $this->databaseSettingsManager->currentForOutput()]);
     }
 
     public function store(Request $request): Response
@@ -30,7 +30,7 @@ final class SettingsController
             return Response::json(['error' => $result['message']], 422);
         }
 
-        $saved = $this->databaseSettingsManager->save($sanitized);
+        $saved = $this->databaseSettingsManager->saveForOutput($sanitized);
 
         return Response::json([
             'message' => 'Datenbankverbindung erfolgreich gespeichert.',
