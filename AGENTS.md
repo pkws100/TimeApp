@@ -315,9 +315,8 @@ Beim Implementieren:
 Beim Aendern von Dokumentation:
 
 - `AGENTS.md` ist die erste Orientierung
-- `PROJECTS.md` beschreibt Umsetzungsstand und offene Folgearbeiten
+- `PROJECTS.md` beschreibt nur noch offene Folgearbeiten
 - `DATABASE.md` beschreibt das Zielbild und die fachlichen DB-Leitlinien
-- `DATABSE.md` ist nur noch ein Hinweis auf `DATABASE.md`
 
 ## 15. Was Agents nicht tun sollen
 - keine alten Planungsannahmen gegen den aktuellen Code durchsetzen
@@ -330,13 +329,13 @@ Beim Aendern von Dokumentation:
 
 ## 16. Offene Prioritaeten
 Die naechsten wahrscheinlichen Arbeitsbereiche sind:
+Die vollstaendige offene Aufgabenliste steht in `PROJECTS.md`.
 
-- Authentifizierung, Sessions und Rechtemiddleware
 - Secret-Haertung fuer weitere sensible Settings
-- Download und Vorschau fuer hochgeladene Dateien
-- produktionsreife Exportlayouts
 - Restore-Apply-Konzept nach bestehendem Validate-Dry-Run
-- tiefere Offline-Sync-Konfliktbehandlung
+- produktionsreife Exportlayouts
+- Versionshistorie und Archivierungsstrategie fuer Settings-Dateien
+- tiefere Offline-Sync-Konfliktbehandlung und vollstaendige Offline-Datei-Upload-Queue
 - spaetere GEO-Auswertung und Datenschutzfinalisierung
 
 ## 17. Kurzfazit fuer neue Laeufe
@@ -346,4 +345,4 @@ Wenn ein neuer Agentenlauf startet, gilt:
 - Settings, Theme, CRUD, Uploads, Push, GEO-Erfassung, Historie und DB-/Admin-Basis existieren schon.
 - Der naechste grosse Schritt ist nicht mehr das Grundgeruest, sondern sichere Haertung, Restore-Konzept, Exportreife und kontrollierter Ausbau.
 - Vor jeder neuen Umsetzung muessen `AGENTS.md`, `PROJECTS.md`, `DATABASE.md` und `bootstrap/app.php` gemeinsam gegen den aktuellen Stand gelesen werden.
-- Nach Beendigung einer Arbeitsanweisung, einen Ui-Agent sowie einen Workflow-Agent und einen Code-Review der Änderungen laufen lassen. Findigs oder Probleme bitte direkt Fixen/beheben.
+- Nach Beendigung einer Arbeitsanweisung, einen Ui-Agent sowie einen Workflow-Agent und einen Code-Review der Änderungen laufen lassen. Findings oder Probleme bitte direkt Fixen/beheben.

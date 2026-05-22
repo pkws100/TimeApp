@@ -218,5 +218,5 @@ COMPOSER_ALLOW_SUPERUSER=1 composer test
 
 ## Dokumentation im Projekt
 - Agenten-Leitfaden: `AGENTS.md`
-- Projektstand und offene Punkte: `PROJECTS.md`
+- Offene Folgearbeiten: `PROJECTS.md`
 - Datenbank-Zielbild: `DATABASE.md`
