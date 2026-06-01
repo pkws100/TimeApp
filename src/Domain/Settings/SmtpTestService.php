@@ -69,11 +69,12 @@ final class SmtpTestService
 
             $subject = 'SMTP Test aus Baustellen-Zeiterfassung';
             $bodyLines = array_filter([
-                'From: ' . ($fromName !== '' ? $fromName . ' ' : '') . '<' . $fromEmail . '>',
-                'To: <' . $recipient . '>',
-                $replyTo !== '' ? 'Reply-To: <' . $replyTo . '>' : null,
+                'From: ' . $this->mailboxHeader($fromEmail, $fromName),
+                'To: ' . $this->mailboxHeader($recipient),
+                $replyTo !== '' ? 'Reply-To: ' . $this->mailboxHeader($replyTo) : null,
                 'Subject: ' . $subject,
                 'Date: ' . gmdate(DATE_RFC2822),
+                'MIME-Version: 1.0',
                 'Content-Type: text/plain; charset=UTF-8',
                 '',
                 'Dies ist eine Test-E-Mail aus dem Settings-Bereich der Baustellen-Zeiterfassung.',
@@ -150,5 +151,33 @@ final class SmtpTestService
         }
 
         return $response;
+    }
+
+    private function mailboxHeader(string $email, string $displayName = ''): string
+    {
+        $email = trim($email);
+        $displayName = $this->sanitizeDisplayName($displayName);
+
+        if ($displayName === '' || strcasecmp($displayName, $email) === 0) {
+            return '<' . $email . '>';
+        }
+
+        return $this->encodeDisplayName($displayName) . ' <' . $email . '>';
+    }
+
+    private function encodeDisplayName(string $displayName): string
+    {
+        if (preg_match('/[^\x20-\x7E]/', $displayName) === 1 && function_exists('mb_encode_mimeheader')) {
+            return mb_encode_mimeheader($displayName, 'UTF-8', 'B', "\r\n");
+        }
+
+        return '"' . addcslashes($displayName, "\\\"") . '"';
+    }
+
+    private function sanitizeDisplayName(string $displayName): string
+    {
+        $displayName = preg_replace('/[\x00-\x1F\x7F]+/', ' ', $displayName) ?? '';
+
+        return trim(preg_replace('/\s+/', ' ', $displayName) ?? '');
     }
 }
