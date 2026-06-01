@@ -104,6 +104,26 @@ final class AccountingClosureDatabaseTest extends TestCase
         });
     }
 
+    public function testArchivedBookingCannotBeRestoredIntoClosedAccountingPeriod(): void
+    {
+        $this->withScratchDatabase(function (DatabaseConnection $connection): void {
+            $ids = $this->seedValidBooking($connection);
+            $bookingService = new AdminBookingService($connection, new TimesheetCalculator());
+            $service = new AccountingClosureService($connection, $bookingService);
+            $service->createClosure(['type' => 'month', 'period' => '2026-05'], (int) $ids['user_id']);
+
+            $connection->execute(
+                'INSERT INTO timesheets (user_id, project_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes, entry_type, source, note, updated_at, is_deleted, deleted_at)
+                 VALUES (:user_id, :project_id, "2026-05-21", "07:00:00", "12:00:00", 300, 0, 300, "work", "admin", "Archivierter Nachtrag", NOW(), 1, NOW())',
+                ['user_id' => $ids['user_id'], 'project_id' => $ids['project_id']]
+            );
+            $archivedTimesheetId = $connection->lastInsertId();
+
+            $this->expectException(InvalidArgumentException::class);
+            $bookingService->restore($archivedTimesheetId, (int) $ids['user_id'], 'Wiederherstellung nach Abschluss');
+        });
+    }
+
     /**
      * @param callable(DatabaseConnection): void $callback
      */

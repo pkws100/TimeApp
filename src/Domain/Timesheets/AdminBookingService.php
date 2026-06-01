@@ -480,6 +480,11 @@ final class AdminBookingService
 
         $this->withAccountingWriteLock(function () use ($id, $archived, $changedByUserId, $reason, $before): void {
             $this->assertNotLockedByAccountingClosure($id);
+            $this->assertAccountingPeriodOpen(
+                (int) ($before['user_id'] ?? 0),
+                isset($before['project_id']) ? (int) $before['project_id'] : null,
+                (string) ($before['work_date'] ?? '')
+            );
 
             $this->connection->transaction(function () use ($id, $archived, $changedByUserId, $reason, $before): void {
                 $this->connection->execute(
