@@ -38,6 +38,7 @@ final class AppPushController
             'data' => [
                 'enabled' => (bool) $settings['enabled'],
                 'can_subscribe' => $canReceive && (bool) $settings['enabled'] && (bool) $settings['vapid_configured'],
+                'role_can_receive' => $canReceive,
                 'permission_required' => !$canReceive,
                 'vapid_configured' => (bool) $settings['vapid_configured'],
                 'vapid_public_key' => $canReceive ? (string) $settings['vapid_public_key'] : '',

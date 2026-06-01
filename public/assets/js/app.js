@@ -2725,18 +2725,30 @@
     function pushProfileSection() {
         const support = pushSupport();
         const push = state.push || {};
+        const pushLoaded = state.push !== null && !push.status_unavailable;
+        const pushUnavailable = state.push !== null && push.status_unavailable === true;
         const devices = Array.isArray(push.devices) ? push.devices : [];
         const hasActiveDevice = devices.some((device) => device && device.is_enabled);
         const permission = support.notification ? Notification.permission : 'unsupported';
         const permissionLabel = permission === 'granted'
             ? 'erlaubt'
             : (permission === 'denied' ? 'blockiert' : 'offen');
+        const statusLabel = pushLoaded
+            ? (push.enabled ? 'Global aktiv' : 'Global deaktiviert')
+            : (state.pushLoading ? 'Wird geladen' : 'Unbekannt');
+        const roleLabel = pushLoaded
+            ? (push.role_can_receive || push.can_subscribe ? 'Fuer Ihre Rolle freigegeben' : 'Nicht fuer Ihre Rolle freigegeben')
+            : (pushUnavailable ? 'Status konnte nicht geladen werden' : 'Noch nicht geprueft');
+        const configurationLabel = pushLoaded
+            ? (!push.enabled ? 'Global deaktiviert' : (push.vapid_configured ? 'Server bereit' : 'Server-Push noch nicht konfiguriert'))
+            : (pushUnavailable ? 'Status konnte nicht geladen werden' : 'Noch nicht geprueft');
         const statusRows = appInfoRows([
-            { label: 'Status', value: push.enabled ? 'Global aktiv' : 'Global deaktiviert' },
-            { label: 'Freigabe', value: push.can_subscribe ? 'Fuer Ihre Rolle freigegeben' : (push.permission_required ? 'Nicht fuer Ihre Rolle freigegeben' : 'Aktuell nicht verfuegbar') },
+            { label: 'Status', value: statusLabel },
+            { label: 'Freigabe', value: roleLabel },
+            { label: 'Konfiguration', value: configurationLabel },
             { label: 'Browser', value: support.supported ? 'unterstuetzt' : 'nicht unterstuetzt' },
             { label: 'Berechtigung', value: permissionLabel },
-            { label: 'Erinnerung', value: push.reminder_time ? 'taeglich ab ' + push.reminder_time + ' Uhr' : null }
+            { label: 'Erinnerung', value: pushLoaded && push.reminder_time ? 'taeglich ab ' + push.reminder_time + ' Uhr' : null }
         ]);
         const enableButton = support.supported && push.can_subscribe && permission !== 'denied'
             ? '<button type="button" id="enablePushButton" ' + (state.pushBusy ? 'disabled' : '') + '>' + escapeHtml(state.pushBusy ? 'Wird aktiviert ...' : 'Push aktivieren') + '</button>'
@@ -2747,7 +2759,9 @@
         const testButton = state.online && support.supported && push.can_subscribe && permission === 'granted' && hasActiveDevice
             ? '<button type="button" id="testPushButton" ' + (state.pushBusy ? 'disabled' : '') + '>' + escapeHtml(state.pushBusy ? 'Wird gesendet ...' : 'Push testen') + '</button>'
             : '';
-        const deviceMarkup = devices.length > 0
+        const deviceMarkup = !pushLoaded
+            ? '<div class="app-empty">' + escapeHtml(state.pushLoading ? 'Push-Status wird geladen.' : 'Push-Status ist noch nicht verfuegbar. Bitte Status aktualisieren.') + '</div>'
+            : (devices.length > 0
             ? '<div class="app-info-list">' + devices.map((device) => {
                 const status = device.is_enabled ? 'aktiv' : 'inaktiv';
                 const disableButton = device.is_enabled
@@ -2761,12 +2775,14 @@
                     + disableButton
                     + '</div>';
             }).join('') + '</div>'
-            : '<div class="app-empty">Noch kein Geraet fuer Push aktiviert.</div>';
+            : '<div class="app-empty">Noch kein Geraet fuer Push aktiviert.</div>');
         const deniedHint = permission === 'denied'
             ? '<div class="app-empty">Benachrichtigungen sind im Browser blockiert. Bitte die Browser-Einstellung pruefen.</div>'
             : '';
         const unsupportedHint = !support.supported
-            ? '<div class="app-empty">Dieser Browser unterstuetzt Push-Benachrichtigungen hier nicht.</div>'
+            ? '<div class="app-empty">' + escapeHtml(isIosDevice() && !isStandaloneApp()
+                ? 'Auf iPhone oder iPad Push erst nach Installation ueber Teilen und Zum Home-Bildschirm nutzen.'
+                : 'Dieser Browser unterstuetzt Push-Benachrichtigungen hier nicht.') + '</div>'
             : '';
 
         return '<section class="app-card app-grid">'
@@ -3718,6 +3734,8 @@
             if (isSessionExpiredError(error)) {
                 return;
             }
+
+            state.push = { status_unavailable: true };
 
             if (showErrors) {
                 showFeedback('error', friendlyMessage(error.message, 'Push-Status konnte nicht geladen werden.'));
