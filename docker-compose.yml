@@ -50,7 +50,7 @@ services:
       SESSION_LIFETIME: ${SESSION_LIFETIME:-7200}
       UPLOAD_DISK: ${UPLOAD_DISK:-local}
       UPLOAD_ROOT: ${UPLOAD_ROOT:-storage/app/uploads}
-      UPLOAD_MAX_FILESIZE: ${UPLOAD_MAX_FILESIZE:-10485760}
+      UPLOAD_MAX_FILESIZE: ${UPLOAD_MAX_FILESIZE:-33554432}
       EXPORT_TEMP_PATH: ${EXPORT_TEMP_PATH:-storage/cache/exports}
     volumes:
       - storage_data:/var/www/html/storage

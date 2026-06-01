@@ -17,6 +17,7 @@ use App\Domain\Users\RoleService;
 use App\Domain\Users\UserService;
 use App\Http\Request;
 use App\Http\Response;
+use App\Http\UploadSizeGuard;
 use App\Presentation\Admin\AdminView;
 use App\Presentation\Admin\BookingModalRenderer;
 use InvalidArgumentException;
@@ -97,7 +98,9 @@ final class AdminManagementController
         $files = $this->fileAttachmentService->listForProject((int) $project['id'], 'all');
         $bookings = [];
         $allProjects = [];
-        $activeUsers = [];
+        $activeUsers = $this->activeAssignableUsers();
+        $bookingUsers = [];
+        $membershipUserIds = $this->projectService->membershipUserIds((int) $project['id']);
 
         if ($this->authService->hasPermission('timesheets.view')) {
             $bookingFilters = $this->bookingService->normalizeFilters($request->query(), (int) $project['id']);
@@ -105,12 +108,13 @@ final class AdminManagementController
             $allProjects = $this->projectService->list('all');
 
             if ($this->authService->hasPermission('timesheets.manage')) {
-                $activeUsers = $this->userService->list('active');
+                $bookingUsers = $activeUsers;
             }
         }
 
         $content = $this->renderProjectForm('/admin/projects/' . (int) $project['id'], 'Projekt bearbeiten', $project)
-            . $this->renderProjectBookingsSection($project, $bookings, $allProjects, $activeUsers, $request)
+            . $this->renderProjectMembershipSection($project, $activeUsers, $membershipUserIds)
+            . $this->renderProjectBookingsSection($project, $bookings, $allProjects, $bookingUsers, $request)
             . $this->renderAttachmentSection('Projektanhaenge', '/admin/projects/' . (int) $project['id'] . '/files', $files, 'project');
 
         return Response::html($this->view->render('Projekt bearbeiten', $content));
@@ -128,6 +132,25 @@ final class AdminManagementController
         $this->projectService->update((int) $params['id'], $request->input());
 
         return Response::redirect('/admin/projects/' . (int) $params['id'] . '/edit?notice=updated');
+    }
+
+    public function projectMembershipUpdate(Request $request, array $params): Response
+    {
+        $projectId = (int) ($params['id'] ?? 0);
+        $returnTo = '/admin/projects/' . $projectId . '/edit';
+        $project = $this->projectService->find($projectId);
+
+        if ($project === null) {
+            return Response::html($this->notFoundMarkup('Projekt'), 404);
+        }
+
+        if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+            return Response::redirect($returnTo . '?error=csrf');
+        }
+
+        $this->projectService->syncMemberships($projectId, $request->input('user_ids', []));
+
+        return Response::redirect($returnTo . '?notice=memberships-updated');
     }
 
     public function projectArchive(Request $request, array $params): Response
@@ -168,14 +191,18 @@ final class AdminManagementController
             $file = $request->files()['file'] ?? null;
 
             if (!is_array($file)) {
+                if (UploadSizeGuard::exceedsPostMaxSize($request)) {
+                    return Response::redirect('/admin/projects/' . (int) $params['id'] . '/edit?error=file-upload&error_detail=' . rawurlencode(UploadSizeGuard::message()));
+                }
+
                 return Response::redirect('/admin/projects/' . (int) $params['id'] . '/edit?error=no-file');
             }
 
             $this->fileAttachmentService->storeProject($file, (int) $params['id']);
 
             return Response::redirect('/admin/projects/' . (int) $params['id'] . '/edit?notice=file-uploaded');
-        } catch (RuntimeException) {
-            return Response::redirect('/admin/projects/' . (int) $params['id'] . '/edit?error=file-upload');
+        } catch (RuntimeException $exception) {
+            return Response::redirect('/admin/projects/' . (int) $params['id'] . '/edit?error=file-upload&error_detail=' . rawurlencode($exception->getMessage()));
         }
     }
 
@@ -300,14 +327,18 @@ final class AdminManagementController
             $file = $request->files()['file'] ?? null;
 
             if (!is_array($file)) {
+                if (UploadSizeGuard::exceedsPostMaxSize($request)) {
+                    return Response::redirect('/admin/assets/' . (int) $params['id'] . '/edit?error=file-upload&error_detail=' . rawurlencode(UploadSizeGuard::message()));
+                }
+
                 return Response::redirect('/admin/assets/' . (int) $params['id'] . '/edit?error=no-file');
             }
 
             $this->fileAttachmentService->storeAsset($file, (int) $params['id']);
 
             return Response::redirect('/admin/assets/' . (int) $params['id'] . '/edit?notice=file-uploaded');
-        } catch (RuntimeException) {
-            return Response::redirect('/admin/assets/' . (int) $params['id'] . '/edit?error=file-upload');
+        } catch (RuntimeException $exception) {
+            return Response::redirect('/admin/assets/' . (int) $params['id'] . '/edit?error=file-upload&error_detail=' . rawurlencode($exception->getMessage()));
         }
     }
 
@@ -713,6 +744,87 @@ HTML;
 HTML;
     }
 
+    private function renderProjectMembershipSection(array $project, array $users, array $membershipUserIds): string
+    {
+        $projectId = (int) ($project['id'] ?? 0);
+        $csrfToken = $this->csrfService->token();
+        $membershipUserIds = array_map(static fn (mixed $value): int => (int) $value, $membershipUserIds);
+        $checkboxes = '';
+        $users = array_values(array_filter($users, static function (array $user): bool {
+            return ($user['employment_status'] ?? 'active') === 'active'
+                && (int) ($user['is_deleted'] ?? 0) === 0;
+        }));
+
+        usort($users, static function (array $left, array $right) use ($membershipUserIds): int {
+            $leftSelected = in_array((int) ($left['id'] ?? 0), $membershipUserIds, true) ? 0 : 1;
+            $rightSelected = in_array((int) ($right['id'] ?? 0), $membershipUserIds, true) ? 0 : 1;
+
+            if ($leftSelected !== $rightSelected) {
+                return $leftSelected <=> $rightSelected;
+            }
+
+            return strcasecmp(
+                trim((string) ($left['last_name'] ?? '') . ' ' . (string) ($left['first_name'] ?? '')),
+                trim((string) ($right['last_name'] ?? '') . ' ' . (string) ($right['first_name'] ?? ''))
+            );
+        });
+
+        foreach ($users as $user) {
+            $userId = (int) ($user['id'] ?? 0);
+
+            if ($userId <= 0) {
+                continue;
+            }
+
+            $displayName = trim(((string) ($user['first_name'] ?? '')) . ' ' . ((string) ($user['last_name'] ?? '')));
+            $label = $displayName !== '' ? $displayName : (string) ($user['email'] ?? ('User #' . $userId));
+            $employeeNumber = trim((string) ($user['employee_number'] ?? ''));
+            $roles = trim((string) ($user['role_names'] ?? ''));
+            $details = [];
+
+            if ($employeeNumber !== '') {
+                $details[] = $employeeNumber;
+            }
+
+            $details[] = $roles !== '' ? $roles : 'Keine Rolle';
+
+            $checked = in_array($userId, $membershipUserIds, true) ? 'checked' : '';
+            $detailText = '<br><small class="muted">' . $this->e(implode(' · ', $details)) . '</small>';
+            $checkboxes .= '<label class="checkbox-item"><input type="checkbox" name="user_ids[]" value="' . $userId . '" ' . $checked . '> <span>' . $this->e($label) . $detailText . '</span></label>';
+        }
+
+        if ($checkboxes === '') {
+            $checkboxes = '<p class="muted">Keine aktiven Mitarbeiter vorhanden.</p>';
+        }
+
+        return <<<HTML
+<section class="card stack">
+    <div class="section-toolbar">
+        <div>
+            <h2>App-Projektfreigaben</h2>
+            <p class="muted">Ausgewaehlte Mitarbeiter sehen dieses Projekt in der mobilen App und koennen darauf Zeiten buchen. Rollen werden zur Orientierung angezeigt.</p>
+        </div>
+    </div>
+    <form method="post" action="/admin/projects/{$projectId}/memberships" class="form-grid">
+        <input type="hidden" name="csrf_token" value="{$this->e($csrfToken)}">
+        <div class="full-span field-group">
+            <span>Mitarbeiter mit App-Zugriff auf dieses Projekt</span>
+            <div class="checkbox-grid">{$checkboxes}</div>
+        </div>
+        <button class="button" type="submit">Projektfreigaben speichern</button>
+    </form>
+</section>
+HTML;
+    }
+
+    private function activeAssignableUsers(): array
+    {
+        return array_values(array_filter($this->userService->list('active'), static function (array $user): bool {
+            return ($user['employment_status'] ?? 'active') === 'active'
+                && (int) ($user['is_deleted'] ?? 0) === 0;
+        }));
+    }
+
     private function renderAttachmentSection(string $title, string $uploadAction, array $files, string $type): string
     {
         $rows = '';
@@ -907,8 +1019,9 @@ HTML;
                 'csrf' => 'Die Sicherheitspruefung ist abgelaufen. Bitte erneut versuchen.',
                 default => 'Beim Vorgang ist ein Fehler aufgetreten.',
             };
+            $detail = $error === 'file-upload' ? trim((string) $request->query('error_detail', '')) : '';
 
-            return '<p class="notice error">' . $this->e($message) . '</p>';
+            return '<p class="notice error">' . $this->e($message . ($detail !== '' ? ' ' . $detail : '')) . '</p>';
         }
 
         if ($notice === '') {
@@ -920,6 +1033,7 @@ HTML;
             'updated' => 'Datensatz erfolgreich gespeichert.',
             'archived' => 'Datensatz erfolgreich archiviert.',
             'restored' => 'Projekt erfolgreich wiederhergestellt.',
+            'memberships-updated' => 'Projektfreigaben erfolgreich gespeichert.',
             'booking-created' => 'Buchung erfolgreich nacherfasst.',
             'file-uploaded' => 'Datei erfolgreich zugewiesen.',
             'file-archived' => 'Datei erfolgreich archiviert.',

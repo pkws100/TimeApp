@@ -693,13 +693,14 @@ final class AppTimesheetSyncService
                    AND project_memberships.user_id = :user_id
                    AND COALESCE(projects.is_deleted, 0) = 0
                    AND projects.status <> "archived"
-                   AND (project_memberships.assigned_from IS NULL OR project_memberships.assigned_from <= :work_date)
-                   AND (project_memberships.assigned_until IS NULL OR project_memberships.assigned_until >= :work_date)
+                   AND (project_memberships.assigned_from IS NULL OR project_memberships.assigned_from <= :work_date_from)
+                   AND (project_memberships.assigned_until IS NULL OR project_memberships.assigned_until >= :work_date_until)
                  LIMIT 1',
                 [
                     'project_id' => $projectId,
                     'user_id' => $userId,
-                    'work_date' => $workDate,
+                    'work_date_from' => $workDate,
+                    'work_date_until' => $workDate,
                 ]
             );
 

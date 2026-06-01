@@ -536,7 +536,7 @@ HTML;
     {
         $mimeType = (string) ($file['mime_type'] ?? '');
 
-        if ((bool) ($file['is_image'] ?? false)) {
+        if ((bool) ($file['is_image'] ?? false) && $this->isPreviewableImageMimeType($mimeType)) {
             return 'image';
         }
 
@@ -550,6 +550,11 @@ HTML;
         }
 
         return '<span>PDF</span>';
+    }
+
+    private function isPreviewableImageMimeType(string $mimeType): bool
+    {
+        return in_array($mimeType, ['image/jpeg', 'image/png', 'image/webp'], true);
     }
 
     private function documentStatusOptions(array $statuses): string

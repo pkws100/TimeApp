@@ -48,6 +48,60 @@ final class FileAttachmentServiceTest extends TestCase
         self::assertArrayNotHasKey('stored_name', $stored);
     }
 
+    public function testCameraUploadWithoutFilenameExtensionUsesDetectedImageMimeType(): void
+    {
+        if (!function_exists('imagejpeg')) {
+            self::markTestSkipped('GD JPEG support is not available.');
+        }
+
+        $source = $this->tempFile('camera-upload');
+        $image = imagecreatetruecolor(4, 3);
+        imagejpeg($image, $source);
+        imagedestroy($image);
+
+        $stored = $this->service()->storeTimesheet($this->uploadFile($source, 'blob', 'application/octet-stream'), 44, 7);
+
+        self::assertSame('blob.jpg', $stored['original_name']);
+        self::assertSame('image/jpeg', $stored['mime_type']);
+        self::assertTrue($stored['is_image']);
+    }
+
+    public function testHeicUploadIsImageButNotInlinePreviewable(): void
+    {
+        $service = $this->serviceWithImageTypes(['heic'], ['image/heic']);
+        $method = new ReflectionMethod($service, 'publicFile');
+        $method->setAccessible(true);
+
+        $descriptor = $method->invoke($service, [
+            'id' => 5,
+            'original_name' => 'aufnahme.heic',
+            'mime_type' => 'image/heic',
+            'size_bytes' => 4096,
+            'uploaded_at' => '2026-06-01 12:00:00',
+            'is_deleted' => 0,
+            'deleted_at' => null,
+        ], 'timesheet');
+
+        self::assertTrue($descriptor['is_image']);
+        self::assertFalse($descriptor['is_previewable']);
+        self::assertSame('/api/v1/app/timesheet-files/5/download', $descriptor['download_url']);
+        self::assertNull($descriptor['preview_url']);
+    }
+
+    public function testUploadLimitErrorUsesActionableMessage(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Die Datei ist zu gross. Bitte eine kleinere Datei verwenden.');
+
+        $this->service()->storeTimesheet([
+            'error' => UPLOAD_ERR_INI_SIZE,
+            'name' => 'foto.jpg',
+            'type' => 'image/jpeg',
+            'tmp_name' => '',
+            'size' => 0,
+        ], 44, 7);
+    }
+
     public function testRejectsDisallowedMimeType(): void
     {
         $source = $this->tempFile('fake.jpg');
@@ -193,11 +247,16 @@ final class FileAttachmentServiceTest extends TestCase
 
     private function service(): FileAttachmentService
     {
+        return $this->serviceWithImageTypes(['jpg', 'jpeg', 'png'], ['image/jpeg', 'image/png']);
+    }
+
+    private function serviceWithImageTypes(array $extensions, array $mimeTypes): FileAttachmentService
+    {
         return new FileAttachmentService(new DatabaseConnection([]), [
             'root' => $this->uploadRoot,
             'max_filesize' => 5 * 1024 * 1024,
-            'allowed_extensions' => ['jpg', 'jpeg', 'png'],
-            'allowed_mime_types' => ['image/jpeg', 'image/png'],
+            'allowed_extensions' => $extensions,
+            'allowed_mime_types' => $mimeTypes,
         ]);
     }
 

@@ -19,6 +19,12 @@ final class FileAttachmentService
         'image/heif-sequence',
     ];
 
+    private const PREVIEW_IMAGE_MIME_TYPES = [
+        'image/png',
+        'image/jpeg',
+        'image/webp',
+    ];
+
     public function __construct(private DatabaseConnection $connection, private array $config)
     {
     }
@@ -306,13 +312,17 @@ final class FileAttachmentService
         array $file,
         ?int $userId = null
     ): array {
-        if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
-            throw new RuntimeException('Datei-Upload fehlgeschlagen.');
+        $uploadError = (int) ($file['error'] ?? UPLOAD_ERR_NO_FILE);
+
+        if ($uploadError !== UPLOAD_ERR_OK) {
+            throw new RuntimeException($this->uploadErrorMessage($uploadError));
         }
 
-        $extension = strtolower(pathinfo((string) $file['name'], PATHINFO_EXTENSION));
-        $mimeType = $this->resolveMimeType($file);
+        $originalName = trim((string) ($file['name'] ?? '')) ?: 'upload';
+        $extension = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+        $mimeType = $this->resolveMimeType($file, $extension);
         $mimeType = $this->normalizeMimeTypeForExtension($mimeType, $extension);
+        $extension = $this->normalizeExtensionForMimeType($extension, $mimeType);
         $size = (int) ($file['size'] ?? 0);
 
         if (!in_array($extension, $this->config['allowed_extensions'] ?? [], true)) {
@@ -334,7 +344,8 @@ final class FileAttachmentService
             throw new RuntimeException('Upload-Verzeichnis konnte nicht angelegt werden.');
         }
 
-        $safeName = preg_replace('/[^a-zA-Z0-9._-]/', '-', strtolower((string) $file['name'])) ?: 'upload.bin';
+        $storedOriginalName = $this->originalNameWithExtension($originalName, $extension);
+        $safeName = preg_replace('/[^a-zA-Z0-9._-]/', '-', strtolower($storedOriginalName)) ?: 'upload.bin';
         $storedName = uniqid('file_', true) . '-' . $safeName;
         $targetPath = $targetDirectory . '/' . $storedName;
 
@@ -353,7 +364,7 @@ final class FileAttachmentService
         $documentStatusId = $this->defaultDocumentStatusId();
         $bindings = [
             'owner_id' => $ownerId,
-            'original_name' => (string) $file['name'],
+            'original_name' => $storedOriginalName,
             'stored_name' => $storedName,
             'mime_type' => $mimeType,
             'size_bytes' => $size,
@@ -413,11 +424,16 @@ final class FileAttachmentService
         return $this->publicFile($stored, $this->fileTypeForTable($table));
     }
 
-    private function resolveMimeType(array $file): string
+    private function resolveMimeType(array $file, string $extension = ''): string
     {
-        $reportedMimeType = trim((string) ($file['type'] ?? ''));
+        $reportedMimeType = $this->normalizeMimeTypeForExtension(trim((string) ($file['type'] ?? '')), $extension);
         $detectedMimeType = null;
+        $signatureMimeType = null;
         $tmpName = trim((string) ($file['tmp_name'] ?? ''));
+
+        if ($tmpName !== '' && is_file($tmpName)) {
+            $signatureMimeType = $this->detectImageMimeTypeBySignature($tmpName);
+        }
 
         if ($tmpName !== '' && is_file($tmpName) && function_exists('finfo_open')) {
             $resource = finfo_open(FILEINFO_MIME_TYPE);
@@ -434,6 +450,10 @@ final class FileAttachmentService
 
         $allowedMimeTypes = $this->config['allowed_mime_types'] ?? [];
 
+        if ($signatureMimeType !== null && in_array($signatureMimeType, $allowedMimeTypes, true)) {
+            return $signatureMimeType;
+        }
+
         if ($detectedMimeType !== null && in_array($detectedMimeType, $allowedMimeTypes, true)) {
             return $detectedMimeType;
         }
@@ -442,15 +462,72 @@ final class FileAttachmentService
             return $detectedMimeType;
         }
 
-        if ($reportedMimeType !== '' && in_array($reportedMimeType, $allowedMimeTypes, true)) {
+        if (
+            $reportedMimeType !== ''
+            && in_array($reportedMimeType, $allowedMimeTypes, true)
+            && ($extension !== '' || !$this->isImageMimeType($reportedMimeType))
+        ) {
             return $reportedMimeType;
         }
 
         return $detectedMimeType ?? $reportedMimeType ?: 'application/octet-stream';
     }
 
+    private function detectImageMimeTypeBySignature(string $path): ?string
+    {
+        $handle = @fopen($path, 'rb');
+
+        if (!is_resource($handle)) {
+            return null;
+        }
+
+        $bytes = (string) fread($handle, 64);
+        fclose($handle);
+
+        if (str_starts_with($bytes, "\xFF\xD8\xFF")) {
+            return 'image/jpeg';
+        }
+
+        if (str_starts_with($bytes, "\x89PNG\r\n\x1A\n")) {
+            return 'image/png';
+        }
+
+        if (strlen($bytes) >= 12 && substr($bytes, 0, 4) === 'RIFF' && substr($bytes, 8, 4) === 'WEBP') {
+            return 'image/webp';
+        }
+
+        if (strlen($bytes) >= 12 && substr($bytes, 4, 4) === 'ftyp') {
+            $brands = substr($bytes, 8, 56);
+
+            foreach (['heic', 'heix', 'hevc', 'hevx'] as $brand) {
+                if (str_contains($brands, $brand)) {
+                    return 'image/heic';
+                }
+            }
+
+            foreach (['mif1', 'msf1', 'heif'] as $brand) {
+                if (str_contains($brands, $brand)) {
+                    return 'image/heif';
+                }
+            }
+        }
+
+        return null;
+    }
+
     private function normalizeMimeTypeForExtension(string $mimeType, string $extension): string
     {
+        $mimeType = strtolower(trim($mimeType));
+        $aliases = [
+            'image/jpg' => 'image/jpeg',
+            'image/pjpeg' => 'image/jpeg',
+            'image/x-png' => 'image/png',
+        ];
+
+        if (isset($aliases[$mimeType])) {
+            return $aliases[$mimeType];
+        }
+
         if ($mimeType !== 'application/zip') {
             return $mimeType;
         }
@@ -459,6 +536,44 @@ final class FileAttachmentService
             'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
             'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             default => $mimeType,
+        };
+    }
+
+    private function normalizeExtensionForMimeType(string $extension, string $mimeType): string
+    {
+        if ($extension !== '') {
+            return $extension;
+        }
+
+        return match ($mimeType) {
+            'image/jpeg' => 'jpg',
+            'image/png' => 'png',
+            'image/webp' => 'webp',
+            'image/heic', 'image/heic-sequence' => 'heic',
+            'image/heif', 'image/heif-sequence' => 'heif',
+            default => $extension,
+        };
+    }
+
+    private function originalNameWithExtension(string $originalName, string $extension): string
+    {
+        if ($extension === '' || pathinfo($originalName, PATHINFO_EXTENSION) !== '') {
+            return $originalName;
+        }
+
+        return rtrim($originalName, '.') . '.' . $extension;
+    }
+
+    private function uploadErrorMessage(int $error): string
+    {
+        return match ($error) {
+            UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE => 'Die Datei ist zu gross. Bitte eine kleinere Datei verwenden.',
+            UPLOAD_ERR_PARTIAL => 'Datei wurde nur teilweise hochgeladen. Bitte erneut versuchen.',
+            UPLOAD_ERR_NO_FILE => 'Keine Datei uebergeben.',
+            UPLOAD_ERR_NO_TMP_DIR => 'Upload-Verzeichnis des Servers fehlt.',
+            UPLOAD_ERR_CANT_WRITE => 'Datei konnte nicht auf dem Server gespeichert werden.',
+            UPLOAD_ERR_EXTENSION => 'Datei-Upload wurde durch eine Server-Erweiterung gestoppt.',
+            default => 'Datei-Upload fehlgeschlagen.',
         };
     }
 
@@ -515,6 +630,7 @@ final class FileAttachmentService
         $mimeType = (string) ($file['mime_type'] ?? '');
         $downloadUrl = $this->downloadUrl($type, $fileId);
         $isImage = $this->isImageMimeType($mimeType);
+        $isPreviewableImage = $this->isPreviewableImageMimeType($mimeType);
 
         return [
             'id' => $fileId,
@@ -525,8 +641,9 @@ final class FileAttachmentService
             'is_deleted' => (int) ($file['is_deleted'] ?? 0),
             'deleted_at' => $file['deleted_at'] ?? null,
             'is_image' => $isImage,
+            'is_previewable' => $isPreviewableImage,
             'download_url' => $downloadUrl,
-            'preview_url' => $isImage ? $downloadUrl : null,
+            'preview_url' => $isPreviewableImage ? $downloadUrl : null,
             'document_status' => $this->documentStatusFromRow($file),
         ];
     }
@@ -538,7 +655,7 @@ final class FileAttachmentService
         $isDeleted = (int) ($file['is_deleted'] ?? 0) === 1;
         $downloadUrl = (!$isDeleted && $fileId > 0) ? '/admin/timesheet-files/' . $fileId . '/download' : null;
         $isImage = $this->isImageMimeType($mimeType);
-        $isPreviewable = $isImage || $mimeType === 'application/pdf';
+        $isPreviewable = $this->isPreviewableImageMimeType($mimeType) || $mimeType === 'application/pdf';
 
         return [
             'id' => $fileId,
@@ -584,7 +701,7 @@ final class FileAttachmentService
             'original_name' => (string) ($file['original_name'] ?? 'download.bin'),
             'mime_type' => (string) ($file['mime_type'] ?? 'application/octet-stream'),
             'size_bytes' => (int) filesize($realPath),
-            'is_image' => $this->isImageMimeType((string) ($file['mime_type'] ?? '')),
+            'is_image' => $this->isPreviewableImageMimeType((string) ($file['mime_type'] ?? '')),
         ];
     }
 
@@ -678,6 +795,11 @@ final class FileAttachmentService
     private function isImageMimeType(string $mimeType): bool
     {
         return in_array($mimeType, self::IMAGE_MIME_TYPES, true);
+    }
+
+    private function isPreviewableImageMimeType(string $mimeType): bool
+    {
+        return in_array($mimeType, self::PREVIEW_IMAGE_MIME_TYPES, true);
     }
 
     private function fileSelectColumns(string $table): string

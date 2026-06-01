@@ -93,6 +93,75 @@ final class ProjectService
         return $minutesByProject;
     }
 
+    public function membershipUserIds(int $projectId): array
+    {
+        if ($projectId <= 0 || !$this->connection->tableExists('project_memberships')) {
+            return [];
+        }
+
+        $rows = $this->connection->fetchAll(
+            'SELECT user_id
+             FROM project_memberships
+             WHERE project_id = :project_id
+               AND (assigned_from IS NULL OR assigned_from <= CURDATE())
+               AND (assigned_until IS NULL OR assigned_until >= CURDATE())
+             ORDER BY user_id',
+            ['project_id' => $projectId]
+        );
+
+        return array_map(static fn (array $row): int => (int) ($row['user_id'] ?? 0), $rows);
+    }
+
+    public function syncMemberships(int $projectId, mixed $userIds): void
+    {
+        if ($projectId <= 0 || !$this->connection->tableExists('project_memberships')) {
+            return;
+        }
+
+        $userIds = $this->validActiveUserIds($this->normalizeUserIds($userIds));
+        $existingUserIds = $this->allMembershipUserIds($projectId);
+
+        $this->connection->transaction(function () use ($projectId, $userIds, $existingUserIds): void {
+            foreach ($existingUserIds as $existingUserId) {
+                if (in_array($existingUserId, $userIds, true)) {
+                    continue;
+                }
+
+                $this->connection->execute(
+                    'DELETE FROM project_memberships WHERE project_id = :project_id AND user_id = :user_id',
+                    [
+                        'project_id' => $projectId,
+                        'user_id' => $existingUserId,
+                    ]
+                );
+            }
+
+            foreach ($userIds as $userId) {
+                if (in_array($userId, $existingUserIds, true)) {
+                    $this->connection->execute(
+                        'UPDATE project_memberships
+                         SET assigned_from = NULL, assigned_until = NULL
+                         WHERE project_id = :project_id AND user_id = :user_id',
+                        [
+                            'project_id' => $projectId,
+                            'user_id' => $userId,
+                        ]
+                    );
+                    continue;
+                }
+
+                $this->connection->execute(
+                    'INSERT INTO project_memberships (project_id, user_id, assignment_role, assigned_from, assigned_until)
+                     VALUES (:project_id, :user_id, NULL, NULL, NULL)',
+                    [
+                        'project_id' => $projectId,
+                        'user_id' => $userId,
+                    ]
+                );
+            }
+        });
+    }
+
     public function find(int $id): ?array
     {
         if (!$this->connection->tableExists('projects')) {
@@ -280,6 +349,53 @@ final class ProjectService
         $value = trim((string) ($value ?? ''));
 
         return $value === '' ? null : $value;
+    }
+
+    private function normalizeUserIds(mixed $userIds): array
+    {
+        $userIds = is_array($userIds) ? $userIds : [$userIds];
+        $normalized = array_values(array_unique(array_filter(array_map(static fn (mixed $value): int => (int) $value, $userIds))));
+        sort($normalized);
+
+        return $normalized;
+    }
+
+    private function allMembershipUserIds(int $projectId): array
+    {
+        $rows = $this->connection->fetchAll(
+            'SELECT user_id FROM project_memberships WHERE project_id = :project_id ORDER BY user_id',
+            ['project_id' => $projectId]
+        );
+
+        return array_map(static fn (array $row): int => (int) ($row['user_id'] ?? 0), $rows);
+    }
+
+    private function validActiveUserIds(array $userIds): array
+    {
+        if ($userIds === [] || !$this->connection->tableExists('users')) {
+            return [];
+        }
+
+        $bindings = [];
+        $placeholders = [];
+
+        foreach ($userIds as $index => $userId) {
+            $key = 'user_id_' . $index;
+            $placeholders[] = ':' . $key;
+            $bindings[$key] = $userId;
+        }
+
+        $rows = $this->connection->fetchAll(
+            'SELECT id
+             FROM users
+             WHERE id IN (' . implode(', ', $placeholders) . ')
+               AND employment_status = :employment_status
+               AND COALESCE(is_deleted, 0) = 0
+             ORDER BY id',
+            [...$bindings, 'employment_status' => 'active']
+        );
+
+        return array_map(static fn (array $row): int => (int) ($row['id'] ?? 0), $rows);
     }
 
     private function truthy(mixed $value): bool

@@ -576,12 +576,12 @@
             'Bitte zuerst einen Check-in buchen. Danach koennen Sie das Projekt zuordnen.': 'Bitte zuerst einen Check-in buchen. Danach koennen Sie die Baustelle oder das Projekt zuordnen.',
             'Bitte zuerst einen Check-in buchen oder eine Startzeit eingeben.': 'Bitte zuerst einen Check-in buchen oder eine Startzeit eintragen.',
             'Check-out ist erst moeglich, wenn die laufende Pause beendet wurde.': 'Bitte erst die laufende Pause beenden, bevor Sie den Check-out buchen.',
-            'Datei-Upload fehlgeschlagen.': 'Das Bild konnte nicht hochgeladen werden. Bitte erneut versuchen.',
-            'Dateityp ist nicht freigegeben.': 'Bitte ein Bild im erlaubten Format waehlen.',
-            'MIME-Typ ist nicht freigegeben.': 'Bitte ein Bild im erlaubten Format waehlen.',
-            'Datei ist zu gross.': 'Bitte ein kleineres Bild waehlen.',
-            'Datei konnte nicht gespeichert werden.': 'Das Bild konnte nicht gespeichert werden. Bitte erneut versuchen.',
-            'Keine Datei uebergeben.': 'Bitte zuerst ein Bild auswaehlen.',
+            'Datei-Upload fehlgeschlagen.': 'Die Datei konnte nicht hochgeladen werden. Bitte erneut versuchen.',
+            'Dateityp ist nicht freigegeben.': 'Bitte ein Foto oder eine Datei im erlaubten Format waehlen.',
+            'MIME-Typ ist nicht freigegeben.': 'Bitte ein Foto oder eine Datei im erlaubten Format waehlen.',
+            'Datei ist zu gross.': 'Bitte eine kleinere Datei waehlen.',
+            'Datei konnte nicht gespeichert werden.': 'Die Datei konnte nicht gespeichert werden. Bitte erneut versuchen.',
+            'Keine Datei uebergeben.': 'Bitte zuerst ein Foto oder eine Datei auswaehlen.',
             'Keine Berechtigung.': 'Dafuer fehlt die Berechtigung.',
         };
 
@@ -2779,15 +2779,39 @@
             + '</section>';
     }
 
+    function isStandaloneApp() {
+        const displayStandalone = window.matchMedia && window.matchMedia('(display-mode: standalone)').matches;
+        const iosStandalone = window.navigator && window.navigator.standalone === true;
+
+        return displayStandalone || iosStandalone;
+    }
+
+    function isIosDevice() {
+        const platform = window.navigator && window.navigator.platform ? window.navigator.platform : '';
+        const userAgent = window.navigator && window.navigator.userAgent ? window.navigator.userAgent : '';
+        const touchPoints = window.navigator && Number(window.navigator.maxTouchPoints || 0);
+
+        return /iPad|iPhone|iPod/.test(userAgent) || (platform === 'MacIntel' && touchPoints > 1);
+    }
+
     function installProfileSection() {
-        const installed = window.matchMedia && window.matchMedia('(display-mode: standalone)').matches;
+        const installed = isStandaloneApp();
         const canInstall = state.installPromptAvailable && !installed;
+        const iosHint = isIosDevice() && !installed
+            ? '<div class="app-empty">Auf iPhone oder iPad ueber Teilen und dann Zum Home-Bildschirm installieren.</div>'
+            : '';
+        const unavailableHint = !canInstall && !installed && !iosHint
+            ? '<div class="app-empty">Falls der Browser kein Installationsfenster anbietet, die Browser-Funktion Zum Startbildschirm hinzufuegen nutzen.</div>'
+            : '';
+        const installAction = canInstall
+            ? '<div class="app-inline-actions"><button type="button" id="installAppButton">App installieren</button></div>'
+            : '';
 
         return '<section class="app-card app-grid">'
             + '<div><p class="muted">App</p><h2>Installation</h2><p>' + escapeHtml(installed ? 'Die App laeuft bereits im installierten Modus.' : 'Die mobile App kann auf geeigneten Geraeten installiert werden.') + '</p></div>'
-            + '<div class="app-inline-actions">'
-            + (canInstall ? '<button type="button" id="installAppButton">App installieren</button>' : '<button type="button" disabled>Installation aktuell nicht verfuegbar</button>')
-            + '</div>'
+            + installAction
+            + iosHint
+            + unavailableHint
             + '</section>';
     }
 
@@ -4383,13 +4407,13 @@
             updateCurrentAttachments(payload.data && payload.data.files ? payload.data.files : []);
             await cacheSet(todayCacheKey(), state.today);
             markTimesheetHistoryDirty();
-            showFeedback('success', friendlyMessage(payload.message, 'Bild erfolgreich hochgeladen.'));
+            showFeedback('success', friendlyMessage(payload.message, 'Datei erfolgreich hochgeladen.'));
         } catch (error) {
             if (isSessionExpiredError(error)) {
                 return;
             }
 
-            showFeedback('error', friendlyMessage(error.message, 'Das Bild konnte nicht hochgeladen werden.'), true);
+            showFeedback('error', friendlyMessage(error.message, 'Die Datei konnte nicht hochgeladen werden.'), true);
         } finally {
             state.pendingAction = null;
             state.uploadingTimesheetId = null;

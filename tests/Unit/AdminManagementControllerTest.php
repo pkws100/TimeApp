@@ -57,6 +57,45 @@ final class AdminManagementControllerTest extends TestCase
         self::assertStringContainsString('Projekt erfolgreich wiederhergestellt.', $html);
     }
 
+    public function testMembershipNoticeUsesProjectSpecificMessage(): void
+    {
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'notice');
+        $method->setAccessible(true);
+        $html = (string) $method->invoke($controller, new Request('GET', '/admin/projects/5/edit', ['notice' => 'memberships-updated'], [], [], [], []));
+
+        self::assertStringContainsString('Projektfreigaben erfolgreich gespeichert.', $html);
+    }
+
+    public function testProjectMembershipSectionRendersActiveUsersWithRolesAndSelection(): void
+    {
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'renderProjectMembershipSection');
+        $method->setAccessible(true);
+
+        $html = (string) $method->invoke($controller, ['id' => 5], [
+            ['id' => 1, 'first_name' => 'Anna', 'last_name' => 'Aktiv', 'employee_number' => 'A-1', 'role_names' => 'Mitarbeiter'],
+            ['id' => 2, 'first_name' => 'Ben', 'last_name' => 'Bau', 'employee_number' => 'B-2', 'role_names' => 'Bauleiter, Mitarbeiter'],
+            ['id' => 3, 'first_name' => 'Rita', 'last_name' => 'Rollenlos', 'employee_number' => '', 'role_names' => ''],
+            ['id' => 4, 'first_name' => 'Ina', 'last_name' => 'Inaktiv', 'employee_number' => '', 'role_names' => 'Mitarbeiter', 'employment_status' => 'inactive'],
+            ['id' => 5, 'first_name' => 'Archiv', 'last_name' => 'User', 'employee_number' => '', 'role_names' => 'Mitarbeiter', 'is_deleted' => 1],
+        ], [2]);
+
+        self::assertStringContainsString('action="/admin/projects/5/memberships"', $html);
+        self::assertStringContainsString('App-Projektfreigaben', $html);
+        self::assertStringContainsString('name="user_ids[]" value="1" ', $html);
+        self::assertStringContainsString('name="user_ids[]" value="2" checked', $html);
+        self::assertStringContainsString('Anna Aktiv', $html);
+        self::assertStringContainsString('A-1', $html);
+        self::assertStringContainsString('Bauleiter, Mitarbeiter', $html);
+        self::assertStringContainsString('<br><small class="muted">', $html);
+        self::assertStringContainsString('Keine Rolle', $html);
+        self::assertStringNotContainsString('Ina Inaktiv', $html);
+        self::assertStringNotContainsString('Archiv User', $html);
+        self::assertLessThan(strpos($html, 'Anna Aktiv'), strpos($html, 'Ben Bau'));
+        self::assertStringContainsString('Projektfreigaben speichern', $html);
+    }
+
     public function testManualProjectBookingFormUsesOnlyActiveUsersAndForcedProjectAction(): void
     {
         $controller = $this->controller();
@@ -147,6 +186,15 @@ final class AdminManagementControllerTest extends TestCase
         self::assertStringContainsString('/admin/projects/{id}/bookings', $bootstrap);
         self::assertStringContainsString('projectBookingStore', $bootstrap);
         self::assertStringContainsString('timesheets.manage', $bootstrap);
+    }
+
+    public function testProjectMembershipRouteIsRegistered(): void
+    {
+        $bootstrap = file_get_contents(base_path('bootstrap/app.php')) ?: '';
+
+        self::assertStringContainsString('/admin/projects/{id}/memberships', $bootstrap);
+        self::assertStringContainsString('projectMembershipUpdate', $bootstrap);
+        self::assertStringContainsString('projects.manage', $bootstrap);
     }
 
     private function invokeProjectLifecycleForm(string $archiveAction, string $restoreAction, bool $archived): string

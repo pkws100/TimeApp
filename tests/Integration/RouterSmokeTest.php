@@ -153,6 +153,10 @@ final class RouterSmokeTest extends TestCase
 
         self::assertStringContainsString('window.__APP_BOOTSTRAP__', $shell);
         self::assertStringContainsString('/assets/js/app.js', $shell);
+        self::assertStringContainsString('name="apple-mobile-web-app-title"', $shell);
+        self::assertStringContainsString('name="apple-mobile-web-app-capable" content="yes"', $shell);
+        self::assertStringContainsString('name="mobile-web-app-capable" content="yes"', $shell);
+        self::assertStringContainsString('rel="apple-touch-icon"', $shell);
 
         $_SERVER['REQUEST_METHOD'] = 'GET';
         $_SERVER['REQUEST_URI'] = '/app/historie';
@@ -165,6 +169,39 @@ final class RouterSmokeTest extends TestCase
 
         self::assertStringContainsString('window.__APP_BOOTSTRAP__', $historyShell);
         self::assertStringContainsString('/assets/js/app.js', $historyShell);
+
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/app/manifest.json';
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $router->dispatch($request)->send();
+        $manifestPayload = ob_get_clean() ?: '';
+        $manifest = json_decode($manifestPayload, true);
+
+        self::assertIsArray($manifest);
+        self::assertNotSame('', trim((string) ($manifest['name'] ?? '')));
+        self::assertSame($manifest['name'], $manifest['short_name'] ?? null);
+        self::assertSame('/app', $manifest['start_url'] ?? null);
+        self::assertSame('/app', $manifest['scope'] ?? null);
+        self::assertSame('standalone', $manifest['display'] ?? null);
+        self::assertContains('/assets/app-icon-192.png', array_column($manifest['icons'] ?? [], 'src'));
+        self::assertContains('/assets/app-icon-512.png', array_column($manifest['icons'] ?? [], 'src'));
+        self::assertContains('/assets/app-icon-maskable-512.png', array_column($manifest['icons'] ?? [], 'src'));
+        self::assertContains('maskable', array_column($manifest['icons'] ?? [], 'purpose'));
+
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/app/sw.js';
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $router->dispatch($request)->send();
+        $serviceWorker = ob_get_clean() ?: '';
+
+        self::assertStringContainsString('/assets/app-icon-192.png', $serviceWorker);
+        self::assertStringContainsString('/assets/app-icon-maskable-512.png', $serviceWorker);
 
         $_SERVER['REQUEST_METHOD'] = 'GET';
         $_SERVER['REQUEST_URI'] = '/api/v1/auth/session';

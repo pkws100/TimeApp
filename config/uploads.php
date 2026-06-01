@@ -5,7 +5,7 @@ declare(strict_types=1);
 return [
     'disk' => (string) env('UPLOAD_DISK', 'local'),
     'root' => base_path((string) env('UPLOAD_ROOT', 'storage/app/uploads')),
-    'max_filesize' => (int) env('UPLOAD_MAX_FILESIZE', 10 * 1024 * 1024),
+    'max_filesize' => (int) env('UPLOAD_MAX_FILESIZE', 32 * 1024 * 1024),
     'allowed_extensions' => [
         'pdf',
         'png',

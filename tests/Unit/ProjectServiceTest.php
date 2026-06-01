@@ -68,4 +68,13 @@ final class ProjectServiceTest extends TestCase
         self::assertTrue($service->archive(123, 7));
         self::assertTrue($service->restore(123, 7));
     }
+
+    public function testProjectMembershipFallbackWithoutDatabaseIsEmptyAndNoop(): void
+    {
+        $service = new ProjectService(new DatabaseConnection([]));
+
+        self::assertSame([], $service->membershipUserIds(5));
+        $service->syncMemberships(5, [1, 2, 2, '3']);
+        self::assertSame([], $service->membershipUserIds(5));
+    }
 }

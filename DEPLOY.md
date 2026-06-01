@@ -101,6 +101,17 @@ Persistente Volumes:
 - `timeapp_timeapp-db-data`
 - `timeapp_timeapp-storage`
 
+Upload-Grenzen:
+
+- Im Docker-Image setzt `docker/php/custom.ini` `upload_max_filesize=32M` und
+  `post_max_size=40M`.
+- `UPLOAD_MAX_FILESIZE` muss dazu passen; Standard in `.env.example` und Compose
+  ist `33554432` Byte.
+- Bei nativen Apache/PHP-Installationen ausserhalb von Docker muessen diese
+  PHP-INI-Werte separat in der Apache-SAPI gesetzt und Apache neu geladen
+  werden, sonst greifen oft die PHP-Defaults `2M`/`8M` und Handyfotos werden vor
+  der Anwendung abgelehnt.
+
 ## Erstsetup und Updates
 
 Fuer wiederkehrende Updates ist `bin/update-prod.sh` der Standardpfad. Das

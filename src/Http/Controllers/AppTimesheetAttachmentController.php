@@ -8,6 +8,7 @@ use App\Domain\Auth\AuthService;
 use App\Domain\Files\FileAttachmentService;
 use App\Http\Request;
 use App\Http\Response;
+use App\Http\UploadSizeGuard;
 use RuntimeException;
 
 final class AppTimesheetAttachmentController
@@ -73,10 +74,18 @@ final class AppTimesheetAttachmentController
             $file = $files['file'] ?? null;
 
             if (!is_array($file)) {
+                if (UploadSizeGuard::exceedsPostMaxSize($request)) {
+                    return Response::json([
+                        'ok' => false,
+                        'error' => 'Datei ist zu gross.',
+                        'message' => UploadSizeGuard::message(),
+                    ], 413);
+                }
+
                 return Response::json([
                     'ok' => false,
                     'error' => 'Keine Datei uebergeben.',
-                    'message' => 'Bitte zuerst ein Bild auswaehlen.',
+                    'message' => 'Bitte zuerst ein Foto oder eine Datei auswaehlen.',
                 ], 422);
             }
 
@@ -84,7 +93,7 @@ final class AppTimesheetAttachmentController
 
             return Response::json([
                 'ok' => true,
-                'message' => 'Bild erfolgreich zum Zeiteintrag hinzugefuegt.',
+                'message' => 'Datei erfolgreich zum Zeiteintrag hinzugefuegt.',
                 'data' => [
                     'file' => $stored,
                     'files' => $this->fileAttachmentService->listForTimesheet($timesheetId),

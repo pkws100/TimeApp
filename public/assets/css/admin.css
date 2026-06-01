@@ -1144,6 +1144,11 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
     background: var(--page-surface-strong);
 }
 
+.checkbox-item span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
 .checkbox-item input {
     margin-top: 0.2rem;
 }

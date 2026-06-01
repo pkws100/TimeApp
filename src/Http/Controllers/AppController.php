@@ -37,7 +37,7 @@ final class AppController
     {
         $manifest = [
             'name' => $this->appName,
-            'short_name' => 'Zeiten',
+            'short_name' => $this->appName,
             'start_url' => '/app',
             'display' => 'standalone',
             'background_color' => '#f6f3ee',
@@ -46,10 +46,28 @@ final class AppController
             'scope' => '/app',
             'icons' => [
                 [
+                    'src' => '/assets/app-icon-192.png',
+                    'sizes' => '192x192',
+                    'type' => 'image/png',
+                    'purpose' => 'any',
+                ],
+                [
+                    'src' => '/assets/app-icon-512.png',
+                    'sizes' => '512x512',
+                    'type' => 'image/png',
+                    'purpose' => 'any',
+                ],
+                [
+                    'src' => '/assets/app-icon-maskable-512.png',
+                    'sizes' => '512x512',
+                    'type' => 'image/png',
+                    'purpose' => 'maskable',
+                ],
+                [
                     'src' => '/assets/app-icon.svg',
                     'sizes' => 'any',
                     'type' => 'image/svg+xml',
-                    'purpose' => 'any maskable',
+                    'purpose' => 'any',
                 ],
             ],
         ];
@@ -65,12 +83,23 @@ final class AppController
     {
         $cssUrl = AppView::versionedAssetUrl('/assets/css/app.css');
         $jsUrl = AppView::versionedAssetUrl('/assets/js/app.js');
+        $icon192Url = AppView::versionedAssetUrl('/assets/app-icon-192.png');
+        $icon512Url = AppView::versionedAssetUrl('/assets/app-icon-512.png');
+        $maskableIconUrl = AppView::versionedAssetUrl('/assets/app-icon-maskable-512.png');
+        $appleTouchIconUrl = AppView::versionedAssetUrl('/assets/apple-touch-icon.png');
+        $appName = json_encode($this->appName, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
         $script = <<<JS
-const CACHE_NAME = 'zeiterfassung-app-v4';
+const CACHE_NAME = 'zeiterfassung-app-v5';
+const APP_NAME = {$appName};
+const APP_FALLBACK_URL = '/app';
 const APP_SHELL = [
-  '/app',
+  APP_FALLBACK_URL,
   '{$cssUrl}',
-  '{$jsUrl}'
+  '{$jsUrl}',
+  '{$icon192Url}',
+  '{$icon512Url}',
+  '{$maskableIconUrl}',
+  '{$appleTouchIconUrl}'
 ];
 
 self.addEventListener('install', (event) => {
@@ -103,6 +132,20 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  if (isAppShellRequest) {
+    event.respondWith(
+      fetch(request).then((response) => {
+        if (response.ok) {
+          const cloned = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(request, cloned));
+        }
+
+        return response;
+      }).catch(() => caches.match(request).then((cached) => cached || caches.match(APP_FALLBACK_URL)))
+    );
+    return;
+  }
+
   event.respondWith(
     caches.match(request).then((cached) => {
       if (cached) {
@@ -132,11 +175,11 @@ self.addEventListener('push', (event) => {
     }
   }
 
-  const title = payload.title || 'Zeiterfassung';
+  const title = payload.title || APP_NAME;
   const options = {
     body: payload.body || 'Bitte oeffnen Sie die App.',
-    icon: '/assets/app-icon.svg',
-    badge: '/assets/app-icon.svg',
+    icon: '/assets/app-icon-192.png',
+    badge: '/assets/app-icon-maskable-512.png',
     tag: payload.tag || 'zeiterfassung-push',
     data: {
       url: payload.url || '/app'

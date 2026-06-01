@@ -303,6 +303,7 @@ $router->get('/admin/projects/create', $admin([$adminManagementController, 'proj
 $router->get('/admin/projects/{id}/edit', $admin([$adminManagementController, 'projectEdit'], 'projects.manage'));
 $router->post('/admin/projects', $admin([$adminManagementController, 'projectStore'], 'projects.manage'));
 $router->put('/admin/projects/{id}', $admin([$adminManagementController, 'projectUpdate'], 'projects.manage'));
+$router->post('/admin/projects/{id}/memberships', $admin([$adminManagementController, 'projectMembershipUpdate'], 'projects.manage'));
 $router->delete('/admin/projects/{id}', $admin([$adminManagementController, 'projectArchive'], 'projects.manage'));
 $router->post('/admin/projects/{id}/restore', $admin([$adminManagementController, 'projectRestore'], 'projects.manage'));
 $router->post('/admin/projects/{id}/bookings', $admin([$adminManagementController, 'projectBookingStore'], 'timesheets.manage'));
