@@ -102,6 +102,108 @@ final class AdminCalendarControllerTest extends TestCase
         self::assertStringContainsString('"html"', $dayPayload);
     }
 
+    public function testDayPanelHidesArchivedBookingsFromCalendarBookingCard(): void
+    {
+        $_SESSION = [];
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'renderDayPanel');
+        $method->setAccessible(true);
+
+        $html = (string) $method->invoke(
+            $controller,
+            [
+                'date' => '2026-05-15',
+                'label' => 'Freitag, 15.05.2026',
+                'summary' => [
+                    'status' => 'ok',
+                    'status_label' => 'Sauber',
+                    'active_booking_count' => 1,
+                    'employee_count' => 1,
+                    'net_minutes' => 480,
+                ],
+                'bookings' => [
+                    $this->bookingFixture(41, 'Aktiv Person', 'Aktives Projekt', 0),
+                    $this->bookingFixture(42, 'Archiv Person', 'Archiv Projekt', 1),
+                ],
+                'assets' => [],
+            ],
+            [],
+            [],
+            '/admin/calendar?month=2026-05&date=2026-05-15',
+            'csrf-token',
+            false,
+            true
+        );
+
+        self::assertStringContainsString('calendar-bookings-card', $html);
+        self::assertStringContainsString('Aktiv Person', $html);
+        self::assertStringContainsString('Aktives Projekt', $html);
+        self::assertStringNotContainsString('Archiv Person', $html);
+        self::assertStringNotContainsString('Archiv Projekt', $html);
+    }
+
+    public function testDayPanelShowsActiveEmptyMessageWhenOnlyArchivedBookingsExist(): void
+    {
+        $_SESSION = [];
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'renderDayPanel');
+        $method->setAccessible(true);
+
+        $html = (string) $method->invoke(
+            $controller,
+            [
+                'date' => '2026-05-15',
+                'label' => 'Freitag, 15.05.2026',
+                'summary' => [
+                    'status' => 'empty',
+                    'status_label' => 'Keine Buchung',
+                    'active_booking_count' => 0,
+                    'employee_count' => 0,
+                    'net_minutes' => 0,
+                ],
+                'bookings' => [
+                    $this->bookingFixture(42, 'Archiv Person', 'Archiv Projekt', 1),
+                ],
+                'assets' => [],
+            ],
+            [],
+            [],
+            '/admin/calendar?month=2026-05&date=2026-05-15',
+            'csrf-token',
+            false,
+            true
+        );
+
+        self::assertStringContainsString('An diesem Tag sind keine aktiven Buchungen vorhanden.', $html);
+        self::assertStringNotContainsString('Archiv Person', $html);
+        self::assertStringNotContainsString('Archiv Projekt', $html);
+    }
+
+    private function bookingFixture(int $id, string $employeeName, string $projectName, int $isDeleted): array
+    {
+        return [
+            'id' => $id,
+            'work_date' => '2026-05-15',
+            'user_id' => $id,
+            'employee_name' => $employeeName,
+            'employee_number' => 'M-' . $id,
+            'project_id' => 2,
+            'project_number' => 'P-2',
+            'project_name' => $projectName,
+            'project_is_deleted' => 0,
+            'entry_type' => 'work',
+            'source' => 'admin',
+            'source_label' => 'Admin-Nacherfassung',
+            'start_time' => '07:30:00',
+            'end_time' => '16:00:00',
+            'break_minutes' => 30,
+            'net_minutes' => 480,
+            'note' => '',
+            'is_deleted' => $isDeleted,
+            'version_hint' => 'v1',
+        ];
+    }
+
     private function controller(): AdminCalendarController
     {
         $connection = new DatabaseConnection([]);

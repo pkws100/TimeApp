@@ -217,7 +217,7 @@ HTML;
     {
         $renderer = new BookingModalRenderer();
         $summary = is_array($day['summary'] ?? null) ? $day['summary'] : [];
-        $bookings = is_array($day['bookings'] ?? null) ? $day['bookings'] : [];
+        $bookings = $this->activeBookings(is_array($day['bookings'] ?? null) ? $day['bookings'] : []);
         $assets = is_array($day['assets'] ?? null) ? $day['assets'] : [];
         $date = (string) ($day['date'] ?? '');
         $table = $renderer->renderTable(
@@ -226,7 +226,7 @@ HTML;
             $this->bookingService->entryTypeOptions(),
             [
                 'show_selection' => false,
-                'empty_message' => 'An diesem Tag sind keine Buchungen vorhanden.',
+                'empty_message' => 'An diesem Tag sind keine aktiven Buchungen vorhanden.',
                 'can_manage' => $canManage,
                 'can_archive' => $canArchive,
                 'can_view_attachments' => true,
@@ -267,6 +267,14 @@ HTML;
     {$table}
 </section>
 HTML;
+    }
+
+    private function activeBookings(array $bookings): array
+    {
+        return array_values(array_filter(
+            $bookings,
+            static fn (array $booking): bool => (int) ($booking['is_deleted'] ?? 0) === 0
+        ));
     }
 
     private function renderManualBookingForm(string $date, array $projects, array $users, string $returnTo, string $csrfToken): string

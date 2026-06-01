@@ -68,13 +68,14 @@ final class AdminCalendarService
             'entry_type' => '',
             'scope' => 'all',
         ]);
+        $activeBookings = $this->activeBookings($bookings);
 
         return [
             'date' => $date,
             'label' => $this->dateLabel(new DateTimeImmutable($date)),
             'summary' => $this->summarizeDay($date, $bookings),
             'bookings' => $bookings,
-            'assets' => $this->assetsForDay($date, $bookings),
+            'assets' => $this->assetsForDay($date, $activeBookings),
         ];
     }
 
@@ -116,10 +117,7 @@ final class AdminCalendarService
 
     public function summarizeDay(string $date, array $bookings): array
     {
-        $activeBookings = array_values(array_filter(
-            $bookings,
-            static fn (array $booking): bool => (int) ($booking['is_deleted'] ?? 0) === 0
-        ));
+        $activeBookings = $this->activeBookings($bookings);
         $dayPolicy = $this->dayPolicy($date);
         $activeWorkBookings = array_values(array_filter(
             $activeBookings,
@@ -137,13 +135,8 @@ final class AdminCalendarService
         $missingCount = $this->missingCount($date, $bookedUserIds);
         $hasProblem = false;
 
-        foreach ($bookings as $booking) {
+        foreach ($activeBookings as $booking) {
             $entryType = (string) ($booking['entry_type'] ?? 'work');
-
-            if ((int) ($booking['is_deleted'] ?? 0) === 1) {
-                $hasProblem = true;
-                break;
-            }
 
             if ($entryType === 'work' && (trim((string) ($booking['start_time'] ?? '')) === '' || trim((string) ($booking['end_time'] ?? '')) === '')) {
                 $hasProblem = true;
@@ -206,7 +199,7 @@ final class AdminCalendarService
                 static fn (array $booking): int => (int) ($booking['net_minutes'] ?? 0),
                 $activeBookings
             )),
-            'issue_count' => $hasProblem ? $this->issueCount($bookings) : 0,
+            'issue_count' => $hasProblem ? $this->issueCount($activeBookings) : 0,
         ];
     }
 
@@ -271,6 +264,14 @@ final class AdminCalendarService
         );
     }
 
+    private function activeBookings(array $bookings): array
+    {
+        return array_values(array_filter(
+            $bookings,
+            static fn (array $booking): bool => (int) ($booking['is_deleted'] ?? 0) === 0
+        ));
+    }
+
     private function groupBookingsByDate(array $bookings): array
     {
         $grouped = [];
@@ -294,8 +295,7 @@ final class AdminCalendarService
 
         foreach ($bookings as $booking) {
             $entryType = (string) ($booking['entry_type'] ?? 'work');
-            $isIssue = (int) ($booking['is_deleted'] ?? 0) === 1
-                || ($entryType === 'work' && (trim((string) ($booking['start_time'] ?? '')) === '' || trim((string) ($booking['end_time'] ?? '')) === ''))
+            $isIssue = ($entryType === 'work' && (trim((string) ($booking['start_time'] ?? '')) === '' || trim((string) ($booking['end_time'] ?? '')) === ''))
                 || (bool) ($booking['needs_project_assignment'] ?? false);
 
             if ($isIssue) {

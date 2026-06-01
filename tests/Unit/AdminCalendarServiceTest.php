@@ -140,13 +140,37 @@ final class AdminCalendarServiceTest extends TestCase
         self::assertSame(1, $totals['missing_days']);
     }
 
-    public function testDaySummaryMarksArchivedAndOpenWorkAsRed(): void
+    public function testDaySummaryIgnoresArchivedBookingsForCalendarStatus(): void
+    {
+        $summary = $this->service()->summarizeDay('2026-05-08', [
+            $this->booking(['is_deleted' => 1]),
+        ]);
+
+        self::assertSame('empty', $summary['status']);
+        self::assertSame('Keine Buchung', $summary['status_label']);
+        self::assertSame(1, $summary['booking_count']);
+        self::assertSame(0, $summary['active_booking_count']);
+        self::assertSame(0, $summary['issue_count']);
+    }
+
+    public function testActiveBookingFilterKeepsDayDerivedListsAwayFromArchivedRows(): void
+    {
+        $service = $this->service();
+        $method = new ReflectionMethod($service, 'activeBookings');
+        $method->setAccessible(true);
+
+        $bookings = $method->invoke($service, [
+            $this->booking(['id' => 1, 'is_deleted' => 0]),
+            $this->booking(['id' => 2, 'is_deleted' => 1]),
+        ]);
+
+        self::assertSame([1], array_column($bookings, 'id'));
+    }
+
+    public function testDaySummaryMarksOpenWorkAsRed(): void
     {
         $service = $this->service();
 
-        self::assertSame('issue', $service->summarizeDay('2026-05-08', [
-            $this->booking(['is_deleted' => 1]),
-        ])['status']);
         self::assertSame('issue', $service->summarizeDay('2026-05-08', [
             $this->booking(['end_time' => null]),
         ])['status']);
