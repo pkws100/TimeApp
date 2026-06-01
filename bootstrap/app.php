@@ -14,6 +14,8 @@ use App\Domain\Auth\RouteGuard;
 use App\Domain\Backup\BackupService;
 use App\Domain\Calendar\CalendarPolicyService;
 use App\Domain\Dashboard\DashboardService;
+use App\Domain\Exports\AccountingClosureService;
+use App\Domain\Exports\AccountingDocumentExportService;
 use App\Domain\Exports\AccountingExportService;
 use App\Domain\Exports\BookingExportService;
 use App\Domain\Exports\ReportService;
@@ -40,6 +42,7 @@ use App\Domain\Users\RoleService;
 use App\Domain\Users\StorageUsageService;
 use App\Domain\Users\UserService;
 use App\Http\Controllers\AccountingExportController;
+use App\Http\Controllers\AdminAccountingController;
 use App\Http\Controllers\AdminAuthController;
 use App\Http\Controllers\AdminBookingController;
 use App\Http\Controllers\AdminCalendarController;
@@ -169,6 +172,8 @@ $documentStatusService = new DocumentStatusService($connection);
 $reportService = new ReportService($connection, $config->get('exports', []), $timesheetService);
 $bookingExportService = new BookingExportService($adminBookingService);
 $accountingExportService = new AccountingExportService($adminBookingService);
+$accountingClosureService = new AccountingClosureService($connection, $adminBookingService);
+$accountingDocumentExportService = new AccountingDocumentExportService($companySettingsService, $config->get('exports', []));
 $backupService = new BackupService($connection, $config->get('uploads', []));
 $smtpTestService = new SmtpTestService();
 $mobileAppService = new MobileAppService($connection, $projectService, $companySettingsService, $workdayStateCalculator, $fileService, $timesheetGeoLocationService, $calendarPolicyService, $timesheetSignatureService);
@@ -244,6 +249,15 @@ $adminCalendarController = new AdminCalendarController(
     $csrfService,
     $timesheetSignatureService
 );
+$adminAccountingController = new AdminAccountingController(
+    $adminView,
+    $accountingClosureService,
+    $accountingDocumentExportService,
+    $projectService,
+    $userService,
+    $authService,
+    $csrfService
+);
 $companySettingsController = new CompanySettingsController($adminView, $companySettingsService, $smtpTestService, $csrfService, $config->get('maps', []));
 $calendarSettingsController = new CalendarSettingsController($adminView, $calendarPolicyService, $authService, $csrfService);
 $documentStatusController = new DocumentStatusController($adminView, $documentStatusService, $authService, $csrfService);
@@ -285,6 +299,10 @@ $router->get('/admin', $admin([$adminController, 'dashboard'], 'dashboard.view')
 $router->get('/admin/calendar', $admin([$adminCalendarController, 'index'], 'timesheets.view'));
 $router->get('/admin/calendar/month', $admin([$adminCalendarController, 'month'], 'timesheets.view'));
 $router->get('/admin/calendar/day', $admin([$adminCalendarController, 'day'], 'timesheets.view'));
+$router->get('/admin/accounting', $admin([$adminAccountingController, 'index'], 'reports.accounting.export'));
+$router->get('/admin/accounting/export', $admin([$adminAccountingController, 'export'], 'reports.accounting.export'));
+$router->post('/admin/accounting/closures', $admin([$adminAccountingController, 'createClosure'], 'accounting.finalize'));
+$router->get('/admin/accounting/closures/{id}/download', $admin([$adminAccountingController, 'download'], 'reports.accounting.export'));
 $router->get('/admin/attendance', $admin([$attendanceController, 'index'], 'attendance.view'));
 $router->get('/admin/projects', $admin([$adminManagementController, 'projects'], 'projects.view'));
 $router->get('/admin/bookings', $admin([$adminBookingController, 'index'], 'timesheets.view'));

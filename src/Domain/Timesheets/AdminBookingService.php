@@ -10,6 +10,8 @@ use InvalidArgumentException;
 
 final class AdminBookingService
 {
+    private const ACCOUNTING_WRITE_LOCK = 'accounting-timesheet-write';
+
     public function __construct(
         private DatabaseConnection $connection,
         private TimesheetCalculator $calculator,
@@ -219,33 +221,41 @@ final class AdminBookingService
             throw new InvalidArgumentException('Die Buchungstabelle ist nicht verfuegbar.');
         }
 
-        $bookingId = 0;
-
-        $this->connection->transaction(function () use ($normalized, $adminUserId, $reason, &$bookingId): void {
-            $this->connection->execute(
-                'INSERT INTO timesheets (
-                    user_id, project_id, created_by_user_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes, expenses_amount, entry_type, source, note, created_at, updated_at
-                ) VALUES (
-                    :user_id, :project_id, :created_by_user_id, :work_date, :start_time, :end_time, :gross_minutes, :break_minutes, :net_minutes, 0, :entry_type, "admin", :note, NOW(), NOW()
-                )',
-                [
-                    ...$normalized,
-                    'created_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
-                ]
+        return $this->withAccountingWriteLock(function () use ($normalized, $adminUserId, $reason): array {
+            $this->assertAccountingPeriodOpen(
+                (int) $normalized['user_id'],
+                $normalized['project_id'],
+                (string) $normalized['work_date']
             );
 
-            $bookingId = $this->connection->lastInsertId();
-            $after = $this->find($bookingId);
-            $this->logChange($bookingId, 'manual_created', $adminUserId, $reason, null, $after);
+            $bookingId = 0;
+
+            $this->connection->transaction(function () use ($normalized, $adminUserId, $reason, &$bookingId): void {
+                $this->connection->execute(
+                    'INSERT INTO timesheets (
+                        user_id, project_id, created_by_user_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes, expenses_amount, entry_type, source, note, created_at, updated_at
+                    ) VALUES (
+                        :user_id, :project_id, :created_by_user_id, :work_date, :start_time, :end_time, :gross_minutes, :break_minutes, :net_minutes, 0, :entry_type, "admin", :note, NOW(), NOW()
+                    )',
+                    [
+                        ...$normalized,
+                        'created_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
+                    ]
+                );
+
+                $bookingId = $this->connection->lastInsertId();
+                $after = $this->find($bookingId);
+                $this->logChange($bookingId, 'manual_created', $adminUserId, $reason, null, $after);
+            });
+
+            $booking = $this->find($bookingId);
+
+            if ($booking === null) {
+                throw new InvalidArgumentException('Die nacherfasste Buchung konnte nicht geladen werden.');
+            }
+
+            return $booking;
         });
-
-        $booking = $this->find($bookingId);
-
-        if ($booking === null) {
-            throw new InvalidArgumentException('Die nacherfasste Buchung konnte nicht geladen werden.');
-        }
-
-        return $booking;
     }
 
     public function update(int $id, array $payload, int $changedByUserId, string $reason): ?array
@@ -262,37 +272,46 @@ final class AdminBookingService
             throw new InvalidArgumentException('Die Buchung wurde nicht gefunden.');
         }
 
-        $normalized = $this->normalizeBookingPayload($payload, $before);
+        return $this->withAccountingWriteLock(function () use ($id, $payload, $changedByUserId, $reason, $before): ?array {
+            $this->assertNotLockedByAccountingClosure($id);
 
-        $this->connection->transaction(function () use ($id, $normalized, $changedByUserId, $reason, $before): void {
-            if ($this->signatureRelevantChanges($before, $normalized)) {
-                $this->signatureService?->archiveActiveForTimesheet($id, $changedByUserId);
-            }
-
-            $this->connection->execute(
-                'UPDATE timesheets SET
-                    project_id = :project_id,
-                    work_date = :work_date,
-                    start_time = :start_time,
-                    end_time = :end_time,
-                    gross_minutes = :gross_minutes,
-                    break_minutes = :break_minutes,
-                    net_minutes = :net_minutes,
-                    entry_type = :entry_type,
-                    note = :note,
-                    updated_at = NOW()
-                 WHERE id = :id',
-                [
-                    ...$normalized,
-                    'id' => $id,
-                ]
+            $normalized = $this->normalizeBookingPayload($payload, $before);
+            $this->assertAccountingPeriodOpen(
+                (int) ($before['user_id'] ?? 0),
+                $normalized['project_id'],
+                (string) $normalized['work_date']
             );
 
-            $after = $this->find($id);
-            $this->logChange($id, 'updated', $changedByUserId, $reason, $before, $after);
-        });
+            $this->connection->transaction(function () use ($id, $normalized, $changedByUserId, $reason, $before): void {
+                if ($this->signatureRelevantChanges($before, $normalized)) {
+                    $this->signatureService?->archiveActiveForTimesheet($id, $changedByUserId);
+                }
 
-        return $this->find($id);
+                $this->connection->execute(
+                    'UPDATE timesheets SET
+                        project_id = :project_id,
+                        work_date = :work_date,
+                        start_time = :start_time,
+                        end_time = :end_time,
+                        gross_minutes = :gross_minutes,
+                        break_minutes = :break_minutes,
+                        net_minutes = :net_minutes,
+                        entry_type = :entry_type,
+                        note = :note,
+                        updated_at = NOW()
+                     WHERE id = :id',
+                    [
+                        ...$normalized,
+                        'id' => $id,
+                    ]
+                );
+
+                $after = $this->find($id);
+                $this->logChange($id, 'updated', $changedByUserId, $reason, $before, $after);
+            });
+
+            return $this->find($id);
+        });
     }
 
     public function bulkAssign(array $bookingIds, ?int $projectId, int $changedByUserId, string $reason): int
@@ -311,35 +330,44 @@ final class AdminBookingService
 
         $this->assertProjectExists($projectId);
 
-        $updated = 0;
+        return $this->withAccountingWriteLock(function () use ($bookingIds, $projectId, $changedByUserId, $reason): int {
+            $updated = 0;
 
-        $this->connection->transaction(function () use ($bookingIds, $projectId, $changedByUserId, $reason, &$updated): void {
-            foreach ($bookingIds as $bookingId) {
-                $before = $this->find($bookingId);
+            $this->connection->transaction(function () use ($bookingIds, $projectId, $changedByUserId, $reason, &$updated): void {
+                foreach ($bookingIds as $bookingId) {
+                    $before = $this->find($bookingId);
 
-                if ($before === null) {
-                    continue;
+                    if ($before === null) {
+                        continue;
+                    }
+
+                    $this->assertNotLockedByAccountingClosure($bookingId);
+                    $this->assertAccountingPeriodOpen(
+                        (int) ($before['user_id'] ?? 0),
+                        $projectId,
+                        (string) ($before['work_date'] ?? '')
+                    );
+
+                    if ((int) ($before['project_id'] ?? 0) !== (int) ($projectId ?? 0)) {
+                        $this->signatureService?->archiveActiveForTimesheet($bookingId, $changedByUserId);
+                    }
+
+                    $this->connection->execute(
+                        'UPDATE timesheets SET project_id = :project_id, updated_at = NOW() WHERE id = :id',
+                        [
+                            'id' => $bookingId,
+                            'project_id' => $projectId,
+                        ]
+                    );
+
+                    $after = $this->find($bookingId);
+                    $this->logChange($bookingId, 'bulk_project_reassigned', $changedByUserId, $reason, $before, $after);
+                    $updated++;
                 }
+            });
 
-                if ((int) ($before['project_id'] ?? 0) !== (int) ($projectId ?? 0)) {
-                    $this->signatureService?->archiveActiveForTimesheet($bookingId, $changedByUserId);
-                }
-
-                $this->connection->execute(
-                    'UPDATE timesheets SET project_id = :project_id, updated_at = NOW() WHERE id = :id',
-                    [
-                        'id' => $bookingId,
-                        'project_id' => $projectId,
-                    ]
-                );
-
-                $after = $this->find($bookingId);
-                $this->logChange($bookingId, 'bulk_project_reassigned', $changedByUserId, $reason, $before, $after);
-                $updated++;
-            }
+            return $updated;
         });
-
-        return $updated;
     }
 
     public function archive(int $id, int $changedByUserId, string $reason): void
@@ -450,28 +478,32 @@ final class AdminBookingService
             throw new InvalidArgumentException('Die Buchung wurde nicht gefunden.');
         }
 
-        $this->connection->transaction(function () use ($id, $archived, $changedByUserId, $reason, $before): void {
-            $this->connection->execute(
-                'UPDATE timesheets SET
-                    is_deleted = :is_deleted,
-                    deleted_at = :deleted_at,
-                    deleted_by_user_id = :deleted_by_user_id,
-                    updated_at = NOW()
-                 WHERE id = :id',
-                [
-                    'id' => $id,
-                    'is_deleted' => $archived ? 1 : 0,
-                    'deleted_at' => $archived ? (new DateTimeImmutable())->format('Y-m-d H:i:s') : null,
-                    'deleted_by_user_id' => $archived ? $changedByUserId : null,
-                ]
-            );
+        $this->withAccountingWriteLock(function () use ($id, $archived, $changedByUserId, $reason, $before): void {
+            $this->assertNotLockedByAccountingClosure($id);
 
-            if ($archived) {
-                $this->signatureService?->archiveActiveForTimesheet($id, $changedByUserId);
-            }
+            $this->connection->transaction(function () use ($id, $archived, $changedByUserId, $reason, $before): void {
+                $this->connection->execute(
+                    'UPDATE timesheets SET
+                        is_deleted = :is_deleted,
+                        deleted_at = :deleted_at,
+                        deleted_by_user_id = :deleted_by_user_id,
+                        updated_at = NOW()
+                     WHERE id = :id',
+                    [
+                        'id' => $id,
+                        'is_deleted' => $archived ? 1 : 0,
+                        'deleted_at' => $archived ? (new DateTimeImmutable())->format('Y-m-d H:i:s') : null,
+                        'deleted_by_user_id' => $archived ? $changedByUserId : null,
+                    ]
+                );
 
-            $after = $this->find($id);
-            $this->logChange($id, $archived ? 'archived' : 'restored', $changedByUserId, $reason, $before, $after);
+                if ($archived) {
+                    $this->signatureService?->archiveActiveForTimesheet($id, $changedByUserId);
+                }
+
+                $after = $this->find($id);
+                $this->logChange($id, $archived ? 'archived' : 'restored', $changedByUserId, $reason, $before, $after);
+            });
         });
     }
 
@@ -528,6 +560,77 @@ final class AdminBookingService
             'entry_type' => $entryType,
             'note' => $note,
         ];
+    }
+
+    private function assertNotLockedByAccountingClosure(int $timesheetId): void
+    {
+        if ($timesheetId <= 0
+            || !$this->connection->tableExists('accounting_closures')
+            || !$this->connection->tableExists('accounting_closure_items')) {
+            return;
+        }
+
+        $locked = (int) ($this->connection->fetchColumn(
+            'SELECT COUNT(*)
+             FROM accounting_closure_items
+             INNER JOIN accounting_closures ON accounting_closures.id = accounting_closure_items.closure_id
+             WHERE accounting_closure_items.timesheet_id = :timesheet_id
+               AND accounting_closures.status IN ("final", "correction")',
+            ['timesheet_id' => $timesheetId]
+        ) ?? 0) > 0;
+
+        if ($locked) {
+            throw new InvalidArgumentException('Diese Buchung ist Teil eines festgeschriebenen Abrechnungsabschlusses. Normale Aenderungen sind gesperrt.');
+        }
+    }
+
+    private function assertAccountingPeriodOpen(int $userId, ?int $projectId, string $workDate): void
+    {
+        if ($userId <= 0
+            || $workDate === ''
+            || !$this->connection->tableExists('accounting_closures')) {
+            return;
+        }
+
+        $locked = (int) ($this->connection->fetchColumn(
+            'SELECT COUNT(*)
+             FROM accounting_closures
+             WHERE status IN ("final", "correction")
+               AND period_start <= :work_date_start
+               AND period_end >= :work_date_end
+               AND (user_id IS NULL OR user_id = :user_id)
+               AND (project_id IS NULL OR project_id = :project_id)',
+            [
+                'work_date_start' => $workDate,
+                'work_date_end' => $workDate,
+                'user_id' => $userId,
+                'project_id' => $projectId,
+            ]
+        ) ?? 0) > 0;
+
+        if ($locked) {
+            throw new InvalidArgumentException('Der gewaehlte Zeitraum ist bereits festgeschrieben. Normale Aenderungen sind gesperrt.');
+        }
+    }
+
+    /**
+     * @template T
+     * @param callable(): T $callback
+     * @return T
+     */
+    private function withAccountingWriteLock(callable $callback): mixed
+    {
+        $locked = (int) ($this->connection->fetchColumn('SELECT GET_LOCK(:lock_name, 10)', ['lock_name' => self::ACCOUNTING_WRITE_LOCK]) ?? 0);
+
+        if ($locked !== 1) {
+            throw new InvalidArgumentException('Die Abrechnung verarbeitet gerade Buchungen. Bitte erneut versuchen.');
+        }
+
+        try {
+            return $callback();
+        } finally {
+            $this->connection->fetchColumn('SELECT RELEASE_LOCK(:lock_name)', ['lock_name' => self::ACCOUNTING_WRITE_LOCK]);
+        }
     }
 
     private function normalizeBookingPayload(array $payload, array $before): array

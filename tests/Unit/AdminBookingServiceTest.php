@@ -203,6 +203,17 @@ final class AdminBookingServiceTest extends TestCase
         self::assertFalse($assignedWork['needs_project_assignment']);
     }
 
+    public function testAccountingClosureGuardChecksTargetStateOnUpdatesAndBulkAssign(): void
+    {
+        $source = (string) file_get_contents(base_path('src/Domain/Timesheets/AdminBookingService.php'));
+
+        self::assertStringContainsString('$this->assertAccountingPeriodOpen(', $source);
+        self::assertStringContainsString('$normalized[\'project_id\']', $source);
+        self::assertStringContainsString('(string) $normalized[\'work_date\']', $source);
+        self::assertStringContainsString('$projectId,', $source);
+        self::assertStringContainsString('(string) ($before[\'work_date\'] ?? \'\')', $source);
+    }
+
     /**
      * @param array<string, mixed> $overrides
      *

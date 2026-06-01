@@ -13,6 +13,7 @@ use App\Domain\Timesheets\WorkdayStateCalculator;
 use App\Infrastructure\Database\DatabaseConnection;
 use PDO;
 use PDOException;
+use RuntimeException;
 use PHPUnit\Framework\TestCase;
 
 final class AppTimesheetSyncDatabaseTest extends TestCase
@@ -115,6 +116,44 @@ final class AppTimesheetSyncDatabaseTest extends TestCase
         }
     }
 
+    public function testEmployeeCannotSyncIntoFinalizedAccountingPeriod(): void
+    {
+        $this->withScratchDatabase(function (DatabaseConnection $connection): void {
+            [$userId, $projectId, $suffix] = $this->seedAssignedUserAndProject($connection, 'locked');
+
+            $connection->execute(
+                'INSERT INTO accounting_closures (
+                    closure_number, closure_type, status, period_start, period_end, project_id, user_id,
+                    snapshot_hash, item_count, total_net_minutes, created_at, finalized_at
+                 ) VALUES (
+                    "ABR-MONTH-2026-06-LOCKED", "month", "final", "2026-06-01", "2026-06-30", NULL, NULL,
+                    "hash", 0, 0, NOW(), NOW()
+                 )'
+            );
+
+            $service = new AppTimesheetSyncService(
+                $connection,
+                new TimesheetCalculator(),
+                new CompanySettingsService($connection, []),
+                new WorkdayStateCalculator()
+            );
+
+            $this->expectException(RuntimeException::class);
+            $this->expectExceptionMessage('festgeschrieben');
+
+            $service->sync(
+                ['id' => $userId, 'permissions' => ['timesheets.create', 'timesheets.view_own']],
+                [
+                    'client_request_id' => 'phpunit-locked-' . $suffix,
+                    'action' => 'check_in',
+                    'project_id' => $projectId,
+                    'work_date' => '2026-06-02',
+                    'start_time' => '07:00',
+                ]
+            );
+        });
+    }
+
     /**
      * @return array<string, mixed>
      */
@@ -127,6 +166,93 @@ final class AppTimesheetSyncDatabaseTest extends TestCase
         );
 
         return $settings->current();
+    }
+
+    /**
+     * @param callable(DatabaseConnection): void $callback
+     */
+    private function withScratchDatabase(callable $callback): void
+    {
+        $baseConfig = $this->databaseConfig();
+        $baseConnection = new DatabaseConnection($baseConfig);
+
+        if (!$baseConnection->isAvailable()) {
+            self::markTestSkipped('Keine Test-Datenbank verfuegbar.');
+        }
+
+        $pdo = $baseConnection->pdo();
+        self::assertInstanceOf(PDO::class, $pdo);
+
+        $databaseName = 'zeiterfassung_appsync_' . bin2hex(random_bytes(4));
+        $quotedDatabaseName = '`' . str_replace('`', '``', $databaseName) . '`';
+        $databaseCreated = false;
+
+        try {
+            try {
+                $pdo->exec('CREATE DATABASE ' . $quotedDatabaseName . ' CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
+                $databaseCreated = true;
+            } catch (PDOException) {
+                self::markTestSkipped('Datenbankbenutzer darf keine Scratch-Datenbank anlegen.');
+            }
+
+            $config = $baseConfig;
+            $config['database'] = $databaseName;
+            $connection = new DatabaseConnection($config);
+            $this->createSchema($connection);
+
+            $callback($connection);
+        } finally {
+            if ($databaseCreated) {
+                try {
+                    $pdo->exec('DROP DATABASE IF EXISTS ' . $quotedDatabaseName);
+                } catch (PDOException) {
+                    // Best-effort cleanup for scratch database.
+                }
+            }
+        }
+    }
+
+    private function seedAssignedUserAndProject(DatabaseConnection $connection, string $prefix): array
+    {
+        $suffix = bin2hex(random_bytes(4));
+        $userEmail = 'phpunit-' . $prefix . '-' . $suffix . '@example.test';
+        $projectNumber = 'PHP-' . strtoupper($prefix) . '-' . $suffix;
+
+        $connection->execute(
+            'INSERT INTO users (
+                employee_number, first_name, last_name, email, password_hash, employment_status, time_tracking_required, created_at, updated_at, is_deleted
+             ) VALUES (
+                :employee_number, "PHPUnit", "Mitarbeiter", :email, "", "active", 1, NOW(), NOW(), 0
+             )',
+            [
+                'employee_number' => strtoupper($prefix) . '-' . $suffix,
+                'email' => $userEmail,
+            ]
+        );
+        $userId = $connection->lastInsertId();
+
+        $connection->execute(
+            'INSERT INTO projects (
+                project_number, name, status, created_at, updated_at, is_deleted
+             ) VALUES (
+                :project_number, "PHPUnit Projekt", "active", NOW(), NOW(), 0
+             )',
+            ['project_number' => $projectNumber]
+        );
+        $projectId = $connection->lastInsertId();
+
+        $connection->execute(
+            'INSERT INTO project_memberships (project_id, user_id, assignment_role, assigned_from, assigned_until)
+             VALUES (:project_id, :user_id, NULL, :assigned_from, :assigned_until)',
+            [
+                'project_id' => $projectId,
+                'user_id' => $userId,
+                'assigned_from' => '2026-01-01',
+                'assigned_until' => '2026-12-31',
+            ]
+        );
+
+        return [$userId, $projectId, $suffix];
     }
 
     private function createSchema(DatabaseConnection $connection): void
@@ -206,6 +332,37 @@ final class AppTimesheetSyncDatabaseTest extends TestCase
                 response_json TEXT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE KEY uniq_client_request_id (client_request_id)
+            )'
+        );
+
+        $connection->execute(
+            'CREATE TABLE accounting_closures (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                closure_number VARCHAR(80) NOT NULL UNIQUE,
+                closure_type ENUM("month","project") NOT NULL,
+                status ENUM("draft","final","correction") NOT NULL DEFAULT "final",
+                period_start DATE NOT NULL,
+                period_end DATE NOT NULL,
+                project_id INT UNSIGNED NULL,
+                user_id INT UNSIGNED NULL,
+                original_closure_id INT UNSIGNED NULL,
+                snapshot_hash VARCHAR(64) NOT NULL DEFAULT "",
+                item_count INT NOT NULL DEFAULT 0,
+                total_net_minutes INT NOT NULL DEFAULT 0,
+                created_by_user_id INT UNSIGNED NULL,
+                finalized_by_user_id INT UNSIGNED NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                finalized_at DATETIME NULL,
+                note TEXT NULL
+            )'
+        );
+
+        $connection->execute(
+            'CREATE TABLE accounting_closure_items (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                closure_id INT UNSIGNED NOT NULL,
+                timesheet_id INT UNSIGNED NOT NULL,
+                UNIQUE KEY uniq_accounting_closure_items_timesheet (timesheet_id)
             )'
         );
     }

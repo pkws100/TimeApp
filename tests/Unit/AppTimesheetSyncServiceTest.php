@@ -17,4 +17,15 @@ final class AppTimesheetSyncServiceTest extends TestCase
         self::assertStringNotContainsString('project_memberships.assigned_from <= :work_date)', $source);
         self::assertStringNotContainsString('project_memberships.assigned_until >= :work_date)', $source);
     }
+
+    public function testAccountingClosureGuardsProtectAppSyncWrites(): void
+    {
+        $source = (string) file_get_contents(base_path('src/Domain/Timesheets/AppTimesheetSyncService.php'));
+
+        self::assertStringContainsString('assertAccountingWriteAllowed($entry, $userId, $projectId, $workDate)', $source);
+        self::assertStringContainsString('assertTimesheetNotLockedByAccountingClosure($timesheetId)', $source);
+        self::assertStringContainsString('accounting_closure_items.timesheet_id = :timesheet_id', $source);
+        self::assertStringContainsString('period_start <= :work_date_start', $source);
+        self::assertStringContainsString('period_end >= :work_date_end', $source);
+    }
 }

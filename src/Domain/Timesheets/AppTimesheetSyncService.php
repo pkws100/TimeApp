@@ -11,6 +11,8 @@ use RuntimeException;
 
 final class AppTimesheetSyncService
 {
+    private const ACCOUNTING_WRITE_LOCK = 'accounting-timesheet-write';
+
     public function __construct(
         private DatabaseConnection $connection,
         private TimesheetCalculator $calculator,
@@ -44,14 +46,16 @@ final class AppTimesheetSyncService
             throw new RuntimeException('Die Aktion ist ungueltig.');
         }
 
-        return $this->connection->transaction(function () use ($userId, $permissions, $clientRequestId, $payload, $action): array {
-            $existingClaim = $this->claimSyncOperation($clientRequestId, $userId, $action);
+        return $this->withAccountingWriteLock(function () use ($userId, $permissions, $clientRequestId, $payload, $action): array {
+            return $this->connection->transaction(function () use ($userId, $permissions, $clientRequestId, $payload, $action): array {
+                $existingClaim = $this->claimSyncOperation($clientRequestId, $userId, $action);
 
-            if ($existingClaim !== null) {
-                return $existingClaim;
-            }
+                if ($existingClaim !== null) {
+                    return $existingClaim;
+                }
 
-            return $this->performSync($userId, $permissions, $clientRequestId, $payload, $action);
+                return $this->performSync($userId, $permissions, $clientRequestId, $payload, $action);
+            });
         });
     }
 
@@ -75,6 +79,7 @@ final class AppTimesheetSyncService
         $currentBreak = $this->workdayStateCalculator->currentBreak($existingBreaks);
         $projectId = $this->normalizeProjectId($payload['project_id'] ?? ($entry['project_id'] ?? null));
         $this->assertProjectVisibleToUser($projectId, $userId, $permissions, $workDate);
+        $this->assertAccountingWriteAllowed($entry, $userId, $projectId, $workDate);
         $note = $this->nullableTrimmed($payload['note'] ?? ($entry['note'] ?? null));
         $manualBreakMinutes = isset($entry['break_minutes']) ? (int) $entry['break_minutes'] : $this->workdayStateCalculator->completedBreakMinutes($existingBreaks);
 
@@ -570,6 +575,7 @@ final class AppTimesheetSyncService
             return;
         }
 
+        $this->assertTimesheetNotLockedByAccountingClosure($timesheetId);
         $before = $this->findTimesheetById($timesheetId);
 
         $shouldArchiveSignature = $before !== null && $this->signatureRelevantChanges($before, [
@@ -642,6 +648,86 @@ final class AppTimesheetSyncService
         }
 
         return $this->calculator->calculate($workDate, $startTime, $endTime, $manualBreakMinutes, 'work');
+    }
+
+    private function assertAccountingWriteAllowed(?array $entry, int $userId, ?int $projectId, string $workDate): void
+    {
+        if ($entry !== null) {
+            $this->assertTimesheetNotLockedByAccountingClosure((int) ($entry['id'] ?? 0));
+        }
+
+        $this->assertAccountingPeriodOpen($userId, $projectId, $workDate);
+    }
+
+    private function assertTimesheetNotLockedByAccountingClosure(int $timesheetId): void
+    {
+        if ($timesheetId <= 0
+            || !$this->connection->tableExists('accounting_closures')
+            || !$this->connection->tableExists('accounting_closure_items')) {
+            return;
+        }
+
+        $locked = (int) ($this->connection->fetchColumn(
+            'SELECT COUNT(*)
+             FROM accounting_closure_items
+             INNER JOIN accounting_closures ON accounting_closures.id = accounting_closure_items.closure_id
+             WHERE accounting_closure_items.timesheet_id = :timesheet_id
+               AND accounting_closures.status IN ("final", "correction")',
+            ['timesheet_id' => $timesheetId]
+        ) ?? 0) > 0;
+
+        if ($locked) {
+            throw new RuntimeException('Diese Buchung ist bereits festgeschrieben. Bitte wenden Sie sich fuer Korrekturen an die Buchhaltung.');
+        }
+    }
+
+    private function assertAccountingPeriodOpen(int $userId, ?int $projectId, string $workDate): void
+    {
+        if ($userId <= 0
+            || $workDate === ''
+            || !$this->connection->tableExists('accounting_closures')) {
+            return;
+        }
+
+        $locked = (int) ($this->connection->fetchColumn(
+            'SELECT COUNT(*)
+             FROM accounting_closures
+             WHERE status IN ("final", "correction")
+               AND period_start <= :work_date_start
+               AND period_end >= :work_date_end
+               AND (user_id IS NULL OR user_id = :user_id)
+               AND (project_id IS NULL OR project_id = :project_id)',
+            [
+                'work_date_start' => $workDate,
+                'work_date_end' => $workDate,
+                'user_id' => $userId,
+                'project_id' => $projectId,
+            ]
+        ) ?? 0) > 0;
+
+        if ($locked) {
+            throw new RuntimeException('Dieser Zeitraum ist bereits festgeschrieben. Neue oder geaenderte Buchungen sind gesperrt. Bitte wenden Sie sich an die Buchhaltung.');
+        }
+    }
+
+    /**
+     * @template T
+     * @param callable(): T $callback
+     * @return T
+     */
+    private function withAccountingWriteLock(callable $callback): mixed
+    {
+        $locked = (int) ($this->connection->fetchColumn('SELECT GET_LOCK(:lock_name, 10)', ['lock_name' => self::ACCOUNTING_WRITE_LOCK]) ?? 0);
+
+        if ($locked !== 1) {
+            throw new RuntimeException('Die Abrechnung verarbeitet gerade Buchungen. Bitte erneut versuchen.');
+        }
+
+        try {
+            return $callback();
+        } finally {
+            $this->connection->fetchColumn('SELECT RELEASE_LOCK(:lock_name)', ['lock_name' => self::ACCOUNTING_WRITE_LOCK]);
+        }
     }
 
     private function normalizeProjectId(mixed $value): ?int

@@ -76,6 +76,12 @@ final class AdminContextService
                 'permission' => 'timesheets.view',
             ],
             [
+                'href' => '/admin/accounting',
+                'label' => 'Abrechnung',
+                'active_prefix' => '/admin/accounting',
+                'permission' => 'reports.accounting.export',
+            ],
+            [
                 'href' => '/admin/users',
                 'label' => 'User',
                 'active_prefix' => '/admin/users',
