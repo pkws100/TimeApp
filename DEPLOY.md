@@ -158,6 +158,7 @@ Push-Scheduler pruefen:
 
 ```bash
 docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-web php bin/send-push-reminders.php --dry-run
+docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-web php bin/send-personnel-event-reminders.php --dry-run
 ```
 
 ## Smoke-Checks

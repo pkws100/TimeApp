@@ -6,6 +6,8 @@ namespace App\Domain\App;
 
 use App\Domain\Calendar\CalendarPolicyService;
 use App\Domain\Files\FileAttachmentService;
+use App\Domain\Personnel\PersonnelEventService;
+use App\Domain\Personnel\PersonnelLabelService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Settings\CompanySettingsService;
 use App\Domain\Timesheets\TimesheetGeoLocationService;
@@ -24,7 +26,9 @@ final class MobileAppService
         private FileAttachmentService $fileAttachmentService,
         private ?TimesheetGeoLocationService $geoLocationService = null,
         private ?CalendarPolicyService $calendarPolicyService = null,
-        private ?TimesheetSignatureService $signatureService = null
+        private ?TimesheetSignatureService $signatureService = null,
+        private ?PersonnelEventService $personnelEventService = null,
+        private ?PersonnelLabelService $personnelLabelService = null
     ) {
     }
 
@@ -59,6 +63,7 @@ final class MobileAppService
             $this->activeProjectsForUser($user)
         );
         $profile = $this->companySettingsService->publicProfile();
+        $showPersonnelOverview = ($appUiSettings['show_personnel_overview'] ?? true) !== false;
 
         return [
             'today' => $today,
@@ -104,7 +109,42 @@ final class MobileAppService
                 'app_display_name' => (string) ($profile['app_display_name'] ?? ''),
                 'company_name' => (string) ($profile['company_name'] ?? ''),
             ],
+            'personnel_events' => $showPersonnelOverview ? $this->personnelEventsForUser((int) ($user['id'] ?? 0)) : [],
+            'personnel_labels' => $showPersonnelOverview ? $this->personnelLabelsForUser((int) ($user['id'] ?? 0)) : [],
         ];
+    }
+
+    private function personnelEventsForUser(int $userId): array
+    {
+        if (!$this->personnelEventService instanceof PersonnelEventService || $userId <= 0) {
+            return [];
+        }
+
+        return array_map(static fn (array $event): array => [
+            'id' => (int) ($event['id'] ?? 0),
+            'title' => (string) ($event['display_title'] ?? ''),
+            'event_type' => (string) ($event['event_type_name'] ?? ''),
+            'due_on' => (string) ($event['due_on'] ?? ''),
+            'valid_until' => $event['valid_until'] ?? null,
+            'status' => (string) ($event['status'] ?? 'ok'),
+            'status_label' => (string) ($event['status_label'] ?? 'OK'),
+            'days_until_due' => $event['days_until_due'] ?? null,
+        ], $this->personnelEventService->upcomingForUser($userId, 6));
+    }
+
+    private function personnelLabelsForUser(int $userId): array
+    {
+        if (!$this->personnelLabelService instanceof PersonnelLabelService || $userId <= 0) {
+            return [];
+        }
+
+        return array_map(static fn (array $label): array => [
+            'id' => (int) ($label['id'] ?? 0),
+            'name' => (string) ($label['name'] ?? ''),
+            'color' => (string) ($label['color'] ?? '#2563eb'),
+            'icon' => (string) ($label['icon'] ?? 'award'),
+            'description' => $label['description'] ?? null,
+        ], $this->personnelLabelService->labelsForUser($userId));
     }
 
     public function timesheetList(

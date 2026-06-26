@@ -42,7 +42,11 @@ final class AdminCalendarController
         $selectedDate = $this->selectedDate($request);
         $month = $this->calendarService->month((string) $request->query('month', substr($selectedDate, 0, 7)));
         $day = $this->calendarService->day($selectedDate);
+        $canViewPersonnel = $this->authService->hasPermission('personnel.view');
+        $month = $this->filterPersonnelMonth($month, $canViewPersonnel);
+        $day = $this->filterPersonnelDay($day, $canViewPersonnel);
         $day['bookings'] = $this->withTimesheetAttachments(is_array($day['bookings'] ?? null) ? $day['bookings'] : []);
+        $day['summary']['personnel_event_count'] = count(is_array($day['personnel_events'] ?? null) ? $day['personnel_events'] : []);
         $projects = $this->projectService->list('all');
         $users = $this->userService->list('active');
         $returnTo = $this->calendarReturnTo($selectedDate);
@@ -80,15 +84,19 @@ final class AdminCalendarController
 
     public function month(Request $request): Response
     {
+        $month = $this->calendarService->month((string) $request->query('month', ''));
+
         return Response::json([
-            'data' => $this->calendarService->month((string) $request->query('month', '')),
+            'data' => $this->filterPersonnelMonth($month, $this->authService->hasPermission('personnel.view')),
         ]);
     }
 
     public function day(Request $request): Response
     {
         $day = $this->calendarService->day((string) $request->query('date', ''));
+        $day = $this->filterPersonnelDay($day, $this->authService->hasPermission('personnel.view'));
         $day['bookings'] = $this->withTimesheetAttachments(is_array($day['bookings'] ?? null) ? $day['bookings'] : []);
+        $day['summary']['personnel_event_count'] = count(is_array($day['personnel_events'] ?? null) ? $day['personnel_events'] : []);
         $date = (string) $day['date'];
         $projects = $this->projectService->list('all');
         $users = $this->userService->list('active');
@@ -203,6 +211,10 @@ HTML;
                 $meta[] = 'Betriebsurlaub';
             }
 
+            if ((int) ($day['personnel_event_count'] ?? 0) > 0) {
+                $meta[] = (int) $day['personnel_event_count'] . ' Pers.';
+            }
+
             $html .= '<button type="button" class="' . trim(implode(' ', array_filter($classes))) . '" data-calendar-date="' . $this->e($date) . '" aria-pressed="' . ($date === $selectedDate ? 'true' : 'false') . '">'
                 . '<span class="calendar-day__number">' . $this->e((string) ($day['day_number'] ?? '')) . '</span>'
                 . '<span class="calendar-day__status">' . $this->e((string) ($day['status_label'] ?? '')) . '</span>'
@@ -219,6 +231,7 @@ HTML;
         $summary = is_array($day['summary'] ?? null) ? $day['summary'] : [];
         $bookings = $this->activeBookings(is_array($day['bookings'] ?? null) ? $day['bookings'] : []);
         $assets = is_array($day['assets'] ?? null) ? $day['assets'] : [];
+        $personnelEvents = is_array($day['personnel_events'] ?? null) ? $day['personnel_events'] : [];
         $date = (string) ($day['date'] ?? '');
         $table = $renderer->renderTable(
             $bookings,
@@ -256,8 +269,10 @@ HTML;
     <div><span>Feiertag</span><strong>{$this->e((string) ($summary['holiday_count'] ?? 0))}</strong></div>
     <div><span>Fehlt</span><strong>{$this->e((string) ((int) ($summary['stored_absent_count'] ?? 0) + (int) ($summary['missing_count'] ?? 0)))}</strong></div>
     <div><span>Kalender</span><strong>{$this->e(((bool) ($summary['time_tracking_required'] ?? true)) ? 'Pflicht' : 'frei')}</strong></div>
+    <div><span>Personal</span><strong>{$this->e((string) count($personnelEvents))}</strong></div>
 </div>
 {$this->renderAssetList($assets)}
+{$this->renderPersonnelEvents($personnelEvents)}
 {$createForm}
 <section class="card stack calendar-bookings-card">
     <div>
@@ -317,6 +332,47 @@ HTML;
         }
 
         return '<section class="calendar-assets"><h3>Fahrzeuge und Geraete</h3><ul>' . $items . '</ul></section>';
+    }
+
+    private function renderPersonnelEvents(array $events): string
+    {
+        if ($events === []) {
+            return '<section class="calendar-assets"><h3>Personal-Events</h3><p class="muted">Keine Personalfaelligkeit fuer diesen Tag.</p></section>';
+        }
+
+        $items = '';
+
+        foreach ($events as $event) {
+            $items .= '<li><strong>' . $this->e((string) ($event['display_title'] ?? '')) . '</strong><span>' . $this->e((string) ($event['marker_label'] ?? 'Stichtag') . ' · ' . (string) ($event['user_name'] ?? '') . ' · faellig ' . (string) ($event['due_on'] ?? '') . ' · ' . (string) ($event['status_label'] ?? '')) . '</span></li>';
+        }
+
+        return '<section class="calendar-assets"><h3>Personal-Events</h3><ul>' . $items . '</ul></section>';
+    }
+
+    private function filterPersonnelMonth(array $month, bool $canViewPersonnel): array
+    {
+        if ($canViewPersonnel) {
+            return $month;
+        }
+
+        foreach ($month['days'] ?? [] as $index => $day) {
+            $month['days'][$index]['personnel_events'] = [];
+            $month['days'][$index]['personnel_event_count'] = 0;
+        }
+
+        return $month;
+    }
+
+    private function filterPersonnelDay(array $day, bool $canViewPersonnel): array
+    {
+        if ($canViewPersonnel) {
+            return $day;
+        }
+
+        $day['personnel_events'] = [];
+        $day['summary']['personnel_event_count'] = 0;
+
+        return $day;
     }
 
     private function renderCalendarPolicyNotice(array $policy): string

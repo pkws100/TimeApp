@@ -55,6 +55,7 @@ fi
 
 echo "== Scheduler dry-run =="
 compose exec -T "$WEB_SERVICE" php bin/send-push-reminders.php --dry-run
+compose exec -T "$WEB_SERVICE" php bin/send-personnel-event-reminders.php --dry-run
 
 APP_PORT_VALUE=${APP_PORT:-$(sed -n 's/^APP_PORT=//p' "$ENV_FILE" | tail -n 1)}
 APP_PORT_VALUE=$(printf '%s' "$APP_PORT_VALUE" | tr -d "\"'")

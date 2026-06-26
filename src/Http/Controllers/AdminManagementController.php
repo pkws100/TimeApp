@@ -10,6 +10,8 @@ use App\Domain\Auth\AuthService;
 use App\Domain\Auth\CsrfService;
 use App\Domain\Files\DocumentStatusService;
 use App\Domain\Files\FileAttachmentService;
+use App\Domain\Personnel\PersonnelEventService;
+use App\Domain\Personnel\PersonnelLabelService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Timesheets\AdminBookingService;
 use App\Domain\Timesheets\TimesheetSignatureService;
@@ -36,7 +38,9 @@ final class AdminManagementController
         private AdminBookingService $bookingService,
         private AuthService $authService,
         private CsrfService $csrfService,
-        private ?TimesheetSignatureService $timesheetSignatureService = null
+        private ?TimesheetSignatureService $timesheetSignatureService = null,
+        private ?PersonnelLabelService $personnelLabelService = null,
+        private ?PersonnelEventService $personnelEventService = null
     ) {
     }
 
@@ -386,13 +390,22 @@ final class AdminManagementController
     {
         $scope = $this->scope($request);
         $users = $this->userService->list($scope);
+        $userIds = array_map(static fn (array $user): int => (int) ($user['id'] ?? 0), $users);
+        $canViewPersonnel = $this->authService->hasPermission('personnel.view');
+        $labelsByUser = $canViewPersonnel ? ($this->personnelLabelService?->labelsForUsersGrouped($userIds) ?? []) : [];
+        $eventsByUser = $canViewPersonnel ? ($this->personnelEventService?->upcomingForUsersGrouped($userIds) ?? []) : [];
         $rows = '';
 
         foreach ($users as $user) {
+            $userId = (int) ($user['id'] ?? 0);
             $timeTrackingRequired = (int) ($user['time_tracking_required'] ?? 1) === 1;
             $timeTrackingBadge = $timeTrackingRequired
                 ? '<span class="badge ok">Pflicht</span>'
                 : '<span class="badge warn">freiwillig</span>';
+            $personnelCells = $canViewPersonnel
+                ? '<td>' . $this->renderPersonnelLabelBadges($labelsByUser[$userId] ?? []) . '</td>'
+                    . '<td>' . $this->renderNextPersonnelEvent($eventsByUser[$userId][0] ?? null) . '</td>'
+                : '';
 
             $rows .= '<tr>'
                 . '<td>' . $this->e(trim(((string) ($user['first_name'] ?? '')) . ' ' . ((string) ($user['last_name'] ?? '')))) . '</td>'
@@ -400,6 +413,7 @@ final class AdminManagementController
                 . '<td>' . $this->e((string) ($user['phone'] ?? '')) . '</td>'
                 . '<td>' . $this->e((string) ($user['employment_status'] ?? '')) . '</td>'
                 . '<td>' . $timeTrackingBadge . '</td>'
+                . $personnelCells
                 . '<td>' . $this->e((string) ($user['role_names'] ?? '')) . '</td>'
                 . '<td class="table-actions">'
                 . '<a class="button" href="/admin/users/' . (int) $user['id'] . '/edit">Bearbeiten</a>'
@@ -408,6 +422,8 @@ final class AdminManagementController
                 . '</tr>';
         }
 
+        $personnelHead = $canViewPersonnel ? '<th>Labels</th><th>Naechstes Event</th>' : '';
+        $colspan = $canViewPersonnel ? 9 : 7;
         $content = $this->renderIndexLayout(
             'User und Mitarbeiter',
             'Benutzerverwaltung',
@@ -415,8 +431,8 @@ final class AdminManagementController
             '/admin/users',
             $scope,
             $this->notice($request),
-            '<div class="table-scroll"><table><thead><tr><th>Name</th><th>E-Mail</th><th>Telefon</th><th>Status</th><th>Zeiterfassung</th><th>Rollen</th><th>Aktionen</th></tr></thead><tbody>'
-            . ($rows !== '' ? $rows : '<tr><td colspan="7" class="table-empty">Keine User im aktuellen Filter.</td></tr>')
+            '<div class="table-scroll"><table data-admin-table="users" data-table-label="User"><thead><tr><th>Name</th><th>E-Mail</th><th>Telefon</th><th>Status</th><th>Zeiterfassung</th>' . $personnelHead . '<th>Rollen</th><th data-search="false" data-sort="false">Aktionen</th></tr></thead><tbody>'
+            . ($rows !== '' ? $rows : '<tr><td colspan="' . $colspan . '" class="table-empty">Keine User im aktuellen Filter.</td></tr>')
             . '</tbody></table></div>'
         );
 
@@ -439,12 +455,26 @@ final class AdminManagementController
         }
 
         $roles = $this->roleService->list('active');
+        $canViewPersonnel = $this->authService->hasPermission('personnel.view');
+        $canManagePersonnel = $this->authService->hasPermission('personnel.manage');
+        $labels = $canManagePersonnel ? ($this->personnelLabelService?->list('active') ?? []) : [];
+        $selectedLabels = $canViewPersonnel ? ($this->personnelLabelService?->labelsForUser((int) $user['id']) ?? []) : [];
+        $events = $canViewPersonnel ? ($this->personnelEventService?->events(['user_id' => (int) $user['id'], 'scope' => 'active']) ?? []) : [];
+        $eventTypes = $canManagePersonnel ? ($this->personnelEventService?->eventTypes('active') ?? []) : [];
 
-        return Response::html($this->view->render('User bearbeiten', $this->renderUserForm('/admin/users/' . (int) $user['id'], 'User bearbeiten', $user, $roles)));
+        return Response::html($this->view->render(
+            'User bearbeiten',
+            $this->renderUserForm('/admin/users/' . (int) $user['id'], 'User bearbeiten', $user, $roles, $labels, array_column($selectedLabels, 'id'))
+            . ($canViewPersonnel ? $this->renderUserPersonnelEventsSection($user, $events, $eventTypes, $canManagePersonnel) : '')
+        ));
     }
 
     public function userStore(Request $request): Response
     {
+        if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+            return Response::redirect('/admin/users/create?error=csrf');
+        }
+
         try {
             $user = $this->userService->create($request->input());
 
@@ -456,9 +486,21 @@ final class AdminManagementController
 
     public function userUpdate(Request $request, array $params): Response
     {
-        $this->userService->update((int) $params['id'], $request->input());
+        $userId = (int) $params['id'];
 
-        return Response::redirect('/admin/users/' . (int) $params['id'] . '/edit?notice=updated');
+        if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+            return Response::redirect('/admin/users/' . $userId . '/edit?error=csrf');
+        }
+
+        $this->userService->update($userId, $request->input());
+
+        if ($this->authService->hasPermission('personnel.manage')
+            && $this->personnelLabelService instanceof PersonnelLabelService
+            && (string) $request->input('personnel_labels_submitted', '') === '1') {
+            $this->personnelLabelService->syncUserLabels($userId, $request->input('label_ids', []), $this->currentUserId());
+        }
+
+        return Response::redirect('/admin/users/' . $userId . '/edit?notice=updated');
     }
 
     public function userArchive(Request $request, array $params): Response
@@ -639,15 +681,17 @@ HTML;
 HTML;
     }
 
-    private function renderUserForm(string $action, string $title, ?array $user, array $roles): string
+    private function renderUserForm(string $action, string $title, ?array $user, array $roles, array $labels = [], array $selectedLabelIds = []): string
     {
         $isEdit = $user !== null;
         $method = $isEdit ? '<input type="hidden" name="_method" value="PUT">' : '';
+        $csrfToken = $this->e($this->csrfService->token());
         $roleIds = $user['role_ids'] ?? [];
         $roleCheckboxes = '';
         $timeTrackingChecked = ((int) ($user['time_tracking_required'] ?? 1) === 1) ? 'checked' : '';
         $appUiSettings = AppUiSettings::normalize($user['app_ui_settings'] ?? null);
         $appUiSettingsCheckboxes = '';
+        $labelCheckboxes = '';
 
         foreach ($roles as $role) {
             $roleId = (int) ($role['id'] ?? 0);
@@ -661,6 +705,16 @@ HTML;
             $appUiSettingsCheckboxes .= '<label class="checkbox-item"><input type="hidden" name="app_ui_settings[' . $this->e($flag) . ']" value="0"><input type="checkbox" name="app_ui_settings[' . $this->e($flag) . ']" value="1" ' . $checked . '> <span>' . $this->e($label) . '</span></label>';
         }
 
+        foreach ($labels as $label) {
+            $labelId = (int) ($label['id'] ?? 0);
+            $checked = in_array($labelId, array_map('intval', $selectedLabelIds), true) ? 'checked' : '';
+            $labelCheckboxes .= '<label class="checkbox-item"><input type="checkbox" name="label_ids[]" value="' . $labelId . '" ' . $checked . '> <span><span class="personnel-label" style="--personnel-label-color:' . $this->e((string) ($label['color'] ?? '#2563eb')) . '">' . $this->e((string) ($label['icon'] ?? 'award')) . ' · ' . $this->e((string) ($label['name'] ?? '')) . '</span></span></label>';
+        }
+
+        $labelsSection = $labels !== []
+            ? '<div class="full-span field-group"><span>Personal-Labels</span><input type="hidden" name="personnel_labels_submitted" value="1"><div class="checkbox-grid">' . $labelCheckboxes . '</div></div>'
+            : '';
+
         return <<<HTML
 <header class="page-header">
     <div>
@@ -673,6 +727,7 @@ HTML;
 {$this->noticeFromCurrentQuery()}
 <form method="post" action="{$this->e($action)}" class="card form-grid">
     {$method}
+    <input type="hidden" name="csrf_token" value="{$csrfToken}">
     <label><span>Mitarbeiternummer</span><input name="employee_number" value="{$this->field($user, 'employee_number')}"></label>
     <label><span>Vorname</span><input name="first_name" value="{$this->field($user, 'first_name')}" required></label>
     <label><span>Nachname</span><input name="last_name" value="{$this->field($user, 'last_name')}" required></label>
@@ -698,6 +753,7 @@ HTML;
         <span>Rollen</span>
         <div class="checkbox-grid">{$roleCheckboxes}</div>
     </div>
+    {$labelsSection}
     <button class="button" type="submit">Speichern</button>
 </form>
 HTML;
@@ -742,6 +798,122 @@ HTML;
     <button class="button" type="submit">Speichern</button>
 </form>
 HTML;
+    }
+
+    private function renderUserPersonnelEventsSection(array $user, array $events, array $eventTypes, bool $canManage): string
+    {
+        if (!$this->personnelEventService instanceof PersonnelEventService) {
+            return '';
+        }
+
+        $userId = (int) ($user['id'] ?? 0);
+        $csrfToken = $this->e($this->csrfService->token());
+        $eventRows = '';
+
+        foreach ($events as $event) {
+            $statusClass = match ((string) ($event['status'] ?? 'ok')) {
+                'overdue' => 'error',
+                'due_soon' => 'warn',
+                'completed' => 'ok',
+                default => 'ok',
+            };
+            $eventRows .= '<tr>'
+                . '<td><strong>' . $this->e((string) ($event['display_title'] ?? '')) . '</strong><br><span class="muted">' . $this->e((string) ($event['event_type_name'] ?? '')) . '</span></td>'
+                . '<td>' . $this->e((string) ($event['due_on'] ?? '')) . '</td>'
+                . '<td><span class="badge ' . $statusClass . '">' . $this->e((string) ($event['status_label'] ?? '')) . '</span></td>'
+                . '<td>' . $this->e(implode(', ', $event['reminder_channels_list'] ?? [])) . '</td>'
+                . '<td>' . ($canManage ? '<a class="button button-secondary" href="/admin/personnel/events?edit=' . (int) ($event['id'] ?? 0) . '">Bearbeiten</a>' : '<span class="muted">Nur Ansicht</span>') . '</td>'
+                . '</tr>';
+        }
+
+        $typeOptions = $this->personnelEventTypeOptions($eventTypes);
+        $eventRowsHtml = $eventRows !== '' ? $eventRows : '<tr><td colspan="5" class="table-empty">Noch keine aktiven Events.</td></tr>';
+        $createForm = $canManage && $eventTypes !== [] ? <<<HTML
+    <form method="post" action="/admin/personnel/events" class="form-grid">
+        <input type="hidden" name="csrf_token" value="{$csrfToken}">
+        <input type="hidden" name="user_id" value="{$userId}">
+        <label><span>Event-Typ</span><select name="event_type_id" required>{$typeOptions}</select></label>
+        <label><span>Titel optional</span><input name="title"></label>
+        <label><span>Faelligkeit / Termin</span><input type="date" name="due_on" required></label>
+        <label><span>Gueltig bis</span><input type="date" name="valid_until"></label>
+        <label><span>Reminder Tage vorher</span><input type="number" name="reminder_days" min="0" placeholder="Standard des Event-Typs"></label>
+        <div class="field-group full-span">
+            <span>Reminder-Kanaele</span>
+            <div class="checkbox-grid">
+                <label class="checkbox-item"><input type="checkbox" name="reminder_channels[]" value="admin" checked> <span>Admin-Anzeige</span></label>
+                <label class="checkbox-item"><input type="checkbox" name="reminder_channels[]" value="push" checked> <span>Push an Mitarbeiter</span></label>
+                <label class="checkbox-item"><input type="checkbox" name="reminder_channels[]" value="email" checked> <span>E-Mail an Mitarbeiter</span></label>
+            </div>
+        </div>
+        <label class="full-span"><span>Notiz</span><textarea name="note" rows="3"></textarea></label>
+        <button class="button" type="submit">Event hinzufuegen</button>
+    </form>
+HTML : '';
+
+        return <<<HTML
+<section class="card stack">
+    <div class="section-toolbar">
+        <div>
+            <h2>Personal-Events</h2>
+            <p class="muted">Schulungen, Fuehrerscheinmodule, Gueltigkeiten und Erinnerungen fuer diesen Mitarbeiter.</p>
+        </div>
+        <a class="button button-secondary" href="/admin/personnel/events?user_id={$userId}">Alle Events</a>
+    </div>
+    {$createForm}
+    <div class="table-scroll">
+        <table>
+            <thead><tr><th>Event</th><th>Faellig</th><th>Status</th><th>Kanaele</th><th>Aktion</th></tr></thead>
+            <tbody>{$eventRowsHtml}</tbody>
+        </table>
+    </div>
+</section>
+HTML;
+    }
+
+    private function renderPersonnelLabelBadges(array $labels): string
+    {
+        if ($labels === []) {
+            return '<span class="muted">-</span>';
+        }
+
+        $badges = '';
+
+        foreach (array_slice($labels, 0, 4) as $label) {
+            $badges .= '<span class="personnel-label" style="--personnel-label-color:' . $this->e((string) ($label['color'] ?? '#2563eb')) . '">' . $this->e((string) ($label['icon'] ?? 'award')) . ' · ' . $this->e((string) ($label['name'] ?? '')) . '</span>';
+        }
+
+        if (count($labels) > 4) {
+            $badges .= '<span class="badge">+' . (count($labels) - 4) . '</span>';
+        }
+
+        return '<span class="personnel-label-list">' . $badges . '</span>';
+    }
+
+    private function renderNextPersonnelEvent(?array $event): string
+    {
+        if ($event === null) {
+            return '<span class="muted">-</span>';
+        }
+
+        $statusClass = match ((string) ($event['status'] ?? 'ok')) {
+            'overdue' => 'error',
+            'due_soon' => 'warn',
+            default => 'ok',
+        };
+
+        return '<strong>' . $this->e((string) ($event['display_title'] ?? '')) . '</strong><br>'
+            . '<span class="badge ' . $statusClass . '">' . $this->e((string) ($event['due_on'] ?? '')) . ' · ' . $this->e((string) ($event['status_label'] ?? '')) . '</span>';
+    }
+
+    private function personnelEventTypeOptions(array $eventTypes): string
+    {
+        $html = '<option value="">Bitte waehlen</option>';
+
+        foreach ($eventTypes as $type) {
+            $html .= '<option value="' . (int) ($type['id'] ?? 0) . '">' . $this->e((string) ($type['name'] ?? '')) . '</option>';
+        }
+
+        return $html;
     }
 
     private function renderProjectMembershipSection(array $project, array $users, array $membershipUserIds): string

@@ -174,6 +174,8 @@ final class AdminManagementControllerTest extends TestCase
         self::assertStringContainsString('name="app_ui_settings[show_today_total_minutes]" value="0"', $html);
         self::assertStringContainsString('name="app_ui_settings[show_today_total_minutes]" value="1" >', $html);
         self::assertStringContainsString('name="app_ui_settings[show_project_today_minutes]" value="1" checked', $html);
+        self::assertStringContainsString('name="app_ui_settings[show_personnel_overview]" value="1" checked', $html);
+        self::assertStringContainsString('Personal: Labels und Events', $html);
         self::assertStringContainsString('Zusatzkachel Aktueller Einsatz', $html);
         self::assertStringNotContainsString('name="app_ui_settings[show_project_total_minutes]"', $html);
         self::assertStringContainsString('Tagesstatus, Start, Ende, Pausen, Nettozeit, Projekt und Zeiterfassungsaktionen bleiben immer sichtbar', $html);

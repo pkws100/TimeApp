@@ -17,6 +17,7 @@ final class AppUiSettings
         'show_geo_section' => 'GEO-Bereich',
         'show_customer_signature' => 'Kundenbestaetigung',
         'show_project_total_minutes' => 'Projekt-Gesamtsummen',
+        'show_personnel_overview' => 'Personal: Labels und Events',
     ];
 
     public const ADMIN_FLAGS = [
@@ -29,6 +30,7 @@ final class AppUiSettings
         'show_timesheet_files',
         'show_geo_section',
         'show_customer_signature',
+        'show_personnel_overview',
     ];
 
     public const MANDATORY_WIDGETS = [

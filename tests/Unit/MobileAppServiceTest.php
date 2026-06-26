@@ -137,8 +137,13 @@ final class MobileAppServiceTest extends TestCase
         self::assertFalse($payload['app_ui_settings']['show_today_total_minutes']);
         self::assertTrue($payload['app_ui_settings']['show_project_today_minutes']);
         self::assertTrue($payload['app_ui_settings']['show_history']);
+        self::assertTrue($payload['app_ui_settings']['show_personnel_overview']);
         self::assertContains('current_net_minutes', $payload['mandatory_app_widgets']);
         self::assertSame($payload['app_ui_settings'], $payload['user']['app_ui_settings']);
+        self::assertArrayHasKey('personnel_events', $payload);
+        self::assertArrayHasKey('personnel_labels', $payload);
+        self::assertSame([], $payload['personnel_events']);
+        self::assertSame([], $payload['personnel_labels']);
     }
 
     public function testDayContextDefaultsAppUiSettingsWhenUserHasNone(): void
@@ -154,6 +159,26 @@ final class MobileAppServiceTest extends TestCase
 
         self::assertTrue($payload['app_ui_settings']['show_today_total_minutes']);
         self::assertTrue($payload['app_ui_settings']['show_project_today_minutes']);
+        self::assertTrue($payload['app_ui_settings']['show_personnel_overview']);
+    }
+
+    public function testDayContextSuppressesPersonnelPayloadWhenAppDisplayIsDisabled(): void
+    {
+        $payload = $this->service()->dayContext([
+            'id' => 7,
+            'first_name' => 'Max',
+            'last_name' => 'Mustermann',
+            'email' => 'max@example.test',
+            'time_tracking_required' => 1,
+            'roles' => [],
+            'app_ui_settings' => [
+                'show_personnel_overview' => false,
+            ],
+        ]);
+
+        self::assertFalse($payload['app_ui_settings']['show_personnel_overview']);
+        self::assertSame([], $payload['personnel_events']);
+        self::assertSame([], $payload['personnel_labels']);
     }
 
     public function testHistoryPayloadAggregatesSummaryAndDays(): void

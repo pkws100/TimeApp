@@ -54,4 +54,24 @@ final class ReferenceSeederTest extends TestCase
             self::assertNotContains('push.manage', $seedRolePermissions[$roleSlug]);
         }
     }
+
+    public function testPersonnelPermissionsAreGrantedToExpectedRoles(): void
+    {
+        $seedRolePermissions = \InitialReferenceSeeder::rolePermissions();
+
+        foreach (['administrator', 'geschaeftsfuehrung'] as $roleSlug) {
+            self::assertContains('personnel.view', $seedRolePermissions[$roleSlug]);
+            self::assertContains('personnel.manage', $seedRolePermissions[$roleSlug]);
+        }
+
+        foreach (['bauleiter', 'disposition'] as $roleSlug) {
+            self::assertContains('personnel.view', $seedRolePermissions[$roleSlug]);
+            self::assertNotContains('personnel.manage', $seedRolePermissions[$roleSlug]);
+        }
+
+        foreach (['kolonnenfuehrer', 'mitarbeiter'] as $roleSlug) {
+            self::assertNotContains('personnel.view', $seedRolePermissions[$roleSlug]);
+            self::assertNotContains('personnel.manage', $seedRolePermissions[$roleSlug]);
+        }
+    }
 }

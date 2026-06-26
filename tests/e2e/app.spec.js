@@ -1,6 +1,8 @@
 const path = require('path');
 const { test, expect } = require('@playwright/test');
 
+test.use({ serviceWorkers: 'block' });
+
 test('mobile app login screen loads', async ({ page }) => {
   await page.goto('/app/login');
 
@@ -8,6 +10,193 @@ test('mobile app login screen loads', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Anmelden' })).toBeVisible();
   await expect(page.locator('input[name="email"]')).toBeVisible();
   await expect(page.locator('input[name="password"]')).toBeVisible();
+});
+
+test('mobile app shows personal labels and events when enabled', async ({ page }) => {
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test',
+          permissions: ['timesheets.create', 'timesheets.view_own']
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          today: '2026-06-26',
+          server_time: '2026-06-26T10:00:00+02:00',
+          user: {
+            id: 7,
+            display_name: 'Max Mustermann',
+            email: 'max@example.test',
+            roles: [],
+            app_ui_settings: {
+              show_personnel_overview: true
+            }
+          },
+          app_ui_settings: {
+            show_personnel_overview: true
+          },
+          mandatory_app_widgets: ['day_status', 'start_time', 'end_time', 'breaks', 'current_net_minutes', 'current_project', 'time_actions'],
+          projects: [],
+          attachments: [],
+          today_state: {
+            status: 'not_started',
+            is_missing: false,
+            work_entry: null,
+            status_entry: null,
+            current_break: null
+          },
+          current_break: null,
+          breaks_today: [],
+          tracked_minutes_live_basis: null,
+          project_day_summaries: [],
+          company: {},
+          geo_policy: {},
+          personnel_events: [
+            {
+              id: 1,
+              title: 'Modul 1',
+              event_type: 'Fuehrerschein',
+              due_on: '2026-07-10',
+              valid_until: '2027-07-10',
+              status: 'due_soon',
+              status_label: 'Bald faellig',
+              days_until_due: 14
+            }
+          ],
+          personnel_labels: [
+            {
+              id: 2,
+              name: 'LKW-Fahrer',
+              color: '#2563eb',
+              icon: 'truck',
+              description: 'Darf LKW fahren'
+            }
+          ]
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { company_name: 'Muster Bau' } })
+    });
+  });
+
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { enabled: false, can_subscribe: false, devices: [] } })
+    });
+  });
+
+  await page.goto('/app/personal');
+
+  await expect(page.locator('a[href="/app/personal"]').first()).toHaveText('Personal');
+  await expect(page.getByRole('heading', { name: 'Labels und Events' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Naechstes faelliges Event' })).toBeVisible();
+  await expect(page.getByText('Modul 1').first()).toBeVisible();
+  await expect(page.getByText('Bald faellig').first()).toBeVisible();
+  await expect(page.getByText('LKW-Fahrer').first()).toBeVisible();
+  await expect(page.getByText('Darf LKW fahren').first()).toBeVisible();
+
+  await page.goto('/app/profil');
+
+  await expect(page.getByRole('heading', { name: 'Einstellungen und Firma' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Meine Termine' })).toHaveCount(0);
+});
+
+test('mobile app hides personal navigation when disabled', async ({ page }) => {
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test',
+          permissions: ['timesheets.create', 'timesheets.view_own']
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          today: '2026-06-26',
+          server_time: '2026-06-26T10:00:00+02:00',
+          user: {
+            id: 7,
+            display_name: 'Max Mustermann',
+            email: 'max@example.test',
+            roles: [],
+            app_ui_settings: {
+              show_personnel_overview: false
+            }
+          },
+          app_ui_settings: {
+            show_personnel_overview: false
+          },
+          mandatory_app_widgets: ['day_status', 'start_time', 'end_time', 'breaks', 'current_net_minutes', 'current_project', 'time_actions'],
+          projects: [],
+          attachments: [],
+          today_state: {
+            status: 'not_started',
+            is_missing: false,
+            work_entry: null,
+            status_entry: null,
+            current_break: null
+          },
+          current_break: null,
+          breaks_today: [],
+          tracked_minutes_live_basis: null,
+          project_day_summaries: [],
+          company: {},
+          geo_policy: {},
+          personnel_events: [],
+          personnel_labels: []
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { company_name: 'Muster Bau' } })
+    });
+  });
+
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { enabled: false, can_subscribe: false, devices: [] } })
+    });
+  });
+
+  await page.goto('/app/personal');
+
+  await expect(page.locator('a[href="/app/personal"]')).toHaveCount(0);
+  await expect(page.getByText('Dieser Bereich ist fuer Ihr App-Anzeigeprofil ausgeblendet.')).toBeVisible();
 });
 
 test('expired mobile session returns to login and keeps pending queue', async ({ page }) => {

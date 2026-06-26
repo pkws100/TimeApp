@@ -171,6 +171,18 @@ final class RouterSmokeTest extends TestCase
         self::assertStringContainsString('/assets/js/app.js', $historyShell);
 
         $_SERVER['REQUEST_METHOD'] = 'GET';
+        $_SERVER['REQUEST_URI'] = '/app/personal';
+
+        [$request, $router] = require base_path('bootstrap/app.php');
+
+        ob_start();
+        $router->dispatch($request)->send();
+        $personalShell = ob_get_clean() ?: '';
+
+        self::assertStringContainsString('window.__APP_BOOTSTRAP__', $personalShell);
+        self::assertStringContainsString('/assets/js/app.js', $personalShell);
+
+        $_SERVER['REQUEST_METHOD'] = 'GET';
         $_SERVER['REQUEST_URI'] = '/app/manifest.json';
 
         [$request, $router] = require base_path('bootstrap/app.php');
@@ -469,6 +481,44 @@ final class RouterSmokeTest extends TestCase
             || (str_contains($dayPayload, '"html"') && str_contains($dayPayload, 'Fehlt') && str_contains($dayPayload, 'Abwesend')),
             'Die Admin-Kalender-Tagesroute sollte erreichbar sein.'
         );
+    }
+
+    public function testAdminPersonnelRoutesAreProtected(): void
+    {
+        foreach ([
+            'GET' => [
+                '/admin/personnel',
+                '/admin/personnel/charts',
+                '/admin/personnel/labels',
+                '/admin/personnel/events',
+                '/admin/personnel/event-types',
+            ],
+            'POST' => [
+                '/admin/personnel/labels',
+                '/admin/personnel/labels/1',
+                '/admin/personnel/labels/1/archive',
+                '/admin/personnel/events',
+                '/admin/personnel/events/1',
+                '/admin/personnel/events/1/archive',
+                '/admin/personnel/event-types',
+                '/admin/personnel/event-types/1',
+                '/admin/personnel/event-types/1/archive',
+            ],
+        ] as $method => $uris) {
+            foreach ($uris as $uri) {
+                $_SERVER['REQUEST_METHOD'] = $method;
+                $_SERVER['REQUEST_URI'] = $uri;
+                $_GET = [];
+                $_POST = [];
+                $_FILES = [];
+
+                [$request, $router] = require base_path('bootstrap/app.php');
+
+                $response = $router->dispatch($request);
+
+                self::assertSame(302, $response->status(), 'Die Personal-Route sollte zum Login umleiten: ' . $method . ' ' . $uri);
+            }
+        }
     }
 
     public function testAdminSettingsPdfRoutesAreProtected(): void

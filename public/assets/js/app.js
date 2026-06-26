@@ -17,7 +17,8 @@
         'show_timesheet_files',
         'show_geo_section',
         'show_customer_signature',
-        'show_project_total_minutes'
+        'show_project_total_minutes',
+        'show_personnel_overview'
     ];
     const ALLOWED_THEME_MODES = ['light', 'dark', 'system'];
     const THEME_LABELS = {
@@ -980,8 +981,19 @@
             { href: '/app/zeiten', label: 'Zeiten' },
             { href: '/app/historie', label: 'Historie' },
             { href: '/app/projektwahl', label: 'Projekt' },
+            { href: '/app/personal', label: 'Personal' },
             { href: '/app/profil', label: 'Profil' }
-        ].filter((item) => item.href !== '/app/historie' || showAppWidget('show_history'));
+        ].filter((item) => {
+            if (item.href === '/app/historie') {
+                return showAppWidget('show_history');
+            }
+
+            if (item.href === '/app/personal') {
+                return showAppWidget('show_personnel_overview');
+            }
+
+            return true;
+        });
     }
 
     function appNav(className) {
@@ -2622,6 +2634,103 @@
         );
     }
 
+    function personnelEvents() {
+        return state.today && Array.isArray(state.today.personnel_events)
+            ? state.today.personnel_events
+            : [];
+    }
+
+    function personnelLabels() {
+        return state.today && Array.isArray(state.today.personnel_labels)
+            ? state.today.personnel_labels
+            : [];
+    }
+
+    function personnelStatusClass(status) {
+        if (status === 'overdue') {
+            return 'danger';
+        }
+
+        if (status === 'due_soon') {
+            return 'warn';
+        }
+
+        return 'ok';
+    }
+
+    function personnelEventRow(event) {
+        const status = event.status_label || 'OK';
+        const statusClass = personnelStatusClass(event.status || 'ok');
+        const due = event.due_on ? formatDate(event.due_on) : '-';
+        const validUntil = event.valid_until ? formatDate(event.valid_until) : '';
+        const type = event.event_type || 'Termin';
+        const title = event.title || type;
+        const meta = [type, 'Faellig ' + due, validUntil ? 'Gueltig bis ' + validUntil : '']
+            .filter((value) => value !== '')
+            .join(' · ');
+
+        return '<div class="app-info-row">'
+            + '<span><span class="app-badge ' + statusClass + '">' + escapeHtml(status) + '</span></span>'
+            + '<strong>' + escapeHtml(title) + '</strong>'
+            + '<span class="muted">' + escapeHtml(meta) + '</span>'
+            + '</div>';
+    }
+
+    function personnelLabelBadge(label) {
+        const color = label.color || '#2563eb';
+        const icon = label.icon || 'award';
+        const name = label.name || 'Label';
+        const description = label.description
+            ? '<small>' + escapeHtml(label.description) + '</small>'
+            : '';
+
+        return '<span class="app-personnel-label" style="--app-personnel-label-color:' + escapeHtml(color) + '">'
+            + '<strong>' + escapeHtml(icon + ' · ' + name) + '</strong>'
+            + description
+            + '</span>';
+    }
+
+    function personalView() {
+        if (!showAppWidget('show_personnel_overview')) {
+            return shell(
+                '<section class="app-card app-grid">'
+                + '<div><p class="muted">Personal</p><h1>Labels und Events</h1><p>Dieser Bereich ist fuer Ihr App-Anzeigeprofil ausgeblendet.</p></div>'
+                + '</section>'
+            );
+        }
+
+        const events = personnelEvents();
+        const labels = personnelLabels();
+        const nextEvent = events[0] || null;
+        const nextEventMarkup = nextEvent
+            ? '<div class="app-info-list">' + personnelEventRow(nextEvent) + '</div>'
+            : '<div class="app-empty">Aktuell ist kein faelliges oder kommendes Personal-Event hinterlegt.</div>';
+        const eventRows = events.length === 0
+            ? '<div class="app-empty">Keine anstehenden Schulungs- oder Qualifikationstermine.</div>'
+            : '<div class="app-info-list">' + events.map(personnelEventRow).join('') + '</div>';
+        const labelRows = labels.length === 0
+            ? '<div class="app-empty">Keine Labels oder Qualifikationsmarker hinterlegt.</div>'
+            : '<div class="app-personnel-label-list">' + labels.map(personnelLabelBadge).join('') + '</div>';
+
+        return shell(
+            '<section class="app-card app-grid">'
+            + '<div><p class="muted">Personal</p><h1>Labels und Events</h1><p>Eigene Qualifikationen, Schulungen und anstehende Faelligkeiten.</p></div>'
+            + '</section>'
+            + '<section class="app-card app-grid">'
+            + '<div><p class="muted">Als naechstes</p><h2>Naechstes faelliges Event</h2></div>'
+            + nextEventMarkup
+            + '</section>'
+            + '<section class="app-card app-grid">'
+            + '<div><p class="muted">Events</p><h2>Meine Events</h2></div>'
+            + eventRows
+            + '</section>'
+            + '<section class="app-card app-grid">'
+            + '<div><p class="muted">Labels</p><h2>Meine Labels</h2></div>'
+            + labelRows
+            + '</section>'
+        );
+    }
+
     function projectView() {
         const entry = workEntry();
         const hasStartedEntry = !!(entry && entry.start_time);
@@ -2952,6 +3061,8 @@
             html = historyView();
         } else if (routeName() === '/projektwahl') {
             html = projectView();
+        } else if (routeName() === '/personal') {
+            html = personalView();
         } else if (routeName() === '/profil') {
             html = profileView();
         } else {

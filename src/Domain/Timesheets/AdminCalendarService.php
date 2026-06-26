@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Timesheets;
 
 use App\Domain\Calendar\CalendarPolicyService;
+use App\Domain\Personnel\PersonnelEventService;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
 
@@ -15,7 +16,8 @@ final class AdminCalendarService
     public function __construct(
         private DatabaseConnection $connection,
         private AdminBookingService $bookingService,
-        private ?CalendarPolicyService $calendarPolicyService = null
+        private ?CalendarPolicyService $calendarPolicyService = null,
+        private ?PersonnelEventService $personnelEventService = null
     ) {
     }
 
@@ -34,12 +36,15 @@ final class AdminCalendarService
             'scope' => 'all',
         ]);
         $bookingsByDate = $this->groupBookingsByDate($bookings);
+        $personnelEventsByDate = $this->groupPersonnelEventsByDate($this->personnelEventsBetween($gridStart->format('Y-m-d'), $gridEnd->format('Y-m-d')));
         $days = [];
 
         for ($cursor = $gridStart; $cursor <= $gridEnd; $cursor = $cursor->modify('+1 day')) {
             $date = $cursor->format('Y-m-d');
             $dayBookings = $bookingsByDate[$date] ?? [];
             $summary = $this->summarizeDay($date, $dayBookings);
+            $summary['personnel_events'] = $personnelEventsByDate[$date] ?? [];
+            $summary['personnel_event_count'] = count($summary['personnel_events']);
             $summary['is_current_month'] = $cursor->format('Y-m') === $monthStart->format('Y-m');
             $summary['weekday'] = (int) $cursor->format('N');
             $summary['day_number'] = (int) $cursor->format('j');
@@ -76,6 +81,7 @@ final class AdminCalendarService
             'summary' => $this->summarizeDay($date, $bookings),
             'bookings' => $bookings,
             'assets' => $this->assetsForDay($date, $activeBookings),
+            'personnel_events' => $this->personnelEventsBetween($date, $date),
         ];
     }
 
@@ -284,6 +290,32 @@ final class AdminCalendarService
             }
 
             $grouped[$date][] = $booking;
+        }
+
+        return $grouped;
+    }
+
+    private function personnelEventsBetween(string $dateFrom, string $dateTo): array
+    {
+        if (!$this->personnelEventService instanceof PersonnelEventService) {
+            return [];
+        }
+
+        return $this->personnelEventService->calendarEvents($dateFrom, $dateTo);
+    }
+
+    private function groupPersonnelEventsByDate(array $events): array
+    {
+        $grouped = [];
+
+        foreach ($events as $event) {
+            $date = (string) ($event['marker_date'] ?? $event['due_on'] ?? '');
+
+            if ($date === '') {
+                continue;
+            }
+
+            $grouped[$date][] = $event;
         }
 
         return $grouped;

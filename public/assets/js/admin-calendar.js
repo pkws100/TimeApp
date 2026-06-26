@@ -114,6 +114,10 @@
                 meta.push('Betriebsurlaub');
             }
 
+            if (Number(day.personnel_event_count || 0) > 0) {
+                meta.push(String(day.personnel_event_count) + ' Pers.');
+            }
+
             return '<button type="button" class="' + escapeHtml(classes) + '" data-calendar-date="' + escapeHtml(day.date || '') + '" aria-pressed="' + (day.date === selectedDate ? 'true' : 'false') + '">'
                 + '<span class="calendar-day__number">' + escapeHtml(day.day_number || '') + '</span>'
                 + '<span class="calendar-day__status">' + escapeHtml(day.status_label || '') + '</span>'

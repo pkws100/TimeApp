@@ -32,6 +32,8 @@ final class InitialReferenceSeeder extends AbstractSeed
             ['code' => 'reports.export', 'label' => 'Berichte exportieren', 'scope' => 'backend'],
             ['code' => 'reports.accounting.export', 'label' => 'Buchhaltungsexport ausfuehren', 'scope' => 'backend'],
             ['code' => 'accounting.finalize', 'label' => 'Abrechnung festschreiben', 'scope' => 'accounting'],
+            ['code' => 'personnel.view', 'label' => 'Personal-Qualifikationen ansehen', 'scope' => 'backend'],
+            ['code' => 'personnel.manage', 'label' => 'Personal-Qualifikationen verwalten', 'scope' => 'backend'],
             ['code' => 'settings.manage', 'label' => 'Globale Einstellungen verwalten', 'scope' => 'backend'],
             ['code' => 'settings.database.manage', 'label' => 'Datenbank umstellen', 'scope' => 'backend'],
             ['code' => 'push.receive', 'label' => 'Push-Benachrichtigungen empfangen', 'scope' => 'app'],
@@ -78,6 +80,8 @@ final class InitialReferenceSeeder extends AbstractSeed
                 'reports.export',
                 'reports.accounting.export',
                 'accounting.finalize',
+                'personnel.view',
+                'personnel.manage',
                 'settings.manage',
                 'settings.database.manage',
                 'push.manage',
@@ -94,6 +98,7 @@ final class InitialReferenceSeeder extends AbstractSeed
                 'timesheets.manage',
                 'timesheets.export',
                 'reports.export',
+                'personnel.view',
                 'push.receive',
             ],
             'kolonnenfuehrer' => [
@@ -122,6 +127,7 @@ final class InitialReferenceSeeder extends AbstractSeed
                 'timesheets.view',
                 'timesheets.export',
                 'reports.export',
+                'personnel.view',
                 'push.receive',
             ],
         ];

@@ -119,6 +119,7 @@ HTML;
             ['href' => '/admin/projects', 'label' => 'Projekte', 'active_prefix' => '/admin/projects', 'badge' => 0],
             ['href' => '/admin/bookings', 'label' => 'Buchungen', 'active_prefix' => '/admin/bookings', 'badge' => 0],
             ['href' => '/admin/accounting', 'label' => 'Abrechnung', 'active_prefix' => '/admin/accounting'],
+            ['href' => '/admin/personnel', 'label' => 'Personal', 'active_prefix' => '/admin/personnel', 'badge' => 0],
             ['href' => '/admin/users', 'label' => 'User', 'active_prefix' => '/admin/users', 'badge' => 0],
             ['href' => '/admin/roles', 'label' => 'Rollen', 'active_prefix' => '/admin/roles', 'badge' => 0],
             ['href' => '/admin/assets', 'label' => 'Geraete', 'active_prefix' => '/admin/assets', 'badge' => 0],

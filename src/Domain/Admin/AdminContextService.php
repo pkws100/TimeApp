@@ -7,6 +7,7 @@ namespace App\Domain\Admin;
 use App\Domain\Assets\AssetService;
 use App\Domain\Attendance\AttendanceService;
 use App\Domain\Auth\AuthService;
+use App\Domain\Personnel\PersonnelEventService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Settings\CompanySettingsService;
 use App\Domain\Timesheets\AdminBookingService;
@@ -23,6 +24,7 @@ final class AdminContextService
         private RoleService $roleService,
         private AssetService $assetService,
         private AdminBookingService $bookingService,
+        private PersonnelEventService $personnelEventService,
         private AuthService $authService,
         private string $defaultAppName
     ) {
@@ -80,6 +82,13 @@ final class AdminContextService
                 'label' => 'Abrechnung',
                 'active_prefix' => '/admin/accounting',
                 'permission' => 'reports.accounting.export',
+            ],
+            [
+                'href' => '/admin/personnel',
+                'label' => 'Personal',
+                'active_prefix' => '/admin/personnel',
+                'badge' => (int) ($this->personnelEventService->overview()['overdue_events'] ?? 0),
+                'permission' => 'personnel.view',
             ],
             [
                 'href' => '/admin/users',

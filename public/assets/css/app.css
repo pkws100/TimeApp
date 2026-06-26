@@ -457,6 +457,35 @@ html[data-theme="dark"] .app-topbar-status.is-absence .app-topbar-status__label 
     color: var(--app-danger);
 }
 
+.app-personnel-label-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+}
+
+.app-personnel-label {
+    display: inline-grid;
+    gap: 0.12rem;
+    align-items: center;
+    min-height: 36px;
+    max-width: 100%;
+    padding: 0.35rem 0.75rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--app-personnel-label-color, #2563eb) 42%, transparent);
+    background: color-mix(in srgb, var(--app-personnel-label-color, #2563eb) 14%, transparent);
+    color: var(--app-ink);
+    font-size: 0.92rem;
+    font-weight: 800;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+}
+
+.app-personnel-label small {
+    color: var(--app-muted);
+    font-size: 0.8rem;
+    font-weight: 700;
+}
+
 .app-projectless-card {
     display: grid;
     gap: 0.85rem;

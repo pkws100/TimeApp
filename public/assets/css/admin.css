@@ -345,6 +345,14 @@ textarea {
     margin: 0;
 }
 
+.metrics-grid,
+.analytics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
 .badge {
     display: inline-block;
     padding: 0.25rem 0.6rem;
@@ -360,6 +368,67 @@ textarea {
 .badge.warn {
     background: var(--page-warn-soft);
     color: var(--page-warn);
+}
+
+.badge.error {
+    background: rgba(220, 38, 38, 0.12);
+    color: #b91c1c;
+}
+
+.personnel-label {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.15rem;
+    max-width: 100%;
+    min-height: 1.85rem;
+    padding: 0.25rem 0.6rem;
+    border: 1px solid color-mix(in srgb, var(--personnel-label-color, #2563eb) 45%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--personnel-label-color, #2563eb) 13%, transparent);
+    color: var(--page-ink);
+    font-size: 0.86rem;
+    font-weight: 800;
+    line-height: 1.1;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.personnel-label-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+}
+
+.personnel-chart-wrap {
+    min-height: 240px;
+}
+
+.personnel-chart-wrap canvas {
+    display: block;
+    width: 100%;
+    min-height: 240px;
+}
+
+.personnel-event-list {
+    display: grid;
+    gap: 0.65rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.personnel-event-list li {
+    display: grid;
+    gap: 0.2rem;
+    padding: 0.75rem;
+    border: 1px solid var(--page-line);
+    border-radius: 0.8rem;
+    background: var(--page-surface-strong);
+}
+
+.personnel-event-list span {
+    color: var(--page-muted);
 }
 
 .document-status-badge {
@@ -1415,6 +1484,11 @@ html[data-theme="dark"] .calendar-status-badge.is-holiday {
 html[data-theme="dark"] .calendar-status-badge.is-closure {
     background: rgba(167, 139, 250, 0.22);
     color: #ddd6fe;
+}
+
+html[data-theme="dark"] .badge.error {
+    background: rgba(248, 113, 113, 0.2);
+    color: #fecaca;
 }
 
 .calendar-detail {

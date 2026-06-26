@@ -21,6 +21,9 @@ use App\Domain\Exports\BookingExportService;
 use App\Domain\Exports\ReportService;
 use App\Domain\Files\DocumentStatusService;
 use App\Domain\Files\FileAttachmentService;
+use App\Domain\Personnel\PersonnelEventService;
+use App\Domain\Personnel\PersonnelLabelService;
+use App\Domain\Personnel\PersonnelReminderService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Push\PushNotificationService;
 use App\Domain\Push\PushSettingsService;
@@ -28,6 +31,7 @@ use App\Domain\Push\PushSubscriptionService;
 use App\Domain\Settings\CompanySettingsService;
 use App\Domain\Settings\DatabaseSettingsManager;
 use App\Domain\Settings\SettingsSecretService;
+use App\Domain\Settings\SmtpMailService;
 use App\Domain\Settings\SmtpTestService;
 use App\Domain\Timesheets\AdminBookingService;
 use App\Domain\Timesheets\AdminCalendarService;
@@ -67,6 +71,7 @@ use App\Http\Controllers\CompanySettingsController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DocumentStatusController;
 use App\Http\Controllers\FileController;
+use App\Http\Controllers\PersonnelController;
 use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\ReportController;
 use App\Http\Controllers\RoleController;
@@ -149,6 +154,8 @@ $calendarPolicyService = new CalendarPolicyService($connection);
 $attendanceService = new AttendanceService($connection, $calendarPolicyService);
 $userService = new UserService($connection);
 $roleService = new RoleService($connection, $permissionMatrix);
+$personnelLabelService = new PersonnelLabelService($connection);
+$personnelEventService = new PersonnelEventService($connection);
 $projectService = new ProjectService($connection);
 $assetService = new AssetService($connection);
 $timesheetCalculator = new TimesheetCalculator();
@@ -156,13 +163,22 @@ $workdayStateCalculator = new WorkdayStateCalculator();
 $timesheetSignatureService = new TimesheetSignatureService($connection, $config->get('uploads', []), (string) $config->get('app.settings_encryption_key', ''));
 $timesheetService = new TimesheetService($connection, $timesheetCalculator);
 $adminBookingService = new AdminBookingService($connection, $timesheetCalculator, $timesheetSignatureService);
-$adminCalendarService = new AdminCalendarService($connection, $adminBookingService, $calendarPolicyService);
+$adminCalendarService = new AdminCalendarService($connection, $adminBookingService, $calendarPolicyService, $personnelEventService);
 $timesheetGeoLocationService = new TimesheetGeoLocationService($connection);
 $settingsSecretService = new SettingsSecretService((string) $config->get('app.settings_encryption_key', ''));
 $companySettingsService = new CompanySettingsService($connection, $config->get('uploads', []), $settingsSecretService);
 $pushSettingsService = new PushSettingsService($connection, $config->get('push', []));
 $pushSubscriptionService = new PushSubscriptionService($connection);
 $pushNotificationService = new PushNotificationService($connection, $pushSettingsService, $pushSubscriptionService);
+$smtpMailService = new SmtpMailService();
+$personnelReminderService = new PersonnelReminderService(
+    $personnelEventService,
+    $pushSubscriptionService,
+    $pushNotificationService,
+    $companySettingsService,
+    $smtpMailService,
+    (string) $config->get('app.timezone', 'Europe/Berlin')
+);
 $authService = new AuthService($connection, $permissionMatrix);
 $csrfService = new CsrfService();
 $routeGuard = new RouteGuard($authService);
@@ -176,7 +192,7 @@ $accountingClosureService = new AccountingClosureService($connection, $adminBook
 $accountingDocumentExportService = new AccountingDocumentExportService($companySettingsService, $config->get('exports', []));
 $backupService = new BackupService($connection, $config->get('uploads', []));
 $smtpTestService = new SmtpTestService();
-$mobileAppService = new MobileAppService($connection, $projectService, $companySettingsService, $workdayStateCalculator, $fileService, $timesheetGeoLocationService, $calendarPolicyService, $timesheetSignatureService);
+$mobileAppService = new MobileAppService($connection, $projectService, $companySettingsService, $workdayStateCalculator, $fileService, $timesheetGeoLocationService, $calendarPolicyService, $timesheetSignatureService, $personnelEventService, $personnelLabelService);
 $appTimesheetSyncService = new AppTimesheetSyncService($connection, $timesheetCalculator, $companySettingsService, $workdayStateCalculator, $timesheetSignatureService);
 $appDisplayName = trim((string) ($companySettingsService->current()['app_display_name'] ?? '')) ?: (string) $config->get('app.name');
 
@@ -188,6 +204,7 @@ $adminContextService = new AdminContextService(
     $roleService,
     $assetService,
     $adminBookingService,
+    $personnelEventService,
     $authService,
     (string) $config->get('app.name')
 );
@@ -221,7 +238,9 @@ $adminManagementController = new AdminManagementController(
     $adminBookingService,
     $authService,
     $csrfService,
-    $timesheetSignatureService
+    $timesheetSignatureService,
+    $personnelLabelService,
+    $personnelEventService
 );
 $adminBookingController = new AdminBookingController(
     $adminView,
@@ -262,6 +281,7 @@ $companySettingsController = new CompanySettingsController($adminView, $companyS
 $calendarSettingsController = new CalendarSettingsController($adminView, $calendarPolicyService, $authService, $csrfService);
 $documentStatusController = new DocumentStatusController($adminView, $documentStatusService, $authService, $csrfService);
 $adminPushController = new AdminPushController($adminView, $pushSettingsService, $pushSubscriptionService, $pushNotificationService, $csrfService);
+$personnelController = new PersonnelController($adminView, $personnelLabelService, $personnelEventService, $userService, $authService, $csrfService);
 $attendanceController = new AttendanceController($attendanceService, $adminView);
 $accountingExportController = new AccountingExportController($accountingExportService);
 $backupController = new BackupController($backupService);
@@ -293,6 +313,7 @@ $router->get('/app/heute', [$appController, 'shell']);
 $router->get('/app/zeiten', [$appController, 'shell']);
 $router->get('/app/historie', [$appController, 'shell']);
 $router->get('/app/projektwahl', [$appController, 'shell']);
+$router->get('/app/personal', [$appController, 'shell']);
 $router->get('/app/profil', [$appController, 'shell']);
 
 $router->get('/admin', $admin([$adminController, 'dashboard'], 'dashboard.view'));
@@ -304,6 +325,20 @@ $router->get('/admin/accounting/export', $admin([$adminAccountingController, 'ex
 $router->post('/admin/accounting/closures', $admin([$adminAccountingController, 'createClosure'], 'accounting.finalize'));
 $router->get('/admin/accounting/closures/{id}/download', $admin([$adminAccountingController, 'download'], 'reports.accounting.export'));
 $router->get('/admin/attendance', $admin([$attendanceController, 'index'], 'attendance.view'));
+$router->get('/admin/personnel', $admin([$personnelController, 'index'], 'personnel.view'));
+$router->get('/admin/personnel/charts', $admin([$personnelController, 'charts'], 'personnel.view'));
+$router->get('/admin/personnel/labels', $admin([$personnelController, 'labels'], 'personnel.view'));
+$router->post('/admin/personnel/labels', $admin([$personnelController, 'createLabel'], 'personnel.manage'));
+$router->post('/admin/personnel/labels/{id}', $admin([$personnelController, 'updateLabel'], 'personnel.manage'));
+$router->post('/admin/personnel/labels/{id}/archive', $admin([$personnelController, 'archiveLabel'], 'personnel.manage'));
+$router->get('/admin/personnel/events', $admin([$personnelController, 'events'], 'personnel.view'));
+$router->post('/admin/personnel/events', $admin([$personnelController, 'createEvent'], 'personnel.manage'));
+$router->post('/admin/personnel/events/{id}', $admin([$personnelController, 'updateEvent'], 'personnel.manage'));
+$router->post('/admin/personnel/events/{id}/archive', $admin([$personnelController, 'archiveEvent'], 'personnel.manage'));
+$router->get('/admin/personnel/event-types', $admin([$personnelController, 'eventTypes'], 'personnel.view'));
+$router->post('/admin/personnel/event-types', $admin([$personnelController, 'createEventType'], 'personnel.manage'));
+$router->post('/admin/personnel/event-types/{id}', $admin([$personnelController, 'updateEventType'], 'personnel.manage'));
+$router->post('/admin/personnel/event-types/{id}/archive', $admin([$personnelController, 'archiveEventType'], 'personnel.manage'));
 $router->get('/admin/projects', $admin([$adminManagementController, 'projects'], 'projects.view'));
 $router->get('/admin/bookings', $admin([$adminBookingController, 'index'], 'timesheets.view'));
 $router->get('/admin/bookings/export', $admin([$adminBookingController, 'export'], 'timesheets.export'));
