@@ -61,6 +61,13 @@ final class ProjectServiceTest extends TestCase
         self::assertSame('Bauherr Mustermann', $project['customer_signature_name']);
     }
 
+    public function testProjectNumberExistsReturnsFalseWhenProjectTableIsUnavailable(): void
+    {
+        $service = new ProjectService(new DatabaseConnection([]));
+
+        self::assertFalse($service->projectNumberExists('P-10'));
+    }
+
     public function testArchiveAndRestoreFallbackWithoutDatabase(): void
     {
         $service = new ProjectService(new DatabaseConnection([]));

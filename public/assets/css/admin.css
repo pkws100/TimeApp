@@ -379,7 +379,7 @@ textarea {
     display: inline-flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 0.15rem;
+    gap: 0.35rem;
     max-width: 100%;
     min-height: 1.85rem;
     padding: 0.25rem 0.6rem;
@@ -392,6 +392,29 @@ textarea {
     line-height: 1.1;
     white-space: normal;
     overflow-wrap: anywhere;
+}
+
+.personnel-label__icon {
+    display: inline-flex;
+    width: 1rem;
+    height: 1rem;
+    color: var(--personnel-label-color, #2563eb);
+    flex: 0 0 auto;
+}
+
+.personnel-label__icon svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.personnel-label__name {
+    min-width: 0;
 }
 
 .personnel-label-list {
@@ -584,10 +607,38 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
     gap: 1rem;
 }
 
-.form-grid label {
+.form-grid label,
+.form-grid .form-field {
     display: grid;
     gap: 0.45rem;
     font-weight: 700;
+}
+
+.form-grid label.is-invalid input:not([type="checkbox"]):not([type="hidden"]),
+.form-grid label.is-invalid select,
+.form-grid label.is-invalid textarea,
+.form-grid .form-field.is-invalid input:not([type="checkbox"]):not([type="hidden"]),
+.form-grid .form-field.is-invalid select,
+.form-grid .form-field.is-invalid textarea {
+    border-color: rgba(146, 64, 14, 0.44);
+}
+
+.form-grid .field-group.is-invalid {
+    padding: 0.85rem 0.95rem;
+    border: 1px solid rgba(146, 64, 14, 0.44);
+    border-radius: 0.9rem;
+    background: var(--page-warn-soft);
+}
+
+.field-error {
+    color: var(--page-warn);
+    font-size: 0.86rem;
+    font-weight: 700;
+}
+
+.form-error-list {
+    margin: 0.5rem 0 0;
+    padding-left: 1.2rem;
 }
 
 .form-grid .checkbox-item {
@@ -854,6 +905,18 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
 .booking-row.is-clickable:hover,
 .booking-row.is-clickable:focus-visible {
     background: var(--page-surface-soft);
+}
+
+.booking-row.has-booking-issue td {
+    background: rgba(220, 38, 38, 0.08);
+}
+
+.booking-row.has-booking-issue td:first-child {
+    border-left: 3px solid #dc2626;
+}
+
+html[data-theme="dark"] .booking-row.has-booking-issue td {
+    background: rgba(248, 113, 113, 0.12);
 }
 
 .table-note {
@@ -1239,7 +1302,8 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
 .calendar-main,
 .calendar-detail,
 .calendar-create-panel,
-.calendar-assets {
+.calendar-assets,
+.calendar-missing-users {
     background: var(--page-surface);
     border: 1px solid var(--page-line);
     border-radius: 1.3rem;
@@ -1263,6 +1327,7 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
 .calendar-detail__header h2,
 .calendar-create-panel h3,
 .calendar-assets h3,
+.calendar-missing-users h3,
 .calendar-bookings-card h3 {
     margin: 0 0 0.35rem;
 }
@@ -1522,12 +1587,19 @@ html[data-theme="dark"] .badge.error {
 }
 
 .calendar-assets,
+.calendar-missing-users,
 .calendar-create-panel,
 .calendar-bookings-card {
     box-shadow: none;
 }
 
-.calendar-assets ul {
+.calendar-missing-users {
+    border-color: rgba(217, 119, 6, 0.34);
+    background: linear-gradient(180deg, var(--page-surface) 0%, rgba(217, 119, 6, 0.12) 100%);
+}
+
+.calendar-assets ul,
+.calendar-missing-users ul {
     display: grid;
     gap: 0.5rem;
     margin: 0;
@@ -1535,7 +1607,8 @@ html[data-theme="dark"] .badge.error {
     list-style: none;
 }
 
-.calendar-assets li {
+.calendar-assets li,
+.calendar-missing-users li {
     display: grid;
     gap: 0.2rem;
     padding: 0.75rem;
@@ -1544,7 +1617,8 @@ html[data-theme="dark"] .badge.error {
     background: var(--page-surface-strong);
 }
 
-.calendar-assets li span {
+.calendar-assets li span,
+.calendar-missing-users li span {
     color: var(--page-muted);
 }
 
@@ -1568,7 +1642,8 @@ html[data-theme="dark"] .badge.error {
     .calendar-main,
     .calendar-detail,
     .calendar-create-panel,
-    .calendar-assets {
+    .calendar-assets,
+    .calendar-missing-users {
         border-radius: 1rem;
         padding: 1rem;
     }

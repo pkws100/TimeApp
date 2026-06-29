@@ -12,6 +12,7 @@ use App\Domain\Users\UserService;
 use App\Http\Request;
 use App\Http\Response;
 use App\Presentation\Admin\AdminView;
+use App\Presentation\Admin\PersonnelIconRenderer;
 use InvalidArgumentException;
 use RuntimeException;
 
@@ -65,7 +66,7 @@ final class PersonnelController
                     . '<form method="post" action="/admin/personnel/labels/' . $id . '/archive" class="inline-form"><input type="hidden" name="csrf_token" value="' . $csrfToken . '"><button class="button button-danger" type="submit">' . ($archived ? 'Archiviert' : 'Archivieren') . '</button></form>'
                 : '<span class="muted">Nur Ansicht</span>';
             $rows .= '<tr>'
-                . '<td><span class="personnel-label" style="--personnel-label-color:' . $this->e((string) ($label['color'] ?? '#2563eb')) . '">' . $this->e((string) ($label['icon'] ?? 'award')) . ' · ' . $this->e((string) ($label['name'] ?? '')) . '</span></td>'
+                . '<td>' . PersonnelIconRenderer::badge($label) . '</td>'
                 . '<td>' . $this->e((string) ($label['description'] ?? '')) . '</td>'
                 . '<td data-sort-type="number">' . (int) ($label['user_count'] ?? 0) . '</td>'
                 . '<td>' . ($archived ? '<span class="badge warn">archiviert</span>' : '<span class="badge ok">aktiv</span>') . '</td>'
@@ -166,7 +167,7 @@ HTML : '';
                     . '<form method="post" action="/admin/personnel/event-types/' . $id . '/archive" class="inline-form"><input type="hidden" name="csrf_token" value="' . $csrfToken . '"><button class="button button-danger" type="submit">' . ($archived ? 'Archiviert' : 'Archivieren') . '</button></form>'
                 : '<span class="muted">Nur Ansicht</span>';
             $rows .= '<tr>'
-                . '<td><span class="personnel-label" style="--personnel-label-color:' . $this->e((string) ($type['color'] ?? '#7c3aed')) . '">' . $this->e((string) ($type['icon'] ?? 'calendar-check')) . ' · ' . $this->e((string) ($type['name'] ?? '')) . '</span></td>'
+                . '<td>' . PersonnelIconRenderer::badge($type, '#7c3aed', 'calendar-check') . '</td>'
                 . '<td>' . $this->e((string) ($type['description'] ?? '')) . '</td>'
                 . '<td>' . $this->e((string) ($type['default_reminder_days'] ?? '')) . '</td>'
                 . '<td data-sort-type="number">' . (int) ($type['event_count'] ?? 0) . '</td>'

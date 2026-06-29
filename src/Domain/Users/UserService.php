@@ -156,6 +156,44 @@ final class UserService
         });
     }
 
+    public function emailExists(string $email, ?int $excludeUserId = null): bool
+    {
+        $email = trim($email);
+
+        if ($email === '' || !$this->connection->tableExists('users')) {
+            return false;
+        }
+
+        $sql = 'SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER(:email)';
+        $bindings = ['email' => $email];
+
+        if ($excludeUserId !== null) {
+            $sql .= ' AND id <> :exclude_user_id';
+            $bindings['exclude_user_id'] = $excludeUserId;
+        }
+
+        return (int) $this->connection->fetchColumn($sql, $bindings) > 0;
+    }
+
+    public function employeeNumberExists(string $employeeNumber, ?int $excludeUserId = null): bool
+    {
+        $employeeNumber = trim($employeeNumber);
+
+        if ($employeeNumber === '' || !$this->connection->tableExists('users')) {
+            return false;
+        }
+
+        $sql = 'SELECT COUNT(*) FROM users WHERE employee_number = :employee_number';
+        $bindings = ['employee_number' => $employeeNumber];
+
+        if ($excludeUserId !== null) {
+            $sql .= ' AND id <> :exclude_user_id';
+            $bindings['exclude_user_id'] = $excludeUserId;
+        }
+
+        return (int) $this->connection->fetchColumn($sql, $bindings) > 0;
+    }
+
     public function update(int $id, array $payload): ?array
     {
         if (!array_key_exists('time_tracking_required', $payload)) {

@@ -13,11 +13,11 @@
         }
     }
 
-    function resize(canvas) {
+    function resize(canvas, preferredHeight) {
         var rect = canvas.getBoundingClientRect();
         var ratio = window.devicePixelRatio || 1;
-        var width = Math.max(320, Math.floor(rect.width || 640));
-        var height = Math.max(240, Math.floor(rect.height || 240));
+        var width = Math.max(260, Math.floor(rect.width || 640));
+        var height = Math.max(240, Math.floor(preferredHeight || rect.height || 240));
 
         canvas.width = Math.floor(width * ratio);
         canvas.height = Math.floor(height * ratio);
@@ -53,7 +53,20 @@
     }
 
     function drawDoughnut(canvas, data) {
-        var box = resize(canvas);
+        var dataset = (data.datasets || [])[0] || {};
+        var values = Array.isArray(dataset.data) ? dataset.data.map(Number) : [];
+        var labels = Array.isArray(data.labels) ? data.labels : [];
+        var colors = Array.isArray(dataset.backgroundColor) ? dataset.backgroundColor : [];
+        var total = values.reduce(function (sum, value) { return sum + Math.max(0, value || 0); }, 0);
+        var rect = canvas.getBoundingClientRect();
+        var measuredWidth = Math.max(260, Math.floor(rect.width || 640));
+        var legendRows = Math.min(values.length, 8);
+        var isCompact = measuredWidth < 520;
+        var compactRadius = Math.min(78, Math.max(54, measuredWidth * 0.22));
+        var preferredHeight = isCompact && total > 0
+            ? Math.max(300, Math.ceil(44 + compactRadius * 2 + legendRows * 28))
+            : 240;
+        var box = resize(canvas, preferredHeight);
         var context = box.context;
 
         if (!context) {
@@ -62,20 +75,16 @@
 
         context.clearRect(0, 0, box.width, box.height);
 
-        var dataset = (data.datasets || [])[0] || {};
-        var values = Array.isArray(dataset.data) ? dataset.data.map(Number) : [];
-        var labels = Array.isArray(data.labels) ? data.labels : [];
-        var colors = Array.isArray(dataset.backgroundColor) ? dataset.backgroundColor : [];
-        var total = values.reduce(function (sum, value) { return sum + Math.max(0, value || 0); }, 0);
-
         if (total <= 0) {
             drawEmpty(context, box.width, 'Noch keine Daten fuer diese Grafik.');
             return;
         }
 
-        var radius = Math.min(box.width, box.height) * 0.28;
-        var centerX = Math.min(box.width * 0.36, radius + 40);
-        var centerY = box.height * 0.5;
+        var radius = isCompact
+            ? Math.min(78, Math.max(54, box.width * 0.22))
+            : Math.min(box.width, box.height) * 0.28;
+        var centerX = isCompact ? box.width * 0.5 : Math.min(box.width * 0.36, radius + 40);
+        var centerY = isCompact ? radius + 20 : box.height * 0.5;
         var start = -Math.PI / 2;
 
         values.forEach(function (value, index) {
@@ -96,17 +105,17 @@
         context.fill();
         context.globalCompositeOperation = 'source-over';
 
-        var legendX = Math.min(box.width - 180, centerX + radius + 28);
-        var legendY = Math.max(28, centerY - Math.min(values.length, 7) * 13);
+        var legendX = isCompact ? 18 : Math.min(box.width - 180, centerX + radius + 28);
+        var legendY = isCompact ? centerY + radius + 30 : Math.max(28, centerY - Math.min(values.length, 7) * 13);
 
         context.font = '13px sans-serif';
         context.textBaseline = 'middle';
         values.slice(0, 8).forEach(function (value, index) {
-            var y = legendY + index * 26;
+            var y = legendY + index * (isCompact ? 28 : 26);
             context.fillStyle = colors[index] || ['#2563eb', '#16a34a', '#d97706', '#dc2626', '#7c3aed'][index % 5];
             context.fillRect(legendX, y - 6, 12, 12);
             context.fillStyle = css('--page-ink', '#14213d');
-            context.fillText(truncateLabel(context, labels[index], Math.max(90, box.width - legendX - 72)) + ': ' + String(value), legendX + 20, y);
+            context.fillText(truncateLabel(context, labels[index], Math.max(90, box.width - legendX - 56)) + ': ' + String(value), legendX + 20, y);
         });
     }
 

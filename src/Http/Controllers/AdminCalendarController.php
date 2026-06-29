@@ -113,7 +113,7 @@ final class AdminCalendarController
                     $users,
                     $returnTo,
                     $this->csrfService->token(),
-                   $this->authService->hasPermission('timesheets.manage'),
+                    $this->authService->hasPermission('timesheets.manage'),
                     $this->authService->hasPermission('timesheets.archive')
                 ),
             ],
@@ -161,7 +161,7 @@ final class AdminCalendarController
             {$this->renderCalendarGrid($month, $selectedDate)}
         </div>
     </div>
-    <aside class="calendar-detail" data-calendar-day-panel>
+    <aside class="calendar-detail" data-calendar-day-panel aria-live="polite" aria-busy="false">
         {$dayPanel}
     </aside>
 </section>
@@ -250,6 +250,7 @@ HTML;
         $createForm = $canManage ? $this->renderManualBookingForm($date, $projects, $users, $returnTo, $csrfToken) : '';
         $calendarPolicy = is_array($summary['calendar_policy'] ?? null) ? $summary['calendar_policy'] : [];
         $policyNotice = $this->renderCalendarPolicyNotice($calendarPolicy);
+        $missingUsersNotice = $this->renderMissingUsersNotice(is_array($summary['missing_users'] ?? null) ? $summary['missing_users'] : []);
 
         return <<<HTML
 <div class="calendar-detail__header">
@@ -271,6 +272,7 @@ HTML;
     <div><span>Kalender</span><strong>{$this->e(((bool) ($summary['time_tracking_required'] ?? true)) ? 'Pflicht' : 'frei')}</strong></div>
     <div><span>Personal</span><strong>{$this->e((string) count($personnelEvents))}</strong></div>
 </div>
+{$missingUsersNotice}
 {$this->renderAssetList($assets)}
 {$this->renderPersonnelEvents($personnelEvents)}
 {$createForm}
@@ -347,6 +349,31 @@ HTML;
         }
 
         return '<section class="calendar-assets"><h3>Personal-Events</h3><ul>' . $items . '</ul></section>';
+    }
+
+    private function renderMissingUsersNotice(array $missingUsers): string
+    {
+        if ($missingUsers === []) {
+            return '';
+        }
+
+        $items = '';
+
+        foreach ($missingUsers as $user) {
+            $meta = array_values(array_filter([
+                trim((string) ($user['employee_number'] ?? '')),
+                trim((string) ($user['email'] ?? '')),
+            ]));
+            $metaHtml = $meta !== []
+                ? '<span>' . $this->e(implode(' · ', $meta)) . '</span>'
+                : '';
+            $items .= '<li><strong>' . $this->e((string) ($user['user_name'] ?? 'Unbekannter Benutzer')) . '</strong>' . $metaHtml . '</li>';
+        }
+
+        $count = count($missingUsers);
+        $headline = $count === 1 ? 'Buchung fehlt bei' : 'Buchungen fehlen bei';
+
+        return '<section class="calendar-missing-users" aria-label="Fehlende Tagesbuchungen"><h3>' . $this->e($headline) . '</h3><ul>' . $items . '</ul></section>';
     }
 
     private function filterPersonnelMonth(array $month, bool $canViewPersonnel): array

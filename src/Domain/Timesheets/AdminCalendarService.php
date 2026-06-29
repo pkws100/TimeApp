@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Timesheets;
 
-use App\Domain\Calendar\CalendarPolicyService;
+use App\Domain\Calendar\CalendarPolicyProvider;
 use App\Domain\Personnel\PersonnelEventService;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
@@ -16,7 +16,7 @@ final class AdminCalendarService
     public function __construct(
         private DatabaseConnection $connection,
         private AdminBookingService $bookingService,
-        private ?CalendarPolicyService $calendarPolicyService = null,
+        private ?CalendarPolicyProvider $calendarPolicyService = null,
         private ?PersonnelEventService $personnelEventService = null
     ) {
     }
@@ -138,7 +138,8 @@ final class AdminCalendarService
             static fn (array $booking): ?int => isset($booking['user_id']) ? (int) $booking['user_id'] : null,
             $activeBookings
         ))));
-        $missingCount = $this->missingCount($date, $bookedUserIds);
+        $missingUsers = $this->missingUsers($date, $bookedUserIds);
+        $missingCount = count($missingUsers);
         $hasProblem = false;
 
         foreach ($activeBookings as $booking) {
@@ -193,6 +194,7 @@ final class AdminCalendarService
             'work_booking_count' => count($activeWorkBookings),
             'absence_count' => count($activeAbsenceBookings),
             'missing_count' => $missingCount,
+            'missing_users' => $missingUsers,
             'sick_count' => $absenceCounts['sick'],
             'vacation_count' => $absenceCounts['vacation'],
             'holiday_count' => $absenceCounts['holiday'],
@@ -377,22 +379,40 @@ final class AdminCalendarService
         return $counts;
     }
 
-    private function missingCount(string $date, array $bookedUserIds): int
+    private function missingUsers(string $date, array $bookedUserIds): array
     {
         if (!$this->shouldDeriveMissing($date)) {
-            return 0;
+            return [];
         }
 
-        if ($this->calendarPolicyService instanceof CalendarPolicyService && !$this->calendarPolicyService->requiresTimeTracking($date)) {
-            return 0;
+        if ($this->calendarPolicyService instanceof CalendarPolicyProvider && !$this->calendarPolicyService->requiresTimeTracking($date)) {
+            return [];
         }
 
-        return count(array_diff($this->activeUserIds($date), $bookedUserIds));
+        $bookedUserIds = array_flip(array_map('intval', $bookedUserIds));
+        $missingUsers = [];
+
+        foreach ($this->activeUserRows($date) as $user) {
+            $userId = (int) ($user['id'] ?? 0);
+
+            if ($userId <= 0 || isset($bookedUserIds[$userId])) {
+                continue;
+            }
+
+            $missingUsers[] = [
+                'user_id' => $userId,
+                'user_name' => $this->userName($user),
+                'employee_number' => $this->nullableTrimmed($user['employee_number'] ?? null),
+                'email' => $this->nullableTrimmed($user['email'] ?? null),
+            ];
+        }
+
+        return $missingUsers;
     }
 
     private function dayPolicy(string $date): array
     {
-        if (!$this->calendarPolicyService instanceof CalendarPolicyService) {
+        if (!$this->calendarPolicyService instanceof CalendarPolicyProvider) {
             return [
                 'date' => $date,
                 'holiday_region' => '',
@@ -408,7 +428,7 @@ final class AdminCalendarService
         return $this->calendarPolicyService->dayPolicy($date);
     }
 
-    private function activeUserIds(string $date): array
+    private function activeUserRows(string $date): array
     {
         if ($this->activeUsers === null) {
             if (!$this->connection->tableExists('users')) {
@@ -418,7 +438,7 @@ final class AdminCalendarService
                     ? 'COALESCE(time_tracking_required, 1)'
                     : '1';
                 $this->activeUsers = $this->connection->fetchAll(
-                    'SELECT id, created_at, ' . $timeTrackingSelect . ' AS time_tracking_required
+                    'SELECT id, employee_number, first_name, last_name, email, created_at, ' . $timeTrackingSelect . ' AS time_tracking_required
                      FROM users
                      WHERE COALESCE(is_deleted, 0) = 0
                        AND employment_status = "active"
@@ -433,10 +453,11 @@ final class AdminCalendarService
             return [];
         }
 
-        return array_values(array_unique(array_filter(array_map(
-            static function (array $row) use ($dayEnd): int {
+        return array_values(array_filter(
+            $this->activeUsers,
+            static function (array $row) use ($dayEnd): bool {
                 if ((int) ($row['time_tracking_required'] ?? 1) !== 1) {
-                    return 0;
+                    return false;
                 }
 
                 $createdAt = trim((string) ($row['created_at'] ?? ''));
@@ -444,17 +465,40 @@ final class AdminCalendarService
                 if ($createdAt !== '') {
                     try {
                         if (new DateTimeImmutable($createdAt) > $dayEnd) {
-                            return 0;
+                            return false;
                         }
                     } catch (\Exception) {
-                        return 0;
+                        return false;
                     }
                 }
 
-                return (int) ($row['id'] ?? 0);
+                return (int) ($row['id'] ?? 0) > 0;
             },
-            $this->activeUsers
-        ))));
+        ));
+    }
+
+    private function userName(array $user): string
+    {
+        $name = trim((string) ($user['first_name'] ?? '') . ' ' . (string) ($user['last_name'] ?? ''));
+
+        if ($name !== '') {
+            return $name;
+        }
+
+        $email = $this->nullableTrimmed($user['email'] ?? null);
+
+        if ($email !== null) {
+            return $email;
+        }
+
+        return 'User #' . (int) ($user['id'] ?? 0);
+    }
+
+    private function nullableTrimmed(mixed $value): ?string
+    {
+        $value = trim((string) ($value ?? ''));
+
+        return $value === '' ? null : $value;
     }
 
     private function shouldDeriveMissing(string $dateInput): bool

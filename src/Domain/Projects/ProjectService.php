@@ -253,6 +253,25 @@ final class ProjectService
         return $record;
     }
 
+    public function projectNumberExists(string $projectNumber, ?int $excludeProjectId = null): bool
+    {
+        $projectNumber = trim($projectNumber);
+
+        if ($projectNumber === '' || !$this->connection->tableExists('projects')) {
+            return false;
+        }
+
+        $sql = 'SELECT COUNT(*) FROM projects WHERE project_number = :project_number';
+        $bindings = ['project_number' => $projectNumber];
+
+        if ($excludeProjectId !== null) {
+            $sql .= ' AND id <> :exclude_project_id';
+            $bindings['exclude_project_id'] = $excludeProjectId;
+        }
+
+        return (int) $this->connection->fetchColumn($sql, $bindings) > 0;
+    }
+
     public function update(int $id, array $payload): ?array
     {
         $record = $this->normalize($payload);

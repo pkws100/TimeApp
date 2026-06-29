@@ -76,6 +76,7 @@ final class AdminCalendarControllerTest extends TestCase
 
         self::assertStringContainsString('data-admin-calendar', $html);
         self::assertStringContainsString('data-calendar-grid', $html);
+        self::assertStringContainsString('data-calendar-day-panel aria-live="polite" aria-busy="false"', $html);
         self::assertStringContainsString('Buchung hinzufuegen', $html);
         self::assertStringContainsString('/admin/bookings', $html);
     }
@@ -100,6 +101,31 @@ final class AdminCalendarControllerTest extends TestCase
 
         self::assertStringContainsString('"date": "2026-05-15"', $dayPayload);
         self::assertStringContainsString('"html"', $dayPayload);
+    }
+
+    public function testAjaxDayPayloadContainsMissingUsersNotice(): void
+    {
+        $_SESSION = [];
+        $controller = $this->controller([
+            [
+                'id' => 71,
+                'created_at' => '2026-01-01 00:00:00',
+                'first_name' => 'Max',
+                'last_name' => 'Mustermann',
+                'employee_number' => 'MA-071',
+                'email' => 'max@example.test',
+                'time_tracking_required' => 1,
+            ],
+        ]);
+
+        $response = $controller->day(new Request('GET', '/admin/calendar/day', ['date' => '2026-05-15'], [], [], [], []));
+        ob_start();
+        $response->send();
+        $payload = ob_get_clean() ?: '';
+
+        self::assertStringContainsString('calendar-missing-users', $payload);
+        self::assertStringContainsString('Max Mustermann', $payload);
+        self::assertStringContainsString('MA-071', $payload);
     }
 
     public function testDayPanelHidesArchivedBookingsFromCalendarBookingCard(): void
@@ -179,6 +205,97 @@ final class AdminCalendarControllerTest extends TestCase
         self::assertStringNotContainsString('Archiv Projekt', $html);
     }
 
+    public function testDayPanelShowsMissingUserNames(): void
+    {
+        $_SESSION = [];
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'renderDayPanel');
+        $method->setAccessible(true);
+
+        $html = (string) $method->invoke(
+            $controller,
+            [
+                'date' => '2026-05-15',
+                'label' => 'Freitag, 15.05.2026',
+                'summary' => [
+                    'status' => 'missing',
+                    'status_label' => 'Fehlend',
+                    'active_booking_count' => 0,
+                    'employee_count' => 0,
+                    'net_minutes' => 0,
+                    'missing_count' => 2,
+                    'missing_users' => [
+                        [
+                            'user_id' => 7,
+                            'user_name' => 'Max Mustermann',
+                            'employee_number' => 'MA-007',
+                            'email' => 'max@example.test',
+                        ],
+                        [
+                            'user_id' => 8,
+                            'user_name' => 'Erika Beispiel',
+                            'employee_number' => '',
+                            'email' => '',
+                        ],
+                    ],
+                ],
+                'bookings' => [],
+                'assets' => [],
+            ],
+            [],
+            [],
+            '/admin/calendar?month=2026-05&date=2026-05-15',
+            'csrf-token',
+            false,
+            true
+        );
+
+        self::assertStringContainsString('calendar-missing-users', $html);
+        self::assertStringContainsString('Buchungen fehlen bei', $html);
+        self::assertStringContainsString('Max Mustermann', $html);
+        self::assertStringContainsString('MA-007', $html);
+        self::assertStringContainsString('max@example.test', $html);
+        self::assertStringContainsString('Erika Beispiel', $html);
+    }
+
+    public function testDayPanelOmitsMissingUsersNoticeWhenNoUsersAreMissing(): void
+    {
+        $_SESSION = [];
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'renderDayPanel');
+        $method->setAccessible(true);
+
+        $html = (string) $method->invoke(
+            $controller,
+            [
+                'date' => '2026-05-15',
+                'label' => 'Freitag, 15.05.2026',
+                'summary' => [
+                    'status' => 'ok',
+                    'status_label' => 'Sauber',
+                    'active_booking_count' => 1,
+                    'employee_count' => 1,
+                    'net_minutes' => 480,
+                    'missing_count' => 0,
+                    'missing_users' => [],
+                ],
+                'bookings' => [
+                    $this->bookingFixture(41, 'Aktiv Person', 'Aktives Projekt', 0),
+                ],
+                'assets' => [],
+            ],
+            [],
+            [],
+            '/admin/calendar?month=2026-05&date=2026-05-15',
+            'csrf-token',
+            false,
+            true
+        );
+
+        self::assertStringNotContainsString('calendar-missing-users', $html);
+        self::assertStringNotContainsString('Buchung fehlt bei', $html);
+    }
+
     private function bookingFixture(int $id, string $employeeName, string $projectName, int $isDeleted): array
     {
         return [
@@ -204,14 +321,21 @@ final class AdminCalendarControllerTest extends TestCase
         ];
     }
 
-    private function controller(): AdminCalendarController
+    private function controller(array $activeUserRows = []): AdminCalendarController
     {
         $connection = new DatabaseConnection([]);
         $bookingService = new AdminBookingService($connection, new TimesheetCalculator());
+        $calendarService = new AdminCalendarService($connection, $bookingService);
+
+        if ($activeUserRows !== []) {
+            $property = new \ReflectionProperty($calendarService, 'activeUsers');
+            $property->setAccessible(true);
+            $property->setValue($calendarService, $activeUserRows);
+        }
 
         return new AdminCalendarController(
             new AdminView('Baustellen Zeiterfassung', 'http://localhost'),
-            new AdminCalendarService($connection, $bookingService),
+            $calendarService,
             $bookingService,
             new ProjectService($connection),
             new UserService($connection),

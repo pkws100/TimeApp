@@ -117,6 +117,94 @@ final class AdminManagementControllerTest extends TestCase
         self::assertStringContainsString('name="change_reason"', $html);
     }
 
+    public function testProjectStoreRendersValidationErrorsAndKeepsSubmittedData(): void
+    {
+        $_SESSION['_csrf_token'] = 'valid-token';
+
+        $response = $this->controller()->projectStore(new Request('POST', '/admin/projects', [], [
+            'csrf_token' => 'valid-token',
+            'project_number' => '',
+            'name' => '',
+            'customer_name' => 'Stadt Muster',
+            'customer_signature_required' => '1',
+            'customer_signature_name' => 'Bauherr Muster',
+            'status' => 'active',
+            'address_line_1' => 'Musterstrasse 1',
+            'postal_code' => '12345',
+            'city' => 'Musterstadt',
+            'starts_on' => '2026-07-10',
+            'ends_on' => '2026-07-01',
+        ], [], [], []));
+
+        $html = $this->responseContent($response);
+
+        self::assertSame(422, $response->status());
+        self::assertArrayNotHasKey('Location', $response->headers());
+        self::assertStringNotContainsString('name="_method" value="PUT"', $html);
+        self::assertStringContainsString('Projekt konnte nicht angelegt werden.', $html);
+        self::assertStringContainsString('Bitte geben Sie eine Projektnummer ein.', $html);
+        self::assertStringContainsString('Bitte geben Sie einen Projektnamen ein.', $html);
+        self::assertStringContainsString('Das Enddatum darf nicht vor dem Startdatum liegen.', $html);
+        self::assertStringContainsString('name="customer_name" value="Stadt Muster"', $html);
+        self::assertStringContainsString('name="customer_signature_required" value="1" checked', $html);
+        self::assertStringContainsString('name="customer_signature_name" value="Bauherr Muster"', $html);
+        self::assertStringContainsString('<option value="active" selected>Aktiv</option>', $html);
+        self::assertStringContainsString('name="address_line_1" value="Musterstrasse 1"', $html);
+        self::assertStringContainsString('name="postal_code" value="12345"', $html);
+        self::assertStringContainsString('name="city" value="Musterstadt"', $html);
+        self::assertStringContainsString('name="starts_on" value="2026-07-10"', $html);
+        self::assertStringContainsString('name="ends_on" value="2026-07-01"', $html);
+        self::assertStringContainsString('aria-invalid="true" aria-describedby="field-error-project_number"', $html);
+    }
+
+    public function testProjectStoreKeepsDataOnCsrfError(): void
+    {
+        $_SESSION['_csrf_token'] = 'valid-token';
+
+        $response = $this->controller()->projectStore(new Request('POST', '/admin/projects', [], [
+            'csrf_token' => 'expired-token',
+            'project_number' => 'P-11',
+            'name' => 'Rathaus',
+            'customer_name' => 'Gemeinde Mitte',
+            'status' => 'planning',
+            'city' => 'Lueneburg',
+        ], [], [], []));
+
+        $html = $this->responseContent($response);
+
+        self::assertSame(422, $response->status());
+        self::assertArrayNotHasKey('Location', $response->headers());
+        self::assertStringNotContainsString('name="_method" value="PUT"', $html);
+        self::assertStringContainsString('Die Sicherheitspruefung ist abgelaufen. Bitte erneut versuchen.', $html);
+        self::assertStringContainsString('name="project_number" value="P-11"', $html);
+        self::assertStringContainsString('name="name" value="Rathaus"', $html);
+        self::assertStringContainsString('name="customer_name" value="Gemeinde Mitte"', $html);
+        self::assertStringContainsString('name="city" value="Lueneburg"', $html);
+    }
+
+    public function testProjectFormCanRenderStorageErrorWithoutSwitchingToEditForm(): void
+    {
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'renderProjectForm');
+        $method->setAccessible(true);
+
+        $html = (string) $method->invoke($controller, '/admin/projects', 'Projekt anlegen', [
+            'project_number' => 'P-10',
+            'name' => 'Kita Nord',
+            'customer_name' => 'Stadt Nord',
+            'customer_signature_required' => 1,
+            'customer_signature_name' => 'Max Muster',
+            'status' => 'planning',
+        ], [
+            '_form' => ['Das Projekt konnte nicht angelegt werden. Bitte pruefen Sie die Projektnummer auf doppelte Werte.'],
+        ]);
+
+        self::assertStringContainsString('Das Projekt konnte nicht angelegt werden. Bitte pruefen Sie die Projektnummer auf doppelte Werte.', $html);
+        self::assertStringNotContainsString('name="_method" value="PUT"', $html);
+        self::assertStringContainsString('name="project_number" value="P-10"', $html);
+        self::assertStringContainsString('name="customer_signature_required" value="1" checked', $html);
+    }
+
     public function testUserFormRendersTimeTrackingRequirementCheckbox(): void
     {
         $controller = $this->controller();
@@ -181,6 +269,103 @@ final class AdminManagementControllerTest extends TestCase
         self::assertStringContainsString('Tagesstatus, Start, Ende, Pausen, Nettozeit, Projekt und Zeiterfassungsaktionen bleiben immer sichtbar', $html);
     }
 
+    public function testUserStoreRendersValidationErrorsAndKeepsSubmittedData(): void
+    {
+        $_SESSION['_csrf_token'] = 'valid-token';
+
+        $response = $this->controllerWithRoles()->userStore(new Request('POST', '/admin/users', [], [
+            'csrf_token' => 'valid-token',
+            'employee_number' => 'M-42',
+            'first_name' => '',
+            'last_name' => 'Muster',
+            'email' => 'ungueltig',
+            'phone' => '+49 151 123',
+            'password' => 'secret123',
+            'employment_status' => 'active',
+            'target_hours_month' => '-1',
+            'time_tracking_required' => '0',
+            'app_ui_settings' => [
+                'show_today_total_minutes' => '0',
+                'show_project_today_minutes' => '1',
+            ],
+            'role_ids' => ['1'],
+        ], [], [], []));
+
+        $html = $this->responseContent($response);
+
+        self::assertSame(422, $response->status());
+        self::assertArrayNotHasKey('Location', $response->headers());
+        self::assertStringNotContainsString('name="_method" value="PUT"', $html);
+        self::assertStringContainsString('Benutzer konnte nicht angelegt werden.', $html);
+        self::assertStringContainsString('Bitte geben Sie einen Vornamen ein.', $html);
+        self::assertStringContainsString('Bitte geben Sie eine gueltige E-Mail-Adresse ein.', $html);
+        self::assertStringContainsString('Sollstunden muessen eine Zahl groesser oder gleich 0 sein.', $html);
+        self::assertStringContainsString('name="employee_number" value="M-42"', $html);
+        self::assertStringContainsString('name="last_name" value="Muster"', $html);
+        self::assertStringContainsString('name="email" type="email" value="ungueltig"', $html);
+        self::assertStringContainsString('name="phone" value="+49 151 123"', $html);
+        self::assertStringContainsString('name="password" type="password" required', $html);
+        self::assertStringNotContainsString('value="secret123"', $html);
+        self::assertStringContainsString('name="target_hours_month" type="number" step="0.01" value="-1"', $html);
+        self::assertStringContainsString('name="time_tracking_required" value="1" >', $html);
+        self::assertStringContainsString('name="app_ui_settings[show_today_total_minutes]" value="1" >', $html);
+        self::assertStringContainsString('name="role_ids[]" value="1" checked', $html);
+        self::assertStringContainsString('aria-invalid="true"', $html);
+    }
+
+    public function testUserStoreKeepsDataButClearsPasswordOnCsrfError(): void
+    {
+        $_SESSION['_csrf_token'] = 'valid-token';
+
+        $response = $this->controllerWithRoles()->userStore(new Request('POST', '/admin/users', [], [
+            'csrf_token' => 'expired-token',
+            'employee_number' => 'M-43',
+            'first_name' => 'Clara',
+            'last_name' => 'Csrf',
+            'email' => 'clara@example.test',
+            'password' => 'topsecret',
+            'employment_status' => 'active',
+            'role_ids' => ['1'],
+        ], [], [], []));
+
+        $html = $this->responseContent($response);
+
+        self::assertSame(422, $response->status());
+        self::assertArrayNotHasKey('Location', $response->headers());
+        self::assertStringNotContainsString('name="_method" value="PUT"', $html);
+        self::assertStringContainsString('Die Sicherheitspruefung ist abgelaufen. Bitte erneut versuchen.', $html);
+        self::assertStringContainsString('name="employee_number" value="M-43"', $html);
+        self::assertStringContainsString('name="first_name" value="Clara"', $html);
+        self::assertStringContainsString('name="email" type="email" value="clara@example.test"', $html);
+        self::assertStringNotContainsString('value="topsecret"', $html);
+        self::assertStringContainsString('name="role_ids[]" value="1" checked', $html);
+    }
+
+    public function testUserFormClearsPasswordWhenRenderingStorageError(): void
+    {
+        $controller = $this->controllerWithRoles();
+        $method = new ReflectionMethod($controller, 'renderUserForm');
+        $method->setAccessible(true);
+
+        $html = (string) $method->invoke($controller, '/admin/users', 'User anlegen', [
+            'first_name' => 'Dora',
+            'last_name' => 'Doppel',
+            'email' => 'dora@example.test',
+            'employment_status' => 'active',
+            'role_ids' => [1],
+        ], [
+            ['id' => 1, 'name' => 'Mitarbeiter'],
+        ], [], [], [
+            '_form' => ['Der Benutzer konnte nicht angelegt werden. Bitte pruefen Sie E-Mail-Adresse und Mitarbeiternummer auf doppelte Werte.'],
+        ]);
+
+        self::assertStringContainsString('Der Benutzer konnte nicht angelegt werden. Bitte pruefen Sie E-Mail-Adresse und Mitarbeiternummer auf doppelte Werte.', $html);
+        self::assertStringNotContainsString('name="_method" value="PUT"', $html);
+        self::assertStringContainsString('name="password" type="password" required', $html);
+        self::assertStringNotContainsString('stored-response-only', $html);
+        self::assertStringContainsString('name="role_ids[]" value="1" checked', $html);
+    }
+
     public function testProjectBookingRouteIsRegistered(): void
     {
         $bootstrap = file_get_contents(base_path('bootstrap/app.php')) ?: '';
@@ -225,5 +410,37 @@ final class AdminManagementControllerTest extends TestCase
             new AuthService($connection, $permissions),
             new CsrfService()
         );
+    }
+
+    private function controllerWithRoles(): AdminManagementController
+    {
+        $connection = new DatabaseConnection([]);
+        $permissions = new PermissionMatrix([
+            'mitarbeiter' => [
+                'label' => 'Mitarbeiter',
+                'permissions' => ['timesheets.create'],
+            ],
+        ], ['timesheets.create']);
+
+        return new AdminManagementController(
+            new AdminView('Baustellen Zeiterfassung', 'http://localhost'),
+            new ProjectService($connection),
+            new UserService($connection),
+            new RoleService($connection, $permissions),
+            new AssetService($connection),
+            new FileAttachmentService($connection, []),
+            new DocumentStatusService($connection),
+            new AdminBookingService($connection, new TimesheetCalculator()),
+            new AuthService($connection, $permissions),
+            new CsrfService()
+        );
+    }
+
+    private function responseContent(object $response): string
+    {
+        $property = new \ReflectionProperty($response, 'content');
+        $property->setAccessible(true);
+
+        return (string) $property->getValue($response);
     }
 }

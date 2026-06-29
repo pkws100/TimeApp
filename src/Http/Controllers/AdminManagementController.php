@@ -22,6 +22,7 @@ use App\Http\Response;
 use App\Http\UploadSizeGuard;
 use App\Presentation\Admin\AdminView;
 use App\Presentation\Admin\BookingModalRenderer;
+use App\Presentation\Admin\PersonnelIconRenderer;
 use InvalidArgumentException;
 use RuntimeException;
 
@@ -126,7 +127,36 @@ final class AdminManagementController
 
     public function projectStore(Request $request): Response
     {
-        $project = $this->projectService->create($request->input());
+        $payload = $request->input();
+
+        if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+            return $this->projectCreateFailureResponse(
+                $payload,
+                ['csrf_token' => ['Die Sicherheitspruefung ist abgelaufen. Bitte erneut versuchen.']]
+            );
+        }
+
+        try {
+            $errors = $this->validateProjectCreatePayload($payload);
+        } catch (RuntimeException|\InvalidArgumentException $exception) {
+            return $this->projectCreateFailureResponse(
+                $payload,
+                ['_form' => [$this->projectCreateStorageErrorMessage($exception)]]
+            );
+        }
+
+        if ($errors !== []) {
+            return $this->projectCreateFailureResponse($payload, $errors);
+        }
+
+        try {
+            $project = $this->projectService->create($payload);
+        } catch (RuntimeException|\InvalidArgumentException $exception) {
+            return $this->projectCreateFailureResponse(
+                $payload,
+                ['_form' => [$this->projectCreateStorageErrorMessage($exception)]]
+            );
+        }
 
         return Response::redirect('/admin/projects/' . (int) $project['id'] . '/edit?notice=created');
     }
@@ -471,16 +501,31 @@ final class AdminManagementController
 
     public function userStore(Request $request): Response
     {
+        $payload = $request->input();
+
         if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
-            return Response::redirect('/admin/users/create?error=csrf');
+            return $this->userCreateFailureResponse(
+                $payload,
+                ['csrf_token' => ['Die Sicherheitspruefung ist abgelaufen. Bitte erneut versuchen.']]
+            );
+        }
+
+        $roles = $this->roleService->list('active');
+        $errors = $this->validateUserCreatePayload($payload, $roles);
+
+        if ($errors !== []) {
+            return $this->userCreateFailureResponse($payload, $errors);
         }
 
         try {
-            $user = $this->userService->create($request->input());
+            $user = $this->userService->create($payload);
 
             return Response::redirect('/admin/users/' . (int) $user['id'] . '/edit?notice=created');
-        } catch (RuntimeException|\InvalidArgumentException) {
-            return Response::redirect('/admin/users/create?error=validation');
+        } catch (RuntimeException|\InvalidArgumentException $exception) {
+            return $this->userCreateFailureResponse(
+                $payload,
+                ['_form' => [$this->userCreateStorageErrorMessage($exception)]]
+            );
         }
     }
 
@@ -618,12 +663,14 @@ final class AdminManagementController
 HTML;
     }
 
-    private function renderProjectForm(string $action, string $title, ?array $project = null): string
+    private function renderProjectForm(string $action, string $title, ?array $project = null, array $formErrors = []): string
     {
-        $isEdit = $project !== null;
+        $isEdit = $project !== null && array_key_exists('id', $project);
         $method = $isEdit ? '<input type="hidden" name="_method" value="PUT">' : '';
         $hint = $isEdit ? '' : '<p class="muted">Dateianhaenge koennen direkt nach dem ersten Speichern zugewiesen werden.</p>';
         $signatureRequiredChecked = (int) ($project['customer_signature_required'] ?? 0) === 1 ? 'checked' : '';
+        $errorSummary = $this->renderFormErrorSummary($formErrors, 'Projekt konnte nicht angelegt werden.');
+        $csrfToken = $this->e($this->csrfService->token());
 
         return <<<HTML
 <header class="page-header">
@@ -635,22 +682,119 @@ HTML;
     <a class="button" href="/admin/projects">Zur Liste</a>
 </header>
 {$this->noticeFromCurrentQuery()}
+{$errorSummary}
 <form method="post" action="{$this->e($action)}" class="card form-grid">
     {$method}
-    <label><span>Projektnummer</span><input name="project_number" value="{$this->field($project, 'project_number')}" required></label>
-    <label><span>Name</span><input name="name" value="{$this->field($project, 'name')}" required></label>
-    <label><span>Kunde</span><input name="customer_name" value="{$this->field($project, 'customer_name')}"></label>
+    <input type="hidden" name="csrf_token" value="{$csrfToken}">
+    <div{$this->fieldWrapperClass($formErrors, 'project_number')}><label for="project_number">Projektnummer</label><input id="project_number" name="project_number" value="{$this->field($project, 'project_number')}" required{$this->fieldInvalidAttribute($formErrors, 'project_number')}>{$this->fieldErrorMarkup($formErrors, 'project_number')}</div>
+    <div{$this->fieldWrapperClass($formErrors, 'name')}><label for="name">Name</label><input id="name" name="name" value="{$this->field($project, 'name')}" required{$this->fieldInvalidAttribute($formErrors, 'name')}>{$this->fieldErrorMarkup($formErrors, 'name')}</div>
+    <div class="form-field"><label for="customer_name">Kunde</label><input id="customer_name" name="customer_name" value="{$this->field($project, 'customer_name')}"></div>
     <label class="checkbox-item full-span"><input type="checkbox" name="customer_signature_required" value="1" {$signatureRequiredChecked}> <span>Kundenunterschrift bei Abschluss anfordern</span></label>
-    <label><span>Standardname für Kundenbestätigung</span><input name="customer_signature_name" value="{$this->field($project, 'customer_signature_name')}"></label>
-    <label><span>Status</span>{$this->select('status', ['planning' => 'Planung', 'active' => 'Aktiv', 'paused' => 'Pausiert', 'completed' => 'Abgeschlossen', 'archived' => 'Archiviert'], $project['status'] ?? 'planning')}</label>
-    <label><span>Adresse</span><input name="address_line_1" value="{$this->field($project, 'address_line_1')}"></label>
-    <label><span>PLZ</span><input name="postal_code" value="{$this->field($project, 'postal_code')}"></label>
-    <label><span>Ort</span><input name="city" value="{$this->field($project, 'city')}"></label>
-    <label><span>Start</span><input type="date" name="starts_on" value="{$this->field($project, 'starts_on')}"></label>
-    <label><span>Ende</span><input type="date" name="ends_on" value="{$this->field($project, 'ends_on')}"></label>
+    <div class="form-field"><label for="customer_signature_name">Standardname für Kundenbestätigung</label><input id="customer_signature_name" name="customer_signature_name" value="{$this->field($project, 'customer_signature_name')}"></div>
+    <div{$this->fieldWrapperClass($formErrors, 'status')}><label for="status">Status</label>{$this->select('status', ['planning' => 'Planung', 'active' => 'Aktiv', 'paused' => 'Pausiert', 'completed' => 'Abgeschlossen', 'archived' => 'Archiviert'], (string) ($project['status'] ?? 'planning'), $this->fieldInvalidAttribute($formErrors, 'status'))}{$this->fieldErrorMarkup($formErrors, 'status')}</div>
+    <div class="form-field"><label for="address_line_1">Adresse</label><input id="address_line_1" name="address_line_1" value="{$this->field($project, 'address_line_1')}"></div>
+    <div class="form-field"><label for="postal_code">PLZ</label><input id="postal_code" name="postal_code" value="{$this->field($project, 'postal_code')}"></div>
+    <div class="form-field"><label for="city">Ort</label><input id="city" name="city" value="{$this->field($project, 'city')}"></div>
+    <div{$this->fieldWrapperClass($formErrors, 'starts_on')}><label for="starts_on">Start</label><input id="starts_on" type="date" name="starts_on" value="{$this->field($project, 'starts_on')}"{$this->fieldInvalidAttribute($formErrors, 'starts_on')}>{$this->fieldErrorMarkup($formErrors, 'starts_on')}</div>
+    <div{$this->fieldWrapperClass($formErrors, 'ends_on')}><label for="ends_on">Ende</label><input id="ends_on" type="date" name="ends_on" value="{$this->field($project, 'ends_on')}"{$this->fieldInvalidAttribute($formErrors, 'ends_on')}>{$this->fieldErrorMarkup($formErrors, 'ends_on')}</div>
     <button class="button" type="submit">Speichern</button>
 </form>
 HTML;
+    }
+
+    private function projectCreateFailureResponse(array $payload, array $errors): Response
+    {
+        return Response::html(
+            $this->view->render(
+                'Projekt anlegen',
+                $this->renderProjectForm('/admin/projects', 'Projekt anlegen', $this->projectFormPayload($payload), $errors)
+            ),
+            422
+        );
+    }
+
+    private function validateProjectCreatePayload(array $payload): array
+    {
+        $errors = [];
+        $projectNumber = trim((string) ($payload['project_number'] ?? ''));
+        $name = trim((string) ($payload['name'] ?? ''));
+        $status = trim((string) ($payload['status'] ?? 'planning'));
+        $startsOn = trim((string) ($payload['starts_on'] ?? ''));
+        $endsOn = trim((string) ($payload['ends_on'] ?? ''));
+
+        if ($projectNumber === '') {
+            $errors['project_number'][] = 'Bitte geben Sie eine Projektnummer ein.';
+        } elseif ($this->projectService->projectNumberExists($projectNumber)) {
+            $errors['project_number'][] = 'Diese Projektnummer ist bereits vergeben.';
+        }
+
+        if ($name === '') {
+            $errors['name'][] = 'Bitte geben Sie einen Projektnamen ein.';
+        }
+
+        if (!in_array($status, ['planning', 'active', 'paused', 'completed', 'archived'], true)) {
+            $errors['status'][] = 'Bitte waehlen Sie einen gueltigen Status.';
+        }
+
+        $startDate = $startsOn !== '' ? $this->validDate($startsOn) : null;
+        $endDate = $endsOn !== '' ? $this->validDate($endsOn) : null;
+
+        if ($startsOn !== '' && $startDate === null) {
+            $errors['starts_on'][] = 'Bitte geben Sie ein gueltiges Startdatum ein.';
+        }
+
+        if ($endsOn !== '' && $endDate === null) {
+            $errors['ends_on'][] = 'Bitte geben Sie ein gueltiges Enddatum ein.';
+        }
+
+        if ($startDate !== null && $endDate !== null && $startDate > $endDate) {
+            $errors['ends_on'][] = 'Das Enddatum darf nicht vor dem Startdatum liegen.';
+        }
+
+        return $errors;
+    }
+
+    private function projectCreateStorageErrorMessage(\Throwable $exception): string
+    {
+        $message = $exception->getMessage();
+        error_log('Project create failed: ' . $message);
+
+        if (stripos($message, 'project_number') !== false || stripos($message, 'Duplicate') !== false) {
+            return 'Das Projekt konnte nicht angelegt werden. Bitte pruefen Sie die Projektnummer auf doppelte Werte.';
+        }
+
+        return 'Das Projekt konnte nicht angelegt werden. Bitte pruefen Sie die Eingaben oder versuchen Sie es erneut.';
+    }
+
+    private function projectFormPayload(array $payload): array
+    {
+        return [
+            'project_number' => (string) ($payload['project_number'] ?? ''),
+            'name' => (string) ($payload['name'] ?? ''),
+            'customer_name' => (string) ($payload['customer_name'] ?? ''),
+            'customer_signature_required' => in_array($payload['customer_signature_required'] ?? false, [true, 1, '1', 'on', 'yes'], true) ? 1 : 0,
+            'customer_signature_name' => (string) ($payload['customer_signature_name'] ?? ''),
+            'status' => (string) ($payload['status'] ?? 'planning'),
+            'address_line_1' => (string) ($payload['address_line_1'] ?? ''),
+            'postal_code' => (string) ($payload['postal_code'] ?? ''),
+            'city' => (string) ($payload['city'] ?? ''),
+            'starts_on' => (string) ($payload['starts_on'] ?? ''),
+            'ends_on' => (string) ($payload['ends_on'] ?? ''),
+        ];
+    }
+
+    private function validDate(string $value): ?\DateTimeImmutable
+    {
+        $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+        $errors = \DateTimeImmutable::getLastErrors();
+
+        if ($date instanceof \DateTimeImmutable
+            && $date->format('Y-m-d') === $value
+            && ($errors === false || ((int) $errors['warning_count'] === 0 && (int) $errors['error_count'] === 0))) {
+            return $date;
+        }
+
+        return null;
     }
 
     private function renderAssetForm(string $action, string $title, ?array $asset = null): string
@@ -681,9 +825,17 @@ HTML;
 HTML;
     }
 
-    private function renderUserForm(string $action, string $title, ?array $user, array $roles, array $labels = [], array $selectedLabelIds = []): string
+    private function renderUserForm(
+        string $action,
+        string $title,
+        ?array $user,
+        array $roles,
+        array $labels = [],
+        array $selectedLabelIds = [],
+        array $formErrors = []
+    ): string
     {
-        $isEdit = $user !== null;
+        $isEdit = $user !== null && array_key_exists('id', $user);
         $method = $isEdit ? '<input type="hidden" name="_method" value="PUT">' : '';
         $csrfToken = $this->e($this->csrfService->token());
         $roleIds = $user['role_ids'] ?? [];
@@ -692,6 +844,7 @@ HTML;
         $appUiSettings = AppUiSettings::normalize($user['app_ui_settings'] ?? null);
         $appUiSettingsCheckboxes = '';
         $labelCheckboxes = '';
+        $errorSummary = $this->renderFormErrorSummary($formErrors);
 
         foreach ($roles as $role) {
             $roleId = (int) ($role['id'] ?? 0);
@@ -708,7 +861,7 @@ HTML;
         foreach ($labels as $label) {
             $labelId = (int) ($label['id'] ?? 0);
             $checked = in_array($labelId, array_map('intval', $selectedLabelIds), true) ? 'checked' : '';
-            $labelCheckboxes .= '<label class="checkbox-item"><input type="checkbox" name="label_ids[]" value="' . $labelId . '" ' . $checked . '> <span><span class="personnel-label" style="--personnel-label-color:' . $this->e((string) ($label['color'] ?? '#2563eb')) . '">' . $this->e((string) ($label['icon'] ?? 'award')) . ' · ' . $this->e((string) ($label['name'] ?? '')) . '</span></span></label>';
+            $labelCheckboxes .= '<label class="checkbox-item"><input type="checkbox" name="label_ids[]" value="' . $labelId . '" ' . $checked . '> <span>' . PersonnelIconRenderer::badge($label) . '</span></label>';
         }
 
         $labelsSection = $labels !== []
@@ -725,19 +878,20 @@ HTML;
     <a class="button" href="/admin/users">Zur Liste</a>
 </header>
 {$this->noticeFromCurrentQuery()}
+{$errorSummary}
 <form method="post" action="{$this->e($action)}" class="card form-grid">
     {$method}
     <input type="hidden" name="csrf_token" value="{$csrfToken}">
-    <label><span>Mitarbeiternummer</span><input name="employee_number" value="{$this->field($user, 'employee_number')}"></label>
-    <label><span>Vorname</span><input name="first_name" value="{$this->field($user, 'first_name')}" required></label>
-    <label><span>Nachname</span><input name="last_name" value="{$this->field($user, 'last_name')}" required></label>
-    <label><span>E-Mail</span><input name="email" type="email" value="{$this->field($user, 'email')}" required></label>
-    <label><span>Telefon</span><input name="phone" value="{$this->field($user, 'phone')}"></label>
-    <label><span>Passwort</span><input name="password" type="password" {$this->required(!$isEdit)}></label>
-    <label><span>Status</span>{$this->select('employment_status', ['active' => 'Aktiv', 'inactive' => 'Inaktiv', 'terminated' => 'Ausgeschieden'], $user['employment_status'] ?? 'active')}</label>
-    <label><span>Sollstunden / Monat</span><input name="target_hours_month" type="number" step="0.01" value="{$this->field($user, 'target_hours_month')}"></label>
-    <label><span>Notfallkontakt</span><input name="emergency_contact_name" value="{$this->field($user, 'emergency_contact_name')}"></label>
-    <label><span>Notfalltelefon</span><input name="emergency_contact_phone" value="{$this->field($user, 'emergency_contact_phone')}"></label>
+    <div{$this->fieldWrapperClass($formErrors, 'employee_number')}><label for="employee_number">Mitarbeiternummer</label><input id="employee_number" name="employee_number" value="{$this->field($user, 'employee_number')}"{$this->fieldInvalidAttribute($formErrors, 'employee_number')}>{$this->fieldErrorMarkup($formErrors, 'employee_number')}</div>
+    <div{$this->fieldWrapperClass($formErrors, 'first_name')}><label for="first_name">Vorname</label><input id="first_name" name="first_name" value="{$this->field($user, 'first_name')}" required{$this->fieldInvalidAttribute($formErrors, 'first_name')}>{$this->fieldErrorMarkup($formErrors, 'first_name')}</div>
+    <div{$this->fieldWrapperClass($formErrors, 'last_name')}><label for="last_name">Nachname</label><input id="last_name" name="last_name" value="{$this->field($user, 'last_name')}" required{$this->fieldInvalidAttribute($formErrors, 'last_name')}>{$this->fieldErrorMarkup($formErrors, 'last_name')}</div>
+    <div{$this->fieldWrapperClass($formErrors, 'email')}><label for="email">E-Mail</label><input id="email" name="email" type="email" value="{$this->field($user, 'email')}" required{$this->fieldInvalidAttribute($formErrors, 'email')}>{$this->fieldErrorMarkup($formErrors, 'email')}</div>
+    <div class="form-field"><label for="phone">Telefon</label><input id="phone" name="phone" value="{$this->field($user, 'phone')}"></div>
+    <div{$this->fieldWrapperClass($formErrors, 'password')}><label for="password">Passwort</label><input id="password" name="password" type="password" {$this->required(!$isEdit)}{$this->fieldInvalidAttribute($formErrors, 'password')}>{$this->fieldErrorMarkup($formErrors, 'password')}</div>
+    <div{$this->fieldWrapperClass($formErrors, 'employment_status')}><label for="employment_status">Status</label>{$this->select('employment_status', ['active' => 'Aktiv', 'inactive' => 'Inaktiv', 'terminated' => 'Ausgeschieden'], (string) ($user['employment_status'] ?? 'active'), $this->fieldInvalidAttribute($formErrors, 'employment_status'))}{$this->fieldErrorMarkup($formErrors, 'employment_status')}</div>
+    <div{$this->fieldWrapperClass($formErrors, 'target_hours_month')}><label for="target_hours_month">Sollstunden / Monat</label><input id="target_hours_month" name="target_hours_month" type="number" step="0.01" value="{$this->field($user, 'target_hours_month')}"{$this->fieldInvalidAttribute($formErrors, 'target_hours_month')}>{$this->fieldErrorMarkup($formErrors, 'target_hours_month')}</div>
+    <div class="form-field"><label for="emergency_contact_name">Notfallkontakt</label><input id="emergency_contact_name" name="emergency_contact_name" value="{$this->field($user, 'emergency_contact_name')}"></div>
+    <div class="form-field"><label for="emergency_contact_phone">Notfalltelefon</label><input id="emergency_contact_phone" name="emergency_contact_phone" value="{$this->field($user, 'emergency_contact_phone')}"></div>
     <div class="full-span field-group">
         <span>Zeiterfassung</span>
         <input type="hidden" name="time_tracking_required" value="0">
@@ -749,14 +903,198 @@ HTML;
         <div class="checkbox-grid">{$appUiSettingsCheckboxes}</div>
         <p class="muted">Diese Optionen steuern nur optionale Karten in der mobilen App. Tagesstatus, Start, Ende, Pausen, Nettozeit, Projekt und Zeiterfassungsaktionen bleiben immer sichtbar.</p>
     </div>
-    <div class="full-span field-group">
-        <span>Rollen</span>
+    <div class="full-span field-group{$this->fieldGroupErrorClass($formErrors, 'role_ids')}" role="group" aria-labelledby="role_ids_label"{$this->fieldInvalidAttribute($formErrors, 'role_ids')}>
+        <span id="role_ids_label">Rollen</span>
         <div class="checkbox-grid">{$roleCheckboxes}</div>
+        {$this->fieldErrorMarkup($formErrors, 'role_ids')}
     </div>
     {$labelsSection}
     <button class="button" type="submit">Speichern</button>
 </form>
 HTML;
+    }
+
+    private function userCreateFailureResponse(array $payload, array $errors): Response
+    {
+        $roles = $this->roleService->list('active');
+        $formUser = $this->userFormPayload($payload);
+
+        return Response::html(
+            $this->view->render(
+                'User anlegen',
+                $this->renderUserForm('/admin/users', 'User anlegen', $formUser, $roles, [], [], $errors)
+            ),
+            422
+        );
+    }
+
+    private function validateUserCreatePayload(array $payload, array $roles): array
+    {
+        $errors = [];
+        $email = trim((string) ($payload['email'] ?? ''));
+        $employeeNumber = trim((string) ($payload['employee_number'] ?? ''));
+        $password = trim((string) ($payload['password'] ?? ''));
+        $status = trim((string) ($payload['employment_status'] ?? 'active'));
+        $targetHours = trim((string) ($payload['target_hours_month'] ?? ''));
+
+        if (trim((string) ($payload['first_name'] ?? '')) === '') {
+            $errors['first_name'][] = 'Bitte geben Sie einen Vornamen ein.';
+        }
+
+        if (trim((string) ($payload['last_name'] ?? '')) === '') {
+            $errors['last_name'][] = 'Bitte geben Sie einen Nachnamen ein.';
+        }
+
+        if ($email === '') {
+            $errors['email'][] = 'Bitte geben Sie eine E-Mail-Adresse ein.';
+        } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            $errors['email'][] = 'Bitte geben Sie eine gueltige E-Mail-Adresse ein.';
+        } elseif ($this->userService->emailExists($email)) {
+            $errors['email'][] = 'Diese E-Mail-Adresse ist bereits einem Benutzer zugeordnet.';
+        }
+
+        if ($employeeNumber !== '' && $this->userService->employeeNumberExists($employeeNumber)) {
+            $errors['employee_number'][] = 'Diese Mitarbeiternummer ist bereits vergeben.';
+        }
+
+        if ($password === '') {
+            $errors['password'][] = 'Bitte vergeben Sie ein Passwort.';
+        }
+
+        if (!in_array($status, ['active', 'inactive', 'terminated'], true)) {
+            $errors['employment_status'][] = 'Bitte waehlen Sie einen gueltigen Status.';
+        }
+
+        if ($targetHours !== '' && (!is_numeric($targetHours) || (float) $targetHours < 0)) {
+            $errors['target_hours_month'][] = 'Sollstunden muessen eine Zahl groesser oder gleich 0 sein.';
+        }
+
+        $activeRoleIds = array_map(static fn (array $role): int => (int) ($role['id'] ?? 0), $roles);
+        $activeRoleIds = array_values(array_filter($activeRoleIds, static fn (int $id): bool => $id > 0));
+
+        foreach ($this->selectedRoleIds($payload['role_ids'] ?? []) as $roleId) {
+            if ($roleId <= 0 || !in_array($roleId, $activeRoleIds, true)) {
+                $errors['role_ids'][] = 'Mindestens eine ausgewaehlte Rolle ist nicht mehr verfuegbar.';
+                break;
+            }
+        }
+
+        return $errors;
+    }
+
+    private function userCreateStorageErrorMessage(\Throwable $exception): string
+    {
+        $message = $exception->getMessage();
+        error_log('User create failed: ' . $message);
+
+        if (stripos($message, 'email') !== false || stripos($message, 'Duplicate') !== false) {
+            return 'Der Benutzer konnte nicht angelegt werden. Bitte pruefen Sie E-Mail-Adresse und Mitarbeiternummer auf doppelte Werte.';
+        }
+
+        return 'Der Benutzer konnte nicht angelegt werden. Bitte pruefen Sie die Eingaben oder versuchen Sie es erneut.';
+    }
+
+    private function userFormPayload(array $payload): array
+    {
+        return [
+            'employee_number' => (string) ($payload['employee_number'] ?? ''),
+            'first_name' => (string) ($payload['first_name'] ?? ''),
+            'last_name' => (string) ($payload['last_name'] ?? ''),
+            'email' => (string) ($payload['email'] ?? ''),
+            'phone' => (string) ($payload['phone'] ?? ''),
+            'employment_status' => (string) ($payload['employment_status'] ?? 'active'),
+            'target_hours_month' => (string) ($payload['target_hours_month'] ?? ''),
+            'emergency_contact_name' => (string) ($payload['emergency_contact_name'] ?? ''),
+            'emergency_contact_phone' => (string) ($payload['emergency_contact_phone'] ?? ''),
+            'time_tracking_required' => (string) ($payload['time_tracking_required'] ?? '1') === '1' ? 1 : 0,
+            'app_ui_settings' => AppUiSettings::normalize($payload['app_ui_settings'] ?? null),
+            'role_ids' => $this->selectedRoleIds($payload['role_ids'] ?? []),
+        ];
+    }
+
+    private function selectedRoleIds(mixed $roleIds): array
+    {
+        $roleIds = is_array($roleIds) ? $roleIds : [$roleIds];
+
+        return array_values(array_unique(array_map(static fn (mixed $value): int => (int) $value, $roleIds)));
+    }
+
+    private function renderFormErrorSummary(array $errors, string $headline = 'Benutzer konnte nicht angelegt werden.'): string
+    {
+        $messages = $this->flattenFormErrors($errors);
+
+        if ($messages === []) {
+            return '';
+        }
+
+        $items = '';
+
+        foreach ($messages as $message) {
+            $items .= '<li>' . $this->e($message) . '</li>';
+        }
+
+        return '<div class="notice error" role="alert" aria-live="polite" tabindex="-1"><strong>' . $this->e($headline) . '</strong><ul class="form-error-list">' . $items . '</ul></div>';
+    }
+
+    private function fieldErrorClass(array $errors, string $field): string
+    {
+        return ($errors[$field] ?? []) !== [] ? ' class="is-invalid"' : '';
+    }
+
+    private function fieldWrapperClass(array $errors, string $field): string
+    {
+        $classes = ['form-field'];
+
+        if (($errors[$field] ?? []) !== []) {
+            $classes[] = 'is-invalid';
+        }
+
+        return ' class="' . implode(' ', $classes) . '"';
+    }
+
+    private function fieldGroupErrorClass(array $errors, string $field): string
+    {
+        return ($errors[$field] ?? []) !== [] ? ' is-invalid' : '';
+    }
+
+    private function fieldInvalidAttribute(array $errors, string $field): string
+    {
+        return ($errors[$field] ?? []) !== []
+            ? ' aria-invalid="true" aria-describedby="' . $this->fieldErrorId($field) . '"'
+            : '';
+    }
+
+    private function fieldErrorMarkup(array $errors, string $field): string
+    {
+        $messages = array_values(array_filter(array_map('strval', $errors[$field] ?? [])));
+
+        if ($messages === []) {
+            return '';
+        }
+
+        return '<small class="field-error" id="' . $this->fieldErrorId($field) . '">' . $this->e(implode(' ', $messages)) . '</small>';
+    }
+
+    private function fieldErrorId(string $field): string
+    {
+        return 'field-error-' . preg_replace('/[^a-z0-9_-]+/i', '-', $field);
+    }
+
+    private function flattenFormErrors(array $errors): array
+    {
+        $messages = [];
+
+        foreach ($errors as $fieldErrors) {
+            foreach ((array) $fieldErrors as $message) {
+                $message = trim((string) $message);
+
+                if ($message !== '') {
+                    $messages[] = $message;
+                }
+            }
+        }
+
+        return array_values(array_unique($messages));
     }
 
     private function renderRoleForm(string $action, string $title, ?array $role = null): string
@@ -879,7 +1217,7 @@ HTML;
         $badges = '';
 
         foreach (array_slice($labels, 0, 4) as $label) {
-            $badges .= '<span class="personnel-label" style="--personnel-label-color:' . $this->e((string) ($label['color'] ?? '#2563eb')) . '">' . $this->e((string) ($label['icon'] ?? 'award')) . ' · ' . $this->e((string) ($label['name'] ?? '')) . '</span>';
+            $badges .= PersonnelIconRenderer::badge($label);
         }
 
         if (count($labels) > 4) {
@@ -1321,9 +1659,13 @@ HTML;
         return '<a class="' . $class . '" href="' . $this->e($baseUrl) . '?scope=' . $this->e($scope) . '">' . $this->e($label) . '</a>';
     }
 
-    private function select(string $name, array $options, string $selected): string
+    private function select(string $name, array $options, string $selected, string $attributes = ''): string
     {
-        $html = '<select name="' . $this->e($name) . '">';
+        $html = '<select id="' . $this->e($name) . '" name="' . $this->e($name) . '"' . $attributes . '>';
+
+        if ($selected !== '' && !array_key_exists($selected, $options)) {
+            $html .= '<option value="' . $this->e($selected) . '" selected>Ungueltiger Wert: ' . $this->e($selected) . '</option>';
+        }
 
         foreach ($options as $value => $label) {
             $isSelected = $value === $selected ? ' selected' : '';

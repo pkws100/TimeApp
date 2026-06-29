@@ -9,7 +9,7 @@ use DateTimeImmutable;
 use InvalidArgumentException;
 use RuntimeException;
 
-final class CalendarPolicyService
+final class CalendarPolicyService implements CalendarPolicyProvider
 {
     /** @var array<string, string> */
     private const REGIONS = [

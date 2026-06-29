@@ -25,16 +25,29 @@ final class BookingModalRenderer
 
         foreach ($bookings as $booking) {
             $id = (int) ($booking['id'] ?? 0);
+            $isActive = (int) ($booking['is_deleted'] ?? 0) !== 1;
+            $entryType = (string) ($booking['entry_type'] ?? 'work');
+            $hasIncompleteTime = $isActive
+                && $entryType === 'work'
+                && (trim((string) ($booking['start_time'] ?? '')) === '' || trim((string) ($booking['end_time'] ?? '')) === '');
+            $needsProjectAssignment = $isActive && (bool) ($booking['needs_project_assignment'] ?? false);
+            $hasBookingIssue = $hasIncompleteTime || $needsProjectAssignment;
             $projectLabel = $this->projectLabel($booking);
             $projectDisplay = $this->e($projectLabel);
 
-            if ((bool) ($booking['needs_project_assignment'] ?? false)) {
+            if ($needsProjectAssignment) {
                 $projectDisplay .= '<br><span class="badge warn">Projekt offen</span>';
             }
 
-            $typeLabel = (string) ($entryTypeOptions[(string) ($booking['entry_type'] ?? 'work')] ?? ($booking['entry_type'] ?? ''));
+            $typeLabel = (string) ($entryTypeOptions[$entryType] ?? $entryType);
+            $typeDisplay = $this->e($typeLabel);
+
+            if ($hasIncompleteTime) {
+                $typeDisplay .= '<br><span class="badge error">Zeit unvollstaendig</span>';
+            }
+
             $sourceLabel = (string) ($booking['source_label'] ?? $this->sourceLabel((string) ($booking['source'] ?? 'app')));
-            $statusBadge = (int) ($booking['is_deleted'] ?? 0) === 1
+            $statusBadge = !$isActive
                 ? '<span class="badge warn">Archiviert</span>'
                 : '<span class="badge ok">Aktiv</span>';
             $note = trim((string) ($booking['note'] ?? ''));
@@ -70,15 +83,15 @@ final class BookingModalRenderer
                 ? '<td><input type="checkbox" name="booking_ids[]" value="' . $id . '"' . ($bulkFormId !== '' ? ' form="' . $this->e($bulkFormId) . '"' : '') . '></td>'
                 : '';
             $rowData = $this->rowData($booking, $typeLabel, $projectLabel);
-            $rowClasses = $canOpenModal ? 'booking-row is-clickable' : 'booking-row';
+            $rowClasses = trim(($canOpenModal ? 'booking-row is-clickable' : 'booking-row') . ($hasBookingIssue ? ' has-booking-issue' : ''));
             $tabIndex = $canOpenModal ? '0' : '-1';
 
-            $rows .= '<tr class="' . $rowClasses . '" data-booking-row data-booking-id="' . $id . '" data-booking-openable="' . ($canOpenModal ? '1' : '0') . '" data-booking="' . $this->dataJson($rowData) . '" tabindex="' . $tabIndex . '">'
+            $rows .= '<tr class="' . $rowClasses . '" data-booking-row data-booking-id="' . $id . '" data-booking-openable="' . ($canOpenModal ? '1' : '0') . '"' . ($hasBookingIssue ? ' data-booking-issue="1"' : '') . ' data-booking="' . $this->dataJson($rowData) . '" tabindex="' . $tabIndex . '">'
                 . $selectionCell
                 . '<td>' . $this->e((string) ($booking['work_date'] ?? '')) . '</td>'
                 . '<td><strong>' . $this->e((string) ($booking['employee_name'] ?? '')) . '</strong><br><span class="muted">' . $this->e((string) ($booking['employee_number'] ?? '')) . '</span></td>'
                 . '<td>' . $projectDisplay . '</td>'
-                . '<td>' . $this->e($typeLabel) . '</td>'
+                . '<td>' . $typeDisplay . '</td>'
                 . '<td><span class="badge">' . $this->e($sourceLabel) . '</span></td>'
                 . '<td>' . $this->displayTime($booking['start_time'] ?? null) . '</td>'
                 . '<td>' . $this->displayTime($booking['end_time'] ?? null) . '</td>'

@@ -174,6 +174,7 @@
             button.setAttribute('aria-pressed', selected ? 'true' : 'false');
         });
         panel.classList.add('is-loading');
+        panel.setAttribute('aria-busy', 'true');
 
         try {
             var payload = await adminJson('/admin/calendar/day?date=' + encodeURIComponent(date));
@@ -195,6 +196,7 @@
         } finally {
             if (requestId === dayRequestId) {
                 panel.classList.remove('is-loading');
+                panel.setAttribute('aria-busy', 'false');
             }
         }
     }

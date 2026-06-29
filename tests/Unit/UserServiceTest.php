@@ -76,6 +76,20 @@ final class UserServiceTest extends TestCase
         self::assertTrue($record['app_ui_settings']['show_history']);
     }
 
+    public function testEmailExistsReturnsFalseWhenUserTableIsUnavailable(): void
+    {
+        $service = new UserService(new DatabaseConnection([]));
+
+        self::assertFalse($service->emailExists('ada@example.test'));
+    }
+
+    public function testEmployeeNumberExistsReturnsFalseWhenUserTableIsUnavailable(): void
+    {
+        $service = new UserService(new DatabaseConnection([]));
+
+        self::assertFalse($service->employeeNumberExists('M-42'));
+    }
+
     private function normalize(array $payload): array
     {
         $service = new UserService(new DatabaseConnection([]));

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Unit;
 
+use App\Domain\Calendar\CalendarPolicyProvider;
 use App\Domain\Timesheets\AdminBookingService;
 use App\Domain\Timesheets\AdminCalendarService;
 use App\Domain\Timesheets\TimesheetCalculator;
@@ -72,7 +73,24 @@ final class AdminCalendarServiceTest extends TestCase
 
     public function testDaySummaryMarksDerivedMissingForUnbookedActiveUsers(): void
     {
-        $service = $this->serviceWithActiveUsers([7, 8]);
+        $service = $this->serviceWithActiveUserRows([
+            [
+                'id' => 7,
+                'created_at' => '2026-01-01 00:00:00',
+                'first_name' => 'Anna',
+                'last_name' => 'Arbeit',
+                'employee_number' => 'MA-007',
+                'email' => 'anna@example.test',
+            ],
+            [
+                'id' => 8,
+                'created_at' => '2026-01-01 00:00:00',
+                'first_name' => 'Ben',
+                'last_name' => 'Fehlt',
+                'employee_number' => 'MA-008',
+                'email' => 'ben@example.test',
+            ],
+        ]);
         $summary = $service->summarizeDay('2026-05-08', [
             $this->booking(['user_id' => 7]),
         ]);
@@ -80,6 +98,12 @@ final class AdminCalendarServiceTest extends TestCase
         self::assertSame('missing', $summary['status']);
         self::assertSame('Fehlend', $summary['status_label']);
         self::assertSame(1, $summary['missing_count']);
+        self::assertSame([[
+            'user_id' => 8,
+            'user_name' => 'Ben Fehlt',
+            'employee_number' => 'MA-008',
+            'email' => 'ben@example.test',
+        ]], $summary['missing_users']);
         self::assertSame(1, $summary['work_booking_count']);
     }
 
@@ -94,6 +118,7 @@ final class AdminCalendarServiceTest extends TestCase
         ]);
 
         self::assertSame(0, $summary['missing_count']);
+        self::assertSame([], $summary['missing_users']);
     }
 
     public function testDaySummaryDoesNotCountUsersWithoutTimeTrackingRequirementAsMissing(): void
@@ -107,18 +132,55 @@ final class AdminCalendarServiceTest extends TestCase
         ]);
 
         self::assertSame(0, $summary['missing_count']);
+        self::assertSame([], $summary['missing_users']);
         self::assertSame('ok', $summary['status']);
     }
 
-    public function testMonthTotalsIgnoreVoluntaryUsersForMissingDays(): void
+    public function testDaySummaryDoesNotDeriveMissingOnFreeDays(): void
     {
         $service = $this->serviceWithActiveUserRows([
-            ['id' => 7, 'created_at' => '2026-01-01 00:00:00', 'time_tracking_required' => 0],
+            ['id' => 7, 'created_at' => '2026-01-01 00:00:00', 'time_tracking_required' => 1],
         ]);
+        $summary = $service->summarizeDay('2026-05-09', []);
+
+        self::assertSame(0, $summary['missing_count']);
+        self::assertSame([], $summary['missing_users']);
+        self::assertSame('empty', $summary['status']);
+    }
+
+    public function testDaySummaryDoesNotDeriveMissingWhenCalendarPolicyDisablesTracking(): void
+    {
+        $service = $this->serviceWithActiveUserRows(
+            [
+                ['id' => 7, 'created_at' => '2026-01-01 00:00:00', 'time_tracking_required' => 1],
+            ],
+            new class implements CalendarPolicyProvider {
+                public function requiresTimeTracking(string $date): bool
+                {
+                    return false;
+                }
+
+                public function dayPolicy(string $date): array
+                {
+                    return [
+                        'date' => $date,
+                        'holiday_region' => 'NW',
+                        'is_public_holiday' => true,
+                        'holiday_name' => 'Test-Feiertag',
+                        'is_company_closure' => false,
+                        'closure_titles' => [],
+                        'closures' => [],
+                        'time_tracking_required' => false,
+                    ];
+                }
+            }
+        );
         $summary = $service->summarizeDay('2026-05-08', []);
 
         self::assertSame(0, $summary['missing_count']);
-        self::assertSame('empty', $summary['status']);
+        self::assertSame([], $summary['missing_users']);
+        self::assertSame('holiday', $summary['status']);
+        self::assertFalse($summary['time_tracking_required']);
     }
 
     public function testMonthTotalsCountAbsenceAndMissingByCountsNotDominantStatus(): void
@@ -179,11 +241,15 @@ final class AdminCalendarServiceTest extends TestCase
         ])['status']);
     }
 
-    private function service(): AdminCalendarService
+    private function service(?CalendarPolicyProvider $calendarPolicyService = null): AdminCalendarService
     {
         $connection = new DatabaseConnection([]);
 
-        return new AdminCalendarService($connection, new AdminBookingService($connection, new TimesheetCalculator()));
+        return new AdminCalendarService(
+            $connection,
+            new AdminBookingService($connection, new TimesheetCalculator()),
+            $calendarPolicyService
+        );
     }
 
     private function serviceWithActiveUsers(array $userIds): AdminCalendarService
@@ -194,9 +260,9 @@ final class AdminCalendarServiceTest extends TestCase
         ));
     }
 
-    private function serviceWithActiveUserRows(array $users): AdminCalendarService
+    private function serviceWithActiveUserRows(array $users, ?CalendarPolicyProvider $calendarPolicyService = null): AdminCalendarService
     {
-        $service = $this->service();
+        $service = $this->service($calendarPolicyService);
         $property = new ReflectionProperty($service, 'activeUsers');
         $property->setAccessible(true);
         $property->setValue($service, $users);

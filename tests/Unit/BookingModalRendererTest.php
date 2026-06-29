@@ -88,6 +88,8 @@ final class BookingModalRendererTest extends TestCase
         self::assertStringNotContainsString('type="date" name="work_date"', $html);
         self::assertStringNotContainsString('<textarea', $html);
         self::assertStringContainsString('Bearbeiten', $html);
+        self::assertStringNotContainsString('has-booking-issue', $html);
+        self::assertStringNotContainsString('Zeit unvollstaendig', $html);
     }
 
     public function testRenderModalIncludesProjectAssignmentAndSharedReason(): void
@@ -352,5 +354,107 @@ final class BookingModalRendererTest extends TestCase
         self::assertStringContainsString('Nicht zugeordnet', $html);
         self::assertStringContainsString('Projekt offen', $html);
         self::assertStringContainsString('badge warn', $html);
+        self::assertStringContainsString('has-booking-issue', $html);
+        self::assertStringContainsString('data-booking-issue="1"', $html);
+    }
+
+    public function testRenderTableHighlightsIncompleteWorkTime(): void
+    {
+        $renderer = new BookingModalRenderer();
+        $html = $renderer->renderTable(
+            [[
+                'id' => 17,
+                'work_date' => '2026-05-08',
+                'employee_name' => 'Max Mustermann',
+                'employee_number' => 'M-17',
+                'project_id' => 2,
+                'project_number' => 'P-2',
+                'project_name' => 'Rathaus',
+                'entry_type' => 'work',
+                'source' => 'app',
+                'source_label' => 'App',
+                'start_time' => '08:00:00',
+                'end_time' => '',
+                'break_minutes' => 0,
+                'net_minutes' => 0,
+                'note' => '',
+                'is_deleted' => 0,
+                'version_hint' => 'Originalstand',
+                'needs_project_assignment' => false,
+            ]],
+            [],
+            ['work' => 'Arbeit']
+        );
+
+        self::assertStringContainsString('has-booking-issue', $html);
+        self::assertStringContainsString('data-booking-issue="1"', $html);
+        self::assertStringContainsString('Zeit unvollstaendig', $html);
+        self::assertStringContainsString('badge error', $html);
+    }
+
+    public function testRenderTableDoesNotHighlightCleanWorkBooking(): void
+    {
+        $renderer = new BookingModalRenderer();
+        $html = $renderer->renderTable(
+            [[
+                'id' => 18,
+                'work_date' => '2026-05-08',
+                'employee_name' => 'Sauber Person',
+                'employee_number' => 'M-18',
+                'project_id' => 2,
+                'project_number' => 'P-2',
+                'project_name' => 'Rathaus',
+                'entry_type' => 'work',
+                'source' => 'app',
+                'source_label' => 'App',
+                'start_time' => '08:00:00',
+                'end_time' => '16:00:00',
+                'break_minutes' => 30,
+                'net_minutes' => 450,
+                'note' => '',
+                'is_deleted' => 0,
+                'version_hint' => 'Originalstand',
+                'needs_project_assignment' => false,
+            ]],
+            [],
+            ['work' => 'Arbeit']
+        );
+
+        self::assertStringNotContainsString('has-booking-issue', $html);
+        self::assertStringNotContainsString('data-booking-issue="1"', $html);
+        self::assertStringNotContainsString('Zeit unvollstaendig', $html);
+    }
+
+    public function testRenderTableDoesNotHighlightArchivedIncompleteWorkBooking(): void
+    {
+        $renderer = new BookingModalRenderer();
+        $html = $renderer->renderTable(
+            [[
+                'id' => 19,
+                'work_date' => '2026-05-08',
+                'employee_name' => 'Archiv Person',
+                'employee_number' => 'M-19',
+                'project_id' => null,
+                'entry_type' => 'work',
+                'source' => 'app',
+                'source_label' => 'App',
+                'start_time' => '',
+                'end_time' => '',
+                'break_minutes' => 0,
+                'net_minutes' => 0,
+                'note' => '',
+                'is_deleted' => 1,
+                'version_hint' => 'Archivstand',
+                'needs_project_assignment' => true,
+            ]],
+            [],
+            ['work' => 'Arbeit']
+        );
+
+        self::assertStringContainsString('Archiviert', $html);
+        self::assertStringNotContainsString('has-booking-issue', $html);
+        self::assertStringNotContainsString('data-booking-issue="1"', $html);
+        self::assertStringNotContainsString('Zeit unvollstaendig', $html);
+        self::assertStringNotContainsString('Projekt offen', $html);
     }
 }
