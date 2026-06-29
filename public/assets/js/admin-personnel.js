@@ -52,15 +52,43 @@
         return value + '...';
     }
 
+    function chartDescription(legendItems, maxItems) {
+        var visibleLabels = legendItems.slice(0, maxItems).map(function (item) {
+            return item.label + ': ' + String(item.value);
+        });
+        var hiddenCount = Math.max(0, legendItems.length - maxItems);
+
+        if (hiddenCount > 0) {
+            var hiddenTotal = legendItems.slice(maxItems).reduce(function (sum, item) {
+                return sum + item.value;
+            }, 0);
+
+            visibleLabels.push('Weitere ' + String(hiddenCount) + ': ' + String(hiddenTotal));
+        }
+
+        return visibleLabels.join(', ');
+    }
+
     function drawDoughnut(canvas, data) {
         var dataset = (data.datasets || [])[0] || {};
         var values = Array.isArray(dataset.data) ? dataset.data.map(Number) : [];
         var labels = Array.isArray(data.labels) ? data.labels : [];
         var colors = Array.isArray(dataset.backgroundColor) ? dataset.backgroundColor : [];
         var total = values.reduce(function (sum, value) { return sum + Math.max(0, value || 0); }, 0);
+        var maxLegendItems = 8;
+        var legendItems = values.map(function (value, index) {
+            return {
+                label: String(labels[index] || 'Eintrag'),
+                value: Math.max(0, value || 0),
+                color: colors[index] || ['#2563eb', '#16a34a', '#d97706', '#dc2626', '#7c3aed'][index % 5]
+            };
+        }).filter(function (item) {
+            return item.value > 0;
+        });
         var rect = canvas.getBoundingClientRect();
         var measuredWidth = Math.max(260, Math.floor(rect.width || 640));
-        var legendRows = Math.min(values.length, 8);
+        var hiddenLegendItems = Math.max(0, legendItems.length - maxLegendItems);
+        var legendRows = Math.min(legendItems.length, maxLegendItems) + (hiddenLegendItems > 0 ? 1 : 0);
         var isCompact = measuredWidth < 520;
         var compactRadius = Math.min(78, Math.max(54, measuredWidth * 0.22));
         var preferredHeight = isCompact && total > 0
@@ -74,11 +102,15 @@
         }
 
         context.clearRect(0, 0, box.width, box.height);
+        canvas.setAttribute('role', 'img');
 
         if (total <= 0) {
+            canvas.setAttribute('aria-label', 'Noch keine Daten fuer diese Grafik.');
             drawEmpty(context, box.width, 'Noch keine Daten fuer diese Grafik.');
             return;
         }
+
+        canvas.setAttribute('aria-label', chartDescription(legendItems, maxLegendItems));
 
         var radius = isCompact
             ? Math.min(78, Math.max(54, box.width * 0.22))
@@ -110,13 +142,23 @@
 
         context.font = '13px sans-serif';
         context.textBaseline = 'middle';
-        values.slice(0, 8).forEach(function (value, index) {
+        legendItems.slice(0, maxLegendItems).forEach(function (item, index) {
             var y = legendY + index * (isCompact ? 28 : 26);
-            context.fillStyle = colors[index] || ['#2563eb', '#16a34a', '#d97706', '#dc2626', '#7c3aed'][index % 5];
+            context.fillStyle = item.color;
             context.fillRect(legendX, y - 6, 12, 12);
             context.fillStyle = css('--page-ink', '#14213d');
-            context.fillText(truncateLabel(context, labels[index], Math.max(90, box.width - legendX - 56)) + ': ' + String(value), legendX + 20, y);
+            context.fillText(truncateLabel(context, item.label, Math.max(90, box.width - legendX - 56)) + ': ' + String(item.value), legendX + 20, y);
         });
+
+        if (hiddenLegendItems > 0) {
+            var hiddenY = legendY + maxLegendItems * (isCompact ? 28 : 26);
+            var hiddenTotal = legendItems.slice(maxLegendItems).reduce(function (sum, item) {
+                return sum + item.value;
+            }, 0);
+
+            context.fillStyle = css('--page-muted', '#64748b');
+            context.fillText('Weitere ' + String(hiddenLegendItems) + ': ' + String(hiddenTotal), legendX + 20, hiddenY);
+        }
     }
 
     function boot() {

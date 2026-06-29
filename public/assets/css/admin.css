@@ -425,11 +425,13 @@ textarea {
 
 .personnel-chart-wrap {
     min-height: 240px;
+    overflow-x: auto;
 }
 
 .personnel-chart-wrap canvas {
     display: block;
     width: 100%;
+    min-width: 260px;
     min-height: 240px;
 }
 
