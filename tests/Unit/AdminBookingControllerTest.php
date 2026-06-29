@@ -42,17 +42,66 @@ final class AdminBookingControllerTest extends TestCase
                 'user_id' => '',
                 'entry_type' => '',
                 'scope' => 'active',
+                'issue' => '',
+                'sort' => 'date',
+                'direction' => 'desc',
+                'page' => 1,
+                'per_page' => 100,
             ],
             [],
             [],
             [],
             '',
             '/admin/bookings',
-            'csrf-token'
+            'csrf-token',
+            [
+                'items' => [],
+                'total' => 0,
+                'page' => 1,
+                'per_page' => 100,
+                'total_pages' => 1,
+            ]
         );
 
         self::assertStringContainsString('Offene Projektzuordnungen', $html);
         self::assertStringContainsString('/admin/bookings?scope=active&amp;project_id=__none__&amp;entry_type=work', $html);
+        self::assertStringContainsString('Fehlbuchungen', $html);
+        self::assertStringContainsString('/admin/bookings?scope=active&amp;issue=all', $html);
+        self::assertStringContainsString('booking-sort-link', $html);
+        self::assertStringContainsString('<option value="75">75</option>', $html);
+        self::assertStringNotContainsString('<option value="200">200</option>', $html);
+        self::assertStringContainsString('Tabellenspalten anpassen', $html);
+        self::assertStringContainsString('<span class="button button-secondary is-disabled" aria-disabled="true">Zurueck</span>', $html);
+    }
+
+    public function testExportQueryCanStripPaginationButKeepFiltersAndSorting(): void
+    {
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'filterQuery');
+        $method->setAccessible(true);
+
+        $query = (string) $method->invoke($controller, [
+            'date_from' => '2026-04-01',
+            'date_to' => null,
+            'project_id' => '2',
+            'user_id' => '',
+            'entry_type' => 'work',
+            'scope' => 'active',
+            'issue' => 'all',
+            'sort' => 'employee',
+            'direction' => 'asc',
+            'page' => 4,
+            'per_page' => 100,
+        ], ['page', 'per_page']);
+
+        self::assertStringContainsString('date_from=2026-04-01', $query);
+        self::assertStringContainsString('project_id=2', $query);
+        self::assertStringContainsString('entry_type=work', $query);
+        self::assertStringContainsString('issue=all', $query);
+        self::assertStringContainsString('sort=employee', $query);
+        self::assertStringContainsString('direction=asc', $query);
+        self::assertStringNotContainsString('page=', $query);
+        self::assertStringNotContainsString('per_page=', $query);
     }
 
     private function controller(): AdminBookingController

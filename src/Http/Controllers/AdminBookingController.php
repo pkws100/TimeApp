@@ -41,7 +41,8 @@ final class AdminBookingController
     public function index(Request $request): Response
     {
         $filters = $this->bookingService->normalizeFilters($request->query());
-        $bookings = $this->withTimesheetAttachments($this->bookingService->list($filters));
+        $pagination = $this->bookingService->paginatedList($filters);
+        $bookings = $this->withTimesheetAttachments($pagination['items']);
         $projects = $this->projectService->list('all');
         $users = $this->userService->list('all');
         $returnTo = $this->currentRequestUri($request);
@@ -55,7 +56,8 @@ final class AdminBookingController
             $users,
             $this->notice($request),
             $returnTo,
-            $csrfToken
+            $csrfToken,
+            $pagination
         );
 
         return Response::html($this->view->render('Buchungen', $content));
@@ -172,6 +174,7 @@ final class AdminBookingController
     {
         try {
             $filters = $this->bookingService->normalizeFilters($request->query());
+            unset($filters['page'], $filters['per_page']);
             $format = (string) $request->query('format', 'csv');
             $export = $this->exportService->export($format, $filters);
 
@@ -181,19 +184,25 @@ final class AdminBookingController
         }
     }
 
-    private function renderPage(Request $request, array $filters, array $bookings, array $projects, array $users, string $notice, string $returnTo, string $csrfToken): string
+    private function renderPage(Request $request, array $filters, array $bookings, array $projects, array $users, string $notice, string $returnTo, string $csrfToken, array $pagination = []): string
     {
-        $query = $this->filterQuery($filters);
+        $query = $this->filterQuery($filters, ['page', 'per_page']);
         $exportBase = '/admin/bookings/export' . ($query !== '' ? '?' . $query : '');
         $projectOptions = $this->projectFilterOptions($projects, $filters['project_id']);
         $userOptions = $this->userOptions($users, $filters['user_id']);
         $entryTypeOptions = $this->entryTypeFilterOptions((string) $filters['entry_type']);
+        $issueOptions = $this->issueFilterOptions((string) ($filters['issue'] ?? ''));
+        $sortOptions = $this->sortOptions((string) ($filters['sort'] ?? 'date'));
+        $directionOptions = $this->directionOptions((string) ($filters['direction'] ?? 'desc'));
+        $perPageOptions = $this->perPageOptions((int) ($pagination['per_page'] ?? ($filters['per_page'] ?? 100)));
         $scopeSwitch = $this->scopeSwitch('/admin/bookings', (string) $filters['scope'], $filters);
         $openProjectAssignmentUrl = '/admin/bookings?scope=active&project_id=__none__&entry_type=work';
+        $openIssuesUrl = '/admin/bookings?scope=active&issue=all';
         $renderer = new BookingModalRenderer();
         $canManage = $this->authService->hasPermission('timesheets.manage');
         $canArchive = $this->authService->hasPermission('timesheets.archive');
         $canExport = $this->authService->hasPermission('timesheets.export');
+        $pager = $this->paginationControls($pagination, $filters);
         $table = $renderer->renderTable(
             $bookings,
             $projects,
@@ -207,6 +216,12 @@ final class AdminBookingController
                 'can_view_attachments' => true,
                 'document_statuses' => $this->documentStatusService->activeList(),
                 'open_booking_location' => $returnTo,
+                'column_controls' => true,
+                'sort_enabled' => true,
+                'sort' => (string) ($filters['sort'] ?? 'date'),
+                'direction' => (string) ($filters['direction'] ?? 'desc'),
+                'sort_base_url' => '/admin/bookings',
+                'sort_filters' => $filters,
             ]
         );
         $modal = $renderer->renderModal(
@@ -229,7 +244,7 @@ final class AdminBookingController
             : '';
         $bulkForm = $canManage
             ? <<<HTML
-    <form id="bulk-assignment-form" method="post" action="/admin/bookings/bulk-assign" class="form-grid">
+    <form id="bulk-assignment-form" method="post" action="/admin/bookings/bulk-assign" class="form-grid booking-bulk-form">
         <input type="hidden" name="return_to" value="{$this->e($returnTo)}">
         <input type="hidden" name="csrf_token" value="{$this->e($csrfToken)}">
         <label><span>Sammelzuordnung auf Projekt</span><select name="project_id">{$this->projectAssignmentOptions($projects, '__none__')}</select></label>
@@ -256,6 +271,7 @@ HTML
     Aktive Arbeitsbuchungen ohne Projekt brauchen eine spaetere Zuordnung. Nutzen Sie den Schnellfilter und weisen Sie die Buchungen einzeln oder gesammelt zu.
     <div class="notice-actions">
         <a class="button button-secondary" href="{$this->e($openProjectAssignmentUrl)}">Offene Projektzuordnungen anzeigen</a>
+        <a class="button button-secondary" href="{$this->e($openIssuesUrl)}">Fehlbuchungen anzeigen</a>
     </div>
 </div>
 <section class="card stack">
@@ -265,11 +281,15 @@ HTML
         <label><span>Projekt</span><select name="project_id">{$projectOptions}</select></label>
         <label><span>Mitarbeiter</span><select name="user_id">{$userOptions}</select></label>
         <label><span>Typ</span><select name="entry_type">{$entryTypeOptions}</select></label>
+        <label><span>Fehlbuchungen</span><select name="issue">{$issueOptions}</select></label>
         <label><span>Scope</span><select name="scope">
             <option value="active"{$this->selected($filters['scope'] === 'active')}>Aktiv</option>
             <option value="archived"{$this->selected($filters['scope'] === 'archived')}>Archiviert</option>
             <option value="all"{$this->selected($filters['scope'] === 'all')}>Alle</option>
         </select></label>
+        <label><span>Sortierung</span><select name="sort">{$sortOptions}</select></label>
+        <label><span>Richtung</span><select name="direction">{$directionOptions}</select></label>
+        <label><span>Pro Seite</span><select name="per_page">{$perPageOptions}</select></label>
         <button class="button" type="submit">Filter anwenden</button>
     </form>
 </section>
@@ -278,8 +298,10 @@ HTML
     <p class="muted">Jede Aenderung braucht eine fachliche Begruendung. Loeschen erfolgt nur ueber Archivkennzeichen.</p>
 </section>
 <section class="card stack">
-    {$table}
     {$bulkForm}
+    {$pager}
+    {$table}
+    {$pager}
 </section>
 {$modal}
 HTML;
@@ -350,6 +372,40 @@ HTML;
         return $html;
     }
 
+    private function issueFilterOptions(string $selected): string
+    {
+        return '<option value=""' . $this->selected($selected === '') . '>Alle Buchungen</option>'
+            . '<option value="all"' . $this->selected($selected === 'all') . '>Nur Fehlbuchungen</option>';
+    }
+
+    private function sortOptions(string $selected): string
+    {
+        $html = '';
+
+        foreach ($this->bookingService->sortOptions() as $value => $label) {
+            $html .= '<option value="' . $this->e($value) . '"' . $this->selected($selected === $value) . '>' . $this->e($label) . '</option>';
+        }
+
+        return $html;
+    }
+
+    private function directionOptions(string $selected): string
+    {
+        return '<option value="desc"' . $this->selected($selected === 'desc') . '>Absteigend</option>'
+            . '<option value="asc"' . $this->selected($selected === 'asc') . '>Aufsteigend</option>';
+    }
+
+    private function perPageOptions(int $selected): string
+    {
+        $html = '';
+
+        foreach ($this->bookingService->perPageOptions() as $value) {
+            $html .= '<option value="' . $value . '"' . $this->selected($selected === $value) . '>' . $value . '</option>';
+        }
+
+        return $html;
+    }
+
     private function scopeSwitch(string $baseUrl, string $currentScope, array $filters): string
     {
         $html = '';
@@ -357,6 +413,7 @@ HTML;
         foreach (['active' => 'Aktiv', 'archived' => 'Archiviert', 'all' => 'Alle'] as $scope => $label) {
             $query = $filters;
             $query['scope'] = $scope;
+            $query['page'] = 1;
             $class = $scope === $currentScope ? 'scope-link is-active' : 'scope-link';
             $html .= '<a class="' . $class . '" href="' . $this->e($baseUrl . '?' . http_build_query($query)) . '">' . $this->e($label) . '</a>';
         }
@@ -364,9 +421,58 @@ HTML;
         return $html;
     }
 
-    private function filterQuery(array $filters): string
+    private function filterQuery(array $filters, array $exclude = []): string
     {
+        foreach ($exclude as $key) {
+            unset($filters[$key]);
+        }
+
         return http_build_query(array_filter(
+            $filters,
+            static fn ($value): bool => $value !== '' && $value !== null
+        ));
+    }
+
+    private function paginationControls(array $pagination, array $filters): string
+    {
+        if ($pagination === []) {
+            return '';
+        }
+
+        $total = max(0, (int) ($pagination['total'] ?? 0));
+        $page = max(1, (int) ($pagination['page'] ?? 1));
+        $perPage = max(1, (int) ($pagination['per_page'] ?? 100));
+        $totalPages = max(1, (int) ($pagination['total_pages'] ?? 1));
+        $from = $total === 0 ? 0 : (($page - 1) * $perPage) + 1;
+        $to = min($total, $page * $perPage);
+        $previous = $this->pageUrl($filters, max(1, $page - 1));
+        $next = $this->pageUrl($filters, min($totalPages, $page + 1));
+        $previousControl = $page <= 1
+            ? '<span class="button button-secondary is-disabled" aria-disabled="true">Zurueck</span>'
+            : '<a class="button button-secondary" href="' . $this->e($previous) . '">Zurueck</a>';
+        $nextControl = $page >= $totalPages
+            ? '<span class="button button-secondary is-disabled" aria-disabled="true">Weiter</span>'
+            : '<a class="button button-secondary" href="' . $this->e($next) . '">Weiter</a>';
+        $summary = $total === 0
+            ? 'Keine Buchungen gefunden'
+            : $from . '-' . $to . ' von ' . $total . ' Buchungen';
+
+        return <<<HTML
+<nav class="booking-pagination" aria-label="Buchungsseiten">
+    <p class="muted">{$this->e($summary)} · Seite {$page} von {$totalPages}</p>
+    <div class="table-actions">
+        {$previousControl}
+        {$nextControl}
+    </div>
+</nav>
+HTML;
+    }
+
+    private function pageUrl(array $filters, int $page): string
+    {
+        $filters['page'] = $page;
+
+        return '/admin/bookings?' . http_build_query(array_filter(
             $filters,
             static fn ($value): bool => $value !== '' && $value !== null
         ));
@@ -444,12 +550,11 @@ HTML;
         $timesheetIds = array_map(static fn (array $booking): int => (int) ($booking['id'] ?? 0), $bookings);
         $geoByTimesheet = $this->geoLocationService->listForTimesheetsGrouped($timesheetIds);
         $signatureByTimesheet = $this->timesheetSignatureService?->listForTimesheetsGrouped($timesheetIds) ?? [];
+        $attachmentsByTimesheet = $this->fileAttachmentService->listForTimesheetsAdminGrouped($timesheetIds, 'all');
 
         foreach ($bookings as $index => $booking) {
             $timesheetId = (int) ($booking['id'] ?? 0);
-            $attachments = $timesheetId > 0
-                ? $this->fileAttachmentService->listForTimesheetAdmin($timesheetId, 'all')
-                : [];
+            $attachments = $attachmentsByTimesheet[$timesheetId] ?? [];
             $activeAttachments = array_values(array_filter(
                 $attachments,
                 static fn (array $file): bool => (int) ($file['is_deleted'] ?? 0) === 0

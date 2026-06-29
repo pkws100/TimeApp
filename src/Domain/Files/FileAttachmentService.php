@@ -97,6 +97,51 @@ final class FileAttachmentService
         );
     }
 
+    public function listForTimesheetsAdminGrouped(array $timesheetIds, string $scope = 'all'): array
+    {
+        $timesheetIds = array_values(array_unique(array_filter(
+            array_map(static fn (mixed $id): int => (int) $id, $timesheetIds),
+            static fn (int $id): bool => $id > 0
+        )));
+
+        if ($timesheetIds === [] || !$this->connection->tableExists('timesheet_files')) {
+            return [];
+        }
+
+        $placeholders = [];
+        $bindings = [];
+
+        foreach ($timesheetIds as $index => $timesheetId) {
+            $placeholder = 'id_' . $index;
+            $placeholders[] = ':' . $placeholder;
+            $bindings[$placeholder] = $timesheetId;
+        }
+
+        $rows = $this->connection->fetchAll(
+            'SELECT timesheet_id, ' . $this->fileSelectColumns('timesheet_files') . '
+             FROM timesheet_files
+             ' . $this->documentStatusJoin('timesheet_files') . '
+             WHERE timesheet_id IN (' . implode(', ', $placeholders) . ')
+               AND ' . $this->scopeWhereClause($scope, 'timesheet_files') . '
+             ORDER BY timesheet_files.timesheet_id ASC, timesheet_files.is_deleted ASC, timesheet_files.uploaded_at DESC',
+            $bindings
+        );
+
+        $grouped = [];
+
+        foreach ($rows as $row) {
+            $timesheetId = (int) ($row['timesheet_id'] ?? 0);
+
+            if ($timesheetId <= 0) {
+                continue;
+            }
+
+            $grouped[$timesheetId][] = $this->adminTimesheetFile($row);
+        }
+
+        return $grouped;
+    }
+
     public function findProjectFile(int $fileId): ?array
     {
         return $this->findFile('project_files', $fileId);

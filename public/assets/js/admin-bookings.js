@@ -537,7 +537,102 @@
         }
     }
 
+    function hiddenBookingColumnsKey() {
+        return 'admin.bookings.hiddenColumns';
+    }
+
+    function readHiddenBookingColumns() {
+        try {
+            var stored = window.localStorage.getItem(hiddenBookingColumnsKey());
+            var parsed = stored ? JSON.parse(stored) : [];
+
+            return Array.isArray(parsed) ? parsed : [];
+        } catch (error) {
+            return [];
+        }
+    }
+
+    function writeHiddenBookingColumns(columns) {
+        try {
+            if (columns.length === 0) {
+                window.localStorage.removeItem(hiddenBookingColumnsKey());
+                return;
+            }
+
+            window.localStorage.setItem(hiddenBookingColumnsKey(), JSON.stringify(columns));
+        } catch (error) {
+            // Browser storage can be unavailable in strict privacy modes.
+        }
+    }
+
+    function initBookingColumnControls() {
+        var table = document.querySelector('[data-booking-column-table]');
+        var controls = document.querySelector('[data-booking-column-controls]');
+
+        if (!table || !controls) {
+            return;
+        }
+
+        var toggles = Array.prototype.slice.call(controls.querySelectorAll('[data-booking-column-toggle]'));
+        var reset = controls.querySelector('[data-booking-column-reset]');
+
+        if (toggles.length === 0) {
+            return;
+        }
+
+        function knownColumns() {
+            return toggles.map(function (toggle) {
+                return toggle.value;
+            }).filter(Boolean);
+        }
+
+        function normalizeHiddenColumns(columns) {
+            var known = knownColumns();
+            var hidden = columns.filter(function (column, index, list) {
+                return known.indexOf(column) !== -1 && list.indexOf(column) === index;
+            });
+
+            return hidden.length >= known.length ? [] : hidden;
+        }
+
+        function applyHiddenColumns(columns) {
+            var hidden = normalizeHiddenColumns(columns);
+
+            toggles.forEach(function (toggle) {
+                toggle.checked = hidden.indexOf(toggle.value) === -1;
+            });
+
+            table.querySelectorAll('[data-booking-column]').forEach(function (cell) {
+                cell.hidden = hidden.indexOf(cell.getAttribute('data-booking-column')) !== -1;
+            });
+
+            writeHiddenBookingColumns(hidden);
+        }
+
+        applyHiddenColumns(readHiddenBookingColumns());
+
+        toggles.forEach(function (toggle) {
+            toggle.addEventListener('change', function () {
+                var hidden = toggles.filter(function (item) {
+                    return !item.checked;
+                }).map(function (item) {
+                    return item.value;
+                });
+
+                applyHiddenColumns(hidden);
+            });
+        });
+
+        if (reset) {
+            reset.addEventListener('click', function () {
+                applyHiddenColumns([]);
+            });
+        }
+    }
+
     document.addEventListener('DOMContentLoaded', function () {
+        initBookingColumnControls();
+
         var modal = document.querySelector('[data-booking-modal]');
 
         if (!modal) {

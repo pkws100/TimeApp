@@ -20,8 +20,16 @@ final class BookingModalRenderer
         $canViewAttachments = (bool) ($options['can_view_attachments'] ?? false);
         $openBookingLocation = (string) ($options['open_booking_location'] ?? '/admin/bookings');
         $canOpenModal = $canManage || $canArchive || $canViewAttachments;
+        $sortEnabled = (bool) ($options['sort_enabled'] ?? false);
+        $currentSort = (string) ($options['sort'] ?? 'date');
+        $currentDirection = (string) ($options['direction'] ?? 'desc');
+        $sortBaseUrl = (string) ($options['sort_base_url'] ?? '/admin/bookings');
+        $sortFilters = is_array($options['sort_filters'] ?? null) ? $options['sort_filters'] : [];
+        $columnControlsEnabled = (bool) ($options['column_controls'] ?? false);
+        $columns = $this->bookingColumns($showSelection);
 
         $rows = '';
+        $cards = '';
 
         foreach ($bookings as $booking) {
             $id = (int) ($booking['id'] ?? 0);
@@ -80,7 +88,7 @@ final class BookingModalRenderer
                 ? '<a class="button button-secondary booking-edit-trigger" data-booking-open aria-haspopup="dialog" href="' . $this->e($this->openBookingLocation($openBookingLocation, $id)) . '">' . $this->e($actionLabel) . '</a>'
                 : '<span class="muted">Nur Ansicht</span>';
             $selectionCell = $showSelection
-                ? '<td><input type="checkbox" name="booking_ids[]" value="' . $id . '"' . ($bulkFormId !== '' ? ' form="' . $this->e($bulkFormId) . '"' : '') . '></td>'
+                ? '<td data-booking-column="selection"><input type="checkbox" name="booking_ids[]" value="' . $id . '"' . ($bulkFormId !== '' ? ' form="' . $this->e($bulkFormId) . '"' : '') . '></td>'
                 : '';
             $rowData = $this->rowData($booking, $typeLabel, $projectLabel);
             $rowClasses = trim(($canOpenModal ? 'booking-row is-clickable' : 'booking-row') . ($hasBookingIssue ? ' has-booking-issue' : ''));
@@ -88,53 +96,81 @@ final class BookingModalRenderer
 
             $rows .= '<tr class="' . $rowClasses . '" data-booking-row data-booking-id="' . $id . '" data-booking-openable="' . ($canOpenModal ? '1' : '0') . '"' . ($hasBookingIssue ? ' data-booking-issue="1"' : '') . ' data-booking="' . $this->dataJson($rowData) . '" tabindex="' . $tabIndex . '">'
                 . $selectionCell
-                . '<td>' . $this->e((string) ($booking['work_date'] ?? '')) . '</td>'
-                . '<td><strong>' . $this->e((string) ($booking['employee_name'] ?? '')) . '</strong><br><span class="muted">' . $this->e((string) ($booking['employee_number'] ?? '')) . '</span></td>'
-                . '<td>' . $projectDisplay . '</td>'
-                . '<td>' . $typeDisplay . '</td>'
-                . '<td><span class="badge">' . $this->e($sourceLabel) . '</span></td>'
-                . '<td>' . $this->displayTime($booking['start_time'] ?? null) . '</td>'
-                . '<td>' . $this->displayTime($booking['end_time'] ?? null) . '</td>'
-                . '<td>' . $this->e((string) ($booking['break_minutes'] ?? 0)) . ' Min</td>'
-                . '<td>' . $this->e((string) ($booking['net_minutes'] ?? 0)) . ' Min</td>'
-                . '<td>' . $noteDisplay . '</td>'
-                . '<td>' . $attachmentDisplay . '</td>'
-                . '<td>' . $geoDisplay . '</td>'
-                . '<td>' . $signatureDisplay . '</td>'
-                . '<td>' . $statusBadge . '</td>'
-                . '<td><span class="muted">' . $this->e((string) ($booking['version_hint'] ?? '')) . '</span></td>'
+                . '<td data-booking-column="date">' . $this->e((string) ($booking['work_date'] ?? '')) . '</td>'
+                . '<td data-booking-column="employee"><strong>' . $this->e((string) ($booking['employee_name'] ?? '')) . '</strong><br><span class="muted">' . $this->e((string) ($booking['employee_number'] ?? '')) . '</span></td>'
+                . '<td data-booking-column="project">' . $projectDisplay . '</td>'
+                . '<td data-booking-column="type">' . $typeDisplay . '</td>'
+                . '<td data-booking-column="source"><span class="badge">' . $this->e($sourceLabel) . '</span></td>'
+                . '<td data-booking-column="start">' . $this->displayTime($booking['start_time'] ?? null) . '</td>'
+                . '<td data-booking-column="end">' . $this->displayTime($booking['end_time'] ?? null) . '</td>'
+                . '<td data-booking-column="break">' . $this->e((string) ($booking['break_minutes'] ?? 0)) . ' Min</td>'
+                . '<td data-booking-column="net">' . $this->e((string) ($booking['net_minutes'] ?? 0)) . ' Min</td>'
+                . '<td data-booking-column="note">' . $noteDisplay . '</td>'
+                . '<td data-booking-column="attachments">' . $attachmentDisplay . '</td>'
+                . '<td data-booking-column="location">' . $geoDisplay . '</td>'
+                . '<td data-booking-column="signature">' . $signatureDisplay . '</td>'
+                . '<td data-booking-column="status">' . $statusBadge . '</td>'
+                . '<td data-booking-column="version"><span class="muted">' . $this->e((string) ($booking['version_hint'] ?? '')) . '</span></td>'
                 . '<td class="table-actions">' . $actionButton . '</td>'
                 . '</tr>';
+
+            $selectionControl = $showSelection
+                ? '<label class="booking-card__check"><input type="checkbox" name="booking_ids[]" value="' . $id . '"' . ($bulkFormId !== '' ? ' form="' . $this->e($bulkFormId) . '"' : '') . '><span>Auswaehlen</span></label>'
+                : '';
+            $issueBadges = ($needsProjectAssignment ? '<span class="badge warn">Projekt offen</span>' : '')
+                . ($hasIncompleteTime ? '<span class="badge error">Zeit unvollstaendig</span>' : '');
+            $timeRange = trim($this->timeValue($booking['start_time'] ?? null) . ' - ' . $this->timeValue($booking['end_time'] ?? null), ' -');
+            $timeRange = $timeRange !== '' ? $this->e($timeRange) : '<span class="muted">Keine Zeit</span>';
+            $cardClasses = trim('booking-card' . ($hasBookingIssue ? ' has-booking-issue' : ''));
+
+            $cards .= '<article class="' . $cardClasses . '" data-booking-row data-booking-id="' . $id . '" data-booking-openable="' . ($canOpenModal ? '1' : '0') . '"' . ($hasBookingIssue ? ' data-booking-issue="1"' : '') . ' data-booking="' . $this->dataJson($rowData) . '" tabindex="' . $tabIndex . '">'
+                . '<div class="booking-card__top">'
+                . '<div><span class="muted">' . $this->e((string) ($booking['work_date'] ?? '')) . '</span><strong>' . $this->e((string) ($booking['employee_name'] ?? '')) . '</strong></div>'
+                . $selectionControl
+                . '</div>'
+                . '<div class="booking-card__badges">' . $statusBadge . ($issueBadges !== '' ? $issueBadges : '') . '<span class="badge">' . $this->e($sourceLabel) . '</span></div>'
+                . '<dl class="booking-card__meta">'
+                . '<div><dt>Projekt</dt><dd>' . $this->e($projectLabel) . '</dd></div>'
+                . '<div><dt>Typ</dt><dd>' . $this->e($typeLabel) . '</dd></div>'
+                . '<div><dt>Zeit</dt><dd>' . $timeRange . '</dd></div>'
+                . '<div><dt>Netto</dt><dd>' . $this->e((string) ($booking['net_minutes'] ?? 0)) . ' Min</dd></div>'
+                . '</dl>'
+                . '<div class="booking-card__signals">' . $attachmentDisplay . $geoDisplay . $signatureDisplay . '</div>'
+                . '<div class="booking-card__actions">' . $actionButton . '</div>'
+                . '</article>';
         }
 
         if ($rows === '') {
             $colspan = $showSelection ? '17' : '16';
             $rows = '<tr><td colspan="' . $colspan . '" class="table-empty">' . $this->e($emptyMessage) . '</td></tr>';
+            $cards = '<p class="table-empty">' . $this->e($emptyMessage) . '</p>';
         }
 
-        $selectionHead = $showSelection ? '<th>Auswahl</th>' : '';
+        $selectionHead = $showSelection ? '<th data-booking-column="selection">Auswahl</th>' : '';
+        $columnControls = $columnControlsEnabled ? $this->columnControls($columns) : '';
 
         return <<<HTML
-<div class="table-scroll">
-    <table class="booking-table">
+{$columnControls}
+<div class="booking-list-desktop table-scroll">
+    <table class="booking-table" data-booking-column-table>
         <thead>
             <tr>
                 {$selectionHead}
-                <th>Datum</th>
-                <th>Mitarbeiter</th>
-                <th>Projekt</th>
-                <th>Typ</th>
-                <th>Herkunft</th>
-                <th>Start</th>
-                <th>Ende</th>
-                <th>Pause</th>
-                <th>Netto</th>
-                <th>Notiz</th>
-                <th>Anhänge</th>
-                <th>Standort</th>
-                <th>Bestätigung</th>
-                <th>Status</th>
-                <th>Version</th>
+                <th data-booking-column="date">{$this->sortableHeader('date', 'Datum', $sortEnabled, $currentSort, $currentDirection, $sortBaseUrl, $sortFilters)}</th>
+                <th data-booking-column="employee">{$this->sortableHeader('employee', 'Mitarbeiter', $sortEnabled, $currentSort, $currentDirection, $sortBaseUrl, $sortFilters)}</th>
+                <th data-booking-column="project">{$this->sortableHeader('project', 'Projekt', $sortEnabled, $currentSort, $currentDirection, $sortBaseUrl, $sortFilters)}</th>
+                <th data-booking-column="type">{$this->sortableHeader('type', 'Typ', $sortEnabled, $currentSort, $currentDirection, $sortBaseUrl, $sortFilters)}</th>
+                <th data-booking-column="source">{$this->sortableHeader('source', 'Herkunft', $sortEnabled, $currentSort, $currentDirection, $sortBaseUrl, $sortFilters)}</th>
+                <th data-booking-column="start">{$this->sortableHeader('start', 'Start', $sortEnabled, $currentSort, $currentDirection, $sortBaseUrl, $sortFilters)}</th>
+                <th data-booking-column="end">{$this->sortableHeader('end', 'Ende', $sortEnabled, $currentSort, $currentDirection, $sortBaseUrl, $sortFilters)}</th>
+                <th data-booking-column="break">Pause</th>
+                <th data-booking-column="net">{$this->sortableHeader('net', 'Netto', $sortEnabled, $currentSort, $currentDirection, $sortBaseUrl, $sortFilters)}</th>
+                <th data-booking-column="note">Notiz</th>
+                <th data-booking-column="attachments">Anhänge</th>
+                <th data-booking-column="location">Standort</th>
+                <th data-booking-column="signature">Bestätigung</th>
+                <th data-booking-column="status">{$this->sortableHeader('status', 'Status', $sortEnabled, $currentSort, $currentDirection, $sortBaseUrl, $sortFilters)}</th>
+                <th data-booking-column="version">{$this->sortableHeader('updated', 'Version', $sortEnabled, $currentSort, $currentDirection, $sortBaseUrl, $sortFilters)}</th>
                 <th>Aktionen</th>
             </tr>
         </thead>
@@ -142,6 +178,9 @@ final class BookingModalRenderer
             {$rows}
         </tbody>
     </table>
+</div>
+<div class="booking-card-list" aria-label="Buchungen">
+    {$cards}
 </div>
 HTML;
     }
@@ -296,6 +335,84 @@ HTML;
         }
 
         return $label !== '' ? $label : 'Nicht zugeordnet';
+    }
+
+    private function bookingColumns(bool $showSelection): array
+    {
+        $columns = [
+            'date' => 'Datum',
+            'employee' => 'Mitarbeiter',
+            'project' => 'Projekt',
+            'type' => 'Typ',
+            'source' => 'Herkunft',
+            'start' => 'Start',
+            'end' => 'Ende',
+            'break' => 'Pause',
+            'net' => 'Netto',
+            'note' => 'Notiz',
+            'attachments' => 'Anhänge',
+            'location' => 'Standort',
+            'signature' => 'Bestätigung',
+            'status' => 'Status',
+            'version' => 'Version',
+        ];
+
+        return $showSelection ? ['selection' => 'Auswahl'] + $columns : $columns;
+    }
+
+    private function columnControls(array $columns): string
+    {
+        $items = '';
+
+        foreach ($columns as $key => $label) {
+            $items .= '<label class="booking-column-controls__item">'
+                . '<input type="checkbox" value="' . $this->e((string) $key) . '" checked data-booking-column-toggle>'
+                . '<span>' . $this->e((string) $label) . '</span>'
+                . '</label>';
+        }
+
+        return <<<HTML
+<details class="booking-column-controls" data-booking-column-controls>
+    <summary class="booking-column-controls__summary">
+        <span>Tabellenspalten anpassen</span>
+    </summary>
+    <div class="booking-column-controls__header">
+        <p class="booking-column-controls__title">Sichtbare Spalten</p>
+        <button type="button" class="button button-secondary booking-column-controls__reset" data-booking-column-reset>Alle anzeigen</button>
+    </div>
+    <div class="booking-column-controls__grid">
+        {$items}
+    </div>
+</details>
+HTML;
+    }
+
+    private function sortableHeader(string $sort, string $label, bool $enabled, string $currentSort, string $currentDirection, string $baseUrl, array $filters): string
+    {
+        if (!$enabled) {
+            return $this->e($label);
+        }
+
+        return $this->sortLink($sort, $label, $currentSort, $currentDirection, $baseUrl, $filters);
+    }
+
+    private function sortLink(string $sort, string $label, string $currentSort, string $currentDirection, string $baseUrl, array $filters): string
+    {
+        $nextDirection = $currentSort === $sort && $currentDirection === 'asc' ? 'desc' : 'asc';
+        $filters['sort'] = $sort;
+        $filters['direction'] = $nextDirection;
+        $filters['page'] = 1;
+        $href = $baseUrl . '?' . http_build_query(array_filter(
+            $filters,
+            static fn ($value): bool => $value !== '' && $value !== null
+        ));
+        $indicator = $currentSort === $sort ? ($currentDirection === 'asc' ? ' ^' : ' v') : '';
+        $sortState = $currentSort === $sort
+            ? '<span class="sr-only">, aktuell ' . $this->e($currentDirection === 'asc' ? 'aufsteigend' : 'absteigend') . ' sortiert</span>'
+            : '';
+        $nextState = '<span class="sr-only">, ' . $this->e($nextDirection === 'asc' ? 'aufsteigend' : 'absteigend') . ' sortieren</span>';
+
+        return '<a class="admin-table-sort booking-sort-link" href="' . $this->e($href) . '">' . $this->e($label . $indicator) . $sortState . $nextState . '</a>';
     }
 
     private function renderAttachmentSection(array $attachments, bool $canArchive, string $returnTo, string $csrfToken, int $bookingId, array $documentStatuses = [], bool $canManageStatus = false): string

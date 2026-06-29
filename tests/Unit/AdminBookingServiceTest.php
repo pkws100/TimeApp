@@ -23,6 +23,11 @@ final class AdminBookingServiceTest extends TestCase
             'user_id' => '7',
             'entry_type' => 'work',
             'scope' => 'archived',
+            'issue' => 'all',
+            'sort' => 'employee',
+            'direction' => 'asc',
+            'page' => '3',
+            'per_page' => '75',
         ]);
 
         self::assertSame('2026-04-01', $filters['date_from']);
@@ -31,6 +36,52 @@ final class AdminBookingServiceTest extends TestCase
         self::assertSame('7', $filters['user_id']);
         self::assertSame('work', $filters['entry_type']);
         self::assertSame('archived', $filters['scope']);
+        self::assertSame('all', $filters['issue']);
+        self::assertSame('employee', $filters['sort']);
+        self::assertSame('asc', $filters['direction']);
+        self::assertSame(3, $filters['page']);
+        self::assertSame(75, $filters['per_page']);
+    }
+
+    public function testNormalizeFiltersFallsBackForInvalidListOptions(): void
+    {
+        $service = new AdminBookingService(new DatabaseConnection([]), new TimesheetCalculator());
+        $filters = $service->normalizeFilters([
+            'issue' => 'broken',
+            'sort' => 'unsafe',
+            'direction' => 'sideways',
+            'page' => '-4',
+            'per_page' => '999',
+        ]);
+
+        self::assertSame('', $filters['issue']);
+        self::assertSame('date', $filters['sort']);
+        self::assertSame('desc', $filters['direction']);
+        self::assertSame(1, $filters['page']);
+        self::assertSame(100, $filters['per_page']);
+    }
+
+    public function testBuildFilterClauseAddsProblemBookingPredicate(): void
+    {
+        $service = new AdminBookingService(new DatabaseConnection([]), new TimesheetCalculator());
+        $method = new ReflectionMethod($service, 'buildFilterClause');
+        $method->setAccessible(true);
+
+        [$where] = $method->invoke($service, [
+            'date_from' => null,
+            'date_to' => null,
+            'project_id' => '',
+            'user_id' => '',
+            'entry_type' => '',
+            'scope' => 'all',
+            'issue' => 'all',
+        ]);
+
+        self::assertStringContainsString('COALESCE(timesheets.is_deleted, 0) = 0', $where);
+        self::assertStringContainsString('timesheets.entry_type = "work"', $where);
+        self::assertStringContainsString('timesheets.project_id IS NULL', $where);
+        self::assertStringContainsString('timesheets.start_time IS NULL', $where);
+        self::assertStringContainsString('timesheets.end_time IS NULL', $where);
     }
 
     public function testEntryTypeOptionsExposeStableAdminEditingSet(): void

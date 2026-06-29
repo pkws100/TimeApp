@@ -11,6 +11,11 @@ use InvalidArgumentException;
 final class AdminBookingService
 {
     private const ACCOUNTING_WRITE_LOCK = 'accounting-timesheet-write';
+    private const DEFAULT_SORT = 'date';
+    private const DEFAULT_DIRECTION = 'desc';
+    private const DEFAULT_PAGE = 1;
+    private const DEFAULT_PER_PAGE = 100;
+    private const PER_PAGE_OPTIONS = [25, 50, 75, 100];
 
     public function __construct(
         private DatabaseConnection $connection,
@@ -41,6 +46,15 @@ final class AdminBookingService
 
         $projectFilter = $forcedProjectId !== null ? (string) $forcedProjectId : trim((string) ($input['project_id'] ?? ''));
         $userFilter = trim((string) ($input['user_id'] ?? ''));
+        $issue = trim((string) ($input['issue'] ?? ''));
+        $issue = $issue === 'all' ? 'all' : '';
+        $sort = trim((string) ($input['sort'] ?? self::DEFAULT_SORT));
+        $sort = array_key_exists($sort, $this->sortOptions()) ? $sort : self::DEFAULT_SORT;
+        $direction = strtolower(trim((string) ($input['direction'] ?? self::DEFAULT_DIRECTION)));
+        $direction = in_array($direction, ['asc', 'desc'], true) ? $direction : self::DEFAULT_DIRECTION;
+        $page = max(self::DEFAULT_PAGE, (int) ($input['page'] ?? self::DEFAULT_PAGE));
+        $perPage = (int) ($input['per_page'] ?? self::DEFAULT_PER_PAGE);
+        $perPage = in_array($perPage, self::PER_PAGE_OPTIONS, true) ? $perPage : self::DEFAULT_PER_PAGE;
 
         return [
             'date_from' => $this->normalizeDate($input['date_from'] ?? null),
@@ -49,17 +63,94 @@ final class AdminBookingService
             'user_id' => $this->normalizePositiveIntOrEmpty($userFilter),
             'entry_type' => $entryType,
             'scope' => $scope,
+            'issue' => $issue,
+            'sort' => $sort,
+            'direction' => $direction,
+            'page' => $page,
+            'per_page' => $perPage,
         ];
     }
 
     public function list(array $filters): array
+    {
+        return $this->fetchBookings($filters);
+    }
+
+    public function paginatedList(array $filters): array
+    {
+        if (!$this->connection->tableExists('timesheets')) {
+            return [
+                'items' => [],
+                'total' => 0,
+                'page' => 1,
+                'per_page' => (int) ($filters['per_page'] ?? self::DEFAULT_PER_PAGE),
+                'total_pages' => 1,
+            ];
+        }
+
+        $perPage = in_array((int) ($filters['per_page'] ?? self::DEFAULT_PER_PAGE), self::PER_PAGE_OPTIONS, true)
+            ? (int) $filters['per_page']
+            : self::DEFAULT_PER_PAGE;
+        $page = max(1, (int) ($filters['page'] ?? self::DEFAULT_PAGE));
+        $total = $this->count($filters);
+        $totalPages = max(1, (int) ceil($total / $perPage));
+        $page = min($page, $totalPages);
+        $offset = ($page - 1) * $perPage;
+        $pageIds = $this->fetchPageIds($filters, $perPage, $offset);
+
+        return [
+            'items' => $this->fetchBookingsByIds($pageIds),
+            'total' => $total,
+            'page' => $page,
+            'per_page' => $perPage,
+            'total_pages' => $totalPages,
+        ];
+    }
+
+    public function count(array $filters): int
+    {
+        if (!$this->connection->tableExists('timesheets')) {
+            return 0;
+        }
+
+        [$where, $bindings] = $this->buildFilterClause($filters);
+
+        return (int) ($this->connection->fetchColumn(
+            'SELECT COUNT(*) FROM timesheets WHERE ' . $where,
+            $bindings
+        ) ?? 0);
+    }
+
+    public function sortOptions(): array
+    {
+        return [
+            'date' => 'Datum',
+            'employee' => 'Mitarbeiter',
+            'project' => 'Projekt',
+            'type' => 'Typ',
+            'source' => 'Herkunft',
+            'start' => 'Start',
+            'end' => 'Ende',
+            'net' => 'Netto',
+            'status' => 'Status',
+            'updated' => 'Letzte Aenderung',
+        ];
+    }
+
+    public function perPageOptions(): array
+    {
+        return self::PER_PAGE_OPTIONS;
+    }
+
+    private function fetchBookings(array $filters, ?int $limit = null, int $offset = 0): array
     {
         if (!$this->connection->tableExists('timesheets')) {
             return [];
         }
 
         [$where, $bindings] = $this->buildFilterClause($filters);
-        $sourceSelect = $this->hasTimesheetSourceColumn()
+        $hasSourceColumn = $this->hasTimesheetSourceColumn();
+        $sourceSelect = $hasSourceColumn
             ? 'COALESCE(timesheets.source, "app") AS source,'
             : '"app" AS source,';
         $auditSelect = '0 AS change_count, NULL AS last_change_at, NULL AS last_action_type, NULL AS last_change_reason';
@@ -122,9 +213,135 @@ final class AdminBookingService
             LEFT JOIN projects ON projects.id = timesheets.project_id
             ' . $auditJoin . '
             WHERE ' . $where . '
-            ORDER BY timesheets.work_date DESC, timesheets.start_time DESC, timesheets.id DESC';
+            ORDER BY ' . $this->orderClause($filters, $hasSourceColumn);
+
+        if ($limit !== null) {
+            $sql .= ' LIMIT ' . max(1, $limit) . ' OFFSET ' . max(0, $offset);
+        }
 
         $rows = $this->connection->fetchAll($sql, $bindings);
+
+        return array_map(fn (array $row): array => $this->hydrateBookingRow($row), $rows);
+    }
+
+    private function fetchPageIds(array $filters, int $limit, int $offset): array
+    {
+        if (!$this->connection->tableExists('timesheets')) {
+            return [];
+        }
+
+        [$where, $bindings] = $this->buildFilterClause($filters);
+        $hasSourceColumn = $this->hasTimesheetSourceColumn();
+        $rows = $this->connection->fetchAll(
+            'SELECT timesheets.id
+             FROM timesheets
+             LEFT JOIN users ON users.id = timesheets.user_id
+             LEFT JOIN projects ON projects.id = timesheets.project_id
+             WHERE ' . $where . '
+             ORDER BY ' . $this->orderClause($filters, $hasSourceColumn) . '
+             LIMIT ' . max(1, $limit) . ' OFFSET ' . max(0, $offset),
+            $bindings
+        );
+
+        return array_values(array_filter(
+            array_map(static fn (array $row): int => (int) ($row['id'] ?? 0), $rows),
+            static fn (int $id): bool => $id > 0
+        ));
+    }
+
+    private function fetchBookingsByIds(array $ids): array
+    {
+        $ids = array_values(array_unique(array_filter(
+            array_map(static fn (mixed $id): int => (int) $id, $ids),
+            static fn (int $id): bool => $id > 0
+        )));
+
+        if ($ids === [] || !$this->connection->tableExists('timesheets')) {
+            return [];
+        }
+
+        $mainPlaceholders = [];
+        $bindings = [];
+
+        foreach ($ids as $index => $id) {
+            $key = 'id_' . $index;
+            $mainPlaceholders[] = ':' . $key;
+            $bindings[$key] = $id;
+        }
+
+        $sourceSelect = $this->hasTimesheetSourceColumn()
+            ? 'COALESCE(timesheets.source, "app") AS source,'
+            : '"app" AS source,';
+        $auditSelect = '0 AS change_count, NULL AS last_change_at, NULL AS last_action_type, NULL AS last_change_reason';
+        $auditJoin = '';
+
+        if ($this->connection->tableExists('timesheet_change_log')) {
+            $auditPlaceholders = [];
+
+            foreach ($ids as $index => $id) {
+                $key = 'audit_id_' . $index;
+                $auditPlaceholders[] = ':' . $key;
+                $bindings[$key] = $id;
+            }
+
+            $auditSelect = 'audit.change_count, audit.last_change_at, audit.last_action_type, audit.last_change_reason';
+            $auditJoin = 'LEFT JOIN (
+                SELECT
+                    change_log.timesheet_id,
+                    COUNT(*) AS change_count,
+                    MAX(change_log.created_at) AS last_change_at,
+                    SUBSTRING_INDEX(
+                        GROUP_CONCAT(change_log.action_type ORDER BY change_log.created_at DESC SEPARATOR "||"),
+                        "||",
+                        1
+                    ) AS last_action_type,
+                    SUBSTRING_INDEX(
+                        GROUP_CONCAT(change_log.change_reason ORDER BY change_log.created_at DESC SEPARATOR "||"),
+                        "||",
+                        1
+                    ) AS last_change_reason
+                FROM timesheet_change_log AS change_log
+                WHERE change_log.timesheet_id IN (' . implode(', ', $auditPlaceholders) . ')
+                GROUP BY change_log.timesheet_id
+            ) AS audit ON audit.timesheet_id = timesheets.id';
+        }
+
+        $orderIds = implode(',', $ids);
+        $rows = $this->connection->fetchAll(
+            'SELECT
+                timesheets.id,
+                timesheets.user_id,
+                timesheets.project_id,
+                timesheets.work_date,
+                timesheets.start_time,
+                timesheets.end_time,
+                timesheets.gross_minutes,
+                timesheets.break_minutes,
+                timesheets.net_minutes,
+                timesheets.expenses_amount,
+                timesheets.entry_type,
+                ' . $sourceSelect . '
+                timesheets.note,
+                timesheets.updated_at,
+                COALESCE(timesheets.is_deleted, 0) AS is_deleted,
+                timesheets.deleted_at,
+                timesheets.deleted_by_user_id,
+                users.employee_number,
+                users.first_name,
+                users.last_name,
+                COALESCE(users.is_deleted, 0) AS user_is_deleted,
+                projects.project_number,
+                projects.name AS project_name,
+                COALESCE(projects.is_deleted, 0) AS project_is_deleted,
+                ' . $auditSelect . '
+             FROM timesheets
+             LEFT JOIN users ON users.id = timesheets.user_id
+             LEFT JOIN projects ON projects.id = timesheets.project_id
+             ' . $auditJoin . '
+             WHERE timesheets.id IN (' . implode(', ', $mainPlaceholders) . ')
+             ORDER BY FIELD(timesheets.id, ' . $orderIds . ')',
+            $bindings
+        );
 
         return array_map(fn (array $row): array => $this->hydrateBookingRow($row), $rows);
     }
@@ -733,7 +950,35 @@ final class AdminBookingService
             $bindings[$key] = $filters['entry_type'];
         }
 
+        if (($filters['issue'] ?? '') === 'all') {
+            $clauses[] = 'COALESCE(' . $alias . '.is_deleted, 0) = 0';
+            $clauses[] = $alias . '.entry_type = "work"';
+            $clauses[] = '(' . $alias . '.project_id IS NULL OR ' . $alias . '.start_time IS NULL OR ' . $alias . '.end_time IS NULL)';
+        }
+
         return [implode(' AND ', $clauses), $bindings];
+    }
+
+    private function orderClause(array $filters, bool $hasSourceColumn): string
+    {
+        $direction = strtoupper((string) ($filters['direction'] ?? self::DEFAULT_DIRECTION));
+        $direction = in_array($direction, ['ASC', 'DESC'], true) ? $direction : strtoupper(self::DEFAULT_DIRECTION);
+        $sourceExpression = $hasSourceColumn ? 'COALESCE(timesheets.source, "app")' : '"app"';
+
+        $order = match ((string) ($filters['sort'] ?? self::DEFAULT_SORT)) {
+            'employee' => 'users.last_name ' . $direction . ', users.first_name ' . $direction . ', users.employee_number ' . $direction,
+            'project' => 'projects.project_number ' . $direction . ', projects.name ' . $direction,
+            'type' => 'timesheets.entry_type ' . $direction,
+            'source' => $sourceExpression . ' ' . $direction,
+            'start' => 'timesheets.start_time ' . $direction,
+            'end' => 'timesheets.end_time ' . $direction,
+            'net' => 'timesheets.net_minutes ' . $direction,
+            'status' => 'COALESCE(timesheets.is_deleted, 0) ' . $direction,
+            'updated' => 'timesheets.updated_at ' . $direction,
+            default => 'timesheets.work_date ' . $direction,
+        };
+
+        return $order . ', timesheets.work_date DESC, timesheets.start_time DESC, timesheets.id DESC';
     }
 
     private function scopeClause(string $scope, string $alias = 'timesheets'): string

@@ -75,10 +75,12 @@ final class BookingModalRendererTest extends TestCase
 
         self::assertStringContainsString('data-booking-row', $html);
         self::assertStringContainsString('data-booking-open', $html);
-        self::assertStringContainsString('<th>Herkunft</th>', $html);
-        self::assertStringContainsString('<th>Anhänge</th>', $html);
-        self::assertStringContainsString('<th>Standort</th>', $html);
-        self::assertStringContainsString('<th>Bestätigung</th>', $html);
+        self::assertStringContainsString('Herkunft', $html);
+        self::assertStringContainsString('data-booking-column-table', $html);
+        self::assertStringContainsString('<th data-booking-column="attachments">Anhänge</th>', $html);
+        self::assertStringContainsString('<th data-booking-column="location">Standort</th>', $html);
+        self::assertStringContainsString('<th data-booking-column="signature">Bestätigung</th>', $html);
+        self::assertStringNotContainsString('data-booking-column-controls', $html);
         self::assertStringContainsString('Anhänge: 1', $html);
         self::assertStringContainsString('Standort: 1', $html);
         self::assertStringContainsString('Bestaetigt', $html);
@@ -88,8 +90,53 @@ final class BookingModalRendererTest extends TestCase
         self::assertStringNotContainsString('type="date" name="work_date"', $html);
         self::assertStringNotContainsString('<textarea', $html);
         self::assertStringContainsString('Bearbeiten', $html);
+        self::assertStringContainsString('booking-card-list', $html);
+        self::assertStringContainsString('booking-card__check', $html);
+        self::assertStringNotContainsString('booking-sort-link', $html);
         self::assertStringNotContainsString('has-booking-issue', $html);
         self::assertStringNotContainsString('Zeit unvollstaendig', $html);
+    }
+
+    public function testRenderTableCanExposeColumnControls(): void
+    {
+        $renderer = new BookingModalRenderer();
+        $html = $renderer->renderTable(
+            [[
+                'id' => 21,
+                'work_date' => '2026-05-12',
+                'employee_name' => 'Anpassbar Person',
+                'employee_number' => 'M-21',
+                'project_id' => 2,
+                'project_number' => 'P-2',
+                'project_name' => 'Rathaus',
+                'entry_type' => 'work',
+                'source' => 'app',
+                'source_label' => 'App',
+                'start_time' => '08:00:00',
+                'end_time' => '16:00:00',
+                'break_minutes' => 30,
+                'net_minutes' => 450,
+                'note' => 'Spaltentest',
+                'is_deleted' => 0,
+                'version_hint' => 'Originalstand',
+            ]],
+            [['id' => 2, 'project_number' => 'P-2', 'name' => 'Rathaus', 'is_deleted' => 0]],
+            ['work' => 'Arbeit'],
+            [
+                'show_selection' => true,
+                'column_controls' => true,
+            ]
+        );
+
+        self::assertStringContainsString('data-booking-column-controls', $html);
+        self::assertStringContainsString('<details class="booking-column-controls" data-booking-column-controls>', $html);
+        self::assertStringContainsString('Tabellenspalten anpassen', $html);
+        self::assertStringContainsString('Sichtbare Spalten', $html);
+        self::assertStringContainsString('data-booking-column-reset', $html);
+        self::assertStringContainsString('value="note" checked data-booking-column-toggle', $html);
+        self::assertStringContainsString('value="selection" checked data-booking-column-toggle', $html);
+        self::assertStringContainsString('data-booking-column="note"', $html);
+        self::assertStringContainsString('data-booking-column="selection"', $html);
     }
 
     public function testRenderModalIncludesProjectAssignmentAndSharedReason(): void
