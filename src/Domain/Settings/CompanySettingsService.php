@@ -202,6 +202,28 @@ final class CompanySettingsService
         return $this->current();
     }
 
+    public function saveTerminalSettings(array $payload): array
+    {
+        if (!$this->connection->tableExists('company_settings') || !$this->connection->columnExists('company_settings', 'terminal_enabled')) {
+            throw new RuntimeException('Die Terminal-Settings sind noch nicht verfuegbar. Bitte zuerst die Migration ausfuehren.');
+        }
+
+        $this->ensureRowExists();
+        $saved = $this->connection->execute(
+            'UPDATE company_settings SET terminal_enabled = :terminal_enabled, updated_at = NOW() WHERE id = :id',
+            [
+                'id' => self::SINGLETON_ID,
+                'terminal_enabled' => (string) ($payload['terminal_enabled'] ?? '0') === '1' ? 1 : 0,
+            ]
+        );
+
+        if (!$saved) {
+            throw new RuntimeException('Die Terminal-Settings konnten nicht gespeichert werden.');
+        }
+
+        return $this->current();
+    }
+
     public function publicLogoUrl(): ?string
     {
         $logo = $this->publicLogoFile();
@@ -282,6 +304,7 @@ final class CompanySettingsService
             'geo_capture_enabled' => (bool) ($settings['geo_capture_enabled'] ?? false),
             'geo_notice_text' => $settings['geo_notice_text'] ?? '',
             'geo_requires_acknowledgement' => (bool) ($settings['geo_requires_acknowledgement'] ?? false),
+            'terminal_enabled' => (bool) ($settings['terminal_enabled'] ?? false),
         ];
     }
 
@@ -915,6 +938,7 @@ final class CompanySettingsService
             'geo_company_longitude' => null,
             'geo_company_location_label' => null,
             'geo_company_geocoded_at' => null,
+            'terminal_enabled' => 0,
         ];
     }
 

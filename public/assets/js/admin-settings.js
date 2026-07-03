@@ -1,5 +1,5 @@
 function classifySettingsField(field) {
-    const control = field.querySelector('input, select, textarea');
+    const control = field.querySelector('input:not([type="hidden"]), select, textarea');
 
     if (!control) {
         return 'optional';

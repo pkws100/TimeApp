@@ -33,6 +33,9 @@ use App\Domain\Settings\DatabaseSettingsManager;
 use App\Domain\Settings\SettingsSecretService;
 use App\Domain\Settings\SmtpMailService;
 use App\Domain\Settings\SmtpTestService;
+use App\Domain\Terminals\NfcTagService;
+use App\Domain\Terminals\TerminalPunchService;
+use App\Domain\Terminals\TerminalService;
 use App\Domain\Timesheets\AdminBookingService;
 use App\Domain\Timesheets\AdminCalendarService;
 use App\Domain\Timesheets\AppTimesheetSyncService;
@@ -76,6 +79,8 @@ use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\ReportController;
 use App\Http\Controllers\RoleController;
 use App\Http\Controllers\SettingsController;
+use App\Http\Controllers\TerminalAdminController;
+use App\Http\Controllers\TerminalApiController;
 use App\Http\Controllers\TimesheetController;
 use App\Http\Controllers\UserController;
 use App\Http\Request;
@@ -194,6 +199,9 @@ $backupService = new BackupService($connection, $config->get('uploads', []));
 $smtpTestService = new SmtpTestService();
 $mobileAppService = new MobileAppService($connection, $projectService, $companySettingsService, $workdayStateCalculator, $fileService, $timesheetGeoLocationService, $calendarPolicyService, $timesheetSignatureService, $personnelEventService, $personnelLabelService);
 $appTimesheetSyncService = new AppTimesheetSyncService($connection, $timesheetCalculator, $companySettingsService, $workdayStateCalculator, $timesheetSignatureService);
+$terminalService = new TerminalService($connection, $companySettingsService);
+$nfcTagService = new NfcTagService($connection, (string) $config->get('app.settings_encryption_key', ''));
+$terminalPunchService = new TerminalPunchService($connection, $terminalService, $nfcTagService, $appTimesheetSyncService);
 $appDisplayName = trim((string) ($companySettingsService->current()['app_display_name'] ?? '')) ?: (string) $config->get('app.name');
 
 $adminContextService = new AdminContextService(
@@ -205,6 +213,7 @@ $adminContextService = new AdminContextService(
     $assetService,
     $adminBookingService,
     $personnelEventService,
+    $terminalService,
     $authService,
     (string) $config->get('app.name')
 );
@@ -224,6 +233,7 @@ $appTimesheetController = new AppTimesheetController($appTimesheetSyncService, $
 $appTimesheetAttachmentController = new AppTimesheetAttachmentController($fileService, $authService);
 $appTimesheetSignatureController = new AppTimesheetSignatureController($timesheetSignatureService, $authService);
 $appProjectAttachmentController = new AppProjectAttachmentController($fileService, $authService);
+$terminalApiController = new TerminalApiController($terminalService, $terminalPunchService);
 $adminTimesheetAttachmentController = new AdminTimesheetAttachmentController($fileService, $authService, $csrfService);
 $adminTimesheetSignatureController = new AdminTimesheetSignatureController($timesheetSignatureService, $authService, $csrfService);
 $adminController = new AdminController($adminView, $dashboardService, $databaseSettings);
@@ -278,6 +288,7 @@ $adminAccountingController = new AdminAccountingController(
     $csrfService
 );
 $companySettingsController = new CompanySettingsController($adminView, $companySettingsService, $smtpTestService, $csrfService, $config->get('maps', []));
+$terminalAdminController = new TerminalAdminController($adminView, $terminalService, $nfcTagService, $userService, $projectService, $authService, $csrfService);
 $calendarSettingsController = new CalendarSettingsController($adminView, $calendarPolicyService, $authService, $csrfService);
 $documentStatusController = new DocumentStatusController($adminView, $documentStatusService, $authService, $csrfService);
 $adminPushController = new AdminPushController($adminView, $pushSettingsService, $pushSubscriptionService, $pushNotificationService, $csrfService);
@@ -384,6 +395,14 @@ $router->delete('/admin/assets/{id}', $admin([$adminManagementController, 'asset
 $router->post('/admin/assets/{id}/files', $admin([$adminManagementController, 'assetFileStore'], 'assets.manage'));
 $router->delete('/admin/asset-files/{id}', $admin([$adminManagementController, 'assetFileArchive'], 'assets.manage'));
 $router->post('/admin/asset-files/{id}/status', $admin([$adminManagementController, 'assetFileStatus'], 'assets.manage'));
+$router->get('/admin/terminals', $admin([$terminalAdminController, 'index'], 'terminals.manage'));
+$router->post('/admin/terminals', $admin([$terminalAdminController, 'store'], 'terminals.manage'));
+$router->post('/admin/terminals/{id}', $admin([$terminalAdminController, 'update'], 'terminals.manage'));
+$router->post('/admin/terminals/{id}/archive', $admin([$terminalAdminController, 'archive'], 'terminals.manage'));
+$router->post('/admin/terminals/{id}/token-reset', $admin([$terminalAdminController, 'resetToken'], 'terminals.manage'));
+$router->post('/admin/terminals/{id}/learn', $admin([$terminalAdminController, 'learn'], 'terminals.manage'));
+$router->post('/admin/terminals/tags/{id}', $admin([$terminalAdminController, 'updateTag'], 'terminals.manage'));
+$router->post('/admin/terminals/tags/{id}/archive', $admin([$terminalAdminController, 'archiveTag'], 'terminals.manage'));
 $router->get('/admin/settings/company', $admin([$companySettingsController, 'show'], 'settings.manage'));
 $router->post('/admin/settings/company', $admin([$companySettingsController, 'save'], 'settings.manage'));
 $router->post('/admin/settings/company/logo', $admin([$companySettingsController, 'saveLogo'], 'settings.manage'));
@@ -397,6 +416,7 @@ $router->get('/admin/settings/company/datenschutz-pdf/preview', $admin([$company
 $router->get('/admin/settings/company/datenschutz-pdf/download', $admin([$companySettingsController, 'downloadDatenschutzPdf'], 'settings.manage'));
 $router->post('/admin/settings/company/smtp', $admin([$companySettingsController, 'saveSmtp'], 'settings.manage'));
 $router->post('/admin/settings/company/geo', $admin([$companySettingsController, 'saveGeo'], 'settings.manage'));
+$router->post('/admin/settings/company/terminal', $admin([$companySettingsController, 'saveTerminal'], 'settings.manage'));
 $router->post('/admin/settings/company/smtp-test', $admin([$companySettingsController, 'smtpTest'], 'settings.manage'));
 $router->get('/admin/settings/calendar', $admin([$calendarSettingsController, 'show'], 'settings.manage'));
 $router->post('/admin/settings/calendar', $admin([$calendarSettingsController, 'saveRegion'], 'settings.manage'));
@@ -416,6 +436,9 @@ $router->post('/admin/settings/push/test', $admin([$adminPushController, 'test']
 $router->post('/api/v1/auth/login', [$authController, 'login']);
 $router->post('/api/v1/auth/logout', [$authController, 'logout']);
 $router->get('/api/v1/auth/session', [$authController, 'session']);
+
+$router->get('/api/v1/terminal/config', [$terminalApiController, 'config']);
+$router->post('/api/v1/terminal/scan', [$terminalApiController, 'scan']);
 
 $router->get('/api/v1/app/me/day', $api([$appApiController, 'meDay'], 'timesheets.view_own'));
 $router->get('/api/v1/app/me/timesheets', $api([$appApiController, 'meTimesheets'], 'timesheets.view_own'));

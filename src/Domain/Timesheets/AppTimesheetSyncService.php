@@ -81,6 +81,7 @@ final class AppTimesheetSyncService
         $this->assertProjectVisibleToUser($projectId, $userId, $permissions, $workDate);
         $this->assertAccountingWriteAllowed($entry, $userId, $projectId, $workDate);
         $note = $this->nullableTrimmed($payload['note'] ?? ($entry['note'] ?? null));
+        $source = $this->normalizeSource($payload['source'] ?? ($entry['source'] ?? 'app'));
         $manualBreakMinutes = isset($entry['break_minutes']) ? (int) $entry['break_minutes'] : $this->workdayStateCalculator->completedBreakMinutes($existingBreaks);
 
         if ($action === 'pause' && array_key_exists('manual_break_minutes', $payload)) {
@@ -140,7 +141,7 @@ final class AppTimesheetSyncService
         }
 
         $calculated = $this->calculatedValues($workDate, $startTime, $endTime, $manualBreakMinutes);
-        $timesheetId = $this->persistTimesheet($entry, $userId, $projectId, $workDate, $startTime, $endTime, $note, $calculated);
+        $timesheetId = $this->persistTimesheet($entry, $userId, $projectId, $workDate, $startTime, $endTime, $note, $source, $calculated);
         $this->handlePauseAction($action, $timesheetId, $userId, $payload, $currentBreak);
 
         $breaks = $this->findBreaksForTimesheet($timesheetId);
@@ -149,7 +150,7 @@ final class AppTimesheetSyncService
             : $this->workdayStateCalculator->completedBreakMinutes($breaks);
 
         $recalculated = $this->calculatedValues($workDate, $startTime, $endTime, $effectiveBreakMinutes);
-        $this->refreshTimesheetDurations($timesheetId, $projectId, $startTime, $endTime, $note, $recalculated);
+        $this->refreshTimesheetDurations($timesheetId, $projectId, $startTime, $endTime, $note, $source, $recalculated);
         $geoStored = $this->storeGeoRecord($timesheetId, $userId, $workDate, $payload);
         $timesheet = $this->findTimesheetById($timesheetId);
         $breaks = $this->findBreaksForTimesheet($timesheetId);
@@ -239,6 +240,7 @@ final class AppTimesheetSyncService
         ?string $startTime,
         ?string $endTime,
         ?string $note,
+        string $source,
         array $calculated
     ): int {
         if (!$this->connection->tableExists('timesheets')) {
@@ -256,6 +258,7 @@ final class AppTimesheetSyncService
             'break_minutes' => (int) ($calculated['break_minutes'] ?? 0),
             'net_minutes' => (int) ($calculated['net_minutes'] ?? 0),
             'note' => $note,
+            'source' => $source,
         ];
 
         if ($entry === null) {
@@ -263,7 +266,7 @@ final class AppTimesheetSyncService
                 'INSERT INTO timesheets (
                     user_id, project_id, created_by_user_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes, expenses_amount, entry_type, source, note, created_at, updated_at
                 ) VALUES (
-                    :user_id, :project_id, :created_by_user_id, :work_date, :start_time, :end_time, :gross_minutes, :break_minutes, :net_minutes, 0, "work", "app", :note, NOW(), NOW()
+                    :user_id, :project_id, :created_by_user_id, :work_date, :start_time, :end_time, :gross_minutes, :break_minutes, :net_minutes, 0, "work", :source, :note, NOW(), NOW()
                 )',
                 $bindings
             );
@@ -287,6 +290,7 @@ final class AppTimesheetSyncService
                 gross_minutes = :gross_minutes,
                 break_minutes = :break_minutes,
                 net_minutes = :net_minutes,
+                source = :source,
                 note = :note,
                 updated_at = NOW()
              WHERE id = :id
@@ -298,6 +302,7 @@ final class AppTimesheetSyncService
                 'gross_minutes' => (int) ($calculated['gross_minutes'] ?? 0),
                 'break_minutes' => (int) ($calculated['break_minutes'] ?? 0),
                 'net_minutes' => (int) ($calculated['net_minutes'] ?? 0),
+                'source' => $source,
                 'note' => $note,
                 'id' => (int) $entry['id'],
             ]
@@ -528,6 +533,7 @@ final class AppTimesheetSyncService
                 timesheets.gross_minutes,
                 timesheets.break_minutes,
                 timesheets.net_minutes,
+                timesheets.source,
                 timesheets.note,
                 projects.name AS project_name,
                 projects.customer_name AS project_customer_name,
@@ -559,6 +565,7 @@ final class AppTimesheetSyncService
             'gross_minutes' => (int) ($row['gross_minutes'] ?? 0),
             'break_minutes' => (int) ($row['break_minutes'] ?? 0),
             'net_minutes' => (int) ($row['net_minutes'] ?? 0),
+            'source' => (string) ($row['source'] ?? 'app'),
             'note' => $row['note'] ?? null,
         ];
     }
@@ -569,6 +576,7 @@ final class AppTimesheetSyncService
         ?string $startTime,
         ?string $endTime,
         ?string $note,
+        string $source,
         array $calculated
     ): void {
         if ($timesheetId <= 0 || !$this->connection->tableExists('timesheets')) {
@@ -594,6 +602,7 @@ final class AppTimesheetSyncService
                 gross_minutes = :gross_minutes,
                 break_minutes = :break_minutes,
                 net_minutes = :net_minutes,
+                source = :source,
                 note = :note,
                 updated_at = NOW()
              WHERE id = :id',
@@ -605,6 +614,7 @@ final class AppTimesheetSyncService
                 'gross_minutes' => (int) ($calculated['gross_minutes'] ?? 0),
                 'break_minutes' => (int) ($calculated['break_minutes'] ?? 0),
                 'net_minutes' => (int) ($calculated['net_minutes'] ?? 0),
+                'source' => $source,
                 'note' => $note,
             ]
         );
@@ -739,6 +749,13 @@ final class AppTimesheetSyncService
         $id = (int) $value;
 
         return $id > 0 ? $id : null;
+    }
+
+    private function normalizeSource(mixed $value): string
+    {
+        $source = trim((string) ($value ?? 'app'));
+
+        return in_array($source, ['app', 'terminal'], true) ? $source : 'app';
     }
 
     private function assertProjectVisibleToUser(?int $projectId, int $userId, array $permissions, string $workDate): void

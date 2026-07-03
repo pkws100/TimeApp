@@ -28,4 +28,14 @@ final class AppTimesheetSyncServiceTest extends TestCase
         self::assertStringContainsString('period_start <= :work_date_start', $source);
         self::assertStringContainsString('period_end >= :work_date_end', $source);
     }
+
+    public function testTerminalSourceCanBePersistedThroughAppSyncPipeline(): void
+    {
+        $source = (string) file_get_contents(base_path('src/Domain/Timesheets/AppTimesheetSyncService.php'));
+
+        self::assertStringContainsString('$source = $this->normalizeSource($payload[\'source\']', $source);
+        self::assertStringContainsString('return in_array($source, [\'app\', \'terminal\'], true) ? $source : \'app\';', $source);
+        self::assertStringContainsString('"work", :source, :note', $source);
+        self::assertStringContainsString('source = :source', $source);
+    }
 }

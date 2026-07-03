@@ -40,6 +40,7 @@ final class CompanySettingsController
         $privacyInfo = $this->fileInfo($settings, 'datenschutz_pdf');
         $geoEnabled = ((int) ($settings['geo_capture_enabled'] ?? 0) === 1) ? 'checked' : '';
         $geoAck = ((int) ($settings['geo_requires_acknowledgement'] ?? 0) === 1) ? 'checked' : '';
+        $terminalEnabled = ((int) ($settings['terminal_enabled'] ?? 0) === 1) ? 'checked' : '';
         $smtpPasswordStored = (bool) ($settings['smtp_password_is_set'] ?? false);
         $smtpPasswordHint = $smtpPasswordStored
             ? '<p class="muted">Ein SMTP-Passwort ist gespeichert. Leer lassen zum Beibehalten; neues Passwort eintragen, um es zu ersetzen.</p>'
@@ -281,6 +282,26 @@ final class CompanySettingsController
         </div>
     </form>
 </section>
+
+<section class="card stack">
+    <form method="post" action="/admin/settings/company/terminal" class="stack" data-settings-form>
+        <input type="hidden" name="csrf_token" value="{$csrfToken}">
+        <div class="section-toolbar">
+            <div>
+                <h2>Terminals</h2>
+                <p class="muted">Aktiviert stationaere LAN-Terminals fuer NFC-basierte Kommen-/Gehen-Buchungen.</p>
+            </div>
+            <span class="badge warn" data-settings-section-badge>Wird geprueft</span>
+        </div>
+        <div class="form-grid">
+            <label class="checkbox-item settings-field" data-settings-field><input type="hidden" name="terminal_enabled" value="0"><input type="checkbox" name="terminal_enabled" value="1" {$terminalEnabled}> <span>Terminal-Funktion aktivieren</span></label>
+        </div>
+        <p class="muted">Nach dem Aktivieren erscheint der Admin-Bereich Terminals fuer Geraete, Tokens, Anlernmodus und NFC-Tag-Zuordnung.</p>
+        <div class="toolbar-actions">
+            <button class="button" type="submit">Terminal-Settings speichern</button>
+        </div>
+    </form>
+</section>
 HTML;
 
         return Response::html($this->view->render('Settings', $content, '<script src="/assets/vendor/leaflet/leaflet.js"></script><script src="/assets/js/admin-geo-map.js"></script>'));
@@ -424,6 +445,21 @@ HTML;
         }
     }
 
+    public function saveTerminal(Request $request): Response
+    {
+        if (!$this->hasValidCsrfToken($request)) {
+            return Response::redirect('/admin/settings/company?error=' . rawurlencode('Die Aktion konnte nicht bestaetigt werden. Bitte Seite neu laden.'));
+        }
+
+        try {
+            $this->companySettingsService->saveTerminalSettings($request->input());
+
+            return Response::redirect('/admin/settings/company?notice=terminal-saved');
+        } catch (RuntimeException $exception) {
+            return Response::redirect('/admin/settings/company?error=' . rawurlencode($exception->getMessage()));
+        }
+    }
+
     public function smtpTest(Request $request): Response
     {
         if (!$this->hasValidCsrfToken($request)) {
@@ -538,6 +574,7 @@ HTML;
             'datenschutz-pdf-saved' => 'Die Datenschutz-PDF wurde erfolgreich gespeichert.',
             'smtp-saved' => 'Die SMTP-Settings wurden gespeichert. Bitte jetzt den Testversand ausfuehren.',
             'geo-saved' => 'Die GEO-Settings und der Firmenstandort wurden gespeichert.',
+            'terminal-saved' => 'Die Terminal-Settings wurden gespeichert.',
             'smtp-tested' => 'Die SMTP-Testmail wurde erfolgreich versendet.',
             default => 'Die Settings wurden aktualisiert.',
         };

@@ -8,6 +8,26 @@
     --transition-base: 180ms ease;
 }
 
+.terminal-row-form {
+    display: grid;
+    gap: 1rem;
+}
+
+.terminal-row-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+    gap: 1rem;
+}
+
+.terminal-row-grid .full-span {
+    grid-column: 1 / -1;
+}
+
+.notice code {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
 html {
     color-scheme: light;
     overflow-x: hidden;

@@ -36,6 +36,7 @@ final class InitialReferenceSeeder extends AbstractSeed
             ['code' => 'personnel.manage', 'label' => 'Personal-Qualifikationen verwalten', 'scope' => 'backend'],
             ['code' => 'settings.manage', 'label' => 'Globale Einstellungen verwalten', 'scope' => 'backend'],
             ['code' => 'settings.database.manage', 'label' => 'Datenbank umstellen', 'scope' => 'backend'],
+            ['code' => 'terminals.manage', 'label' => 'Terminals und NFC-Tags verwalten', 'scope' => 'backend'],
             ['code' => 'push.receive', 'label' => 'Push-Benachrichtigungen empfangen', 'scope' => 'app'],
             ['code' => 'push.manage', 'label' => 'Push-Benachrichtigungen verwalten', 'scope' => 'backend'],
         ];
@@ -84,6 +85,7 @@ final class InitialReferenceSeeder extends AbstractSeed
                 'personnel.manage',
                 'settings.manage',
                 'settings.database.manage',
+                'terminals.manage',
                 'push.manage',
                 'push.receive',
             ],

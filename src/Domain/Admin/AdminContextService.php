@@ -10,6 +10,7 @@ use App\Domain\Auth\AuthService;
 use App\Domain\Personnel\PersonnelEventService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Settings\CompanySettingsService;
+use App\Domain\Terminals\TerminalService;
 use App\Domain\Timesheets\AdminBookingService;
 use App\Domain\Users\RoleService;
 use App\Domain\Users\UserService;
@@ -25,6 +26,7 @@ final class AdminContextService
         private AssetService $assetService,
         private AdminBookingService $bookingService,
         private PersonnelEventService $personnelEventService,
+        private TerminalService $terminalService,
         private AuthService $authService,
         private string $defaultAppName
     ) {
@@ -111,13 +113,21 @@ final class AdminContextService
                 'badge' => count($this->assetService->list('active')),
                 'permission' => 'assets.manage',
             ],
+            [
+                'href' => '/admin/terminals',
+                'label' => 'Terminals',
+                'active_prefix' => '/admin/terminals',
+                'badge' => $this->terminalService->activeCount(),
+                'permission' => 'terminals.manage',
+                'enabled' => $this->terminalService->featureEnabled(),
+            ],
             ['href' => '/admin/settings/company', 'label' => 'Settings', 'active_prefix' => '/admin/settings/company', 'permission' => 'settings.manage'],
             ['href' => '/admin/settings/push', 'label' => 'Push', 'active_prefix' => '/admin/settings/push', 'permission' => 'push.manage'],
         ];
 
         return array_values(array_filter(
             $items,
-            fn (array $item): bool => $this->authService->hasPermission((string) ($item['permission'] ?? ''))
+            fn (array $item): bool => (bool) ($item['enabled'] ?? true) && $this->authService->hasPermission((string) ($item['permission'] ?? ''))
         ));
     }
 }

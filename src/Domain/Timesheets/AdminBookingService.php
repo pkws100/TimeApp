@@ -1089,6 +1089,7 @@ final class AdminBookingService
     {
         return match ($source) {
             'admin' => 'Admin-Nacherfassung',
+            'terminal' => 'Terminal',
             default => 'App',
         };
     }
