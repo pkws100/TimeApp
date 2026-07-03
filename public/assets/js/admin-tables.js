@@ -92,6 +92,52 @@
         });
     }
 
+    function isInteractiveTarget(target) {
+        return Boolean(target && typeof target.closest === 'function' && target.closest('a, button, input, select, textarea, label, form, [role="button"]'));
+    }
+
+    function selectableRows(state) {
+        return state.rows.map(function (row) {
+            return row.element;
+        }).filter(function (row) {
+            return row.dataset.rowSelectable === 'true';
+        });
+    }
+
+    function visibleSelectableRows(state) {
+        return Array.prototype.slice.call(state.table.tBodies[0].querySelectorAll('tr[data-row-selectable="true"]'));
+    }
+
+    function updateRovingTabIndex(state, activeRow) {
+        var visibleRows = visibleSelectableRows(state);
+        var selectedVisibleRow = visibleRows.filter(function (row) {
+            return row.classList.contains('is-selected');
+        })[0];
+        var focusRow = visibleRows.indexOf(activeRow) !== -1 ? activeRow : (selectedVisibleRow || visibleRows[0] || null);
+
+        selectableRows(state).forEach(function (row) {
+            row.tabIndex = row === focusRow ? 0 : -1;
+        });
+    }
+
+    function selectRow(state, row) {
+        selectableRows(state).forEach(function (selectableRow) {
+            var selected = selectableRow === row;
+
+            selectableRow.classList.toggle('is-selected', selected);
+            selectableRow.setAttribute('aria-selected', selected ? 'true' : 'false');
+        });
+        updateRovingTabIndex(state, row);
+    }
+
+    function openRowEdit(row) {
+        var editUrl = row.dataset.editUrl || '';
+
+        if (editUrl !== '') {
+            window.location.href = editUrl;
+        }
+    }
+
     function createSortButtons(table, state) {
         sortableHeaders(table).forEach(function (header) {
             var index = header.cellIndex;
@@ -271,6 +317,83 @@
         state.controls.pageInfo.textContent = 'Seite ' + String(state.page) + ' / ' + String(totalPages);
         state.controls.previous.disabled = state.page <= 1 || pageSize === 'all';
         state.controls.next.disabled = state.page >= totalPages || pageSize === 'all';
+        updateRovingTabIndex(state);
+    }
+
+    function enableRowSelection(state) {
+        var selectable = selectableRows(state);
+        var helpId = state.table.id ? state.table.id + '-row-help' : state.table.dataset.adminTable + '-row-help';
+
+        if (selectable.length === 0) {
+            return;
+        }
+
+        if (!document.getElementById(helpId)) {
+            var help = createElement('p', 'sr-only', 'Tab fokussiert die Tabelle. Pfeiltasten wechseln zwischen markierbaren Zeilen, Leertaste markiert eine Zeile, Enter oeffnet Bearbeiten.');
+
+            help.id = helpId;
+            state.table.parentNode.insertBefore(help, state.table);
+            state.table.setAttribute('aria-describedby', helpId);
+        }
+
+        state.table.setAttribute('aria-multiselectable', 'false');
+
+        selectable.forEach(function (row) {
+            row.tabIndex = -1;
+            row.setAttribute('aria-selected', row.classList.contains('is-selected') ? 'true' : 'false');
+
+            row.addEventListener('click', function (event) {
+                if (isInteractiveTarget(event.target)) {
+                    return;
+                }
+
+                selectRow(state, row);
+            });
+
+            row.addEventListener('dblclick', function (event) {
+                if (isInteractiveTarget(event.target)) {
+                    return;
+                }
+
+                openRowEdit(row);
+            });
+
+            row.addEventListener('keydown', function (event) {
+                var visibleRows = visibleSelectableRows(state);
+                var rowIndex = visibleRows.indexOf(row);
+                var nextRow = null;
+
+                if (isInteractiveTarget(event.target)) {
+                    return;
+                }
+
+                if (event.key === 'ArrowDown' && rowIndex !== -1) {
+                    event.preventDefault();
+                    nextRow = visibleRows[Math.min(visibleRows.length - 1, rowIndex + 1)];
+                    updateRovingTabIndex(state, nextRow);
+                    nextRow.focus();
+                }
+
+                if (event.key === 'ArrowUp' && rowIndex !== -1) {
+                    event.preventDefault();
+                    nextRow = visibleRows[Math.max(0, rowIndex - 1)];
+                    updateRovingTabIndex(state, nextRow);
+                    nextRow.focus();
+                }
+
+                if (event.key === ' ' || event.key === 'Spacebar') {
+                    event.preventDefault();
+                    selectRow(state, row);
+                }
+
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    openRowEdit(row);
+                }
+            });
+        });
+
+        updateRovingTabIndex(state);
     }
 
     function initTable(table) {
@@ -316,6 +439,7 @@
         shell.appendChild(scroll);
 
         createSortButtons(table, state);
+        enableRowSelection(state);
         render(state);
     }
 

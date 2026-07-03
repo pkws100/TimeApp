@@ -205,6 +205,19 @@ final class AdminManagementControllerTest extends TestCase
         self::assertStringContainsString('name="customer_signature_required" value="1" checked', $html);
     }
 
+    public function testProjectsTableRendersSelectableRowsWithEditUrl(): void
+    {
+        $response = $this->controller()->projects(new Request('GET', '/admin/projects', [], [], [], [], []));
+        $html = $this->responseContent($response);
+
+        self::assertSame(200, $response->status());
+        self::assertStringContainsString('data-admin-table="projects"', $html);
+        self::assertStringContainsString('data-row-selectable="true"', $html);
+        self::assertStringContainsString('data-edit-url="/admin/projects/1/edit"', $html);
+        self::assertStringContainsString('<td>2026-001</td><td>Neubau Kita Nord</td>', $html);
+        self::assertStringContainsString('<a class="button" href="/admin/projects/1/edit">Bearbeiten</a>', $html);
+    }
+
     public function testUserFormRendersTimeTrackingRequirementCheckbox(): void
     {
         $controller = $this->controller();
@@ -216,6 +229,20 @@ final class AdminManagementControllerTest extends TestCase
         self::assertStringContainsString('name="time_tracking_required" value="0"', $html);
         self::assertStringContainsString('name="time_tracking_required" value="1" checked', $html);
         self::assertStringContainsString('Zeiterfassung erforderlich', $html);
+    }
+
+    public function testUsersTableRendersEmployeeNumberColumnAndSelectableRows(): void
+    {
+        $response = $this->controller()->users(new Request('GET', '/admin/users', [], [], [], [], []));
+        $html = $this->responseContent($response);
+
+        self::assertSame(200, $response->status());
+        self::assertStringContainsString('data-admin-table="users"', $html);
+        self::assertStringContainsString('<th>Mitarbeiternummer</th><th>Name</th>', $html);
+        self::assertStringContainsString('data-row-selectable="true"', $html);
+        self::assertStringContainsString('data-edit-url="/admin/users/1/edit"', $html);
+        self::assertStringContainsString('<td>MA-001</td><td>Jana Kluge</td>', $html);
+        self::assertStringContainsString('<a class="button" href="/admin/users/1/edit">Bearbeiten</a>', $html);
     }
 
     public function testUserFormCanRenderVoluntaryTimeTrackingUnchecked(): void

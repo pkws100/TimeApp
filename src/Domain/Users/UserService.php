@@ -50,6 +50,7 @@ final class UserService
         return [
             [
                 'id' => 1,
+                'employee_number' => 'MA-001',
                 'first_name' => 'Jana',
                 'last_name' => 'Kluge',
                 'email' => 'jana.kluge@example.invalid',

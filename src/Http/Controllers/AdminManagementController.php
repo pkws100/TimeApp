@@ -53,8 +53,10 @@ final class AdminManagementController
         $rows = '';
 
         foreach ($projects as $project) {
+            $projectId = (int) ($project['id'] ?? 0);
+            $editUrl = '/admin/projects/' . $projectId . '/edit';
             $trackedNetMinutes = max(0, (int) ($project['tracked_net_minutes'] ?? 0));
-            $rows .= '<tr>'
+            $rows .= '<tr data-row-selectable="true" data-edit-url="' . $this->e($editUrl) . '">'
                 . '<td>' . $this->e((string) $project['project_number']) . '</td>'
                 . '<td>' . $this->e((string) $project['name']) . '</td>'
                 . '<td>' . $this->e((string) ($project['customer_name'] ?? '')) . '</td>'
@@ -62,10 +64,10 @@ final class AdminManagementController
                 . '<td>' . $this->e((string) ($project['city'] ?? '')) . '</td>'
                 . '<td data-sort-value="' . $trackedNetMinutes . '">' . $this->e($this->formatProjectHours($trackedNetMinutes)) . '</td>'
                 . '<td class="table-actions" data-search="false">'
-                . '<a class="button" href="/admin/projects/' . (int) $project['id'] . '/edit">Bearbeiten</a>'
+                . '<a class="button" href="' . $this->e($editUrl) . '">Bearbeiten</a>'
                 . $this->projectLifecycleForm(
-                    '/admin/projects/' . (int) $project['id'],
-                    '/admin/projects/' . (int) $project['id'] . '/restore',
+                    '/admin/projects/' . $projectId,
+                    '/admin/projects/' . $projectId . '/restore',
                     (int) ($project['is_deleted'] ?? 0) === 1
                 )
                 . '</td>'
@@ -437,7 +439,10 @@ final class AdminManagementController
                     . '<td>' . $this->renderNextPersonnelEvent($eventsByUser[$userId][0] ?? null) . '</td>'
                 : '';
 
-            $rows .= '<tr>'
+            $editUrl = '/admin/users/' . $userId . '/edit';
+
+            $rows .= '<tr data-row-selectable="true" data-edit-url="' . $this->e($editUrl) . '">'
+                . '<td>' . $this->e((string) ($user['employee_number'] ?? '')) . '</td>'
                 . '<td>' . $this->e(trim(((string) ($user['first_name'] ?? '')) . ' ' . ((string) ($user['last_name'] ?? '')))) . '</td>'
                 . '<td>' . $this->e((string) ($user['email'] ?? '')) . '</td>'
                 . '<td>' . $this->e((string) ($user['phone'] ?? '')) . '</td>'
@@ -446,14 +451,14 @@ final class AdminManagementController
                 . $personnelCells
                 . '<td>' . $this->e((string) ($user['role_names'] ?? '')) . '</td>'
                 . '<td class="table-actions">'
-                . '<a class="button" href="/admin/users/' . (int) $user['id'] . '/edit">Bearbeiten</a>'
-                . $this->archiveForm('/admin/users/' . (int) $user['id'], (int) ($user['is_deleted'] ?? 0) === 1)
+                . '<a class="button" href="' . $this->e($editUrl) . '">Bearbeiten</a>'
+                . $this->archiveForm('/admin/users/' . $userId, (int) ($user['is_deleted'] ?? 0) === 1)
                 . '</td>'
                 . '</tr>';
         }
 
         $personnelHead = $canViewPersonnel ? '<th>Labels</th><th>Naechstes Event</th>' : '';
-        $colspan = $canViewPersonnel ? 9 : 7;
+        $colspan = $canViewPersonnel ? 10 : 8;
         $content = $this->renderIndexLayout(
             'User und Mitarbeiter',
             'Benutzerverwaltung',
@@ -461,7 +466,7 @@ final class AdminManagementController
             '/admin/users',
             $scope,
             $this->notice($request),
-            '<div class="table-scroll"><table data-admin-table="users" data-table-label="User"><thead><tr><th>Name</th><th>E-Mail</th><th>Telefon</th><th>Status</th><th>Zeiterfassung</th>' . $personnelHead . '<th>Rollen</th><th data-search="false" data-sort="false">Aktionen</th></tr></thead><tbody>'
+            '<div class="table-scroll"><table data-admin-table="users" data-table-label="User"><thead><tr><th>Mitarbeiternummer</th><th>Name</th><th>E-Mail</th><th>Telefon</th><th>Status</th><th>Zeiterfassung</th>' . $personnelHead . '<th>Rollen</th><th data-search="false" data-sort="false">Aktionen</th></tr></thead><tbody>'
             . ($rows !== '' ? $rows : '<tr><td colspan="' . $colspan . '" class="table-empty">Keine User im aktuellen Filter.</td></tr>')
             . '</tbody></table></div>'
         );

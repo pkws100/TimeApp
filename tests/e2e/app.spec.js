@@ -2221,14 +2221,14 @@ test('admin table module supports search, sorting, pagination and empty states',
     const number = index + 1;
     const minutes = number % 3;
 
-    return '<tr>'
+    return '<tr data-row-selectable="true" data-edit-url="#project-edit-' + number + '">'
       + '<td>P-' + String(number).padStart(3, '0') + '</td>'
       + '<td>Projekt ' + number + '</td>'
       + '<td>Kunde ' + (number % 5) + '</td>'
       + '<td>active</td>'
       + '<td>Ort ' + number + '</td>'
       + '<td data-sort-value="' + minutes + '">' + (minutes / 2).toFixed(2) + ' h</td>'
-      + '<td data-search="false"><a href="/admin/projects/' + number + '/edit">Bearbeiten</a></td>'
+      + '<td data-search="false"><a href="#project-link-' + number + '">Bearbeiten</a></td>'
       + '</tr>';
   }).join('');
 
@@ -2254,6 +2254,17 @@ test('admin table module supports search, sorting, pagination and empty states',
   await expect(search).toBeVisible();
   await expect(rowsLocator).toHaveCount(25);
 
+  await expect(rowsLocator.first()).toHaveAttribute('tabindex', '0');
+  await rowsLocator.nth(1).click();
+  await expect(rowsLocator.nth(1)).toHaveClass(/is-selected/);
+  await expect(rowsLocator.nth(1)).toHaveAttribute('tabindex', '0');
+  await expect(table.locator('tbody tr.is-selected')).toHaveCount(1);
+
+  await rowsLocator.nth(2).locator('a').click();
+  await expect(rowsLocator.nth(1)).toHaveClass(/is-selected/);
+  await expect(rowsLocator.nth(2)).not.toHaveClass(/is-selected/);
+  await expect(page).toHaveURL(/#project-link-3$/);
+
   await search.fill(' kunde 0 projekt 30 ');
   await expect(rowsLocator).toHaveCount(1);
   await expect(rowsLocator.first()).toContainText('Projekt 30');
@@ -2276,12 +2287,61 @@ test('admin table module supports search, sorting, pagination and empty states',
   await page.getByRole('button', { name: 'Weiter' }).first().click();
   await expect(page.locator('.admin-table-page-info').first()).toHaveText('Seite 2 / 3');
 
+  await rowsLocator.first().dblclick();
+  await expect(page).toHaveURL(/#project-edit-\d+$/);
+
   const emptyTable = page.locator('[data-admin-table="empty"]');
 
   await expect(emptyTable.locator('tbody .table-empty')).toContainText('Keine Projekte im aktuellen Filter.');
   await expect(page.locator('.admin-table-summary').nth(1)).toHaveText('0 von 0 Leere Projekte');
   await expect(page.locator('.admin-table-summary').first()).toHaveAttribute('aria-live', 'polite');
   await expect(table.locator('thead th').nth(6)).not.toHaveAttribute('aria-sort', /.+/);
+});
+
+test('admin table module supports opt-in row selection and double-click editing', async ({ page }) => {
+  await page.setContent(
+    '<div class="table-scroll">'
+      + '<table data-admin-table="users" data-table-label="User">'
+      + '<thead><tr><th>Mitarbeiternummer</th><th>Name</th><th>E-Mail</th><th data-search="false" data-sort="false">Aktionen</th></tr></thead>'
+      + '<tbody>'
+      + '<tr data-row-selectable="true" data-edit-url="#edit-3"><td>MA-003</td><td>Clara Check</td><td>clara@example.test</td><td data-search="false"><a href="#link-3">Bearbeiten</a></td></tr>'
+      + '<tr data-row-selectable="true" data-edit-url="#edit-1"><td>MA-001</td><td>Anna Aktiv</td><td>anna@example.test</td><td data-search="false"><a href="#link-1">Bearbeiten</a></td></tr>'
+      + '<tr data-row-selectable="true" data-edit-url="#edit-2"><td>MA-002</td><td>Ben Bau</td><td>ben@example.test</td><td data-search="false"><a href="#link-2">Bearbeiten</a></td></tr>'
+      + '</tbody>'
+      + '</table>'
+      + '</div>'
+  );
+  await page.addScriptTag({ path: path.join(__dirname, '../../public/assets/js/admin-tables.js') });
+  await page.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
+
+  const table = page.locator('[data-admin-table="users"]');
+  const rows = table.locator('tbody tr:not(.table-empty)');
+
+  await expect(rows.first()).toHaveAttribute('tabindex', '0');
+  await expect(rows.nth(1)).toHaveAttribute('tabindex', '-1');
+
+  await rows.nth(1).click();
+  await expect(rows.nth(1)).toHaveClass(/is-selected/);
+  await expect(rows.nth(1)).toHaveAttribute('tabindex', '0');
+  await expect(table.locator('tbody tr.is-selected')).toHaveCount(1);
+
+  await rows.nth(2).locator('a').click();
+  await expect(rows.nth(1)).toHaveClass(/is-selected/);
+  await expect(rows.nth(2)).not.toHaveClass(/is-selected/);
+
+  await rows.nth(2).focus();
+  await page.keyboard.press('Space');
+  await expect(rows.nth(2)).toHaveClass(/is-selected/);
+  await expect(table.locator('tbody tr.is-selected')).toHaveCount(1);
+
+  await page.keyboard.press('ArrowUp');
+  await expect(rows.nth(1)).toBeFocused();
+
+  await page.getByRole('button', { name: 'Mitarbeiternummer sortieren' }).click();
+  await expect(rows.first().locator('td').first()).toHaveText('MA-001');
+
+  await rows.first().dblclick();
+  await expect(page).toHaveURL(/#edit-1$/);
 });
 
 test('admin projects table can be searched and sorted', async ({ page }) => {
