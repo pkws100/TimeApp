@@ -11,12 +11,23 @@ Monolithische PHP-Anwendung fuer Admin-Backend, API und mobile Mitarbeiter-WebAp
 ## GitHub und Lizenz
 - Repository: `pkws100/TimeApp`
 - Lizenz: GNU General Public License Version 2 oder spaeter (`GPL-2.0-or-later`)
-- Rechteinhaber: pkws100
-- Lizenztext: `COPYING`
+- Rechteinhaber und Maintainer: Christian Pittroff (`pkws100`)
+- Entwicklung: Christian Pittroff mit OpenAI Codex als KI-gestuetztem Entwicklungspartner
+- Finanzierung: HTD-Sonneberg
+- Lizenznotiz: `LICENSE`
+- Vollstaendiger Lizenztext: `COPYING`
 - Drittkomponenten und Lizenzhinweise: `THIRD_PARTY_NOTICES.md`
+
+OpenAI Codex wird als eingesetzter KI-Entwicklungspartner genannt. Daraus folgt
+keine Rolle von OpenAI als Rechteinhaber, Maintainer, Lizenzgeber oder
+Support-Anbieter dieses Projekts.
 
 Die GPL ist eine Copyleft-Lizenz. Wer das Projekt weitergibt oder abgeleitete
 Versionen verteilt, muss die entsprechenden Lizenzpflichten beachten.
+Kommerzieller Einsatz ist erlaubt; bezahlter, fair kalkulierbarer Support fuer
+Installation, Infrastruktur-Bereitstellung und produktionsnahen Betrieb kann
+durch den Maintainer oder einen von ihm benannten Anbieter separat und nach
+gesonderter Vereinbarung angeboten werden.
 
 ## Wichtige Pfade
 - Projektwurzel: `/var/www/html`
