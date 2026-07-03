@@ -542,7 +542,22 @@ final class AdminManagementController
             return Response::redirect('/admin/users/' . $userId . '/edit?error=csrf');
         }
 
-        $this->userService->update($userId, $request->input());
+        $roles = $this->roleService->list('active');
+        $errors = $this->validateUserUpdatePayload($request->input(), $roles, $userId);
+
+        if ($errors !== []) {
+            return $this->userEditFailureResponse($userId, $request->input(), $errors);
+        }
+
+        try {
+            $this->userService->update($userId, $request->input());
+        } catch (RuntimeException|\InvalidArgumentException $exception) {
+            return $this->userEditFailureResponse(
+                $userId,
+                $request->input(),
+                ['_form' => [$this->userUpdateStorageErrorMessage($exception)]]
+            );
+        }
 
         if ($this->authService->hasPermission('personnel.manage')
             && $this->personnelLabelService instanceof PersonnelLabelService
@@ -837,7 +852,8 @@ HTML;
         array $roles,
         array $labels = [],
         array $selectedLabelIds = [],
-        array $formErrors = []
+        array $formErrors = [],
+        string $errorHeadline = 'Benutzer konnte nicht angelegt werden.'
     ): string
     {
         $isEdit = $user !== null && array_key_exists('id', $user);
@@ -849,7 +865,7 @@ HTML;
         $appUiSettings = AppUiSettings::normalize($user['app_ui_settings'] ?? null);
         $appUiSettingsCheckboxes = '';
         $labelCheckboxes = '';
-        $errorSummary = $this->renderFormErrorSummary($formErrors);
+        $errorSummary = $this->renderFormErrorSummary($formErrors, $errorHeadline);
 
         foreach ($roles as $role) {
             $roleId = (int) ($role['id'] ?? 0);
@@ -933,7 +949,57 @@ HTML;
         );
     }
 
+    private function userEditFailureResponse(int $userId, array $payload, array $errors): Response
+    {
+        $existingUser = $this->userService->find($userId);
+
+        if ($existingUser === null) {
+            return Response::html($this->notFoundMarkup('User'), 404);
+        }
+
+        $roles = $this->roleService->list('active');
+        $formUser = $this->userFormPayload($payload);
+        $formUser['id'] = $userId;
+        $canViewPersonnel = $this->authService->hasPermission('personnel.view');
+        $canManagePersonnel = $this->authService->hasPermission('personnel.manage');
+        $labels = $canManagePersonnel ? ($this->personnelLabelService?->list('active') ?? []) : [];
+        $selectedLabels = $canViewPersonnel ? ($this->personnelLabelService?->labelsForUser($userId) ?? []) : [];
+        $selectedLabelIds = (string) ($payload['personnel_labels_submitted'] ?? '') === '1'
+            ? $this->selectedRoleIds($payload['label_ids'] ?? [])
+            : array_column($selectedLabels, 'id');
+        $events = $canViewPersonnel ? ($this->personnelEventService?->events(['user_id' => $userId, 'scope' => 'active']) ?? []) : [];
+        $eventTypes = $canManagePersonnel ? ($this->personnelEventService?->eventTypes('active') ?? []) : [];
+
+        return Response::html(
+            $this->view->render(
+                'User bearbeiten',
+                $this->renderUserForm(
+                    '/admin/users/' . $userId,
+                    'User bearbeiten',
+                    $formUser,
+                    $roles,
+                    $labels,
+                    $selectedLabelIds,
+                    $errors,
+                    'Benutzer konnte nicht gespeichert werden.'
+                )
+                . ($canViewPersonnel ? $this->renderUserPersonnelEventsSection($existingUser, $events, $eventTypes, $canManagePersonnel) : '')
+            ),
+            422
+        );
+    }
+
     private function validateUserCreatePayload(array $payload, array $roles): array
+    {
+        return $this->validateUserPayload($payload, $roles, true);
+    }
+
+    private function validateUserUpdatePayload(array $payload, array $roles, int $userId): array
+    {
+        return $this->validateUserPayload($payload, $roles, false, $userId);
+    }
+
+    private function validateUserPayload(array $payload, array $roles, bool $passwordRequired, ?int $excludeUserId = null): array
     {
         $errors = [];
         $email = trim((string) ($payload['email'] ?? ''));
@@ -954,15 +1020,15 @@ HTML;
             $errors['email'][] = 'Bitte geben Sie eine E-Mail-Adresse ein.';
         } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
             $errors['email'][] = 'Bitte geben Sie eine gueltige E-Mail-Adresse ein.';
-        } elseif ($this->userService->emailExists($email)) {
+        } elseif ($this->userService->emailExists($email, $excludeUserId)) {
             $errors['email'][] = 'Diese E-Mail-Adresse ist bereits einem Benutzer zugeordnet.';
         }
 
-        if ($employeeNumber !== '' && $this->userService->employeeNumberExists($employeeNumber)) {
+        if ($employeeNumber !== '' && $this->userService->employeeNumberExists($employeeNumber, $excludeUserId)) {
             $errors['employee_number'][] = 'Diese Mitarbeiternummer ist bereits vergeben.';
         }
 
-        if ($password === '') {
+        if ($passwordRequired && $password === '') {
             $errors['password'][] = 'Bitte vergeben Sie ein Passwort.';
         }
 
@@ -997,6 +1063,18 @@ HTML;
         }
 
         return 'Der Benutzer konnte nicht angelegt werden. Bitte pruefen Sie die Eingaben oder versuchen Sie es erneut.';
+    }
+
+    private function userUpdateStorageErrorMessage(\Throwable $exception): string
+    {
+        $message = $exception->getMessage();
+        error_log('User update failed: ' . $message);
+
+        if (stripos($message, 'email') !== false || stripos($message, 'employee_number') !== false || stripos($message, 'Duplicate') !== false) {
+            return 'Der Benutzer konnte nicht gespeichert werden. Bitte pruefen Sie E-Mail-Adresse und Mitarbeiternummer auf doppelte Werte.';
+        }
+
+        return 'Der Benutzer konnte nicht gespeichert werden. Bitte pruefen Sie die Eingaben oder versuchen Sie es erneut.';
     }
 
     private function userFormPayload(array $payload): array
