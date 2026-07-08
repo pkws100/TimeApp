@@ -26,19 +26,21 @@ final class TimeAccountsAndVacationRequests extends AbstractMigration
 
     public function down(): void
     {
-        $this->execute('SET @@system_versioning_alter_history = 1;');
-
         if ($this->hasTable('timesheets')) {
             $table = $this->table('timesheets');
 
             if ($table->hasForeignKey('vacation_request_id')) {
-                $table->dropForeignKey('vacation_request_id')->update();
+                $this->alterSystemVersionedTimesheets(static function () use ($table): void {
+                    $table->dropForeignKey('vacation_request_id')->update();
+                });
             }
 
             $table = $this->table('timesheets');
 
             if ($table->hasColumn('vacation_request_id')) {
-                $table->removeColumn('vacation_request_id')->update();
+                $this->alterSystemVersionedTimesheets(static function () use ($table): void {
+                    $table->removeColumn('vacation_request_id')->update();
+                });
             }
         }
 
@@ -133,8 +135,6 @@ final class TimeAccountsAndVacationRequests extends AbstractMigration
             return;
         }
 
-        $this->execute('SET @@system_versioning_alter_history = 1;');
-
         $table = $this->table('timesheets');
 
         if (!$table->hasColumn('vacation_request_id')) {
@@ -147,19 +147,36 @@ final class TimeAccountsAndVacationRequests extends AbstractMigration
                 $options['after'] = 'source';
             }
 
-            $table->addColumn('vacation_request_id', 'integer', $options)->update();
+            $this->alterSystemVersionedTimesheets(static function () use ($table, $options): void {
+                $table->addColumn('vacation_request_id', 'integer', $options)->update();
+            });
         }
 
         $table = $this->table('timesheets');
 
         if (!$table->hasForeignKey('vacation_request_id')) {
-            $table->addForeignKey('vacation_request_id', 'vacation_requests', 'id', ['delete' => 'SET_NULL'])->update();
+            $this->alterSystemVersionedTimesheets(static function () use ($table): void {
+                $table->addForeignKey('vacation_request_id', 'vacation_requests', 'id', ['delete' => 'SET_NULL'])->update();
+            });
         }
 
         $table = $this->table('timesheets');
 
         if (!$table->hasIndex(['vacation_request_id'])) {
-            $table->addIndex(['vacation_request_id'])->update();
+            $this->alterSystemVersionedTimesheets(static function () use ($table): void {
+                $table->addIndex(['vacation_request_id'])->update();
+            });
+        }
+    }
+
+    private function alterSystemVersionedTimesheets(callable $alter): void
+    {
+        $this->execute('SET SESSION system_versioning_alter_history = KEEP;');
+
+        try {
+            $alter();
+        } finally {
+            $this->execute('SET SESSION system_versioning_alter_history = ERROR;');
         }
     }
 
