@@ -29,9 +29,9 @@ Diese Belegung ist ein Startpunkt fuer die Firmware. Vor finalem PCB/Gehause bit
 | ---           |    ---  |
 | Gruene LED    | GPIO 25 |
 | Rote LED      | GPIO 26 |
-| Gelb LED      | GPIO 33 |
+| Gelbe LED     | GPIO 33 |
 | KY-012 Buzzer | GPIO 32 |
-| Setup-Taster  | GPIO 13 |
+| Setup-Taster  | GPIO 13 gegen GND, interner Pullup |
 
 ## Firmware-Konstanten
 

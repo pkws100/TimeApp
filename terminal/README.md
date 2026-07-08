@@ -1,6 +1,6 @@
 # Terminal-Konzept
 
-Dieses Verzeichnis beschreibt die stationaeren NFC-Terminals fuer die Zeiterfassung. Die Firmware selbst wird in einem spaeteren Schritt erstellt; diese Dokumentation ist die verbindliche Vorlage fuer Hardware, API und Ablauf.
+Dieses Verzeichnis beschreibt die stationaeren NFC-Terminals fuer die Zeiterfassung. Die erste ESP32-Firmware liegt unter `terminal/firmware/pkws-time-terminal/`; diese Dokumentation bleibt die verbindliche Vorlage fuer Hardware, API und Ablauf.
 
 ## Ziel
 
