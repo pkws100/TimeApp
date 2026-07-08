@@ -1265,7 +1265,8 @@ html[data-theme="dark"] .app-timesheet-table thead th {
     background: rgba(255, 255, 255, 0.45);
 }
 
-.app-info-row strong {
+.app-info-row strong,
+.app-info-row span {
     overflow-wrap: anywhere;
 }
 

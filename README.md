@@ -138,7 +138,9 @@ Volumes, und der Webdienst haengt am externen Proxy-Netz plus lokalem
 Smoke-Check-Port.
 
 Details stehen in `DEPLOY.md`. Wiederkehrende Updates laufen ueber
-`bin/update-prod.sh`; read-only Smoke- und Status-Checks laufen ueber
+`bin/update-prod.sh`; das Skript fuehrt Migrationen, den idempotenten
+Referenz-Seeder und eine Post-Update-Pruefung fuer kritische Schema- und
+Rechte-Backfills aus. Read-only Smoke- und Status-Checks laufen ueber
 `bin/deploy-prod-check.sh`.
 
 ## Backup und Restore-Status

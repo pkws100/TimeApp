@@ -89,7 +89,7 @@ final class AppController
         $appleTouchIconUrl = AppView::versionedAssetUrl('/assets/apple-touch-icon.png');
         $appName = json_encode($this->appName, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
         $script = <<<JS
-const CACHE_NAME = 'zeiterfassung-app-v5';
+const CACHE_NAME = 'zeiterfassung-app-v6';
 const APP_NAME = {$appName};
 const APP_FALLBACK_URL = '/app';
 const APP_SHELL = [

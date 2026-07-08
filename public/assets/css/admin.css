@@ -403,6 +403,11 @@ textarea {
     color: #b91c1c;
 }
 
+.badge.neutral {
+    background: var(--page-surface-soft);
+    color: var(--page-muted);
+}
+
 .personnel-label {
     display: inline-flex;
     align-items: center;

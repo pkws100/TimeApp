@@ -80,6 +80,18 @@ final class AdminContextService
                 'permission' => 'timesheets.view',
             ],
             [
+                'href' => '/admin/time-accounts',
+                'label' => 'Zeitkonten',
+                'active_prefix' => '/admin/time-accounts',
+                'permission' => 'time_accounts.view',
+            ],
+            [
+                'href' => '/admin/vacation-requests',
+                'label' => 'Urlaub',
+                'active_prefix' => '/admin/vacation-requests',
+                'permission' => 'vacation_requests.view',
+            ],
+            [
                 'href' => '/admin/accounting',
                 'label' => 'Abrechnung',
                 'active_prefix' => '/admin/accounting',

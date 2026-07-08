@@ -36,7 +36,10 @@ echo "== Service status =="
 compose ps
 
 echo "== PHP extension check =="
-compose exec -T "$WEB_SERVICE" php -m | grep -E '^(curl|gd|pdo_mysql|zip)$'
+PHP_EXTENSIONS=$(compose exec -T "$WEB_SERVICE" php -m)
+for extension in curl gd pdo_mysql zip; do
+    printf '%s\n' "$PHP_EXTENSIONS" | grep -qx "$extension"
+done
 
 echo "== Phinx status before migrate =="
 compose exec -T "$WEB_SERVICE" vendor/bin/phinx status -c phinx.php || true
@@ -48,9 +51,20 @@ if [ "$APPLY" = true ]; then
     echo "== Seed reference data twice =="
     compose exec -T "$WEB_SERVICE" vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder
     compose exec -T "$WEB_SERVICE" vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder
+
+    echo "== Verify update =="
+    compose exec -T "$WEB_SERVICE" php bin/verify-update.php
 else
     echo "== Migrate/seed skipped =="
     echo "Run $0 --apply to execute migrations and seed reference data."
+
+    if compose exec -T "$WEB_SERVICE" test -f bin/verify-update.php; then
+        echo "== Verify update =="
+        compose exec -T "$WEB_SERVICE" php bin/verify-update.php
+    else
+        echo "== Verify update skipped =="
+        echo "Running image does not contain bin/verify-update.php yet."
+    fi
 fi
 
 echo "== Scheduler dry-run =="

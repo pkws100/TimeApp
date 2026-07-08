@@ -866,6 +866,10 @@ HTML;
         $appUiSettingsCheckboxes = '';
         $labelCheckboxes = '';
         $errorSummary = $this->renderFormErrorSummary($formErrors, $errorHeadline);
+        $targetHoursMode = (string) ($user['target_hours_mode'] ?? 'month');
+        $targetHoursMode = $targetHoursMode === 'week' ? 'week' : 'month';
+        $workdays = $this->workdaysFromMask($user['workdays_mask'] ?? '1,2,3,4,5');
+        $workdayCheckboxes = '';
 
         foreach ($roles as $role) {
             $roleId = (int) ($role['id'] ?? 0);
@@ -877,6 +881,11 @@ HTML;
             $label = AppUiSettings::FLAGS[$flag] ?? $flag;
             $checked = ($appUiSettings[$flag] ?? true) ? 'checked' : '';
             $appUiSettingsCheckboxes .= '<label class="checkbox-item"><input type="hidden" name="app_ui_settings[' . $this->e($flag) . ']" value="0"><input type="checkbox" name="app_ui_settings[' . $this->e($flag) . ']" value="1" ' . $checked . '> <span>' . $this->e($label) . '</span></label>';
+        }
+
+        foreach ($this->weekdayOptions() as $day => $label) {
+            $checked = in_array($day, $workdays, true) ? 'checked' : '';
+            $workdayCheckboxes .= '<label class="checkbox-item"><input type="checkbox" name="workdays_mask[]" value="' . $day . '" ' . $checked . '> <span>' . $this->e($label) . '</span></label>';
         }
 
         foreach ($labels as $label) {
@@ -910,7 +919,16 @@ HTML;
     <div class="form-field"><label for="phone">Telefon</label><input id="phone" name="phone" value="{$this->field($user, 'phone')}"></div>
     <div{$this->fieldWrapperClass($formErrors, 'password')}><label for="password">Passwort</label><input id="password" name="password" type="password" {$this->required(!$isEdit)}{$this->fieldInvalidAttribute($formErrors, 'password')}>{$this->fieldErrorMarkup($formErrors, 'password')}</div>
     <div{$this->fieldWrapperClass($formErrors, 'employment_status')}><label for="employment_status">Status</label>{$this->select('employment_status', ['active' => 'Aktiv', 'inactive' => 'Inaktiv', 'terminated' => 'Ausgeschieden'], (string) ($user['employment_status'] ?? 'active'), $this->fieldInvalidAttribute($formErrors, 'employment_status'))}{$this->fieldErrorMarkup($formErrors, 'employment_status')}</div>
+    <div{$this->fieldWrapperClass($formErrors, 'target_hours_mode')}><label for="target_hours_mode">Arbeitszeitmodell</label>{$this->select('target_hours_mode', ['month' => 'Monatssoll', 'week' => 'Wochensoll'], $targetHoursMode, $this->fieldInvalidAttribute($formErrors, 'target_hours_mode'))}{$this->fieldErrorMarkup($formErrors, 'target_hours_mode')}</div>
     <div{$this->fieldWrapperClass($formErrors, 'target_hours_month')}><label for="target_hours_month">Sollstunden / Monat</label><input id="target_hours_month" name="target_hours_month" type="number" step="0.01" value="{$this->field($user, 'target_hours_month')}"{$this->fieldInvalidAttribute($formErrors, 'target_hours_month')}>{$this->fieldErrorMarkup($formErrors, 'target_hours_month')}</div>
+    <div{$this->fieldWrapperClass($formErrors, 'target_hours_week')}><label for="target_hours_week">Sollstunden / Woche</label><input id="target_hours_week" name="target_hours_week" type="number" step="0.01" value="{$this->field($user, 'target_hours_week')}"{$this->fieldInvalidAttribute($formErrors, 'target_hours_week')}>{$this->fieldErrorMarkup($formErrors, 'target_hours_week')}</div>
+    <div{$this->fieldWrapperClass($formErrors, 'vacation_days_year')}><label for="vacation_days_year">Jahresurlaub</label><input id="vacation_days_year" name="vacation_days_year" type="number" step="0.5" value="{$this->field($user, 'vacation_days_year')}"{$this->fieldInvalidAttribute($formErrors, 'vacation_days_year')}>{$this->fieldErrorMarkup($formErrors, 'vacation_days_year')}</div>
+    <div{$this->fieldWrapperClass($formErrors, 'vacation_carryover_days')}><label for="vacation_carryover_days">Urlaubsuebertrag</label><input id="vacation_carryover_days" name="vacation_carryover_days" type="number" step="0.5" value="{$this->field($user, 'vacation_carryover_days')}"{$this->fieldInvalidAttribute($formErrors, 'vacation_carryover_days')}>{$this->fieldErrorMarkup($formErrors, 'vacation_carryover_days')}</div>
+    <div class="full-span field-group{$this->fieldGroupErrorClass($formErrors, 'workdays_mask')}" role="group" aria-labelledby="workdays_mask_label"{$this->fieldInvalidAttribute($formErrors, 'workdays_mask')}>
+        <span id="workdays_mask_label">Arbeitstage</span>
+        <div class="checkbox-grid">{$workdayCheckboxes}</div>
+        {$this->fieldErrorMarkup($formErrors, 'workdays_mask')}
+    </div>
     <div class="form-field"><label for="emergency_contact_name">Notfallkontakt</label><input id="emergency_contact_name" name="emergency_contact_name" value="{$this->field($user, 'emergency_contact_name')}"></div>
     <div class="form-field"><label for="emergency_contact_phone">Notfalltelefon</label><input id="emergency_contact_phone" name="emergency_contact_phone" value="{$this->field($user, 'emergency_contact_phone')}"></div>
     <div class="full-span field-group">
@@ -1007,6 +1025,10 @@ HTML;
         $password = trim((string) ($payload['password'] ?? ''));
         $status = trim((string) ($payload['employment_status'] ?? 'active'));
         $targetHours = trim((string) ($payload['target_hours_month'] ?? ''));
+        $targetHoursMode = trim((string) ($payload['target_hours_mode'] ?? 'month'));
+        $targetHoursWeek = trim((string) ($payload['target_hours_week'] ?? ''));
+        $vacationDaysYear = trim((string) ($payload['vacation_days_year'] ?? ''));
+        $vacationCarryoverDays = trim((string) ($payload['vacation_carryover_days'] ?? ''));
 
         if (trim((string) ($payload['first_name'] ?? '')) === '') {
             $errors['first_name'][] = 'Bitte geben Sie einen Vornamen ein.';
@@ -1038,6 +1060,26 @@ HTML;
 
         if ($targetHours !== '' && (!is_numeric($targetHours) || (float) $targetHours < 0)) {
             $errors['target_hours_month'][] = 'Sollstunden muessen eine Zahl groesser oder gleich 0 sein.';
+        }
+
+        if (!in_array($targetHoursMode, ['month', 'week'], true)) {
+            $errors['target_hours_mode'][] = 'Bitte waehlen Sie ein gueltiges Arbeitszeitmodell.';
+        }
+
+        if ($targetHoursWeek !== '' && (!is_numeric($targetHoursWeek) || (float) $targetHoursWeek < 0)) {
+            $errors['target_hours_week'][] = 'Wochensollstunden muessen eine Zahl groesser oder gleich 0 sein.';
+        }
+
+        if ($vacationDaysYear !== '' && (!is_numeric($vacationDaysYear) || (float) $vacationDaysYear < 0)) {
+            $errors['vacation_days_year'][] = 'Jahresurlaub muss eine Zahl groesser oder gleich 0 sein.';
+        }
+
+        if ($vacationCarryoverDays !== '' && (!is_numeric($vacationCarryoverDays) || (float) $vacationCarryoverDays < 0)) {
+            $errors['vacation_carryover_days'][] = 'Urlaubsuebertrag muss eine Zahl groesser oder gleich 0 sein.';
+        }
+
+        if ($this->workdaysFromMask($payload['workdays_mask'] ?? '1,2,3,4,5') === []) {
+            $errors['workdays_mask'][] = 'Bitte mindestens einen Arbeitstag auswaehlen.';
         }
 
         $activeRoleIds = array_map(static fn (array $role): int => (int) ($role['id'] ?? 0), $roles);
@@ -1087,6 +1129,11 @@ HTML;
             'phone' => (string) ($payload['phone'] ?? ''),
             'employment_status' => (string) ($payload['employment_status'] ?? 'active'),
             'target_hours_month' => (string) ($payload['target_hours_month'] ?? ''),
+            'target_hours_mode' => (string) ($payload['target_hours_mode'] ?? 'month'),
+            'target_hours_week' => (string) ($payload['target_hours_week'] ?? ''),
+            'workdays_mask' => implode(',', $this->workdaysFromMask($payload['workdays_mask'] ?? '1,2,3,4,5')),
+            'vacation_days_year' => (string) ($payload['vacation_days_year'] ?? ''),
+            'vacation_carryover_days' => (string) ($payload['vacation_carryover_days'] ?? ''),
             'emergency_contact_name' => (string) ($payload['emergency_contact_name'] ?? ''),
             'emergency_contact_phone' => (string) ($payload['emergency_contact_phone'] ?? ''),
             'time_tracking_required' => (string) ($payload['time_tracking_required'] ?? '1') === '1' ? 1 : 0,
@@ -1100,6 +1147,38 @@ HTML;
         $roleIds = is_array($roleIds) ? $roleIds : [$roleIds];
 
         return array_values(array_unique(array_map(static fn (mixed $value): int => (int) $value, $roleIds)));
+    }
+
+    private function workdaysFromMask(mixed $value): array
+    {
+        $values = is_array($value) ? $value : preg_split('/[,\s;|]+/', trim((string) ($value ?? '')));
+        $days = [];
+
+        foreach ($values ?: [] as $day) {
+            $day = (int) $day;
+
+            if ($day >= 1 && $day <= 7) {
+                $days[] = $day;
+            }
+        }
+
+        $days = array_values(array_unique($days));
+        sort($days);
+
+        return $days;
+    }
+
+    private function weekdayOptions(): array
+    {
+        return [
+            1 => 'Montag',
+            2 => 'Dienstag',
+            3 => 'Mittwoch',
+            4 => 'Donnerstag',
+            5 => 'Freitag',
+            6 => 'Samstag',
+            7 => 'Sonntag',
+        ];
     }
 
     private function renderFormErrorSummary(array $errors, string $headline = 'Benutzer konnte nicht angelegt werden.'): string

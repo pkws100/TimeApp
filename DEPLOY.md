@@ -115,8 +115,10 @@ Upload-Grenzen:
 ## Erstsetup und Updates
 
 Fuer wiederkehrende Updates ist `bin/update-prod.sh` der Standardpfad. Das
-Skript validiert Compose, baut das Image, startet den Stack, fuehrt Migrationen
-und den idempotenten Referenz-Seeder aus und prueft den Push-Scheduler per
+Skript validiert Compose, baut das Image, stellt den Datenbankdienst bereit,
+fuehrt Migrationen und den idempotenten Referenz-Seeder mit dem neuen Web-Image
+aus, prueft danach kritische Schema- und Rechte-Backfills und startet erst dann
+den aktualisierten Stack. Anschliessend prueft es den Push-Scheduler per
 Dry-Run:
 
 ```bash
@@ -132,6 +134,10 @@ bin/update-prod.sh --skip-seed
 bin/update-prod.sh --skip-migrations --skip-seed
 ```
 
+Die `--skip-*` Optionen sind fuer Diagnose- und Wiederholungsläufe gedacht. Die
+abschliessende Post-Update-Pruefung laeuft trotzdem und bricht ab, wenn fuer den
+ausgerollten Code notwendige Migrationen oder Referenzdaten fehlen.
+
 Die Einzelschritte bleiben fuer Erstsetup und Fehlerdiagnose verfuegbar.
 
 Migrationen manuell ausfuehren:
@@ -146,6 +152,12 @@ laufen:
 ```bash
 docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-web vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder
 docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-web vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder
+```
+
+Post-Update-Pruefung manuell ausfuehren:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-web php bin/verify-update.php
 ```
 
 Ersten Administrator anlegen:

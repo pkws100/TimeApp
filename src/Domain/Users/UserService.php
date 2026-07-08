@@ -19,6 +19,7 @@ final class UserService
         if ($this->connection->tableExists('users')) {
             $timeTrackingSelect = $this->timeTrackingSelect('users');
             $appUiSettingsSelect = $this->appUiSettingsSelect('users');
+            $timeAccountSelect = $this->timeAccountSelect('users');
 
             $users = $this->connection->fetchAll(
                 'SELECT
@@ -32,6 +33,7 @@ final class UserService
                     users.emergency_contact_name,
                     users.emergency_contact_phone,
                     users.target_hours_month,
+                    ' . $timeAccountSelect . ',
                     ' . $timeTrackingSelect . ' AS time_tracking_required,
                     ' . $appUiSettingsSelect . ' AS app_ui_settings,
                     users.is_deleted,
@@ -82,8 +84,9 @@ final class UserService
 
         $timeTrackingSelect = $this->timeTrackingSelect();
         $appUiSettingsSelect = $this->appUiSettingsSelect();
+        $timeAccountSelect = $this->timeAccountSelect();
         $user = $this->connection->fetchOne(
-            'SELECT id, employee_number, first_name, last_name, email, phone, employment_status, emergency_contact_name, emergency_contact_phone, target_hours_month, ' . $timeTrackingSelect . ' AS time_tracking_required, ' . $appUiSettingsSelect . ' AS app_ui_settings, is_deleted, deleted_at
+            'SELECT id, employee_number, first_name, last_name, email, phone, employment_status, emergency_contact_name, emergency_contact_phone, target_hours_month, ' . $timeAccountSelect . ', ' . $timeTrackingSelect . ' AS time_tracking_required, ' . $appUiSettingsSelect . ' AS app_ui_settings, is_deleted, deleted_at
              FROM users
              WHERE id = :id
              LIMIT 1',
@@ -128,13 +131,14 @@ final class UserService
         $appUiSettingsBindings = $this->appUiSettingsColumnExists()
             ? ['app_ui_settings' => AppUiSettings::encode($record['app_ui_settings'])]
             : [];
+        [$timeAccountColumns, $timeAccountValues, $timeAccountBindings] = $this->timeAccountInsertParts($record);
 
-        return $this->connection->transaction(function () use ($record, $payload, $timeTrackingColumns, $timeTrackingValues, $timeTrackingBindings, $appUiSettingsColumns, $appUiSettingsValues, $appUiSettingsBindings) {
+        return $this->connection->transaction(function () use ($record, $payload, $timeTrackingColumns, $timeTrackingValues, $timeTrackingBindings, $appUiSettingsColumns, $appUiSettingsValues, $appUiSettingsBindings, $timeAccountColumns, $timeAccountValues, $timeAccountBindings) {
             $this->connection->execute(
                 'INSERT INTO users (
-                    employee_number, first_name, last_name, email, phone, password_hash, employment_status, emergency_contact_name, emergency_contact_phone, target_hours_month' . $timeTrackingColumns . $appUiSettingsColumns . ', is_deleted, deleted_at, deleted_by_user_id, created_at, updated_at
+                    employee_number, first_name, last_name, email, phone, password_hash, employment_status, emergency_contact_name, emergency_contact_phone, target_hours_month' . $timeAccountColumns . $timeTrackingColumns . $appUiSettingsColumns . ', is_deleted, deleted_at, deleted_by_user_id, created_at, updated_at
                 ) VALUES (
-                    :employee_number, :first_name, :last_name, :email, :phone, :password_hash, :employment_status, :emergency_contact_name, :emergency_contact_phone, :target_hours_month' . $timeTrackingValues . $appUiSettingsValues . ', 0, NULL, NULL, NOW(), NOW()
+                    :employee_number, :first_name, :last_name, :email, :phone, :password_hash, :employment_status, :emergency_contact_name, :emergency_contact_phone, :target_hours_month' . $timeAccountValues . $timeTrackingValues . $appUiSettingsValues . ', 0, NULL, NULL, NOW(), NOW()
                 )',
                 [
                     'employee_number' => $record['employee_number'],
@@ -147,7 +151,7 @@ final class UserService
                     'emergency_contact_name' => $record['emergency_contact_name'],
                     'emergency_contact_phone' => $record['emergency_contact_phone'],
                     'target_hours_month' => $record['target_hours_month'],
-                ] + $timeTrackingBindings + $appUiSettingsBindings
+                ] + $timeAccountBindings + $timeTrackingBindings + $appUiSettingsBindings
             );
 
             $userId = $this->connection->lastInsertId();
@@ -226,8 +230,9 @@ final class UserService
                     time_tracking_required = :time_tracking_required' : '';
         $appUiSettingsAssignment = $this->appUiSettingsColumnExists() ? ',
                     app_ui_settings = :app_ui_settings' : '';
+        [$timeAccountAssignment, $timeAccountBindings] = $this->timeAccountUpdateParts($record);
 
-        return $this->connection->transaction(function () use ($id, $record, $payload, $timeTrackingAssignment, $appUiSettingsAssignment) {
+        return $this->connection->transaction(function () use ($id, $record, $payload, $timeTrackingAssignment, $appUiSettingsAssignment, $timeAccountAssignment, $timeAccountBindings) {
             $bindings = [
                 'id' => $id,
                 'employee_number' => $record['employee_number'],
@@ -239,7 +244,7 @@ final class UserService
                 'emergency_contact_name' => $record['emergency_contact_name'],
                 'emergency_contact_phone' => $record['emergency_contact_phone'],
                 'target_hours_month' => $record['target_hours_month'],
-            ];
+            ] + $timeAccountBindings;
 
             if ($timeTrackingAssignment !== '') {
                 $bindings['time_tracking_required'] = $record['time_tracking_required'] ? 1 : 0;
@@ -266,7 +271,7 @@ final class UserService
                     employment_status = :employment_status,
                     emergency_contact_name = :emergency_contact_name,
                     emergency_contact_phone = :emergency_contact_phone,
-                    target_hours_month = :target_hours_month' . $timeTrackingAssignment . $appUiSettingsAssignment . $passwordSql . ',
+                    target_hours_month = :target_hours_month' . $timeAccountAssignment . $timeTrackingAssignment . $appUiSettingsAssignment . $passwordSql . ',
                     updated_at = NOW()
                  WHERE id = :id',
                 $bindings
@@ -321,6 +326,11 @@ final class UserService
             'emergency_contact_name' => $this->nullableString($payload['emergency_contact_name'] ?? null),
             'emergency_contact_phone' => $this->nullableString($payload['emergency_contact_phone'] ?? null),
             'target_hours_month' => (float) ($payload['target_hours_month'] ?? 0),
+            'target_hours_mode' => $this->normalizeTargetHoursMode($payload['target_hours_mode'] ?? 'month'),
+            'target_hours_week' => $this->nullableNonNegativeFloat($payload['target_hours_week'] ?? null),
+            'workdays_mask' => $this->normalizeWorkdaysMask($payload['workdays_mask'] ?? null),
+            'vacation_days_year' => $this->nonNegativeFloat($payload['vacation_days_year'] ?? 0),
+            'vacation_carryover_days' => $this->nonNegativeFloat($payload['vacation_carryover_days'] ?? 0),
             'time_tracking_required' => $this->normalizeBoolean($payload['time_tracking_required'] ?? true),
             'app_ui_settings' => AppUiSettings::normalize($payload['app_ui_settings'] ?? null),
         ];
@@ -376,8 +386,124 @@ final class UserService
     private function normalizeUserSettings(array $user): array
     {
         $user['app_ui_settings'] = AppUiSettings::normalize($user['app_ui_settings'] ?? null);
+        $user['target_hours_mode'] = $this->normalizeTargetHoursMode($user['target_hours_mode'] ?? 'month');
+        $targetHoursWeek = $user['target_hours_week'] ?? null;
+        $user['target_hours_week'] = $targetHoursWeek === null || $targetHoursWeek === ''
+            ? null
+            : (float) $targetHoursWeek;
+        $user['workdays_mask'] = $this->normalizeWorkdaysMask($user['workdays_mask'] ?? null);
+        $user['vacation_days_year'] = $this->nonNegativeFloat($user['vacation_days_year'] ?? 0);
+        $user['vacation_carryover_days'] = $this->nonNegativeFloat($user['vacation_carryover_days'] ?? 0);
 
         return $user;
+    }
+
+    private function timeAccountSelect(string $table = ''): string
+    {
+        $prefix = $table === '' ? '' : $table . '.';
+
+        return implode(', ', [
+            $this->connection->columnExists('users', 'target_hours_mode')
+                ? 'COALESCE(' . $prefix . 'target_hours_mode, "month") AS target_hours_mode'
+                : '"month" AS target_hours_mode',
+            $this->connection->columnExists('users', 'target_hours_week')
+                ? $prefix . 'target_hours_week AS target_hours_week'
+                : 'NULL AS target_hours_week',
+            $this->connection->columnExists('users', 'workdays_mask')
+                ? 'COALESCE(' . $prefix . 'workdays_mask, "1,2,3,4,5") AS workdays_mask'
+                : '"1,2,3,4,5" AS workdays_mask',
+            $this->connection->columnExists('users', 'vacation_days_year')
+                ? 'COALESCE(' . $prefix . 'vacation_days_year, 0) AS vacation_days_year'
+                : '0 AS vacation_days_year',
+            $this->connection->columnExists('users', 'vacation_carryover_days')
+                ? 'COALESCE(' . $prefix . 'vacation_carryover_days, 0) AS vacation_carryover_days'
+                : '0 AS vacation_carryover_days',
+        ]);
+    }
+
+    private function timeAccountInsertParts(array $record): array
+    {
+        $columns = [];
+        $values = [];
+        $bindings = [];
+
+        foreach ($this->timeAccountColumns() as $column) {
+            $columns[] = $column;
+            $values[] = ':' . $column;
+            $bindings[$column] = $record[$column] ?? null;
+        }
+
+        return [
+            $columns === [] ? '' : ', ' . implode(', ', $columns),
+            $values === [] ? '' : ', ' . implode(', ', $values),
+            $bindings,
+        ];
+    }
+
+    private function timeAccountUpdateParts(array $record): array
+    {
+        $assignments = [];
+        $bindings = [];
+
+        foreach ($this->timeAccountColumns() as $column) {
+            $assignments[] = $column . ' = :' . $column;
+            $bindings[$column] = $record[$column] ?? null;
+        }
+
+        return [
+            $assignments === [] ? '' : ', ' . implode(', ', $assignments),
+            $bindings,
+        ];
+    }
+
+    private function timeAccountColumns(): array
+    {
+        return array_values(array_filter(
+            ['target_hours_mode', 'target_hours_week', 'workdays_mask', 'vacation_days_year', 'vacation_carryover_days'],
+            fn (string $column): bool => $this->connection->columnExists('users', $column)
+        ));
+    }
+
+    private function normalizeTargetHoursMode(mixed $value): string
+    {
+        $value = strtolower(trim((string) $value));
+
+        return $value === 'week' ? 'week' : 'month';
+    }
+
+    private function normalizeWorkdaysMask(mixed $value): string
+    {
+        $values = is_array($value) ? $value : preg_split('/[,\s;|]+/', trim((string) ($value ?? '')));
+        $days = [];
+
+        foreach ($values ?: [] as $day) {
+            $day = (int) $day;
+
+            if ($day >= 1 && $day <= 7) {
+                $days[] = $day;
+            }
+        }
+
+        $days = array_values(array_unique($days));
+        sort($days);
+
+        return $days === [] ? '1,2,3,4,5' : implode(',', $days);
+    }
+
+    private function nullableNonNegativeFloat(mixed $value): ?float
+    {
+        $value = trim((string) ($value ?? ''));
+
+        if ($value === '') {
+            return null;
+        }
+
+        return max(0.0, (float) $value);
+    }
+
+    private function nonNegativeFloat(mixed $value): float
+    {
+        return max(0.0, (float) ($value ?? 0));
     }
 
     private function nullableString(mixed $value): ?string

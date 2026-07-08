@@ -69,6 +69,12 @@
         push: null,
         pushLoading: false,
         pushBusy: false,
+        timeAccount: null,
+        vacationRequests: [],
+        vacationLoading: false,
+        vacationOffline: false,
+        vacationPreview: null,
+        vacationForm: { date_from: '', date_to: '', employee_note: '' },
         installPromptAvailable: false,
         fileSelectionGuardUntil: 0,
         sessionExpiredHandled: false,
@@ -395,6 +401,12 @@
         state.timesheetListOffline = false;
         state.timesheetHistoryDirty = false;
         state.signatureDialog = null;
+        state.timeAccount = null;
+        state.vacationRequests = [];
+        state.vacationLoading = false;
+        state.vacationOffline = false;
+        state.vacationPreview = null;
+        state.vacationForm = { date_from: '', date_to: '', employee_note: '' };
     }
 
     function currentTimesheetFilterLabel() {
@@ -966,6 +978,8 @@
             upload_attachment: 'Wird hochgeladen ...',
             upload_project_attachment: 'Wird hochgeladen ...',
             signature_save: 'Wird gespeichert ...',
+            vacation_submit: 'Wird gesendet ...',
+            vacation_cancel: 'Wird storniert ...',
         };
 
         return labels[action] || 'Wird verarbeitet ...';
@@ -981,6 +995,7 @@
             { href: '/app/zeiten', label: 'Zeiten' },
             { href: '/app/historie', label: 'Historie' },
             { href: '/app/projektwahl', label: 'Projekt' },
+            { href: '/app/urlaub', label: 'Urlaub' },
             { href: '/app/personal', label: 'Personal' },
             { href: '/app/profil', label: 'Profil' }
         ].filter((item) => {
@@ -2835,6 +2850,89 @@
         );
     }
 
+    function vacationView() {
+        const account = state.timeAccount || {};
+        const vacation = account.vacation || {};
+        const requests = Array.isArray(state.vacationRequests) ? state.vacationRequests : [];
+        const preview = state.vacationPreview;
+        const form = state.vacationForm || {};
+        const loading = state.vacationLoading ? '<div class="app-empty">Urlaubsdaten werden geladen ...</div>' : '';
+        const offline = state.vacationOffline ? '<div class="app-empty">Letzter bekannter Stand. Antraege koennen nur online gesendet werden.</div>' : '';
+        const previewMarkup = preview
+            ? '<div class="app-empty"><strong>Vorschau:</strong> ' + escapeHtml(String(preview.day_count || 0)) + ' Urlaubstage<br><span class="muted">' + escapeHtml((preview.work_dates || []).join(', ') || 'Keine anrechenbaren Arbeitstage') + '</span></div>'
+            : '';
+        const rows = requests.length === 0
+            ? '<div class="app-empty">Noch keine Urlaubsantraege vorhanden.</div>'
+            : '<div class="app-info-list">' + requests.map(vacationRequestRow).join('') + '</div>';
+
+        return shell(
+            '<section class="app-grid app-metrics">'
+            + metric('Monatssaldo', escapeHtml(account.saldo_label || '+00:00'), 'Soll ' + (account.target_label || '00:00') + ' · Ist ' + (account.actual_label || '00:00'))
+            + metric('Resturlaub', escapeHtml(formatVacationDays(vacation.remaining_days || 0)), 'Ohne offene Antraege')
+            + metric('Verfuegbar', escapeHtml(formatVacationDays(vacation.available_days || 0)), 'Nach offenen Antraegen')
+            + '</section>'
+            + loading
+            + offline
+            + '<section class="app-card app-grid">'
+            + '<div><p class="muted">Urlaubskonto</p><h1>Urlaub und Zeitkonto</h1></div>'
+            + appInfoRows([
+                { label: 'Jahresanspruch', value: formatVacationDays(vacation.entitlement_days || 0) },
+                { label: 'Uebertrag', value: formatVacationDays(vacation.carryover_days || 0) },
+                { label: 'Genehmigt/genommen', value: formatVacationDays(vacation.approved_taken_days || 0) },
+                { label: 'Offen beantragt', value: formatVacationDays(vacation.pending_days || 0) },
+                { label: 'Resturlaub', value: formatVacationDays(vacation.remaining_days || 0) },
+                { label: 'Verfuegbar', value: formatVacationDays(vacation.available_days || 0) }
+            ])
+            + '</section>'
+            + '<section class="app-card app-grid">'
+            + '<div><p class="muted">Neuer Antrag</p><h2>Urlaub beantragen</h2></div>'
+            + '<form id="vacationRequestForm" class="app-grid">'
+            + '<label class="app-field"><span>Von</span><input id="vacationDateFrom" name="date_from" type="date" value="' + escapeHtml(form.date_from || '') + '" required></label>'
+            + '<label class="app-field"><span>Bis</span><input id="vacationDateTo" name="date_to" type="date" value="' + escapeHtml(form.date_to || '') + '" required></label>'
+            + '<label class="app-field"><span>Notiz</span><textarea id="vacationEmployeeNote" name="employee_note" rows="3">' + escapeHtml(form.employee_note || '') + '</textarea></label>'
+            + previewMarkup
+            + '<div class="app-inline-actions">'
+            + '<button type="button" id="vacationPreviewButton" ' + (!state.online || isBusy('vacation_submit') ? 'disabled' : '') + '>Tage pruefen</button>'
+            + '<button type="submit" ' + (!state.online || isBusy('vacation_submit') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('vacation_submit', 'Antrag absenden')) + '</button>'
+            + '</div>'
+            + '</form>'
+            + '</section>'
+            + '<section class="app-card app-grid">'
+            + '<div><p class="muted">Meine Antraege</p><h2>Urlaubsantraege</h2></div>'
+            + rows
+            + '</section>'
+        );
+    }
+
+    function vacationRequestRow(request) {
+        const canCancel = request.status === 'pending' && state.online;
+        const cancelButton = canCancel
+            ? '<button type="button" data-cancel-vacation-request="' + Number(request.id || 0) + '" ' + (isBusy('vacation_cancel') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('vacation_cancel', 'Stornieren')) + '</button>'
+            : '';
+
+        return '<div class="app-info-row">'
+            + '<span class="muted">' + escapeHtml(vacationStatusLabel(request.status)) + '</span>'
+            + '<strong>' + escapeHtml(formatDate(request.date_from) + ' bis ' + formatDate(request.date_to)) + '</strong>'
+            + '<span class="muted">' + escapeHtml(formatVacationDays(request.day_count || 0)) + (request.employee_note ? ' · ' + escapeHtml(request.employee_note) : '') + '</span>'
+            + cancelButton
+            + '</div>';
+    }
+
+    function vacationStatusLabel(status) {
+        return {
+            pending: 'Offen',
+            approved: 'Genehmigt',
+            rejected: 'Abgelehnt',
+            cancelled: 'Storniert'
+        }[status] || status || '-';
+    }
+
+    function formatVacationDays(value) {
+        const number = Number(value || 0);
+
+        return number.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' Tage';
+    }
+
     function profileView() {
         const company = state.company || {};
         const companyName = compactLine([company.company_name, company.legal_form]) || '-';
@@ -3106,6 +3204,8 @@
             html = historyView();
         } else if (routeName() === '/projektwahl') {
             html = projectView();
+        } else if (routeName() === '/urlaub') {
+            html = vacationView();
         } else if (routeName() === '/personal') {
             html = personalView();
         } else if (routeName() === '/profil') {
@@ -3467,6 +3567,40 @@
             });
         }
 
+        const vacationPreviewButton = document.getElementById('vacationPreviewButton');
+
+        if (vacationPreviewButton) {
+            vacationPreviewButton.addEventListener('click', async function () {
+                await previewVacationRequest();
+            });
+        }
+
+        const vacationRequestForm = document.getElementById('vacationRequestForm');
+
+        if (vacationRequestForm) {
+            vacationRequestForm.addEventListener('submit', async function (event) {
+                event.preventDefault();
+                await submitVacationRequest();
+            });
+        }
+
+        ['vacationDateFrom', 'vacationDateTo'].forEach((inputId) => {
+            const input = document.getElementById(inputId);
+
+            if (input) {
+                input.addEventListener('input', function () {
+                    state.vacationPreview = null;
+                    state.vacationForm = vacationFormPayload();
+                });
+            }
+        });
+
+        document.querySelectorAll('[data-cancel-vacation-request]').forEach((button) => {
+            button.addEventListener('click', async function () {
+                await cancelVacationRequest(Number(button.getAttribute('data-cancel-vacation-request') || '0'));
+            });
+        });
+
         const logoutButton = document.getElementById('logoutButton');
 
         if (logoutButton) {
@@ -3582,6 +3716,16 @@
         }
 
         if (routeName() !== '/historie' || !showAppWidget('show_history')) {
+            if (routeName() === '/urlaub') {
+                const cachedVacation = await cacheGet(vacationCacheKey());
+
+                if (cachedVacation) {
+                    state.timeAccount = cachedVacation.time_account || null;
+                    state.vacationRequests = Array.isArray(cachedVacation.requests) ? cachedVacation.requests : [];
+                    state.vacationOffline = true;
+                }
+            }
+
             return;
         }
 
@@ -3613,6 +3757,9 @@
 
         if (!navigator.onLine) {
             await applyCachedData();
+            if (routeName() === '/urlaub') {
+                await loadVacationData(force);
+            }
             if (routeName() === '/projektwahl' && showAppWidget('show_project_files')) {
                 await loadProjectFiles(projectFileContextId(), force);
             }
@@ -3673,6 +3820,10 @@
 
             if (routeName() === '/historie' && showAppWidget('show_history')) {
                 await loadTimesheetList(force);
+            }
+
+            if (routeName() === '/urlaub') {
+                await loadVacationData(force);
             }
 
             if (routeName() === '/projektwahl' && showAppWidget('show_project_files')) {
@@ -3826,6 +3977,154 @@
                 state.timesheetListLoading = false;
                 render();
             }
+        }
+    }
+
+    function vacationCacheKey() {
+        const userId = state.session && state.session.user ? Number(state.session.user.id || 0) : 0;
+
+        return 'vacation:' + userId + ':' + currentMonthValue();
+    }
+
+    async function loadVacationData(force) {
+        if (!state.session.authenticated) {
+            return;
+        }
+
+        if (!navigator.onLine) {
+            const cached = await cacheGet(vacationCacheKey());
+            state.timeAccount = cached ? (cached.time_account || null) : state.timeAccount;
+            state.vacationRequests = cached && Array.isArray(cached.requests) ? cached.requests : state.vacationRequests;
+            state.vacationOffline = true;
+            state.vacationLoading = false;
+            render();
+            return;
+        }
+
+        state.vacationLoading = true;
+        render();
+
+        try {
+            const [summaryResult, requestsResult] = await Promise.all([
+                apiJson('/api/v1/app/time-account/summary'),
+                apiJson('/api/v1/app/vacation-requests')
+            ]);
+
+            state.timeAccount = summaryResult.data || null;
+            state.vacationRequests = requestsResult.data && Array.isArray(requestsResult.data.items) ? requestsResult.data.items : [];
+            state.vacationOffline = false;
+
+            await cacheSet(vacationCacheKey(), {
+                time_account: state.timeAccount,
+                requests: state.vacationRequests,
+                cached_at: new Date().toISOString()
+            });
+        } catch (error) {
+            if (isSessionExpiredError(error)) {
+                return;
+            }
+
+            const cached = await cacheGet(vacationCacheKey());
+
+            if (cached) {
+                state.timeAccount = cached.time_account || null;
+                state.vacationRequests = Array.isArray(cached.requests) ? cached.requests : [];
+                state.vacationOffline = true;
+            } else if (!force) {
+                showFeedback('error', error.message || 'Urlaubsdaten konnten nicht geladen werden.');
+            }
+        } finally {
+            state.vacationLoading = false;
+            render();
+        }
+    }
+
+    function vacationFormPayload() {
+        const dateFrom = document.getElementById('vacationDateFrom');
+        const dateTo = document.getElementById('vacationDateTo');
+        const note = document.getElementById('vacationEmployeeNote');
+
+        const payload = {
+            date_from: dateFrom ? dateFrom.value : '',
+            date_to: dateTo ? dateTo.value : '',
+            employee_note: note ? note.value : ''
+        };
+
+        state.vacationForm = payload;
+
+        return payload;
+    }
+
+    async function previewVacationRequest() {
+        if (!navigator.onLine) {
+            showFeedback('error', 'Die Vorschau ist nur online verfuegbar.');
+            return;
+        }
+
+        const payload = vacationFormPayload();
+        const params = new URLSearchParams();
+        params.set('date_from', payload.date_from);
+        params.set('date_to', payload.date_to);
+
+        try {
+            const response = await apiJson('/api/v1/app/vacation-requests/preview?' + params.toString());
+            state.vacationPreview = response.data || null;
+            render();
+        } catch (error) {
+            if (!isSessionExpiredError(error)) {
+                showFeedback('error', error.message || 'Vorschau konnte nicht berechnet werden.');
+            }
+        }
+    }
+
+    async function submitVacationRequest() {
+        if (!navigator.onLine) {
+            showFeedback('error', 'Urlaubsantraege koennen nur online gesendet werden.');
+            return;
+        }
+
+        state.pendingAction = 'vacation_submit';
+        render();
+
+        try {
+            await apiJson('/api/v1/app/vacation-requests', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(vacationFormPayload())
+            });
+            state.vacationPreview = null;
+            state.vacationForm = { date_from: '', date_to: '', employee_note: '' };
+            showFeedback('success', 'Urlaubsantrag wurde gesendet.');
+            await loadVacationData(true);
+        } catch (error) {
+            if (!isSessionExpiredError(error)) {
+                showFeedback('error', error.message || 'Urlaubsantrag konnte nicht gesendet werden.');
+            }
+        } finally {
+            state.pendingAction = null;
+            render();
+        }
+    }
+
+    async function cancelVacationRequest(requestId) {
+        if (!requestId || !navigator.onLine) {
+            return;
+        }
+
+        state.pendingAction = 'vacation_cancel';
+        render();
+
+        try {
+            await apiJson('/api/v1/app/vacation-requests/' + requestId + '/cancel', { method: 'POST' });
+            showFeedback('success', 'Urlaubsantrag wurde storniert.');
+            await loadVacationData(true);
+        } catch (error) {
+            if (!isSessionExpiredError(error)) {
+                showFeedback('error', error.message || 'Urlaubsantrag konnte nicht storniert werden.');
+            }
+        } finally {
+            state.pendingAction = null;
+            render();
         }
     }
 

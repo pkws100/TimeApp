@@ -716,6 +716,7 @@ HTML;
         return match ($source) {
             'admin' => 'Admin-Nacherfassung',
             'terminal' => 'Terminal',
+            'vacation_request' => 'Urlaubsantrag',
             default => 'App',
         };
     }
