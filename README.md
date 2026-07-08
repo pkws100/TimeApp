@@ -143,6 +143,20 @@ Referenz-Seeder und eine Post-Update-Pruefung fuer kritische Schema- und
 Rechte-Backfills aus. Read-only Smoke- und Status-Checks laufen ueber
 `bin/deploy-prod-check.sh`.
 
+Bei nativen Apache/PHP-Installationen ohne Docker nach dem Code-Update diesen
+Update-Helper ausfuehren:
+
+```bash
+bin/update-native.sh
+```
+
+Das Script installiert Composer-Abhaengigkeiten, fuehrt `vendor/bin/phinx
+migrate -c phinx.php` aus, spielt den idempotenten Referenz-Seeder ein und
+prueft anschliessend kritische Schema- und Rechte-Backfills.
+
+Nach nativen Updates sollten mindestens `/admin/login` und `/app` im Browser
+oder per HTTP-Smoke-Check geprueft werden.
+
 ## Backup und Restore-Status
 - `GET /api/v1/system/backup/export` erstellt ein ZIP mit Manifest, Datenbank-JSON, Upload-Kandidaten und Security-/Runtime-Hinweisen.
 - `POST /api/v1/system/backup/import/validate` validiert ein hochgeladenes Backup als Dry-Run.

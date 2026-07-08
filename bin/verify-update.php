@@ -12,7 +12,7 @@ require_once __DIR__ . '/../bootstrap/autoload.php';
 
 (new EnvironmentLoader())->load(base_path('.env'));
 
-$config = ConfigRepository::load(['database']);
+$config = ConfigRepository::load(['database', 'permissions']);
 $databaseSettings = new DatabaseSettingsManager(
     $config->get('database.connections.mysql', []),
     (string) $config->get('database.override_file')
@@ -24,6 +24,35 @@ $errors = [];
 if (!$connection->isAvailable()) {
     fwrite(STDERR, 'Datenbankverbindung fehlgeschlagen: ' . ($connection->lastError() ?? 'unbekannter Fehler') . PHP_EOL);
     exit(1);
+}
+
+$migrationFiles = glob(base_path('migrations') . '/*.php') ?: [];
+$migrationVersions = [];
+
+foreach ($migrationFiles as $migrationFile) {
+    $basename = basename($migrationFile);
+
+    if (preg_match('/^(\d{14})_(.+)\.php$/', $basename, $matches) === 1) {
+        $migrationVersions[$matches[1]] = $matches[2];
+    }
+}
+
+if ($migrationVersions !== []) {
+    if (!$connection->tableExists('phinxlog')) {
+        $errors[] = 'Phinx-Migrationstabelle fehlt: phinxlog';
+    } else {
+        $rows = $connection->fetchAll('SELECT version FROM phinxlog');
+        $appliedVersions = array_fill_keys(
+            array_map(static fn (array $row): string => (string) ($row['version'] ?? ''), $rows),
+            true
+        );
+
+        foreach ($migrationVersions as $version => $name) {
+            if (!isset($appliedVersions[$version])) {
+                $errors[] = sprintf('Migration ausstehend: %s_%s', $version, $name);
+            }
+        }
+    }
 }
 
 $requiredTables = [
@@ -69,6 +98,24 @@ $requiredPermissions = [
 ];
 
 if ($connection->tableExists('permissions')) {
+    $configuredPermissions = $config->get('permissions.available', []);
+
+    if (is_array($configuredPermissions) && $configuredPermissions !== []) {
+        $rows = $connection->fetchAll('SELECT code FROM permissions');
+        $existingPermissionLookup = array_fill_keys(
+            array_map(static fn (array $row): string => (string) ($row['code'] ?? ''), $rows),
+            true
+        );
+
+        foreach ($configuredPermissions as $permission) {
+            $permission = (string) $permission;
+
+            if ($permission !== '' && !isset($existingPermissionLookup[$permission])) {
+                $errors[] = sprintf('Permission aus config/permissions.php fehlt: %s', $permission);
+            }
+        }
+    }
+
     $rows = $connection->fetchAll(
         'SELECT code FROM permissions WHERE code IN ("time_accounts.view", "time_accounts.manage", "vacation_requests.view", "vacation_requests.manage")'
     );
@@ -85,6 +132,63 @@ if ($connection->tableExists('roles') && $connection->tableExists('role_permissi
     $activeRoleCondition = $connection->columnExists('roles', 'is_deleted')
         ? 'AND COALESCE(roles.is_deleted, 0) = 0'
         : '';
+    $configuredRoles = $config->get('permissions.roles', []);
+    $configuredPermissions = $config->get('permissions.available', []);
+
+    if (is_array($configuredRoles) && is_array($configuredPermissions) && $configuredRoles !== []) {
+        $roleRows = $connection->fetchAll('SELECT slug FROM roles WHERE 1 = 1 ' . $activeRoleCondition);
+        $existingRoles = array_fill_keys(
+            array_map(static fn (array $row): string => (string) ($row['slug'] ?? ''), $roleRows),
+            true
+        );
+
+        $permissionRows = $connection->fetchAll(
+            'SELECT roles.slug, permissions.code
+             FROM roles
+             INNER JOIN role_permissions ON role_permissions.role_id = roles.id
+             INNER JOIN permissions ON permissions.id = role_permissions.permission_id
+             WHERE 1 = 1 ' . $activeRoleCondition
+        );
+
+        $configuredAssignments = [];
+        foreach ($permissionRows as $row) {
+            $slug = (string) ($row['slug'] ?? '');
+            $code = (string) ($row['code'] ?? '');
+
+            if ($slug !== '' && $code !== '') {
+                $configuredAssignments[$slug][$code] = true;
+            }
+        }
+
+        foreach ($configuredRoles as $roleSlug => $roleConfig) {
+            $roleSlug = (string) $roleSlug;
+
+            if ($roleSlug === '') {
+                continue;
+            }
+
+            if (!isset($existingRoles[$roleSlug])) {
+                $errors[] = sprintf('Rolle aus config/permissions.php fehlt: %s', $roleSlug);
+                continue;
+            }
+
+            $rolePermissions = is_array($roleConfig) ? ($roleConfig['permissions'] ?? []) : [];
+            $expectedPermissions = $rolePermissions === ['*'] ? $configuredPermissions : $rolePermissions;
+
+            if (!is_array($expectedPermissions)) {
+                continue;
+            }
+
+            foreach ($expectedPermissions as $permission) {
+                $permission = (string) $permission;
+
+                if ($permission !== '' && !isset($configuredAssignments[$roleSlug][$permission])) {
+                    $errors[] = sprintf('Permission-Zuordnung aus config/permissions.php fehlt: %s -> %s', $roleSlug, $permission);
+                }
+            }
+        }
+    }
+
     $rows = $connection->fetchAll(
         'SELECT roles.slug, permissions.code
          FROM roles
@@ -121,8 +225,9 @@ if ($errors !== []) {
         fwrite(STDERR, ' - ' . $error . PHP_EOL);
     }
 
-    fwrite(STDERR, 'Standardpfad: bin/update-prod.sh ohne --skip-migrations/--skip-seed erneut ausfuehren.' . PHP_EOL);
-    fwrite(STDERR, 'Manuell im Container: vendor/bin/phinx migrate -c phinx.php && vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder' . PHP_EOL);
+    fwrite(STDERR, 'Docker-Standardpfad: bin/update-prod.sh ohne --skip-migrations/--skip-seed erneut ausfuehren.' . PHP_EOL);
+    fwrite(STDERR, 'Nativer Standardpfad: bin/update-native.sh ohne --skip-migrations/--skip-seed erneut ausfuehren.' . PHP_EOL);
+    fwrite(STDERR, 'Manuell: vendor/bin/phinx migrate -c phinx.php && vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder' . PHP_EOL);
     exit(1);
 }
 

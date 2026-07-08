@@ -125,6 +125,10 @@ Dry-Run:
 bin/update-prod.sh
 ```
 
+Dieser Docker-Pfad fuehrt `vendor/bin/phinx migrate -c phinx.php` und den
+`InitialReferenceSeeder` automatisch aus. Neue Felder, Tabellen und Rechte
+werden dadurch beim Update nachgezogen.
+
 Nuetzliche Varianten:
 
 ```bash
@@ -138,7 +142,30 @@ Die `--skip-*` Optionen sind fuer Diagnose- und Wiederholungsläufe gedacht. Die
 abschliessende Post-Update-Pruefung laeuft trotzdem und bricht ab, wenn fuer den
 ausgerollten Code notwendige Migrationen oder Referenzdaten fehlen.
 
-Die Einzelschritte bleiben fuer Erstsetup und Fehlerdiagnose verfuegbar.
+Bei nativen Apache/PHP-Installationen ohne Docker ist `bin/update-native.sh`
+der entsprechende Standardpfad nach einem Code-Update:
+
+```bash
+bin/update-native.sh
+```
+
+Das Script fuehrt Composer-Install, Phinx-Migrationen, den idempotenten
+Referenz-Seeder und die Post-Update-Pruefung direkt im Repository aus.
+
+Die Einzelschritte bleiben fuer Erstsetup und Fehlerdiagnose verfuegbar. Phinx
+laedt dabei die `.env` ueber `phinx.php`, damit Migrationen, Seeder und
+Post-Update-Pruefung dieselbe Datenbankkonfiguration verwenden.
+
+Native Einzelschritte:
+
+```bash
+composer install --no-dev --optimize-autoloader
+vendor/bin/phinx migrate -c phinx.php
+vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder
+php bin/verify-update.php
+```
+
+Docker-Einzelschritte:
 
 Migrationen manuell ausfuehren:
 
@@ -147,10 +174,9 @@ docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-web ve
 ```
 
 Referenzdaten manuell einspielen. Der Seeder ist idempotent und darf mehrfach
-laufen:
+laufen; ein Lauf reicht im Normalfall aus:
 
 ```bash
-docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-web vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder
 docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-web vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder
 ```
 

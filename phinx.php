@@ -2,7 +2,11 @@
 
 declare(strict_types=1);
 
+use App\Config\EnvironmentLoader;
+
 require_once __DIR__ . '/bootstrap/autoload.php';
+
+(new EnvironmentLoader())->load(__DIR__ . '/.env');
 
 $database = require __DIR__ . '/config/database.php';
 $default = $database['default'];
