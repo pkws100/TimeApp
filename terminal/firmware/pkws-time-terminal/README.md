@@ -135,10 +135,12 @@ Das Portal bietet:
 - Terminal-Token
 - optionaler Geraetename
 - API-Test gegen `GET /api/v1/terminal/config`
-- Hardwaretests fuer LCD, LEDs, Buzzer und NFC/RC522
+- Diagnose mit WLAN-SSID, Signalstaerke, Signalqualitaet und Einzeltests fuer LCD, LEDs, Buzzer und NFC/RC522
 - Konfiguration speichern und neu starten
 - Konfiguration loeschen
 - Neustart
+
+WLAN-Scan, API-Test und Hardwaretests sind nach dem Portal-Login zusaetzlich mit einem pro Boot erzeugten Formularschluessel geschuetzt.
 
 Nach dem Speichern startet der ESP32 neu und verbindet sich mit dem konfigurierten WLAN. Bei dauerhaftem WLAN-Fehler startet wieder der Setup-Modus.
 
@@ -149,10 +151,11 @@ Der API-Test nutzt die gespeicherten oder gerade im Formular eingetragenen Termi
 
 Die Hardwaretests:
 
+- `WLAN`: zeigt verbundene SSID, RSSI in dBm, Qualitaet in Prozent und eine Bewertung wie `gut` oder `schwach`; die Anzeige kann im Diagnosebereich aktualisiert werden.
 - `LCD`: zeigt vier Testzeilen fuer einige Sekunden.
 - `LEDs`: schaltet Rot, Gelb und Gruen nacheinander.
 - `Buzzer`: spielt eine kurze Tonfolge.
-- `NFC Reader`: oeffnet fuer ca. 15 Sekunden ein Testfenster und zeigt die normalisierte UID im Portal an; dieser Test sendet keine Buchung an die API.
+- `NFC Reader`: oeffnet fuer ca. 15 Sekunden ein Testfenster und zeigt RC522-Version, Reader-Status, Debugmeldung, UID-Laenge und normalisierte UID kurz im Portal an; dieser Test sendet keine Buchung an die API. Nach erfolgreichem Test greift die normale 2-Sekunden-Entprellung fuer dieselbe UID.
 
 ## API
 

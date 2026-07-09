@@ -94,6 +94,8 @@ unsigned long nextApiRetryAt = 0;
 String savedDisplayLines[4] = {"PK-WS TimeApp", "Tag vorhalten", "Bereit", ""};
 bool temporaryDisplayActive = false;
 unsigned long temporaryDisplayUntil = 0;
+DeviceState temporaryDisplayState = DeviceState::BOOT;
+bool resumeScanAfterWifiReconnect = false;
 
 enum class LedTestState {
     OFF,
@@ -106,7 +108,11 @@ LedTestState ledTestState = LedTestState::OFF;
 unsigned long ledTestNextAt = 0;
 bool nfcTestActive = false;
 String nfcTestUid;
+String nfcTestDebug = "Noch nicht gestartet";
+String nfcTestReaderVersion = "";
+uint8_t nfcTestUidSize = 0;
 unsigned long nfcTestUntil = 0;
+unsigned long nfcTestResultVisibleUntil = 0;
 
 uint16_t beepDurations[8] = {0};
 uint8_t beepCount = 0;
@@ -173,6 +179,7 @@ void lcdShowTemporary(const String &line1, const String &line2, const String &li
     String lines[4] = {line1, line2, line3, line4};
     lcdShowLines(lines);
     temporaryDisplayActive = true;
+    temporaryDisplayState = state;
     temporaryDisplayUntil = millis() + holdMs;
 }
 
@@ -347,6 +354,75 @@ String portalIpLabel()
     return "-";
 }
 
+int wifiRssi()
+{
+    return WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
+}
+
+int wifiQualityPercent()
+{
+    if (WiFi.status() != WL_CONNECTED) {
+        return 0;
+    }
+
+    int quality = (wifiRssi() + 100) * 2;
+    if (quality < 0) {
+        return 0;
+    }
+    if (quality > 100) {
+        return 100;
+    }
+
+    return quality;
+}
+
+String wifiQualityLabel()
+{
+    int quality = wifiQualityPercent();
+    if (quality >= 80) {
+        return "sehr gut";
+    }
+    if (quality >= 60) {
+        return "gut";
+    }
+    if (quality >= 40) {
+        return "mittel";
+    }
+    if (quality > 0) {
+        return "schwach";
+    }
+
+    return "nicht verbunden";
+}
+
+String wifiSignalLabel()
+{
+    if (WiFi.status() != WL_CONNECTED) {
+        return "nicht verbunden";
+    }
+
+    return String(wifiRssi()) + " dBm / " + String(wifiQualityPercent()) + "% / " + wifiQualityLabel();
+}
+
+String rc522VersionLabel()
+{
+    byte version = rfid.PCD_ReadRegister(MFRC522::VersionReg);
+    String label = "0x";
+    if (version < 0x10) {
+        label += "0";
+    }
+    String hex = String(version, HEX);
+    hex.toUpperCase();
+    label += hex;
+
+    return label;
+}
+
+bool rc522VersionLooksValid(const String &version)
+{
+    return version.length() > 0 && version != "0x00" && version != "0xFF";
+}
+
 void ensurePortalKeys()
 {
     if (setupFormKey.length() == 0) {
@@ -426,6 +502,8 @@ String setupHtml()
     page += portalIpLabel();
     page += F("</code><span>WLAN</span><code>");
     page += htmlEscape(wifiLabel);
+    page += F("</code><span>Signal</span><code>");
+    page += htmlEscape(wifiSignalLabel());
     page += F("</code><span>API URL</span><code>");
     page += htmlEscape(apiBaseLabel);
     page += F("</code><span>API Status</span><code>");
@@ -452,7 +530,11 @@ String setupHtml()
     page += F("<div id=\"apiResult\" class=\"result muted\">");
     page += htmlEscape(lastApiTestDetails.length() > 0 ? lastApiTestDetails : "Noch kein API-Test ausgefuehrt.");
     page += F("</div></section>");
-    page += F("<section class=\"panel\"><h2>Hardware testen</h2><div class=\"grid\">");
+    page += F("<section class=\"panel\"><h2>Diagnose</h2><p class=\"muted\">WLAN und Geraete einzeln pruefen.</p><div class=\"status\"><span>SSID</span><code id=\"diagSsid\">");
+    page += htmlEscape(WiFi.status() == WL_CONNECTED ? WiFi.SSID() : String("-"));
+    page += F("</code><span>WLAN Staerke</span><code id=\"diagSignal\">");
+    page += htmlEscape(wifiSignalLabel());
+    page += F("</code></div><button class=\"secondary\" type=\"button\" onclick=\"refreshDiag()\">WLAN aktualisieren</button><div class=\"grid\">");
     page += F("<button type=\"button\" onclick=\"postAction('/test/lcd','LCD-Test gestartet')\">LCD</button>");
     page += F("<button type=\"button\" onclick=\"postAction('/test/leds','LED-Test gestartet')\">LEDs</button>");
     page += F("<button type=\"button\" onclick=\"postAction('/test/buzzer','Buzzer-Test gestartet')\">Buzzer</button>");
@@ -465,11 +547,14 @@ String setupHtml()
     page += F("\"><button class=\"secondary\" type=\"submit\">Neustart</button></form></section>");
     page += F("<script>const setupKey='");
     page += htmlEscape(setupFormKey);
-    page += F("';async function scanWifi(){const box=document.getElementById('networks');box.textContent='Suche laeuft...';try{const r=await fetch('/scan-wifi');const d=await r.json();if(!d.networks||!d.networks.length){box.textContent='Keine WLANs gefunden.';return;}box.innerHTML=d.networks.map(n=>'<div class=\"net\"><button type=\"button\" onclick=\"pickSsid(this.dataset.ssid)\" data-ssid=\"'+esc(n.ssid)+'\">'+esc(n.ssid)+'</button><span>'+n.rssi+' dBm</span></div>').join('');}catch(e){box.textContent='WLAN-Scan fehlgeschlagen.';}}");
+    page += F("';async function scanWifi(){const box=document.getElementById('networks');box.textContent='Suche laeuft...';try{const r=await fetch('/scan-wifi?setup_key='+encodeURIComponent(setupKey));const d=await r.json();if(!r.ok)throw new Error(d.message||'WLAN-Scan nicht erlaubt.');if(!d.networks||!d.networks.length){box.textContent='Keine WLANs gefunden.';return;}box.innerHTML=d.networks.map(n=>'<div class=\"net\"><button type=\"button\" onclick=\"pickSsid(this.dataset.ssid)\" data-ssid=\"'+esc(n.ssid)+'\">'+esc(n.ssid)+'</button><span>'+n.rssi+' dBm</span></div>').join('');}catch(e){box.textContent=e.message||'WLAN-Scan fehlgeschlagen.';}}");
     page += F("function pickSsid(s){document.getElementById('ssid').value=s;}function formBody(form){const b=new URLSearchParams(new FormData(form));if(!b.has('setup_key'))b.set('setup_key',setupKey);return b;}");
     page += F("async function testApi(){const box=document.getElementById('apiResult');box.textContent='API-Test laeuft...';try{const r=await fetch('/test-api',{method:'POST',body:formBody(document.getElementById('configForm'))});const d=await r.json();box.textContent=JSON.stringify(d,null,2);}catch(e){box.textContent='API-Test fehlgeschlagen.';}}");
+    page += F("function renderDiag(d){document.getElementById('diagSsid').textContent=d.ssid||'-';document.getElementById('diagSignal').textContent=(d.wifi_status==='connected')?(d.wifi_rssi_dbm+' dBm / '+d.wifi_quality_percent+'% / '+d.wifi_quality):'nicht verbunden';}");
+    page += F("async function refreshDiag(){const box=document.getElementById('hardwareResult');box.textContent='WLAN-Diagnose wird aktualisiert...';try{const r=await fetch('/status');const d=await r.json();if(!r.ok)throw new Error(d.message||'Bitte neu einloggen.');renderDiag(d);box.textContent='WLAN: '+(d.ssid||'-')+'\\nSignal: '+(d.wifi_status==='connected'?(d.wifi_rssi_dbm+' dBm / '+d.wifi_quality_percent+'% / '+d.wifi_quality):'nicht verbunden')+'\\nIP: '+(d.sta_ip||d.ip||'-');}catch(e){box.textContent=e.message||'WLAN-Diagnose fehlgeschlagen.';}}");
+    page += F("function renderNfc(d){return 'NFC Reader\\nRC522 Version: '+(d.reader_version||'-')+'\\nReader Status: '+(d.reader_ok?'OK':'Pruefen')+'\\nDebug: '+(d.debug||'-')+'\\nUID: '+(d.uid||'-')+'\\nUID Bytes: '+(d.uid_bytes||0)+'\\nRestzeit: '+(d.remaining_ms||0)+' ms';}");
     page += F("async function postAction(url,msg){const box=document.getElementById('hardwareResult');box.textContent=msg;try{const b=new URLSearchParams();b.set('setup_key',setupKey);const r=await fetch(url,{method:'POST',body:b});const d=await r.json();box.textContent=JSON.stringify(d,null,2);}catch(e){box.textContent='Test fehlgeschlagen.';}}");
-    page += F("async function startNfcTest(){await postAction('/test/nfc/start','NFC-Test gestartet. Tag vorhalten.');pollNfc(0);}async function pollNfc(i){const box=document.getElementById('hardwareResult');try{const r=await fetch('/test/nfc/status?setup_key='+encodeURIComponent(setupKey));const d=await r.json();box.textContent=JSON.stringify(d,null,2);if(d.active&&!d.uid&&i<20)setTimeout(()=>pollNfc(i+1),1000);}catch(e){box.textContent='NFC-Status fehlgeschlagen.';}}");
+    page += F("async function startNfcTest(){await postAction('/test/nfc/start','NFC-Test gestartet. Tag vorhalten.');pollNfc(0);}async function pollNfc(i){const box=document.getElementById('hardwareResult');try{const r=await fetch('/test/nfc/status?setup_key='+encodeURIComponent(setupKey));const d=await r.json();if(!r.ok)throw new Error(d.message||'Bitte neu einloggen.');box.textContent=renderNfc(d);if(d.active&&!d.uid&&i<20)setTimeout(()=>pollNfc(i+1),1000);}catch(e){box.textContent=e.message||'NFC-Status fehlgeschlagen.';}}");
     page += F("function esc(s){return String(s||'').replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[m]));}</script>");
     page += F("</main></body></html>");
     return page;
@@ -478,12 +563,25 @@ String setupHtml()
 void sendSetupStatus()
 {
     DynamicJsonDocument doc(1536);
+    if (!portalAuthenticated()) {
+        doc["ok"] = false;
+        doc["message"] = "Portal-Login erforderlich.";
+        String body;
+        serializeJson(doc, body);
+        setupServer.send(401, "application/json", body);
+        return;
+    }
+
+    doc["ok"] = true;
     doc["firmware_version"] = FIRMWARE_VERSION;
     doc["mac"] = WiFi.macAddress();
     doc["ip"] = portalIpLabel();
     doc["sta_ip"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("");
     doc["setup_ip"] = setupPortalStarted ? WiFi.softAPIP().toString() : String("");
     doc["ssid"] = WiFi.status() == WL_CONNECTED ? WiFi.SSID() : String("");
+    doc["wifi_rssi_dbm"] = wifiRssi();
+    doc["wifi_quality_percent"] = wifiQualityPercent();
+    doc["wifi_quality"] = wifiQualityLabel();
     doc["wifi_status"] = WiFi.status() == WL_CONNECTED ? "connected" : "setup_ap";
     doc["api_base_url"] = config.apiBaseUrl;
     doc["api_status"] = apiStatus;
@@ -498,6 +596,7 @@ void scanWifi()
 {
     int count = WiFi.scanNetworks();
     DynamicJsonDocument doc(4096);
+    doc["ok"] = true;
     JsonArray networks = doc.createNestedArray("networks");
     int limit = count < 0 ? 0 : (count > 20 ? 20 : count);
 
@@ -733,6 +832,14 @@ void setupRoutes()
     });
 
     setupServer.on("/scan-wifi", HTTP_GET, []() {
+        if (!setupPostAuthorized()) {
+            DynamicJsonDocument doc(256);
+            doc["ok"] = false;
+            doc["message"] = "Setup-Sitzung ungueltig.";
+            sendJson(doc, 403);
+            return;
+        }
+
         scanWifi();
     });
 
@@ -826,7 +933,11 @@ void setupRoutes()
 
         nfcTestActive = true;
         nfcTestUid = "";
+        nfcTestUidSize = 0;
+        nfcTestReaderVersion = rc522VersionLabel();
+        nfcTestDebug = rc522VersionLooksValid(nfcTestReaderVersion) ? "RC522 bereit, warte auf Tag." : "RC522 antwortet nicht sauber.";
         nfcTestUntil = millis() + 15000;
+        nfcTestResultVisibleUntil = 0;
         lcdShowTemporary("NFC Test", "Tag vorhalten", "15 Sekunden", "", 15000);
         handleHardwareTestResponse("nfc", "NFC-Test gestartet. Tag vorhalten.");
     });
@@ -842,7 +953,12 @@ void setupRoutes()
 
         doc["ok"] = true;
         doc["active"] = nfcTestActive;
-        doc["uid"] = nfcTestUid;
+        doc["reader_version"] = nfcTestReaderVersion;
+        doc["reader_ok"] = rc522VersionLooksValid(nfcTestReaderVersion);
+        doc["debug"] = nfcTestDebug;
+        bool exposeUid = nfcTestActive || (nfcTestResultVisibleUntil > 0 && millis() < nfcTestResultVisibleUntil);
+        doc["uid"] = exposeUid ? nfcTestUid : String("");
+        doc["uid_bytes"] = exposeUid ? nfcTestUidSize : 0;
         doc["remaining_ms"] = nfcTestActive && nfcTestUntil > millis() ? (uint32_t)(nfcTestUntil - millis()) : 0;
         sendJson(doc);
     });
@@ -921,6 +1037,9 @@ void enterState(DeviceState next)
 {
     state = next;
     stateEnteredAt = millis();
+    if (next != temporaryDisplayState) {
+        temporaryDisplayActive = false;
+    }
 
     if (next == DeviceState::CONFIG_CHECK) {
         lcdShow("Konfig pruefen", "bitte warten", "", "");
@@ -934,6 +1053,7 @@ void enterState(DeviceState next)
         lcdShow("API pruefen", "Terminal config", "bitte warten", "");
         setAllLeds(false, true, false);
     } else if (next == DeviceState::READY) {
+        resumeScanAfterWifiReconnect = false;
         lcdShowLines(welcomeLines);
         rememberDisplay(welcomeLines);
         setAllLeds(false, false, true);
@@ -1232,11 +1352,15 @@ void handleWifiConnect()
 
 void checkWifiHealth()
 {
-    if (state == DeviceState::SETUP_MODE || state == DeviceState::BOOT || state == DeviceState::CONFIG_CHECK || state == DeviceState::WIFI_CONNECT) {
+    if (state == DeviceState::SETUP_MODE || state == DeviceState::BOOT || state == DeviceState::CONFIG_CHECK || state == DeviceState::WIFI_CONNECT || state == DeviceState::SHOW_RESULT) {
         return;
     }
 
     if (WiFi.status() != WL_CONNECTED) {
+        if (state == DeviceState::SEND_SCAN && currentUid.length() > 0 && currentRequestId.length() > 0) {
+            resumeScanAfterWifiReconnect = true;
+        }
+
         apiStatus = "wifi_lost";
         lcdShow("WLAN getrennt", "Reconnect", "bitte warten", "");
         triggerBeep("error");
@@ -1276,19 +1400,31 @@ void updateLedTest()
 void updateTemporaryDisplay()
 {
     if (temporaryDisplayActive && millis() >= temporaryDisplayUntil) {
-        restoreSavedDisplay();
+        if (state == temporaryDisplayState) {
+            restoreSavedDisplay();
+        } else {
+            temporaryDisplayActive = false;
+        }
     }
 }
 
 void updateNfcTest()
 {
     if (!nfcTestActive) {
+        if (nfcTestResultVisibleUntil > 0 && millis() >= nfcTestResultVisibleUntil) {
+            nfcTestUid = "";
+            nfcTestUidSize = 0;
+            nfcTestResultVisibleUntil = 0;
+            nfcTestDebug = "Test beendet.";
+        }
         return;
     }
 
     if (millis() >= nfcTestUntil) {
         nfcTestActive = false;
+        nfcTestResultVisibleUntil = millis() + 5000;
         if (nfcTestUid.length() == 0) {
+            nfcTestDebug = "Timeout: kein Tag gelesen.";
             lcdShowTemporary("NFC Test", "kein Tag", "erkannt", "", 3000);
         }
         return;
@@ -1299,11 +1435,14 @@ void updateNfcTest()
     }
 
     nfcTestUid = normalizeUid(&rfid.uid);
+    nfcTestUidSize = rfid.uid.size;
+    nfcTestDebug = "Tag gelesen, UID normalisiert.";
     rfid.PICC_HaltA();
     rfid.PCD_StopCrypto1();
     lastUid = nfcTestUid;
     lastUidAt = millis();
     nfcTestActive = false;
+    nfcTestResultVisibleUntil = millis() + 30000;
     lcdShowTemporary("NFC Test OK", nfcTestUid, "UID gelesen", "", 5000);
     applyLedSignal("green");
     triggerBeep("success");
@@ -1477,7 +1616,13 @@ void loop()
 
         case DeviceState::API_CONFIG:
             if (fetchApiConfig()) {
-                enterState(DeviceState::READY);
+                if (resumeScanAfterWifiReconnect && currentUid.length() > 0 && currentRequestId.length() > 0) {
+                    lcdShow("Scan Fortsetzung", "WLAN wieder da", "sende Anfrage", "");
+                    nextScanAttemptAt = millis();
+                    enterState(DeviceState::SEND_SCAN);
+                } else {
+                    enterState(DeviceState::READY);
+                }
             } else {
                 enterState(DeviceState::ERROR_RETRY);
             }

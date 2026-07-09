@@ -54,7 +54,7 @@
 ## Test 8a: Portal im Kundennetz oeffnen
 
 - Nach erfolgreicher WLAN-Verbindung die am LCD angezeigte IP-Adresse im Browser oeffnen, z. B. `http://<terminal-ip>/`.
-- Erwartung: Das Portal ist im LAN erreichbar, fordert das Portal-Passwort an und zeigt danach WLAN-Status, Portal-IP, API Base URL und API-Status.
+- Erwartung: Das Portal ist im LAN erreichbar, fordert das Portal-Passwort an und zeigt danach WLAN-Status, verbundene SSID, RSSI, WLAN-Qualitaet, Portal-IP, API Base URL und API-Status.
 
 ## Test 8b: API-Testbutton nutzen
 
@@ -66,11 +66,14 @@
 
 - `LCD`, `LEDs` und `Buzzer` im Portal nacheinander ausloesen.
 - Erwartung: LCD zeigt Testzeilen, LEDs schalten Rot/Gelb/Gruen nacheinander, Buzzer spielt eine Tonfolge.
+- `WLAN aktualisieren` antippen.
+- Erwartung: Der Diagnosebereich zeigt die verbundene WLAN-SSID, RSSI in dBm und Qualitaet in Prozent.
+- Erwartung: WLAN-Scan und Hardwaretests funktionieren nur nach Portal-Login mit gueltiger Sitzung.
 
 ## Test 8d: NFC-Testmodus aus dem Portal
 
 - `NFC Reader` im Portal starten und innerhalb von 15 Sekunden einen Tag vorhalten.
-- Erwartung: Portal zeigt die normalisierte UID; es wird keine Buchung an die API gesendet.
+- Erwartung: Portal zeigt RC522-Version, Reader-Status, Debugmeldung, UID-Laenge und normalisierte UID kurz als Testergebnis; es wird keine Buchung an die API gesendet. Dieselbe UID wird danach fuer ca. 2 Sekunden entprellt.
 
 ## Test 9: RC522 UID lesen
 
@@ -103,6 +106,8 @@
 
 - WLAN-Router ausschalten oder ESP32 ausser Reichweite bringen.
 - Erwartung: Firmware erkennt den Abbruch, versucht Reconnect und startet nach dauerhaftem Fehler den Setup-Modus.
+- Waehrend eines NFC-Scans den WLAN-Ausfall ausloesen und danach WLAN wiederherstellen.
+- Erwartung: Der erkannte Scan wird nach Reconnect mit derselben Anfrage fortgesetzt und nicht still verworfen.
 
 ## Test 15: Setup-Taster beim Boot erzwingt Setup-Modus
 
