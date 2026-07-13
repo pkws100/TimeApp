@@ -52,6 +52,8 @@ final class VacationRequestServiceTest extends TestCase
         self::assertCount(2, $pdo->timesheets);
         self::assertSame([7, 7], array_column($pdo->timesheets, 'vacation_request_id'));
         self::assertSame(['2026-02-02', '2026-02-03'], array_column($pdo->timesheets, 'work_date'));
+        self::assertSame(['vacation_paid', 'vacation_paid'], array_column($pdo->timesheets, 'absence_reason_code'));
+        self::assertSame([480, 480], array_column($pdo->timesheets, 'credited_minutes'));
     }
 
     public function testRejectAndCancelOnlyAllowPendingTransitions(): void
@@ -135,8 +137,8 @@ final class VacationPdoDouble extends PDO
         'accounting_closures' => true,
     ];
     public array $columns = [
-        'users' => ['id', 'first_name', 'last_name', 'email', 'workdays_mask', 'is_deleted'],
-        'timesheets' => ['id', 'source', 'vacation_request_id', 'user_id', 'work_date', 'entry_type', 'is_deleted'],
+        'users' => ['id', 'first_name', 'last_name', 'email', 'target_hours_month', 'target_hours_mode', 'target_hours_week', 'workdays_mask', 'is_deleted'],
+        'timesheets' => ['id', 'source', 'vacation_request_id', 'user_id', 'work_date', 'entry_type', 'is_deleted', 'credited_minutes', 'absence_reason_code'],
         'company_settings' => ['holiday_region'],
     ];
     public array $users = [];
@@ -195,6 +197,9 @@ final class VacationPdoDouble extends PDO
             'first_name' => 'Ada',
             'last_name' => 'Urlaub',
             'email' => 'ada@example.test',
+            'target_hours_month' => '0.00',
+            'target_hours_mode' => 'week',
+            'target_hours_week' => '40.00',
             'workdays_mask' => '1,2,3,4,5',
             'is_deleted' => 0,
         ];
@@ -362,6 +367,8 @@ final class VacationPdoDouble extends PDO
                 'source' => 'vacation_request',
                 'is_deleted' => 0,
                 'vacation_request_id' => (int) ($params['vacation_request_id'] ?? 0),
+                'credited_minutes' => (int) ($params['credited_minutes'] ?? 0),
+                'absence_reason_code' => (string) ($params['absence_reason_code'] ?? 'vacation_paid'),
             ];
 
             return true;

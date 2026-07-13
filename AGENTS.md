@@ -109,6 +109,9 @@ Bereits umgesetzt:
 - Kalender-Settings fuer gesetzliche Feiertage je Bundesland und Betriebsurlaub
 - Dokumentstatusprofile fuer Projekt-, Geraete- und Buchungsanhaenge
 - optionale Kundenbestaetigung fuer abgeschlossene Arbeitsbuchungen mit Druckbuchstaben-Name, geschuetztem PNG-Storage, Hash und Admin-/App-Abruf
+- revisionsfaehige Zeit- und Urlaubskonten mit Einfuehrungsstichtag, Eroeffnungssaldo, jahresbezogenem Urlaubskonto-Journal, Zeitkonto-Journal, Korrektur-/Gegenbuchungen und Stichtagsprotokoll
+- serverseitige Zeitgutschriften fuer bezahlte Abwesenheiten ueber `timesheets.credited_minutes` und fachliche Abwesenheitsgruende ueber `absence_reason_code`
+- kumulierter Zeitkontostand ab finalisiertem Stichtag, aktuelle Monatsberechnung nur bis Standdatum und neutrale Anzeige von positivem/negativem Zeitkontostand
 
 Noch nicht final umgesetzt:
 
@@ -132,6 +135,10 @@ Diese Entscheidungen gelten aktuell als gesetzt und sollen nicht ohne expliziten
   - 30 Minuten bei mehr als 6 Stunden
   - 45 Minuten bei mehr als 9 Stunden
 - `timesheets` decken mindestens `work`, `sick`, `vacation`, `holiday` und `absent` ab.
+- Tatsaechliche Arbeitszeit und Zeitkonto-Zeitgutschrift sind getrennt: `net_minutes` bleibt geleistete Arbeitszeit, `credited_minutes` ist nur die Gutschrift fuer bezahlte Abwesenheit.
+- Ein finalisierter Zeitkonto-Stichtag uebernimmt den Stand am Ende des Vortages; Zeiten davor veraendern den neuen kumulierten Zeitkontostand nicht.
+- Korrekturen an Zeit- und Urlaubskonten erfolgen ueber unveraenderliche Journalbuchungen und Gegenbuchungen, nicht durch Bearbeiten oder physisches Loeschen alter Journalzeilen.
+- Positive rechnerische Zeitkontostaende werden neutral als positiver Zeitkontostand bezeichnet, nicht automatisch als genehmigte Ueberstunden.
 - Fehlende Tagesbuchungen koennen fuer aktive Mitarbeiter an Werktagen als Status angezeigt werden; dieser abgeleitete Fehlend-Status erzeugt keine automatische `timesheets`-Buchung.
 - Gesetzliche Feiertage und Betriebsurlaub sind Anzeige- und Pflichtlogik; sie erzeugen keine automatischen `timesheets`-Buchungen und deaktivieren abgeleitetes Fehlen bzw. Fehlbuchungs-Pushes.
 - Das Firmenprofil ist ein globaler Singleton-Datensatz in `company_settings`.
@@ -150,6 +157,7 @@ Wichtige Tabellen / Bereiche:
 - `assets`, `asset_assignments`, `asset_files`
 - `company_settings`
 - `timesheets`
+- `employee_account_cutovers`, `time_account_entries`, `vacation_account_entries`
 
 Wichtige Migrationssaetze im Repo:
 
@@ -160,6 +168,8 @@ Wichtige Migrationssaetze im Repo:
 Regeln:
 
 - `timesheets` bleiben revisionssicher per MariaDB System Versioning
+- Aenderungen an `timesheets` bei system versioning muessen `SET SESSION system_versioning_alter_history = KEEP` nutzen und im `finally` wieder auf `ERROR` setzen.
+- Finalisierte Stichtage sperren den Altzeitraum userbezogen ueber `accounting_closures`; normale Timesheet-Aenderungen davor sind gesperrt, Korrekturen laufen ueber Journale.
 - Archivierungsfelder sind Teil der Historien- und GoBD-Strategie
 - Beziehungen und Historie duerfen durch Archivierung nicht unlesbar werden
 
@@ -336,6 +346,7 @@ Die vollstaendige offene Aufgabenliste steht in `PROJECTS.md`.
 - produktionsreife Exportlayouts
 - Versionshistorie und Archivierungsstrategie fuer Settings-Dateien
 - tiefere Offline-Sync-Konfliktbehandlung und vollstaendige Offline-Datei-Upload-Queue
+- historische Arbeitszeitmodellwechsel mit zeitlich gueltigen Wochen-/Monatsmodellen
 - spaetere GEO-Auswertung und Datenschutzfinalisierung
 
 ## 17. Kurzfazit fuer neue Laeufe

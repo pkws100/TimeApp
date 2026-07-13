@@ -828,6 +828,12 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
     color: var(--page-warn);
 }
 
+.notice.warn {
+    border-color: rgba(146, 64, 14, 0.25);
+    background: var(--page-warn-soft);
+    color: var(--page-warn);
+}
+
 .notice.info {
     color: var(--page-ink-soft);
 }

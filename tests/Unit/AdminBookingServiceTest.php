@@ -151,6 +151,7 @@ final class AdminBookingServiceTest extends TestCase
             'user_id' => '7',
             'work_date' => '2026-05-08',
             'entry_type' => 'sick',
+            'absence_reason_code' => 'sick_paid',
             'start_time' => '07:00',
             'end_time' => '15:30',
             'break_minutes' => '30',
@@ -162,6 +163,8 @@ final class AdminBookingServiceTest extends TestCase
         self::assertSame(0, $payload['break_minutes']);
         self::assertSame(0, $payload['net_minutes']);
         self::assertSame('sick', $payload['entry_type']);
+        self::assertSame('sick_paid', $payload['absence_reason_code']);
+        self::assertSame(0, $payload['credited_minutes']);
     }
 
     public function testNormalizeManualCreatePayloadRequiresWorkTimes(): void

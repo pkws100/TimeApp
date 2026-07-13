@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Domain\Timesheets;
 
+use App\Domain\Calendar\CalendarPolicyService;
+use App\Domain\TimeAccounts\DailyTargetService;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
 use InvalidArgumentException;
@@ -21,9 +23,11 @@ final class AdminBookingService
         private DatabaseConnection $connection,
         private TimesheetCalculator $calculator,
         private ?TimesheetSignatureService $signatureService = null,
-        private ?TimesheetWriteGuard $writeGuard = null
+        private ?TimesheetWriteGuard $writeGuard = null,
+        private ?DailyTargetService $dailyTargetService = null
     ) {
         $this->writeGuard ??= new TimesheetWriteGuard($connection);
+        $this->dailyTargetService ??= new DailyTargetService(new CalendarPolicyService($connection));
     }
 
     public function activeCount(): int
@@ -155,6 +159,12 @@ final class AdminBookingService
         $sourceSelect = $hasSourceColumn
             ? 'COALESCE(timesheets.source, "app") AS source,'
             : '"app" AS source,';
+        $creditedSelect = $this->connection->columnExists('timesheets', 'credited_minutes')
+            ? 'timesheets.credited_minutes,'
+            : 'NULL AS credited_minutes,';
+        $absenceReasonSelect = $this->connection->columnExists('timesheets', 'absence_reason_code')
+            ? 'timesheets.absence_reason_code,'
+            : 'NULL AS absence_reason_code,';
         $auditSelect = '0 AS change_count, NULL AS last_change_at, NULL AS last_action_type, NULL AS last_change_reason';
         $auditJoin = '';
 
@@ -194,8 +204,10 @@ final class AdminBookingService
                 timesheets.gross_minutes,
                 timesheets.break_minutes,
                 timesheets.net_minutes,
+                ' . $creditedSelect . '
                 timesheets.expenses_amount,
                 timesheets.entry_type,
+                ' . $absenceReasonSelect . '
                 ' . $sourceSelect . '
                 timesheets.note,
                 timesheets.updated_at,
@@ -452,14 +464,14 @@ final class AdminBookingService
             $this->connection->transaction(function () use ($normalized, $adminUserId, $reason, &$bookingId): void {
                 $this->connection->execute(
                     'INSERT INTO timesheets (
-                        user_id, project_id, created_by_user_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes, expenses_amount, entry_type, source, note, created_at, updated_at
+                        user_id, project_id, created_by_user_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes' . $this->insertColumnSql('credited_minutes') . ', expenses_amount, entry_type' . $this->insertColumnSql('absence_reason_code') . ', source, note, created_at, updated_at
                     ) VALUES (
-                        :user_id, :project_id, :created_by_user_id, :work_date, :start_time, :end_time, :gross_minutes, :break_minutes, :net_minutes, 0, :entry_type, "admin", :note, NOW(), NOW()
+                        :user_id, :project_id, :created_by_user_id, :work_date, :start_time, :end_time, :gross_minutes, :break_minutes, :net_minutes' . $this->insertValueSql('credited_minutes') . ', 0, :entry_type' . $this->insertValueSql('absence_reason_code') . ', "admin", :note, NOW(), NOW()
                     )',
-                    [
+                    $this->bookingWriteBindings([
                         ...$normalized,
                         'created_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
-                    ]
+                    ])
                 );
 
                 $bookingId = $this->connection->lastInsertId();
@@ -516,13 +528,15 @@ final class AdminBookingService
                         break_minutes = :break_minutes,
                         net_minutes = :net_minutes,
                         entry_type = :entry_type,
+                        ' . $this->updateAssignmentSql('absence_reason_code') . '
+                        ' . $this->updateAssignmentSql('credited_minutes') . '
                         note = :note,
                         updated_at = NOW()
                      WHERE id = :id',
-                    [
+                    $this->bookingWriteBindings([
                         ...$normalized,
                         'id' => $id,
-                    ]
+                    ])
                 );
 
                 $after = $this->find($id);
@@ -683,6 +697,45 @@ final class AdminBookingService
         ];
     }
 
+    public function absenceReasonOptions(): array
+    {
+        return [
+            'vacation_paid' => 'Bezahlter Urlaub',
+            'sick_paid' => 'Bezahlte Krankheit',
+            'sick_unpaid' => 'Unbezahlte Krankheit',
+            'paid_leave' => 'Bezahlte Freistellung',
+            'employer_release_paid' => 'Bezahlte Arbeitgeberfreistellung',
+            'unpaid_leave' => 'Unbezahlter Urlaub',
+            'unexcused_absence' => 'Unentschuldigtes Fehlen',
+        ];
+    }
+
+    private function insertColumnSql(string $column): string
+    {
+        return $this->connection->columnExists('timesheets', $column) ? ', ' . $column : '';
+    }
+
+    private function insertValueSql(string $column): string
+    {
+        return $this->connection->columnExists('timesheets', $column) ? ', :' . $column : '';
+    }
+
+    private function updateAssignmentSql(string $column): string
+    {
+        return $this->connection->columnExists('timesheets', $column) ? $column . ' = :' . $column . ',' : '';
+    }
+
+    private function bookingWriteBindings(array $bindings): array
+    {
+        foreach (['credited_minutes', 'absence_reason_code'] as $column) {
+            if (!$this->connection->columnExists('timesheets', $column)) {
+                unset($bindings[$column]);
+            }
+        }
+
+        return $bindings;
+    }
+
     private function setArchivedState(int $id, bool $archived, int $changedByUserId, string $reason): void
     {
         $reason = trim($reason);
@@ -761,12 +814,16 @@ final class AdminBookingService
             $grossMinutes = (int) ($calculation['gross_minutes'] ?? 0);
             $breakMinutes = (int) ($calculation['break_minutes'] ?? $manualBreakMinutes);
             $netMinutes = (int) ($calculation['net_minutes'] ?? 0);
+            $absenceReasonCode = null;
+            $creditedMinutes = null;
         } else {
             $startTime = null;
             $endTime = null;
             $grossMinutes = 0;
             $breakMinutes = 0;
             $netMinutes = 0;
+            $absenceReasonCode = $this->normalizeAbsenceReason($entryType, $payload['absence_reason_code'] ?? null);
+            $creditedMinutes = $this->creditedMinutesForAbsence($userId, $workDate, $absenceReasonCode);
         }
 
         $projectId = $forcedProjectId ?? $this->normalizeProjectValue($payload['project_id'] ?? null);
@@ -782,6 +839,8 @@ final class AdminBookingService
             'break_minutes' => $breakMinutes,
             'net_minutes' => $netMinutes,
             'entry_type' => $entryType,
+            'absence_reason_code' => $absenceReasonCode,
+            'credited_minutes' => $creditedMinutes,
             'note' => $note,
         ];
     }
@@ -856,16 +915,28 @@ final class AdminBookingService
             $grossMinutes = (int) ($calculation['gross_minutes'] ?? 0);
             $breakMinutes = (int) ($calculation['break_minutes'] ?? $manualBreakMinutes);
             $netMinutes = (int) ($calculation['net_minutes'] ?? 0);
+            $absenceReasonCode = null;
+            $creditedMinutes = null;
         } elseif ($entryType === 'work') {
             $grossMinutes = 0;
             $breakMinutes = $manualBreakMinutes;
             $netMinutes = 0;
+            $absenceReasonCode = null;
+            $creditedMinutes = null;
         } else {
             $startTime = null;
             $endTime = null;
             $grossMinutes = 0;
             $breakMinutes = 0;
             $netMinutes = 0;
+            $reasonInput = $payload['absence_reason_code'] ?? ($before['absence_reason_code'] ?? null);
+            $isLegacyUnchangedAbsence = trim((string) ($reasonInput ?? '')) === ''
+                && trim((string) ($before['absence_reason_code'] ?? '')) === ''
+                && $entryType === (string) ($before['entry_type'] ?? '');
+            $absenceReasonCode = $isLegacyUnchangedAbsence ? null : $this->normalizeAbsenceReason($entryType, $reasonInput);
+            $creditedMinutes = $isLegacyUnchangedAbsence
+                ? (isset($before['credited_minutes']) ? (int) $before['credited_minutes'] : null)
+                : $this->creditedMinutesForAbsence((int) ($before['user_id'] ?? 0), $workDate, $absenceReasonCode);
         }
 
         return [
@@ -877,8 +948,71 @@ final class AdminBookingService
             'break_minutes' => $breakMinutes,
             'net_minutes' => $netMinutes,
             'entry_type' => $entryType,
+            'absence_reason_code' => $absenceReasonCode,
+            'credited_minutes' => $creditedMinutes,
             'note' => $note,
         ];
+    }
+
+    private function normalizeAbsenceReason(string $entryType, mixed $value): ?string
+    {
+        if ($entryType === 'work') {
+            return null;
+        }
+
+        $reason = trim((string) ($value ?? ''));
+        $allowed = array_keys($this->absenceReasonOptions());
+        $validForType = match ($entryType) {
+            'vacation' => ['vacation_paid', 'unpaid_leave'],
+            'sick' => ['sick_paid', 'sick_unpaid'],
+            'absent' => ['paid_leave', 'employer_release_paid', 'unpaid_leave', 'unexcused_absence'],
+            'holiday' => ['employer_release_paid'],
+            default => $allowed,
+        };
+
+        if ($reason === '' || !in_array($reason, $validForType, true)) {
+            throw new InvalidArgumentException('Bitte einen eindeutigen Abwesenheitsgrund auswaehlen.');
+        }
+
+        return $reason;
+    }
+
+    private function creditedMinutesForAbsence(int $userId, string $workDate, ?string $absenceReasonCode): int
+    {
+        if (!in_array($absenceReasonCode, ['vacation_paid', 'sick_paid', 'paid_leave', 'employer_release_paid'], true)) {
+            return 0;
+        }
+
+        $user = $this->userForTarget($userId);
+
+        return $user === null ? 0 : (int) ($this->dailyTargetService?->effectiveTargetForDate($user, $workDate) ?? 0);
+    }
+
+    private function userForTarget(int $userId): ?array
+    {
+        if ($userId <= 0 || !$this->connection->tableExists('users')) {
+            return null;
+        }
+
+        $columns = [
+            'id',
+            $this->userColumnOrLiteral('target_hours_month', '0', 'target_hours_month'),
+            $this->userColumnOrLiteral('target_hours_mode', '"month"', 'target_hours_mode'),
+            $this->userColumnOrLiteral('target_hours_week', 'NULL', 'target_hours_week'),
+            $this->userColumnOrLiteral('workdays_mask', '"1,2,3,4,5"', 'workdays_mask'),
+        ];
+
+        return $this->connection->fetchOne(
+            'SELECT ' . implode(', ', $columns) . ' FROM users WHERE id = :id LIMIT 1',
+            ['id' => $userId]
+        );
+    }
+
+    private function userColumnOrLiteral(string $column, string $literal, string $alias): string
+    {
+        return $this->connection->columnExists('users', $column)
+            ? $column . ' AS ' . $alias
+            : $literal . ' AS ' . $alias;
     }
 
     private function buildFilterClause(array $filters, string $alias = 'timesheets', string $bindingPrefix = ''): array
@@ -994,8 +1128,11 @@ final class AdminBookingService
             'gross_minutes' => (int) ($row['gross_minutes'] ?? 0),
             'break_minutes' => (int) ($row['break_minutes'] ?? 0),
             'net_minutes' => (int) ($row['net_minutes'] ?? 0),
+            'credited_minutes' => isset($row['credited_minutes']) ? (int) $row['credited_minutes'] : null,
             'expenses_amount' => (string) ($row['expenses_amount'] ?? '0.00'),
             'entry_type' => $entryType,
+            'absence_reason_code' => $row['absence_reason_code'] ?? null,
+            'absence_reason_label' => $this->absenceReasonOptions()[(string) ($row['absence_reason_code'] ?? '')] ?? '',
             'source' => (string) ($row['source'] ?? 'app'),
             'source_label' => $this->sourceLabel((string) ($row['source'] ?? 'app')),
             'note' => self::nullableTrimmed($row['note'] ?? null),
@@ -1024,7 +1161,7 @@ final class AdminBookingService
             return false;
         }
 
-        foreach (['project_id', 'work_date', 'start_time', 'end_time', 'break_minutes', 'net_minutes', 'entry_type'] as $key) {
+        foreach (['project_id', 'work_date', 'start_time', 'end_time', 'break_minutes', 'net_minutes', 'credited_minutes', 'entry_type', 'absence_reason_code'] as $key) {
             $beforeValue = $before[$key] ?? null;
             $afterValue = $after[$key] ?? null;
 

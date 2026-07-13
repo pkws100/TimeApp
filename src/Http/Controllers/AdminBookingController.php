@@ -235,6 +235,7 @@ final class AdminBookingController
                 'can_view_attachments' => true,
                 'document_statuses' => $this->documentStatusService->activeList(),
                 'selected_booking' => $this->selectedBooking($request),
+                'absence_reason_options' => $this->bookingService->absenceReasonOptions(),
             ]
         );
         $exportButtons = $canExport

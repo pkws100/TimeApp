@@ -20,11 +20,17 @@ final class TimeAccountService
 
     public function __construct(
         private DatabaseConnection $connection,
-        private CalendarPolicyService $calendarPolicyService
+        private CalendarPolicyService $calendarPolicyService,
+        private ?DailyTargetService $dailyTargetService = null,
+        private ?AccountJournalService $journalService = null,
+        private ?EmployeeAccountCutoverService $cutoverService = null
     ) {
+        $this->dailyTargetService ??= new DailyTargetService($calendarPolicyService);
+        $this->journalService ??= new AccountJournalService($connection);
+        $this->cutoverService ??= new EmployeeAccountCutoverService($connection, $this->journalService);
     }
 
-    public function monthlyAccount(int $userId, int $year, int $month): array
+    public function monthlyAccount(int $userId, int $year, int $month, ?string $asOfDate = null): array
     {
         $user = $this->user($userId);
 
@@ -34,11 +40,38 @@ final class TimeAccountService
 
         $start = new DateTimeImmutable(sprintf('%04d-%02d-01', $year, $month));
         $end = $start->modify('last day of this month');
-        $stats = $this->timesheetStats($userId, $start->format('Y-m-d'), $end->format('Y-m-d'));
-        $calendar = $this->calendarStats($user, $start, $end);
-        $targetMinutes = $this->targetMinutes($user, $calendar);
+        $today = $this->normalizeAsOfDate($asOfDate);
+        $standDate = $this->standDateForPeriod($start, $end, $today);
+        $cutover = $this->cutoverService?->activeCutover($userId);
+        $cutoverDate = $cutover !== null ? (string) $cutover['effective_from'] : null;
+        $calculationStart = $cutoverDate !== null && $cutoverDate > $start->format('Y-m-d')
+            ? new DateTimeImmutable($cutoverDate)
+            : $start;
+        $targetEnd = $standDate !== null && $standDate >= $calculationStart->format('Y-m-d') ? new DateTimeImmutable($standDate) : null;
+        $stats = $targetEnd === null
+            ? $this->emptyTimesheetStats()
+            : $this->timesheetStats($userId, $calculationStart->format('Y-m-d'), $targetEnd->format('Y-m-d'));
+        $monthTargetStats = $this->dailyTargetService?->stats($user, $start->format('Y-m-d'), $end->format('Y-m-d')) ?? $this->calendarTargetFallback($user, $start, $end);
+        $targetStats = $targetEnd === null
+            ? $this->emptyTargetStats()
+            : ($this->dailyTargetService?->stats($user, $calculationStart->format('Y-m-d'), $targetEnd->format('Y-m-d')) ?? $this->calendarTargetFallback($user, $calculationStart, $targetEnd));
+        $targetMinutes = (int) $targetStats['effective_target_minutes'];
         $actualMinutes = (int) ($stats['work_minutes'] ?? 0);
-        $saldoMinutes = $actualMinutes - $targetMinutes;
+        $creditedMinutes = (int) ($stats['credited_minutes'] ?? 0);
+        $manualAdjustmentMinutes = $targetEnd === null ? 0 : $this->journalMinutes($userId, $calculationStart->format('Y-m-d'), $targetEnd->format('Y-m-d'), false);
+        $periodDelta = $actualMinutes + $creditedMinutes - $targetMinutes + $manualAdjustmentMinutes;
+        $openingBalance = null;
+        $closingBalance = null;
+        $cutoverStatus = $cutover === null ? 'missing' : 'final';
+
+        if ($cutover !== null) {
+            $periodStartForBalance = $calculationStart->format('Y-m-d');
+            $beforePeriod = (new DateTimeImmutable($periodStartForBalance))->modify('-1 day')->format('Y-m-d');
+            $openingBalance = $this->balanceUntil($user, $cutover, $beforePeriod);
+            $closingBalance = $targetEnd === null ? $openingBalance : $openingBalance + $periodDelta;
+        }
+
+        $saldoMinutes = $periodDelta;
         $vacation = $this->vacationYear($userId, $year, $user);
 
         return [
@@ -47,30 +80,63 @@ final class TimeAccountService
             'year' => $year,
             'month' => $month,
             'month_label' => $start->format('Y-m'),
+            'cutover_status' => $cutoverStatus,
+            'cutover_id' => $cutover !== null ? (int) $cutover['id'] : null,
+            'cutover_date' => $cutoverDate,
+            'as_of_date' => $standDate,
+            'account_message' => $cutover === null ? 'Zeitkonto noch nicht eingerichtet' : null,
+            'opening_balance_at_period_start_minutes' => $openingBalance,
             'target_minutes' => $targetMinutes,
+            'contract_target_minutes' => (int) $targetStats['contract_target_minutes'],
+            'month_contract_target_minutes' => (int) $monthTargetStats['contract_target_minutes'],
+            'month_effective_target_minutes' => (int) $monthTargetStats['effective_target_minutes'],
+            'holiday_reduction_minutes' => (int) $targetStats['holiday_reduction_minutes'],
+            'company_closure_reduction_minutes' => (int) $targetStats['company_closure_reduction_minutes'],
+            'effective_target_minutes' => $targetMinutes,
             'actual_minutes' => $actualMinutes,
+            'actual_work_minutes' => $actualMinutes,
+            'credited_absence_minutes' => $creditedMinutes,
+            'manual_adjustment_minutes' => $manualAdjustmentMinutes,
+            'period_delta_minutes' => $periodDelta,
+            'closing_balance_minutes' => $closingBalance,
             'saldo_minutes' => $saldoMinutes,
             'target_label' => $this->durationLabel($targetMinutes),
+            'month_target_label' => $this->durationLabel((int) $monthTargetStats['effective_target_minutes']),
             'actual_label' => $this->durationLabel($actualMinutes),
+            'credited_absence_label' => $this->durationLabel($creditedMinutes),
+            'manual_adjustment_label' => $this->signedDurationLabel($manualAdjustmentMinutes),
+            'period_delta_label' => $this->signedDurationLabel($periodDelta),
+            'opening_balance_at_period_start_label' => $openingBalance === null ? null : $this->signedDurationLabel($openingBalance),
+            'closing_balance_label' => $closingBalance === null ? null : $this->signedDurationLabel($closingBalance),
             'saldo_label' => $this->signedDurationLabel($saldoMinutes),
             'vacation_days' => (float) ($stats['vacation_days'] ?? 0),
             'sick_days' => (float) ($stats['sick_days'] ?? 0),
             'absent_days' => (float) ($stats['absent_days'] ?? 0),
-            'holiday_days' => (float) $calendar['public_holiday_days'],
-            'company_closure_days' => (float) $calendar['company_closure_days'],
-            'workday_count' => (int) $calendar['workday_count'],
+            'holiday_days' => (float) $targetStats['public_holiday_days'],
+            'company_closure_days' => (float) $targetStats['company_closure_days'],
+            'workday_count' => (int) $targetStats['workday_count'],
             'vacation' => $vacation,
+            'time_entries' => $this->journalService?->timeEntriesForUser($userId, null, $standDate) ?? [],
+            'vacation_entries' => $this->journalService?->vacationEntriesForUser($userId, $year) ?? [],
         ];
     }
 
     public function vacationYear(int $userId, int $year, ?array $user = null): array
     {
         $user ??= $this->user($userId);
-        $entitlement = (float) ($user['vacation_days_year'] ?? 0);
-        $carryover = (float) ($user['vacation_carryover_days'] ?? 0);
-        $taken = $this->takenVacationDays($userId, $year);
+        $cutover = $this->cutoverService?->activeCutover($userId);
+        $cutoverDate = $cutover !== null ? (string) $cutover['effective_from'] : null;
+        $journalTotal = $this->journalService?->vacationSum($userId, $year) ?? 0.0;
+        $hasJournal = $cutover !== null && $this->hasVacationJournalEntries($userId, $year);
+        $entitlement = $hasJournal ? $this->vacationJournalTypeSum($userId, $year, 'annual_entitlement') : (float) ($user['vacation_days_year'] ?? 0);
+        $carryover = $hasJournal ? $this->vacationJournalTypeSum($userId, $year, 'carryover') : (float) ($user['vacation_carryover_days'] ?? 0);
+        $openingAdjustment = $hasJournal ? $this->vacationJournalTypeSum($userId, $year, 'opening_adjustment') : 0.0;
+        $manualAdjustments = $hasJournal ? $this->vacationJournalManualSum($userId, $year) : 0.0;
+        $taken = $this->takenVacationDays($userId, $year, $cutoverDate);
+        $takenPast = $this->takenVacationDays($userId, $year, $cutoverDate, null, $this->normalizeAsOfDate(null));
+        $futureApproved = $this->futureApprovedVacationDays($userId, $year, $cutoverDate, $this->normalizeAsOfDate(null));
         $pending = $this->pendingVacationDays($userId, $year, $user ?? []);
-        $total = $entitlement + $carryover;
+        $total = $hasJournal ? $journalTotal : $entitlement + $carryover;
         $remaining = $total - $taken;
         $available = $remaining - $pending;
 
@@ -78,11 +144,17 @@ final class TimeAccountService
             'year' => $year,
             'entitlement_days' => $entitlement,
             'carryover_days' => $carryover,
+            'opening_adjustment_days' => $openingAdjustment,
+            'manual_adjustment_days' => $manualAdjustments,
             'total_days' => $total,
+            'opening_balance_days' => $hasJournal ? $entitlement + $carryover + $openingAdjustment : $total,
             'approved_taken_days' => $taken,
+            'approved_taken_past_days' => $takenPast,
+            'future_approved_days' => $futureApproved,
             'pending_days' => $pending,
             'remaining_days' => $remaining,
             'available_days' => $available,
+            'source' => $hasJournal ? 'journal' : 'user_defaults',
         ];
     }
 
@@ -136,7 +208,8 @@ final class TimeAccountService
 
         if ($filters['saldo_filter'] !== '') {
             $rows = array_values(array_filter($rows, static function (array $row) use ($filters): bool {
-                $saldo = (int) ($row['saldo_minutes'] ?? 0);
+                $saldo = $row['closing_balance_minutes'] ?? $row['saldo_minutes'] ?? 0;
+                $saldo = (int) $saldo;
 
                 return match ($filters['saldo_filter']) {
                     'negative' => $saldo < 0,
@@ -167,7 +240,7 @@ final class TimeAccountService
             $result = match ($sort) {
                 'target' => ((int) ($left['target_minutes'] ?? 0) <=> (int) ($right['target_minutes'] ?? 0)),
                 'actual' => ((int) ($left['actual_minutes'] ?? 0) <=> (int) ($right['actual_minutes'] ?? 0)),
-                'saldo' => ((int) ($left['saldo_minutes'] ?? 0) <=> (int) ($right['saldo_minutes'] ?? 0)),
+                'saldo' => ((int) (($left['closing_balance_minutes'] ?? null) ?? ($left['saldo_minutes'] ?? 0)) <=> (int) (($right['closing_balance_minutes'] ?? null) ?? ($right['saldo_minutes'] ?? 0))),
                 'taken_vacation' => ((float) ($left['vacation']['approved_taken_days'] ?? 0) <=> (float) ($right['vacation']['approved_taken_days'] ?? 0)),
                 'pending_vacation' => ((float) ($left['vacation']['pending_days'] ?? 0) <=> (float) ($right['vacation']['pending_days'] ?? 0)),
                 'resturlaub' => ((float) ($left['vacation']['remaining_days'] ?? 0) <=> (float) ($right['vacation']['remaining_days'] ?? 0)),
@@ -213,8 +286,23 @@ final class TimeAccountService
                 'Soll' => (string) ($row['target_label'] ?? '00:00'),
                 'Ist' => (string) ($row['actual_label'] ?? '00:00'),
                 'Saldo' => (string) ($row['saldo_label'] ?? '+00:00'),
+                'Stichtag' => (string) ($row['cutover_date'] ?? ''),
+                'Standdatum' => (string) ($row['as_of_date'] ?? ''),
+                'Monatsanfangsbestand' => (string) ($row['opening_balance_at_period_start_label'] ?? ''),
+                'Monats-Soll gesamt' => (string) ($row['month_target_label'] ?? '00:00'),
+                'Soll bis Standdatum' => (string) ($row['target_label'] ?? '00:00'),
+                'Feiertagsreduzierung (Min)' => (int) ($row['holiday_reduction_minutes'] ?? 0),
+                'Betriebsschliessungsreduzierung (Min)' => (int) ($row['company_closure_reduction_minutes'] ?? 0),
+                'Effektives Soll (Min)' => (int) ($row['effective_target_minutes'] ?? 0),
+                'Tatsaechliche Arbeitszeit' => (string) ($row['actual_label'] ?? '00:00'),
+                'Abwesenheitsgutschriften' => (string) ($row['credited_absence_label'] ?? '00:00'),
+                'Manuelle Korrekturen' => (string) ($row['manual_adjustment_label'] ?? '+00:00'),
+                'Monatsveraenderung' => (string) ($row['period_delta_label'] ?? ($row['saldo_label'] ?? '+00:00')),
+                'Monatsendbestand' => (string) ($row['closing_balance_label'] ?? ''),
                 'Urlaub genommen' => (float) ($vacation['approved_taken_days'] ?? 0),
                 'Urlaub offen' => (float) ($vacation['pending_days'] ?? 0),
+                'Jahresurlaub' => (float) ($vacation['entitlement_days'] ?? 0),
+                'Uebertrag' => (float) ($vacation['carryover_days'] ?? 0),
                 'Resturlaub' => (float) ($vacation['remaining_days'] ?? 0),
                 'Verfuegbar' => (float) ($vacation['available_days'] ?? 0),
                 'Krank' => (float) ($row['sick_days'] ?? 0),
@@ -277,11 +365,33 @@ final class TimeAccountService
             'year' => $year,
             'month' => $month,
             'month_label' => sprintf('%04d-%02d', $year, $month),
+            'cutover_status' => 'missing',
+            'cutover_date' => null,
+            'as_of_date' => (new DateTimeImmutable('today'))->format('Y-m-d'),
+            'account_message' => 'Zeitkonto noch nicht eingerichtet',
+            'opening_balance_at_period_start_minutes' => null,
             'target_minutes' => 0,
+            'contract_target_minutes' => 0,
+            'month_contract_target_minutes' => 0,
+            'month_effective_target_minutes' => 0,
+            'holiday_reduction_minutes' => 0,
+            'company_closure_reduction_minutes' => 0,
+            'effective_target_minutes' => 0,
             'actual_minutes' => 0,
+            'actual_work_minutes' => 0,
+            'credited_absence_minutes' => 0,
+            'manual_adjustment_minutes' => 0,
+            'period_delta_minutes' => 0,
+            'closing_balance_minutes' => null,
             'saldo_minutes' => 0,
             'target_label' => '00:00',
+            'month_target_label' => '00:00',
             'actual_label' => '00:00',
+            'credited_absence_label' => '00:00',
+            'manual_adjustment_label' => '+00:00',
+            'period_delta_label' => '+00:00',
+            'opening_balance_at_period_start_label' => null,
+            'closing_balance_label' => null,
             'saldo_label' => '+00:00',
             'vacation_days' => 0.0,
             'sick_days' => 0.0,
@@ -290,6 +400,125 @@ final class TimeAccountService
             'company_closure_days' => 0.0,
             'workday_count' => 0,
             'vacation' => $this->vacationYear($userId, $year, []),
+            'time_entries' => [],
+            'vacation_entries' => [],
+        ];
+    }
+
+    private function balanceUntil(array $user, array $cutover, string $dateTo): int
+    {
+        $cutoverDate = (string) $cutover['effective_from'];
+        $opening = (int) ($cutover['opening_time_balance_minutes'] ?? 0);
+
+        if ($dateTo < $cutoverDate) {
+            return $opening;
+        }
+
+        $stats = $this->timesheetStats((int) $cutover['user_id'], $cutoverDate, $dateTo);
+        $targetStats = $this->dailyTargetService?->stats($user, $cutoverDate, $dateTo) ?? $this->emptyTargetStats();
+        $journal = $this->journalMinutes((int) $cutover['user_id'], $cutoverDate, $dateTo, false);
+
+        return $opening
+            + (int) $stats['work_minutes']
+            + (int) $stats['credited_minutes']
+            - (int) $targetStats['effective_target_minutes']
+            + $journal;
+    }
+
+    private function journalMinutes(int $userId, ?string $dateFrom, ?string $dateTo, bool $includeOpening): int
+    {
+        if ($userId <= 0 || !$this->connection->tableExists('time_account_entries')) {
+            return 0;
+        }
+
+        $clauses = ['user_id = :user_id'];
+        $bindings = ['user_id' => $userId];
+
+        if ($dateFrom !== null) {
+            $clauses[] = 'effective_date >= :date_from';
+            $bindings['date_from'] = $dateFrom;
+        }
+
+        if ($dateTo !== null) {
+            $clauses[] = 'effective_date <= :date_to';
+            $bindings['date_to'] = $dateTo;
+        }
+
+        if (!$includeOpening) {
+            $clauses[] = 'entry_type <> "opening_balance"';
+        }
+
+        return (int) ($this->connection->fetchColumn(
+            'SELECT COALESCE(SUM(minutes), 0) FROM time_account_entries WHERE ' . implode(' AND ', $clauses),
+            $bindings
+        ) ?? 0);
+    }
+
+    private function normalizeAsOfDate(?string $asOfDate): string
+    {
+        $value = trim((string) ($asOfDate ?? ''));
+        $date = $value === '' ? new DateTimeImmutable('today') : DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+        $errors = DateTimeImmutable::getLastErrors();
+
+        if ($date instanceof DateTimeImmutable && ($value === '' || ($date->format('Y-m-d') === $value && ($errors === false || ((int) $errors['warning_count'] === 0 && (int) $errors['error_count'] === 0))))) {
+            return $date->format('Y-m-d');
+        }
+
+        return (new DateTimeImmutable('today'))->format('Y-m-d');
+    }
+
+    private function standDateForPeriod(DateTimeImmutable $start, DateTimeImmutable $end, string $asOfDate): ?string
+    {
+        if ($asOfDate < $start->format('Y-m-d')) {
+            return null;
+        }
+
+        if ($asOfDate > $end->format('Y-m-d')) {
+            return $end->format('Y-m-d');
+        }
+
+        return $asOfDate;
+    }
+
+    private function emptyTimesheetStats(): array
+    {
+        return [
+            'work_minutes' => 0,
+            'credited_minutes' => 0,
+            'vacation_days' => 0.0,
+            'sick_days' => 0.0,
+            'absent_days' => 0.0,
+        ];
+    }
+
+    private function emptyTargetStats(): array
+    {
+        return [
+            'contract_target_minutes' => 0,
+            'holiday_reduction_minutes' => 0,
+            'company_closure_reduction_minutes' => 0,
+            'effective_target_minutes' => 0,
+            'workday_count' => 0,
+            'effective_workday_count' => 0,
+            'public_holiday_days' => 0,
+            'company_closure_days' => 0,
+        ];
+    }
+
+    private function calendarTargetFallback(array $user, DateTimeImmutable $start, DateTimeImmutable $end): array
+    {
+        $calendar = $this->calendarStats($user, $start, $end);
+        $target = $this->targetMinutes($user, $calendar);
+
+        return [
+            'contract_target_minutes' => $target,
+            'holiday_reduction_minutes' => 0,
+            'company_closure_reduction_minutes' => 0,
+            'effective_target_minutes' => $target,
+            'workday_count' => (int) $calendar['workday_count'],
+            'effective_workday_count' => (int) $calendar['effective_workday_count'],
+            'public_holiday_days' => (int) $calendar['public_holiday_days'],
+            'company_closure_days' => (int) $calendar['company_closure_days'],
         ];
     }
 
@@ -342,7 +571,7 @@ final class TimeAccountService
 
         if ($filters['saldo_filter'] !== '') {
             $rows = array_values(array_filter($rows, static function (array $row) use ($filters): bool {
-                $saldo = (int) ($row['saldo_minutes'] ?? 0);
+                $saldo = (int) (($row['closing_balance_minutes'] ?? null) ?? ($row['saldo_minutes'] ?? 0));
 
                 return match ($filters['saldo_filter']) {
                     'negative' => $saldo < 0,
@@ -376,7 +605,7 @@ final class TimeAccountService
             $result = match ($sort) {
                 'target' => ((int) ($left['target_minutes'] ?? 0) <=> (int) ($right['target_minutes'] ?? 0)),
                 'actual' => ((int) ($left['actual_minutes'] ?? 0) <=> (int) ($right['actual_minutes'] ?? 0)),
-                'saldo' => ((int) ($left['saldo_minutes'] ?? 0) <=> (int) ($right['saldo_minutes'] ?? 0)),
+                'saldo' => ((int) (($left['closing_balance_minutes'] ?? null) ?? ($left['saldo_minutes'] ?? 0)) <=> (int) (($right['closing_balance_minutes'] ?? null) ?? ($right['saldo_minutes'] ?? 0))),
                 'taken_vacation' => ((float) ($left['vacation']['approved_taken_days'] ?? 0) <=> (float) ($right['vacation']['approved_taken_days'] ?? 0)),
                 'pending_vacation' => ((float) ($left['vacation']['pending_days'] ?? 0) <=> (float) ($right['vacation']['pending_days'] ?? 0)),
                 'resturlaub' => ((float) ($left['vacation']['remaining_days'] ?? 0) <=> (float) ($right['vacation']['remaining_days'] ?? 0)),
@@ -471,6 +700,7 @@ final class TimeAccountService
     {
         $stats = [
             'work_minutes' => 0,
+            'credited_minutes' => 0,
             'vacation_days' => 0.0,
             'sick_days' => 0.0,
             'absent_days' => 0.0,
@@ -480,8 +710,11 @@ final class TimeAccountService
             return $stats;
         }
 
+        $creditedSelect = $this->connection->columnExists('timesheets', 'credited_minutes')
+            ? 'SUM(COALESCE(credited_minutes, 0)) AS credited_minutes'
+            : '0 AS credited_minutes';
         $rows = $this->connection->fetchAll(
-            'SELECT entry_type, COUNT(DISTINCT work_date) AS day_count, SUM(COALESCE(net_minutes, 0)) AS minutes
+            'SELECT entry_type, COUNT(DISTINCT work_date) AS day_count, SUM(COALESCE(net_minutes, 0)) AS minutes, ' . $creditedSelect . '
              FROM timesheets
              WHERE user_id = :user_id
                AND work_date >= :date_from
@@ -507,14 +740,27 @@ final class TimeAccountService
             } elseif ($type === 'absent') {
                 $stats['absent_days'] = (float) ($row['day_count'] ?? 0);
             }
+
+            $stats['credited_minutes'] += (int) ($row['credited_minutes'] ?? 0);
         }
 
         return $stats;
     }
 
-    private function takenVacationDays(int $userId, int $year): float
+    private function takenVacationDays(int $userId, int $year, ?string $cutoverDate = null, ?string $dateFromOverride = null, ?string $dateToOverride = null): float
     {
         if (!$this->connection->tableExists('timesheets')) {
+            return 0.0;
+        }
+
+        $dateFrom = $dateFromOverride ?? sprintf('%04d-01-01', $year);
+        $dateTo = $dateToOverride ?? sprintf('%04d-12-31', $year);
+
+        if ($cutoverDate !== null && $cutoverDate > $dateFrom) {
+            $dateFrom = $cutoverDate;
+        }
+
+        if ($dateTo < $dateFrom) {
             return 0.0;
         }
 
@@ -528,10 +774,59 @@ final class TimeAccountService
                AND COALESCE(is_deleted, 0) = 0',
             [
                 'user_id' => $userId,
-                'date_from' => sprintf('%04d-01-01', $year),
-                'date_to' => sprintf('%04d-12-31', $year),
+                'date_from' => $dateFrom,
+                'date_to' => $dateTo,
             ]
         ) ?? 0));
+    }
+
+    private function futureApprovedVacationDays(int $userId, int $year, ?string $cutoverDate, string $asOfDate): float
+    {
+        $tomorrow = (new DateTimeImmutable($asOfDate))->modify('+1 day')->format('Y-m-d');
+
+        return $this->takenVacationDays($userId, $year, $cutoverDate, $tomorrow, sprintf('%04d-12-31', $year));
+    }
+
+    private function hasVacationJournalEntries(int $userId, int $year): bool
+    {
+        if (!$this->connection->tableExists('vacation_account_entries')) {
+            return false;
+        }
+
+        return (int) ($this->connection->fetchColumn(
+            'SELECT COUNT(*) FROM vacation_account_entries WHERE user_id = :user_id AND leave_year = :leave_year',
+            ['user_id' => $userId, 'leave_year' => $year]
+        ) ?? 0) > 0;
+    }
+
+    private function vacationJournalTypeSum(int $userId, int $year, string $entryType): float
+    {
+        if (!$this->connection->tableExists('vacation_account_entries')) {
+            return 0.0;
+        }
+
+        return (float) ($this->connection->fetchColumn(
+            'SELECT COALESCE(SUM(days), 0)
+             FROM vacation_account_entries
+             WHERE user_id = :user_id AND leave_year = :leave_year AND entry_type = :entry_type',
+            ['user_id' => $userId, 'leave_year' => $year, 'entry_type' => $entryType]
+        ) ?? 0);
+    }
+
+    private function vacationJournalManualSum(int $userId, int $year): float
+    {
+        if (!$this->connection->tableExists('vacation_account_entries')) {
+            return 0.0;
+        }
+
+        return (float) ($this->connection->fetchColumn(
+            'SELECT COALESCE(SUM(days), 0)
+             FROM vacation_account_entries
+             WHERE user_id = :user_id
+               AND leave_year = :leave_year
+               AND entry_type IN ("manual_adjustment", "expiry", "reversal")',
+            ['user_id' => $userId, 'leave_year' => $year]
+        ) ?? 0);
     }
 
     private function pendingVacationDays(int $userId, int $year, array $user): float

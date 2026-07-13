@@ -11,6 +11,7 @@
 - `assets`, `asset_assignments`, `asset_files`
 - `company_settings`
 - `timesheets`, `timesheet_customer_signatures`
+- `employee_account_cutovers`, `time_account_entries`, `vacation_account_entries`
 
 ## Fachliche Leitlinien
 - Rollen und Berechtigungen sind getrennt modelliert, damit Backend-Rechte, Projektrechte und Exportrechte sauber kombiniert werden koennen.
@@ -21,6 +22,10 @@
 - `company_settings` haelt genau ein globales Firmenprofil fuer Reports, E-Mails, Rechtstexte und spaetere Frontend-Policies.
 - Firmenlogo sowie AGB-/Datenschutz-PDFs werden nur per Dateireferenz gespeichert und physisch geschuetzt abgelegt.
 - `timesheets` deckt `work`, `sick`, `vacation`, `holiday` und `absent` ab.
+- `timesheets.credited_minutes` speichert ausschliesslich Zeitgutschriften fuer nicht geleistete Arbeit; `absence_reason_code` differenziert Abwesenheiten wie bezahlten Urlaub, bezahlte Krankheit, unbezahlte Abwesenheit und unentschuldigtes Fehlen.
+- Ein finaler Einfuehrungsstichtag in `employee_account_cutovers` definiert den verbindlich uebernommenen Zeitkontostand am Ende des Vortages. Zeiten vor `effective_from` veraendern den neuen kumulierten Zeitkontostand nicht mehr.
+- `time_account_entries` und `vacation_account_entries` sind unveraenderliche Journale fuer Eroeffnungen, manuelle Korrekturen, Auszahlungen, Verfall und Gegenbuchungen. Fehler werden durch `reversal`-Buchungen mit `reversal_of_id` korrigiert, nicht durch Bearbeiten oder Loeschen alter Journalzeilen.
+- `users.vacation_days_year` und `users.vacation_carryover_days` bleiben als Vorschlagswerte fuer neue Stichtage bzw. Urlaubsjahre erhalten; sobald jahresbezogene Urlaubskonto-Journalbuchungen vorhanden sind, veraendern diese User-Felder historische Urlaubskonten nicht rueckwirkend.
 - GoBD-konforme Archivierung wird ueber `is_deleted`, `deleted_at` und `deleted_by_user_id` auf den relevanten Stammdaten umgesetzt.
 - SMTP- und GEO-Vorbereitungsfelder liegen zentral im globalen Settings-Datensatz, damit Backend und spaeteres Frontend dieselbe Quelle nutzen.
 
@@ -28,6 +33,12 @@
 - Arbeitsbloecke speichern Brutto-, Pausen- und Netto-Minuten.
 - Gesetzliche Pausen werden serverseitig automatisch auf mindestens 30 Minuten bei mehr als 6 Stunden und 45 Minuten bei mehr als 9 Stunden angehoben.
 - Spesen werden ueber `expenses_amount` erfasst, damit PDF- und Exportberichte dieselbe Datenbasis verwenden.
+- Tatsaechliche Arbeitszeit (`net_minutes` bei `work`) und Zeitgutschrift (`credited_minutes` bei bezahlten Abwesenheiten) sind getrennte Groessen.
+- Zeitkontostand = Eroeffnungssaldo + Arbeitszeit ab Stichtag + bezahlte Abwesenheitsgutschriften - effektives Soll ab Stichtag + Journal-Korrekturen.
+- Die Monatsveraenderung ist die Veraenderung innerhalb des betrachteten Monats; der Gesamtstand ist der kumulierte Saldo seit Stichtag.
+- Der aktuelle Monat rechnet fuer den aktuellen Kontostand nur bis zum Standdatum, standardmaessig heute. Zukuenftige Arbeitstage erzeugen keine aktuellen Minusstunden.
+- Feiertage und bezahlte Betriebsschliessungen reduzieren das Soll. Sie erzeugen keine zusaetzliche automatische Zeitgutschrift, damit keine Doppelwertung entsteht.
+- Ohne finalisierten Stichtag bleiben Monatsauswertungen verfuegbar, aber es wird kein kumulierter Zeitkontostand erfunden.
 
 ## Seeder-Startpunkt
 - Standard-Seeds liefern Rollen, Rechte und notwendige Referenzdaten.

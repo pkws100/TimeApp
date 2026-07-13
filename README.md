@@ -59,6 +59,10 @@ gesonderter Vereinbarung angeboten werden.
 - Admin-Buchungsdatei-Status: `POST /admin/timesheet-files/{id}/status`
 - Admin-Kundenbestaetigungsbild: `GET /admin/timesheet-signatures/{id}/image`
 - Admin-Kundenbestaetigungsarchivierung: `POST /admin/timesheet-signatures/{id}/archive`
+- Zeitkonten: `GET /admin/time-accounts`
+- Stichtag-Vorschau/Finalisierung: `POST /admin/time-accounts/cutovers/preview` und `POST /admin/time-accounts/cutovers/finalize`
+- Stichtagsprotokoll: `GET /admin/time-accounts/cutovers/{id}/protocol`
+- Zeit-/Urlaubskonto-Korrekturen: `POST /admin/time-accounts/entries/time` und `POST /admin/time-accounts/entries/vacation`
 - Admin-AGB-PDF: `GET /admin/settings/company/agb-pdf/preview` und `GET /admin/settings/company/agb-pdf/download`
 - Admin-Datenschutz-PDF: `GET /admin/settings/company/datenschutz-pdf/preview` und `GET /admin/settings/company/datenschutz-pdf/download`
 - Dashboard-Overview: `GET /api/v1/dashboard/overview`
@@ -175,6 +179,14 @@ oder per HTTP-Smoke-Check geprueft werden.
 - Gesetzliche Feiertage werden lokal je eingestelltem Bundesland berechnet und im Admin-Kalender sichtbar gemacht.
 - Feiertage und geplanter Betriebsurlaub erzeugen keine automatische `Fehlt`-Wertung und keine Fehlbuchungs-Pushes; freiwillige Buchungen bleiben moeglich.
 - Dokumentstatusprofile fuer Uploads werden unter `/admin/settings/document-statuses` verwaltet. Neue Uploads erhalten den aktiven Defaultstatus, bestehende Dateien ohne Status bleiben gueltig.
+
+## Revisionsfaehige Zeit- und Urlaubskonten
+- Zeitkonten koennen je Mitarbeiter mit einem Einfuehrungsstichtag finalisiert werden. Der Eroeffnungssaldo ist der uebernommene Stand am Ende des Vortages; ab dem Stichtag berechnet die App den kumulierten Stand selbst.
+- Finale Stichtage erzeugen unveraenderliche Journalbuchungen fuer Zeitkonto und Urlaubskonto sowie eine userbezogene Sperre des Altzeitraums ueber `accounting_closures`.
+- Korrekturen, Auszahlungen, Freizeitausgleich, Urlaubsanpassungen und Revidierungen laufen ueber Journal- und Gegenbuchungen, nicht ueber physische Loeschung oder direkte Aenderung alter Journalzeilen.
+- Bezahlte Abwesenheiten speichern eine separate Zeitgutschrift in `timesheets.credited_minutes`; tatsaechliche Arbeitszeit bleibt davon getrennt.
+- Urlaubskonten werden jahresbezogen aus dem Urlaubskonto-Journal berechnet. Die User-Felder fuer Jahresurlaub und Uebertrag dienen weiter als Vorschlagswerte fuer neue Stichtage.
+- Die Mitarbeiter-App zeigt Zeitkontostand, Monatsveraenderung, Arbeitszeit, Zeitgutschriften, Resturlaub und offene bzw. zukuenftig genehmigte Urlaube lesend an.
 
 ## Wichtige Composer-Befehle
 ```bash

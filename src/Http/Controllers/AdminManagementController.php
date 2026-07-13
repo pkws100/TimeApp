@@ -1664,6 +1664,7 @@ HTML;
         <label><span>Mitarbeiter</span><select name="user_id" required>{$userOptions}</select></label>
         <label><span>Datum</span><input type="date" name="work_date" required></label>
         <label><span>Typ</span><select name="entry_type">{$entryOptions}</select></label>
+        <label><span>Abwesenheitsgrund</span><select name="absence_reason_code">{$this->absenceReasonOptions()}</select></label>
         <label><span>Start</span><input type="time" name="start_time"></label>
         <label><span>Ende</span><input type="time" name="end_time"></label>
         <label><span>Pause in Minuten</span><input type="number" name="break_minutes" min="0" step="1" value="0"></label>
@@ -1907,6 +1908,17 @@ HTML;
 
         foreach ($this->bookingService->entryTypeOptions() as $value => $label) {
             $html .= '<option value="' . $this->e($value) . '"' . ($selected === $value ? ' selected' : '') . '>' . $this->e($label) . '</option>';
+        }
+
+        return $html;
+    }
+
+    private function absenceReasonOptions(): string
+    {
+        $html = '<option value="">Nur bei Abwesenheit</option>';
+
+        foreach ($this->bookingService->absenceReasonOptions() as $value => $label) {
+            $html .= '<option value="' . $this->e($value) . '">' . $this->e($label) . '</option>';
         }
 
         return $html;

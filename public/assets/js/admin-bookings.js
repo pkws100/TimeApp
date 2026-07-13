@@ -47,6 +47,60 @@
         return false;
     }
 
+    var absenceReasonsByType = {
+        vacation: ['vacation_paid', 'unpaid_leave'],
+        sick: ['sick_paid', 'sick_unpaid'],
+        absent: ['paid_leave', 'employer_release_paid', 'unpaid_leave', 'unexcused_absence'],
+        holiday: ['employer_release_paid']
+    };
+
+    function syncAbsenceReasonControl(entryTypeSelect, reasonSelect) {
+        if (!entryTypeSelect || !reasonSelect) {
+            return;
+        }
+
+        var entryType = entryTypeSelect.value || 'work';
+        var allowed = absenceReasonsByType[entryType] || [];
+        var requiresReason = allowed.length > 0;
+
+        reasonSelect.required = requiresReason;
+        reasonSelect.disabled = !requiresReason;
+
+        Array.prototype.forEach.call(reasonSelect.options, function (option) {
+            if (option.value === '') {
+                option.hidden = false;
+                option.disabled = false;
+                return;
+            }
+
+            var isAllowed = allowed.indexOf(option.value) !== -1;
+            option.hidden = !isAllowed;
+            option.disabled = !isAllowed;
+        });
+
+        if (!requiresReason || allowed.indexOf(reasonSelect.value) === -1) {
+            reasonSelect.value = '';
+        }
+    }
+
+    function initAbsenceReasonControls(root) {
+        var scope = root || document;
+
+        scope.querySelectorAll('select[name="absence_reason_code"]').forEach(function (reasonSelect) {
+            var container = reasonSelect.closest('form') || scope;
+            var entryTypeSelect = container.querySelector('select[name="entry_type"]');
+
+            syncAbsenceReasonControl(entryTypeSelect, reasonSelect);
+
+            if (entryTypeSelect && !entryTypeSelect.dataset.absenceReasonBound) {
+                entryTypeSelect.dataset.absenceReasonBound = '1';
+                entryTypeSelect.addEventListener('change', function () {
+                    syncAbsenceReasonControl(entryTypeSelect, reasonSelect);
+                });
+            }
+        });
+    }
+
     function currentReturnTo() {
         var url = new URL(window.location.href);
 
@@ -444,6 +498,8 @@
             var workDate = updateForm.querySelector('[name="work_date"]');
             var projectId = updateForm.querySelector('[name="project_id"]');
             var entryType = updateForm.querySelector('[name="entry_type"]');
+            var absenceReason = updateForm.querySelector('[name="absence_reason_code"]');
+            var creditedDisplay = updateForm.querySelector('[data-booking-credited-display]');
             var startTime = updateForm.querySelector('[name="start_time"]');
             var endTime = updateForm.querySelector('[name="end_time"]');
             var breakMinutes = updateForm.querySelector('[name="break_minutes"]');
@@ -460,6 +516,15 @@
 
             if (entryType) {
                 entryType.value = booking.entry_type || 'work';
+            }
+
+            if (absenceReason) {
+                absenceReason.value = booking.absence_reason_code || '';
+                syncAbsenceReasonControl(entryType, absenceReason);
+            }
+
+            if (creditedDisplay) {
+                creditedDisplay.value = booking.credited_minutes == null ? 'Server berechnet' : String(booking.credited_minutes) + ' Min';
             }
 
             if (startTime) {
@@ -631,6 +696,7 @@
     }
 
     document.addEventListener('DOMContentLoaded', function () {
+        initAbsenceReasonControls(document);
         initBookingColumnControls();
 
         var modal = document.querySelector('[data-booking-modal]');

@@ -2867,7 +2867,9 @@
 
         return shell(
             '<section class="app-grid app-metrics">'
-            + metric('Monatssaldo', escapeHtml(account.saldo_label || '+00:00'), 'Soll ' + (account.target_label || '00:00') + ' · Ist ' + (account.actual_label || '00:00'))
+            + metric('Zeitkontostand', escapeHtml(account.closing_balance_label || 'Nicht eingerichtet'), account.cutover_date ? ('Seit ' + account.cutover_date) : 'Zeitkonto noch nicht eingerichtet')
+            + metric('Monatsveraenderung', escapeHtml(account.period_delta_label || account.saldo_label || '+00:00'), 'Stand ' + (account.as_of_date || 'heute'))
+            + metric('Arbeitszeit', escapeHtml(account.actual_label || '00:00'), 'Gutschriften ' + (account.credited_absence_label || '00:00'))
             + metric('Resturlaub', escapeHtml(formatVacationDays(vacation.remaining_days || 0)), 'Ohne offene Antraege')
             + metric('Verfuegbar', escapeHtml(formatVacationDays(vacation.available_days || 0)), 'Nach offenen Antraegen')
             + '</section>'
@@ -2878,11 +2880,26 @@
             + appInfoRows([
                 { label: 'Jahresanspruch', value: formatVacationDays(vacation.entitlement_days || 0) },
                 { label: 'Uebertrag', value: formatVacationDays(vacation.carryover_days || 0) },
+                { label: 'Eroeffnungsanpassung', value: formatVacationDays(vacation.opening_adjustment_days || 0) },
                 { label: 'Genehmigt/genommen', value: formatVacationDays(vacation.approved_taken_days || 0) },
+                { label: 'Zukuenftig genehmigt', value: formatVacationDays(vacation.future_approved_days || 0) },
                 { label: 'Offen beantragt', value: formatVacationDays(vacation.pending_days || 0) },
                 { label: 'Resturlaub', value: formatVacationDays(vacation.remaining_days || 0) },
                 { label: 'Verfuegbar', value: formatVacationDays(vacation.available_days || 0) }
             ])
+            + '</section>'
+            + '<section class="app-card app-grid">'
+            + '<div><p class="muted">Zeitkonto</p><h2>Aktueller Stand</h2></div>'
+            + appInfoRows([
+                { label: 'Zeitkonto seit', value: account.cutover_date || 'Nicht eingerichtet' },
+                { label: 'Stand zum', value: account.as_of_date || '-' },
+                { label: 'Monatssoll gesamt', value: account.month_target_label || '00:00' },
+                { label: 'Soll bis Stand', value: account.target_label || '00:00' },
+                { label: 'Geleistete Arbeitszeit', value: account.actual_label || '00:00' },
+                { label: 'Zeitgutschriften', value: account.credited_absence_label || '00:00' },
+                { label: 'Korrekturen', value: account.manual_adjustment_label || '+00:00' }
+            ])
+            + accountHistoryRows(account)
             + '</section>'
             + '<section class="app-card app-grid">'
             + '<div><p class="muted">Neuer Antrag</p><h2>Urlaub beantragen</h2></div>'
@@ -2902,6 +2919,33 @@
             + rows
             + '</section>'
         );
+    }
+
+    function accountHistoryRows(account) {
+        const timeEntries = Array.isArray(account.time_entries) ? account.time_entries.slice(0, 5) : [];
+        const vacationEntries = Array.isArray(account.vacation_entries) ? account.vacation_entries.slice(0, 5) : [];
+        const rows = [];
+
+        timeEntries.forEach((entry) => {
+            rows.push('<div class="app-info-row"><span>' + escapeHtml(entry.effective_date || '') + ' · Zeit</span><strong>' + escapeHtml(formatSignedMinutes(Number(entry.minutes || 0))) + '</strong></div>');
+        });
+
+        vacationEntries.forEach((entry) => {
+            rows.push('<div class="app-info-row"><span>' + escapeHtml(entry.effective_date || '') + ' · Urlaub</span><strong>' + escapeHtml(formatVacationDays(Number(entry.days || 0))) + '</strong></div>');
+        });
+
+        return rows.length === 0
+            ? '<div class="app-empty">Keine Konto-Buchungen vorhanden.</div>'
+            : '<div class="app-info-list">' + rows.join('') + '</div>';
+    }
+
+    function formatSignedMinutes(minutes) {
+        const sign = minutes >= 0 ? '+' : '-';
+        const absolute = Math.abs(minutes);
+        const hours = Math.floor(absolute / 60);
+        const mins = absolute % 60;
+
+        return sign + String(hours).padStart(2, '0') + ':' + String(mins).padStart(2, '0');
     }
 
     function vacationRequestRow(request) {

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Vacation;
 
 use App\Domain\Calendar\CalendarPolicyService;
+use App\Domain\TimeAccounts\DailyTargetService;
 use App\Domain\Timesheets\TimesheetWriteGuard;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateInterval;
@@ -19,8 +20,10 @@ final class VacationRequestService
     public function __construct(
         private DatabaseConnection $connection,
         private CalendarPolicyService $calendarPolicyService,
-        private TimesheetWriteGuard $writeGuard
+        private TimesheetWriteGuard $writeGuard,
+        private ?DailyTargetService $dailyTargetService = null
     ) {
+        $this->dailyTargetService ??= new DailyTargetService($calendarPolicyService);
     }
 
     public function listForUser(int $userId): array
@@ -326,6 +329,8 @@ final class VacationRequestService
 
     private function insertVacationTimesheet(int $requestId, int $userId, int $adminUserId, string $workDate): void
     {
+        $user = $this->user($userId) ?? [];
+        $creditedMinutes = $this->dailyTargetService?->effectiveTargetForDate($user, $workDate) ?? 0;
         $columns = [
             'user_id',
             'project_id',
@@ -362,6 +367,17 @@ final class VacationRequestService
         if ($this->connection->columnExists('timesheets', 'source')) {
             $columns[] = 'source';
             $values[] = '"vacation_request"';
+        }
+
+        if ($this->connection->columnExists('timesheets', 'credited_minutes')) {
+            $columns[] = 'credited_minutes';
+            $values[] = ':credited_minutes';
+            $bindings['credited_minutes'] = $creditedMinutes;
+        }
+
+        if ($this->connection->columnExists('timesheets', 'absence_reason_code')) {
+            $columns[] = 'absence_reason_code';
+            $values[] = '"vacation_paid"';
         }
 
         if ($this->connection->columnExists('timesheets', 'vacation_request_id')) {
@@ -553,6 +569,9 @@ final class VacationRequestService
             'first_name',
             'last_name',
             'email',
+            $this->columnOrLiteral('target_hours_month', '0', 'target_hours_month'),
+            $this->columnOrLiteral('target_hours_mode', '"month"', 'target_hours_mode'),
+            $this->columnOrLiteral('target_hours_week', 'NULL', 'target_hours_week'),
             $this->columnOrLiteral('workdays_mask', '"1,2,3,4,5"', 'workdays_mask'),
         ];
 

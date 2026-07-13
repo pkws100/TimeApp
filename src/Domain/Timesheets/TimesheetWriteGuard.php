@@ -43,23 +43,33 @@ final class TimesheetWriteGuard
             return;
         }
 
-        $locked = (int) ($this->connection->fetchColumn(
-            'SELECT COUNT(*)
+        $lock = $this->connection->fetchOne(
+            'SELECT closure_number, note
              FROM accounting_closures
              WHERE status IN ("final", "correction")
                AND period_start <= :work_date_start
                AND period_end >= :work_date_end
                AND (user_id IS NULL OR user_id = :user_id)
-               AND (project_id IS NULL OR project_id = :project_id)',
+               AND (project_id IS NULL OR project_id = :project_id)
+             ORDER BY id DESC
+             LIMIT 1',
             [
                 'work_date_start' => $workDate,
                 'work_date_end' => $workDate,
                 'user_id' => $userId,
                 'project_id' => $projectId,
             ]
-        ) ?? 0) > 0;
+        );
 
-        if ($locked) {
+        if ($lock !== null && array_key_exists('COUNT(*)', $lock) && (int) $lock['COUNT(*)'] <= 0) {
+            $lock = null;
+        }
+
+        if ($lock !== null && str_starts_with((string) ($lock['closure_number'] ?? ''), 'ZK-')) {
+            throw new InvalidArgumentException('Der gewaehlte Zeitraum ist wegen des Zeitkonto-Stichtags festgeschrieben. Korrekturen erfolgen ueber das Zeitkonto-Journal.');
+        }
+
+        if ($lock !== null) {
             throw new InvalidArgumentException('Der gewaehlte Zeitraum ist bereits festgeschrieben. Normale Aenderungen sind gesperrt.');
         }
     }

@@ -62,6 +62,9 @@ $requiredTables = [
     'users',
     'timesheets',
     'vacation_requests',
+    'employee_account_cutovers',
+    'time_account_entries',
+    'vacation_account_entries',
 ];
 
 foreach ($requiredTables as $table) {
@@ -86,8 +89,36 @@ if ($connection->tableExists('users')) {
     }
 }
 
-if ($connection->tableExists('timesheets') && !$connection->columnExists('timesheets', 'vacation_request_id')) {
-    $errors[] = 'timesheets.vacation_request_id fehlt';
+if ($connection->tableExists('timesheets')) {
+    foreach (['vacation_request_id', 'credited_minutes', 'absence_reason_code'] as $column) {
+        if (!$connection->columnExists('timesheets', $column)) {
+            $errors[] = sprintf('timesheets.%s fehlt', $column);
+        }
+    }
+}
+
+if ($connection->tableExists('employee_account_cutovers')) {
+    foreach (['active_final_user_id', 'effective_from', 'opening_time_balance_minutes', 'opening_remaining_leave_days', 'status'] as $column) {
+        if (!$connection->columnExists('employee_account_cutovers', $column)) {
+            $errors[] = sprintf('employee_account_cutovers.%s fehlt', $column);
+        }
+    }
+}
+
+if ($connection->tableExists('time_account_entries')) {
+    foreach (['user_id', 'effective_date', 'minutes', 'entry_type', 'source_type', 'source_id', 'reversal_of_id'] as $column) {
+        if (!$connection->columnExists('time_account_entries', $column)) {
+            $errors[] = sprintf('time_account_entries.%s fehlt', $column);
+        }
+    }
+}
+
+if ($connection->tableExists('vacation_account_entries')) {
+    foreach (['user_id', 'leave_year', 'effective_date', 'days', 'entry_type', 'source_type', 'source_id', 'reversal_of_id'] as $column) {
+        if (!$connection->columnExists('vacation_account_entries', $column)) {
+            $errors[] = sprintf('vacation_account_entries.%s fehlt', $column);
+        }
+    }
 }
 
 $requiredPermissions = [

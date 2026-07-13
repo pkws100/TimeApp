@@ -205,6 +205,8 @@ HTML;
         $csrfToken = (string) ($options['csrf_token'] ?? '');
         $projectOptions = $this->projectAssignmentOptions($projects);
         $entryTypeHtml = $this->entryTypeOptions($entryTypeOptions);
+        $absenceReasonOptions = is_array($options['absence_reason_options'] ?? null) ? $options['absence_reason_options'] : [];
+        $absenceReasonHtml = $this->absenceReasonOptions($absenceReasonOptions);
         $disabled = $canManage ? '' : ' disabled';
         $saveButton = $canManage ? '<button type="submit" class="button">Speichern</button>' : '<span class="muted">Keine Bearbeitungsrechte</span>';
         $isDeleted = (int) ($selectedBooking['is_deleted'] ?? 0) === 1;
@@ -213,6 +215,8 @@ HTML;
         $workDate = $this->e((string) ($selectedBooking['work_date'] ?? ''));
         $projectId = ($selectedBooking['project_id'] ?? null) === null ? '__none__' : (string) $selectedBooking['project_id'];
         $entryType = (string) ($selectedBooking['entry_type'] ?? 'work');
+        $absenceReasonCode = (string) ($selectedBooking['absence_reason_code'] ?? '');
+        $creditedMinutes = $selectedBooking['credited_minutes'] ?? null;
         $startTime = $this->e($this->timeValue($selectedBooking['start_time'] ?? null));
         $endTime = $this->e($this->timeValue($selectedBooking['end_time'] ?? null));
         $breakMinutes = $this->e((string) ($selectedBooking['break_minutes'] ?? 0));
@@ -303,6 +307,8 @@ HTML
                 <label><span>Datum</span><input type="date" name="work_date" value="{$workDate}"{$disabled} required></label>
                 <label><span>Projekt</span><select name="project_id"{$disabled}>{$this->markSelectedOption($projectOptions, $projectId)}</select></label>
                 <label><span>Typ</span><select name="entry_type"{$disabled}>{$this->markSelectedOption($entryTypeHtml, $entryType)}</select></label>
+                <label><span>Abwesenheitsgrund</span><select name="absence_reason_code"{$disabled}>{$this->markSelectedOption($absenceReasonHtml, $absenceReasonCode)}</select></label>
+                <label><span>Zeitgutschrift</span><input type="text" value="{$this->e($creditedMinutes === null ? 'Server berechnet' : ((string) $creditedMinutes . ' Min'))}" data-booking-credited-display disabled></label>
                 <label><span>Start</span><input type="time" name="start_time" value="{$startTime}"{$disabled}></label>
                 <label><span>Ende</span><input type="time" name="end_time" value="{$endTime}"{$disabled}></label>
                 <label><span>Pause in Minuten</span><input type="number" min="0" step="1" name="break_minutes" value="{$breakMinutes}"{$disabled}></label>
@@ -503,6 +509,9 @@ HTML;
             'project_label' => $projectLabel,
             'entry_type' => (string) ($booking['entry_type'] ?? 'work'),
             'entry_type_label' => $typeLabel,
+            'absence_reason_code' => (string) ($booking['absence_reason_code'] ?? ''),
+            'absence_reason_label' => (string) ($booking['absence_reason_label'] ?? ''),
+            'credited_minutes' => $booking['credited_minutes'] ?? null,
             'source' => (string) ($booking['source'] ?? 'app'),
             'source_label' => (string) ($booking['source_label'] ?? $this->sourceLabel((string) ($booking['source'] ?? 'app'))),
             'work_date' => (string) ($booking['work_date'] ?? ''),
@@ -730,6 +739,17 @@ HTML;
 
         foreach ($entryTypeOptions as $value => $label) {
             $html .= '<option value="' . $this->e($value) . '">' . $this->e($label) . '</option>';
+        }
+
+        return $html;
+    }
+
+    private function absenceReasonOptions(array $absenceReasonOptions): string
+    {
+        $html = '<option value="">Bitte waehlen</option>';
+
+        foreach ($absenceReasonOptions as $value => $label) {
+            $html .= '<option value="' . $this->e((string) $value) . '">' . $this->e((string) $label) . '</option>';
         }
 
         return $html;
