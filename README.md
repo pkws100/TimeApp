@@ -63,6 +63,8 @@ gesonderter Vereinbarung angeboten werden.
 - Stichtag-Vorschau/Finalisierung: `POST /admin/time-accounts/cutovers/preview` und `POST /admin/time-accounts/cutovers/finalize`
 - Stichtagsprotokoll: `GET /admin/time-accounts/cutovers/{id}/protocol`
 - Zeit-/Urlaubskonto-Korrekturen: `POST /admin/time-accounts/entries/time` und `POST /admin/time-accounts/entries/vacation`
+- Limitierte Journalhistorie Admin: `GET /admin/time-accounts/users/{id}/entries`
+- Limitierte Journalhistorie App: `GET /api/v1/app/time-account/entries`
 - Admin-AGB-PDF: `GET /admin/settings/company/agb-pdf/preview` und `GET /admin/settings/company/agb-pdf/download`
 - Admin-Datenschutz-PDF: `GET /admin/settings/company/datenschutz-pdf/preview` und `GET /admin/settings/company/datenschutz-pdf/download`
 - Dashboard-Overview: `GET /api/v1/dashboard/overview`
@@ -164,7 +166,7 @@ oder per HTTP-Smoke-Check geprueft werden.
 ## Backup und Restore-Status
 - `GET /api/v1/system/backup/export` erstellt ein ZIP mit Manifest, Datenbank-JSON, Upload-Kandidaten und Security-/Runtime-Hinweisen.
 - `POST /api/v1/system/backup/import/validate` validiert ein hochgeladenes Backup als Dry-Run.
-- Der Validate-Endpunkt prueft Manifest, `backup_version`, `schema_version`, deklarierte Tabellen-JSON-Dateien und unsichere Archivpfade.
+- Der Validate-Endpunkt prueft Manifest, `backup_version`, `schema_version`, deklarierte Tabellen-JSON-Dateien und unsichere Archivpfade. Zeitkonto-Backups muessen die Stichtags- und Journal-Tabellen vollstaendig enthalten.
 - Es gibt bewusst noch keinen produktiven Restore-Apply. Ein Upload fuehrt niemals automatisch einen Restore aus.
 - Runtime-Overrides wie `storage/config/database.override.php` werden aus App-Backup-ZIPs ausgeschlossen und nur im Manifest als Hinweis gefuehrt.
 - Backup- und Restore-Validierung sind mit `settings.database.manage` geschuetzt.
@@ -183,10 +185,15 @@ oder per HTTP-Smoke-Check geprueft werden.
 ## Revisionsfaehige Zeit- und Urlaubskonten
 - Zeitkonten koennen je Mitarbeiter mit einem Einfuehrungsstichtag finalisiert werden. Der Eroeffnungssaldo ist der uebernommene Stand am Ende des Vortages; ab dem Stichtag berechnet die App den kumulierten Stand selbst.
 - Finale Stichtage erzeugen unveraenderliche Journalbuchungen fuer Zeitkonto und Urlaubskonto sowie eine userbezogene Sperre des Altzeitraums ueber `accounting_closures`.
+- Journalbuchungen gehoeren ueber `cutover_id` zu genau einer Stichtagsgeneration. Aktive Berechnungen beruecksichtigen nur Journalzeilen der aktiven finalen Generation; revidierte Generationen bleiben historisch sichtbar, wirken aber nicht mehr in aktuelle Salden.
+- Interne Stichtagssperren sind in `accounting_closures` mit `source_type = employee_account_cutover` gekennzeichnet. Sie wirken fuer Timesheet-Schreibschutz, werden in normalen Abschlusslisten und Exporten aber ausgeblendet.
+- Finalisierung und Revidierung sperren zuerst den Mitarbeiter-Stichtag, danach den globalen `accounting-timesheet-write`-Lock, pruefen die Vorschau erneut und schreiben erst dann innerhalb der DB-Transaktion.
 - Korrekturen, Auszahlungen, Freizeitausgleich, Urlaubsanpassungen und Revidierungen laufen ueber Journal- und Gegenbuchungen, nicht ueber physische Loeschung oder direkte Aenderung alter Journalzeilen.
 - Bezahlte Abwesenheiten speichern eine separate Zeitgutschrift in `timesheets.credited_minutes`; tatsaechliche Arbeitszeit bleibt davon getrennt.
-- Urlaubskonten werden jahresbezogen aus dem Urlaubskonto-Journal berechnet. Die User-Felder fuer Jahresurlaub und Uebertrag dienen weiter als Vorschlagswerte fuer neue Stichtage.
-- Die Mitarbeiter-App zeigt Zeitkontostand, Monatsveraenderung, Arbeitszeit, Zeitgutschriften, Resturlaub und offene bzw. zukuenftig genehmigte Urlaube lesend an.
+- Urlaubskonten werden jahresbezogen aus dem Urlaubskonto-Journal berechnet. Die User-Felder fuer Jahresurlaub und Uebertrag dienen weiter als Vorschlagswerte fuer neue Stichtage und neue Urlaubsjahre. Vor der ersten schreibenden Urlaubskonto-Bewegung eines Jahres wird die Jahreseroeffnung je `user_id`, `leave_year` und `cutover_id` idempotent gebucht.
+- Arbeit plus ganztagige Abwesenheit sowie doppelte ganztagige Abwesenheiten am selben Tag werden serverseitig blockiert; mehrere Arbeitsbuchungen pro Tag bleiben erlaubt.
+- Rueckwirkende Arbeitszeitmodell-, Feiertagsregion- und Betriebsschliessungs-Aenderungen werden bei betroffenen aktiven Zeitkonten blockiert, bis ein versioniertes historisches Regelmodell eingefuehrt ist.
+- Die Mitarbeiter-App zeigt Zeitkontostand, Monatsveraenderung, Arbeitszeit, Zeitgutschriften, Resturlaub und offene bzw. zukuenftig genehmigte Urlaube lesend an. Journalhistorien werden separat und limitiert geladen.
 
 ## Wichtige Composer-Befehle
 ```bash

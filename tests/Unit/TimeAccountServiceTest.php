@@ -230,6 +230,12 @@ final class TimeAccountPdoDouble extends PDO
             return [['holiday_region' => $this->holidayRegion]];
         }
 
+        if (str_contains($sql, 'FROM company_closures') && str_contains($sql, 'year = :year')) {
+            $year = (int) ($params['year'] ?? 0);
+
+            return array_values(array_filter($this->closures, static fn (array $closure): bool => (int) ($closure['is_deleted'] ?? 0) === 0 && (int) ($closure['year'] ?? substr((string) $closure['date_from'], 0, 4)) === $year));
+        }
+
         if (str_contains($sql, 'FROM company_closures') && str_contains($sql, 'date_from <= :date_from')) {
             $date = (string) ($params['date_from'] ?? '');
 

@@ -112,6 +112,8 @@ Bereits umgesetzt:
 - revisionsfaehige Zeit- und Urlaubskonten mit Einfuehrungsstichtag, Eroeffnungssaldo, jahresbezogenem Urlaubskonto-Journal, Zeitkonto-Journal, Korrektur-/Gegenbuchungen und Stichtagsprotokoll
 - serverseitige Zeitgutschriften fuer bezahlte Abwesenheiten ueber `timesheets.credited_minutes` und fachliche Abwesenheitsgruende ueber `absence_reason_code`
 - kumulierter Zeitkontostand ab finalisiertem Stichtag, aktuelle Monatsberechnung nur bis Standdatum und neutrale Anzeige von positivem/negativem Zeitkontostand
+- Stichtagsgenerationen ueber `cutover_id` in Zeit- und Urlaubskonto-Journalen; aktive Berechnungen lesen nur die aktive finale Generation, revidierte Generationen bleiben historisch erhalten
+- interne Stichtagssperren in `accounting_closures` mit `source_type = employee_account_cutover`, wirksam fuer Timesheet-Schreibschutz, aber ausgeblendet in normalen Abschlusslisten und Exporten
 
 Noch nicht final umgesetzt:
 
@@ -137,7 +139,11 @@ Diese Entscheidungen gelten aktuell als gesetzt und sollen nicht ohne expliziten
 - `timesheets` decken mindestens `work`, `sick`, `vacation`, `holiday` und `absent` ab.
 - Tatsaechliche Arbeitszeit und Zeitkonto-Zeitgutschrift sind getrennt: `net_minutes` bleibt geleistete Arbeitszeit, `credited_minutes` ist nur die Gutschrift fuer bezahlte Abwesenheit.
 - Ein finalisierter Zeitkonto-Stichtag uebernimmt den Stand am Ende des Vortages; Zeiten davor veraendern den neuen kumulierten Zeitkontostand nicht.
+- Stichtagsfinalisierung und Revidierung verwenden die feste Sperrreihenfolge: Mitarbeiter-Stichtagslock, globaler `accounting-timesheet-write`-Lock, erneute Vorschau/Pruefung, DB-Transaktion, Freigabe in umgekehrter Reihenfolge.
 - Korrekturen an Zeit- und Urlaubskonten erfolgen ueber unveraenderliche Journalbuchungen und Gegenbuchungen, nicht durch Bearbeiten oder physisches Loeschen alter Journalzeilen.
+- Journalbuchungen muessen einer aktiven Stichtagsgeneration zugeordnet sein; freie Reversal- oder Nullbuchungen sind fachlich nicht erlaubt, ausser explizit zugelassene Eroeffnungsbuchungen.
+- Urlaubskonto-Jahreseroeffnungen werden je Mitarbeiter, Urlaubsjahr und Stichtagsgeneration idempotent gebucht. Spaetere Stammdatenaenderungen veraendern eroeffnete Jahre nicht rueckwirkend.
+- Arbeit plus ganztagige Abwesenheit sowie doppelte ganztagige Abwesenheiten am selben Tag werden zentral blockiert; mehrere Arbeitsbuchungen bleiben erlaubt.
 - Positive rechnerische Zeitkontostaende werden neutral als positiver Zeitkontostand bezeichnet, nicht automatisch als genehmigte Ueberstunden.
 - Fehlende Tagesbuchungen koennen fuer aktive Mitarbeiter an Werktagen als Status angezeigt werden; dieser abgeleitete Fehlend-Status erzeugt keine automatische `timesheets`-Buchung.
 - Gesetzliche Feiertage und Betriebsurlaub sind Anzeige- und Pflichtlogik; sie erzeugen keine automatischen `timesheets`-Buchungen und deaktivieren abgeleitetes Fehlen bzw. Fehlbuchungs-Pushes.
@@ -170,6 +176,9 @@ Regeln:
 - `timesheets` bleiben revisionssicher per MariaDB System Versioning
 - Aenderungen an `timesheets` bei system versioning muessen `SET SESSION system_versioning_alter_history = KEEP` nutzen und im `finally` wieder auf `ERROR` setzen.
 - Finalisierte Stichtage sperren den Altzeitraum userbezogen ueber `accounting_closures`; normale Timesheet-Aenderungen davor sind gesperrt, Korrekturen laufen ueber Journale.
+- Interne Stichtagssperren muessen `source_type/source_id` setzen und duerfen in normalen Abschlusslisten und -exporten nicht als manuelle Buchhaltungsabschluesse erscheinen.
+- FK-Beziehungen von Usern zu Stichtagen und Journalen muessen historienstabil bleiben; physisches User-Loeschen darf keine Zeitkonto-Historie kaskadierend entfernen.
+- Rueckwirkende Arbeitszeitmodell-, Feiertagsregion- und Betriebsschliessungs-Aenderungen bei betroffenen aktiven Zeitkonten sind bis zu einem versionierten Historienmodell zu blockieren.
 - Archivierungsfelder sind Teil der Historien- und GoBD-Strategie
 - Beziehungen und Historie duerfen durch Archivierung nicht unlesbar werden
 

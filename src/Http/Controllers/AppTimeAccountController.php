@@ -35,4 +35,22 @@ final class AppTimeAccountController
             'data' => $this->timeAccountService->monthlyAccount((int) $user['id'], $year, $month),
         ]);
     }
+
+    public function entries(Request $request): Response
+    {
+        $user = $this->authService->currentUser();
+
+        if ($user === null) {
+            return Response::json(['ok' => false, 'message' => 'Bitte erneut anmelden.'], 401);
+        }
+
+        $year = (int) $request->query('year', (int) date('Y'));
+        $limit = max(1, min(100, (int) $request->query('limit', 50)));
+        $page = max(1, (int) $request->query('page', 1));
+
+        return Response::json([
+            'ok' => true,
+            'data' => $this->timeAccountService->journalEntries((int) $user['id'], $year, $limit, $page),
+        ]);
+    }
 }

@@ -43,8 +43,11 @@ final class TimesheetWriteGuard
             return;
         }
 
+        $sourceSelect = $this->connection->columnExists('accounting_closures', 'source_type')
+            ? 'source_type'
+            : 'NULL AS source_type';
         $lock = $this->connection->fetchOne(
-            'SELECT closure_number, note
+            'SELECT closure_number, note, ' . $sourceSelect . '
              FROM accounting_closures
              WHERE status IN ("final", "correction")
                AND period_start <= :work_date_start
@@ -65,7 +68,7 @@ final class TimesheetWriteGuard
             $lock = null;
         }
 
-        if ($lock !== null && str_starts_with((string) ($lock['closure_number'] ?? ''), 'ZK-')) {
+        if ($lock !== null && ((string) ($lock['source_type'] ?? '') === 'employee_account_cutover' || str_starts_with((string) ($lock['closure_number'] ?? ''), 'ZK-'))) {
             throw new InvalidArgumentException('Der gewaehlte Zeitraum ist wegen des Zeitkonto-Stichtags festgeschrieben. Korrekturen erfolgen ueber das Zeitkonto-Journal.');
         }
 

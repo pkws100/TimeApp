@@ -24,10 +24,12 @@ final class AdminBookingService
         private TimesheetCalculator $calculator,
         private ?TimesheetSignatureService $signatureService = null,
         private ?TimesheetWriteGuard $writeGuard = null,
-        private ?DailyTargetService $dailyTargetService = null
+        private ?DailyTargetService $dailyTargetService = null,
+        private ?TimesheetDayConflictService $dayConflictService = null
     ) {
         $this->writeGuard ??= new TimesheetWriteGuard($connection);
         $this->dailyTargetService ??= new DailyTargetService(new CalendarPolicyService($connection));
+        $this->dayConflictService ??= new TimesheetDayConflictService($connection);
     }
 
     public function activeCount(): int
@@ -156,15 +158,6 @@ final class AdminBookingService
 
         [$where, $bindings] = $this->buildFilterClause($filters);
         $hasSourceColumn = $this->hasTimesheetSourceColumn();
-        $sourceSelect = $hasSourceColumn
-            ? 'COALESCE(timesheets.source, "app") AS source,'
-            : '"app" AS source,';
-        $creditedSelect = $this->connection->columnExists('timesheets', 'credited_minutes')
-            ? 'timesheets.credited_minutes,'
-            : 'NULL AS credited_minutes,';
-        $absenceReasonSelect = $this->connection->columnExists('timesheets', 'absence_reason_code')
-            ? 'timesheets.absence_reason_code,'
-            : 'NULL AS absence_reason_code,';
         $auditSelect = '0 AS change_count, NULL AS last_change_at, NULL AS last_action_type, NULL AS last_change_reason';
         $auditJoin = '';
 
@@ -195,33 +188,7 @@ final class AdminBookingService
         }
 
         $sql = 'SELECT
-                timesheets.id,
-                timesheets.user_id,
-                timesheets.project_id,
-                timesheets.work_date,
-                timesheets.start_time,
-                timesheets.end_time,
-                timesheets.gross_minutes,
-                timesheets.break_minutes,
-                timesheets.net_minutes,
-                ' . $creditedSelect . '
-                timesheets.expenses_amount,
-                timesheets.entry_type,
-                ' . $absenceReasonSelect . '
-                ' . $sourceSelect . '
-                timesheets.note,
-                timesheets.updated_at,
-                COALESCE(timesheets.is_deleted, 0) AS is_deleted,
-                timesheets.deleted_at,
-                timesheets.deleted_by_user_id,
-                users.employee_number,
-                users.first_name,
-                users.last_name,
-                COALESCE(users.is_deleted, 0) AS user_is_deleted,
-                projects.project_number,
-                projects.name AS project_name,
-                COALESCE(projects.is_deleted, 0) AS project_is_deleted,
-                ' . $auditSelect . '
+                ' . $this->bookingSelectColumns($auditSelect) . '
             FROM timesheets
             LEFT JOIN users ON users.id = timesheets.user_id
             LEFT JOIN projects ON projects.id = timesheets.project_id
@@ -283,9 +250,6 @@ final class AdminBookingService
             $bindings[$key] = $id;
         }
 
-        $sourceSelect = $this->hasTimesheetSourceColumn()
-            ? 'COALESCE(timesheets.source, "app") AS source,'
-            : '"app" AS source,';
         $auditSelect = '0 AS change_count, NULL AS last_change_at, NULL AS last_action_type, NULL AS last_change_reason';
         $auditJoin = '';
 
@@ -323,31 +287,7 @@ final class AdminBookingService
         $orderIds = implode(',', $ids);
         $rows = $this->connection->fetchAll(
             'SELECT
-                timesheets.id,
-                timesheets.user_id,
-                timesheets.project_id,
-                timesheets.work_date,
-                timesheets.start_time,
-                timesheets.end_time,
-                timesheets.gross_minutes,
-                timesheets.break_minutes,
-                timesheets.net_minutes,
-                timesheets.expenses_amount,
-                timesheets.entry_type,
-                ' . $sourceSelect . '
-                timesheets.note,
-                timesheets.updated_at,
-                COALESCE(timesheets.is_deleted, 0) AS is_deleted,
-                timesheets.deleted_at,
-                timesheets.deleted_by_user_id,
-                users.employee_number,
-                users.first_name,
-                users.last_name,
-                COALESCE(users.is_deleted, 0) AS user_is_deleted,
-                projects.project_number,
-                projects.name AS project_name,
-                COALESCE(projects.is_deleted, 0) AS project_is_deleted,
-                ' . $auditSelect . '
+                ' . $this->bookingSelectColumns($auditSelect) . '
              FROM timesheets
              LEFT JOIN users ON users.id = timesheets.user_id
              LEFT JOIN projects ON projects.id = timesheets.project_id
@@ -396,31 +336,7 @@ final class AdminBookingService
 
         $rows = $this->connection->fetchAll(
             'SELECT
-                timesheets.id,
-                timesheets.user_id,
-                timesheets.project_id,
-                timesheets.work_date,
-                timesheets.start_time,
-                timesheets.end_time,
-                timesheets.gross_minutes,
-                timesheets.break_minutes,
-                timesheets.net_minutes,
-                timesheets.expenses_amount,
-                timesheets.entry_type,
-                ' . ($this->hasTimesheetSourceColumn() ? 'COALESCE(timesheets.source, "app")' : '"app"') . ' AS source,
-                timesheets.note,
-                timesheets.updated_at,
-                COALESCE(timesheets.is_deleted, 0) AS is_deleted,
-                timesheets.deleted_at,
-                timesheets.deleted_by_user_id,
-                users.employee_number,
-                users.first_name,
-                users.last_name,
-                COALESCE(users.is_deleted, 0) AS user_is_deleted,
-                projects.project_number,
-                projects.name AS project_name,
-                COALESCE(projects.is_deleted, 0) AS project_is_deleted,
-                ' . $auditSelect . '
+                ' . $this->bookingSelectColumns($auditSelect) . '
              FROM timesheets
              LEFT JOIN users ON users.id = timesheets.user_id
              LEFT JOIN projects ON projects.id = timesheets.project_id
@@ -458,6 +374,7 @@ final class AdminBookingService
                 $normalized['project_id'],
                 (string) $normalized['work_date']
             );
+            $this->assertDayConflictFree($normalized, null);
 
             $bookingId = 0;
 
@@ -512,6 +429,7 @@ final class AdminBookingService
                 $normalized['project_id'],
                 (string) $normalized['work_date']
             );
+            $this->assertDayConflictFree(['user_id' => (int) ($before['user_id'] ?? 0)] + $normalized, $id);
 
             $this->connection->transaction(function () use ($id, $normalized, $changedByUserId, $reason, $before): void {
                 if ($this->signatureRelevantChanges($before, $normalized)) {
@@ -639,6 +557,8 @@ final class AdminBookingService
                 'Ende' => (string) ($row['end_time'] ?? ''),
                 'Pause (Min)' => (int) ($row['break_minutes'] ?? 0),
                 'Netto (Min)' => (int) ($row['net_minutes'] ?? 0),
+                'Gutschrift (Min)' => isset($row['credited_minutes']) ? (int) $row['credited_minutes'] : '',
+                'Abwesenheitsgrund' => (string) ($row['absence_reason_label'] ?? ''),
                 'Status' => (int) ($row['is_deleted'] ?? 0) === 1 ? 'Archiviert' : 'Aktiv',
                 'Kundenbestaetigung' => $signature !== null ? 'Ja' : 'Nein',
                 'Kundenbestaetigung Name' => (string) ($signature['customer_name'] ?? ''),
@@ -678,6 +598,8 @@ final class AdminBookingService
                 'gross_minutes' => (int) ($row['gross_minutes'] ?? 0),
                 'break_minutes' => (int) ($row['break_minutes'] ?? 0),
                 'net_minutes' => (int) ($row['net_minutes'] ?? 0),
+                'credited_minutes' => isset($row['credited_minutes']) ? (int) $row['credited_minutes'] : null,
+                'absence_reason_code' => $row['absence_reason_code'] ?? null,
                 'expenses_amount' => (string) ($row['expenses_amount'] ?? '0.00'),
                 'note' => (string) ($row['note'] ?? ''),
                 'booking_status' => (int) ($row['is_deleted'] ?? 0) === 1 ? 'archived' : 'active',
@@ -708,6 +630,60 @@ final class AdminBookingService
             'unpaid_leave' => 'Unbezahlter Urlaub',
             'unexcused_absence' => 'Unentschuldigtes Fehlen',
         ];
+    }
+
+    private function bookingSelectColumns(string $auditSelect): string
+    {
+        return implode(",\n                ", [
+            'timesheets.id',
+            'timesheets.user_id',
+            'timesheets.project_id',
+            'timesheets.work_date',
+            'timesheets.start_time',
+            'timesheets.end_time',
+            'timesheets.gross_minutes',
+            'timesheets.break_minutes',
+            'timesheets.net_minutes',
+            $this->creditedMinutesSelect(),
+            'timesheets.expenses_amount',
+            'timesheets.entry_type',
+            $this->absenceReasonSelect(),
+            $this->sourceSelect(),
+            'timesheets.note',
+            'timesheets.updated_at',
+            'COALESCE(timesheets.is_deleted, 0) AS is_deleted',
+            'timesheets.deleted_at',
+            'timesheets.deleted_by_user_id',
+            'users.employee_number',
+            'users.first_name',
+            'users.last_name',
+            'COALESCE(users.is_deleted, 0) AS user_is_deleted',
+            'projects.project_number',
+            'projects.name AS project_name',
+            'COALESCE(projects.is_deleted, 0) AS project_is_deleted',
+            $auditSelect,
+        ]);
+    }
+
+    private function creditedMinutesSelect(): string
+    {
+        return $this->connection->columnExists('timesheets', 'credited_minutes')
+            ? 'timesheets.credited_minutes'
+            : 'NULL AS credited_minutes';
+    }
+
+    private function absenceReasonSelect(): string
+    {
+        return $this->connection->columnExists('timesheets', 'absence_reason_code')
+            ? 'timesheets.absence_reason_code'
+            : 'NULL AS absence_reason_code';
+    }
+
+    private function sourceSelect(): string
+    {
+        return $this->hasTimesheetSourceColumn()
+            ? 'COALESCE(timesheets.source, "app") AS source'
+            : '"app" AS source';
     }
 
     private function insertColumnSql(string $column): string
@@ -872,6 +848,28 @@ final class AdminBookingService
         $this->writeGuard?->assertAccountingPeriodOpen($userId, $projectId, $workDate);
     }
 
+    private function assertDayConflictFree(array $booking, ?int $excludeTimesheetId): void
+    {
+        $userId = (int) ($booking['user_id'] ?? 0);
+        $workDate = (string) ($booking['work_date'] ?? '');
+        $entryType = (string) ($booking['entry_type'] ?? 'work');
+
+        if ($entryType === 'work') {
+            $this->dayConflictService?->assertNoConflictForWork($userId, $workDate, $excludeTimesheetId);
+
+            return;
+        }
+
+        $user = $this->userForTarget($userId);
+        $target = $user === null ? 0 : (int) ($this->dailyTargetService?->effectiveTargetForDate($user, $workDate) ?? 0);
+
+        if ($target <= 0) {
+            throw new InvalidArgumentException('Am gewaehlten Datum liegt fuer diesen Mitarbeiter kein anrechenbarer Arbeitstag vor.');
+        }
+
+        $this->dayConflictService?->assertNoConflictForFullDayAbsence($userId, $workDate, $excludeTimesheetId);
+    }
+
     /**
      * @template T
      * @param callable(): T $callback
@@ -930,11 +928,15 @@ final class AdminBookingService
             $breakMinutes = 0;
             $netMinutes = 0;
             $reasonInput = $payload['absence_reason_code'] ?? ($before['absence_reason_code'] ?? null);
-            $isLegacyUnchangedAbsence = trim((string) ($reasonInput ?? '')) === ''
-                && trim((string) ($before['absence_reason_code'] ?? '')) === ''
-                && $entryType === (string) ($before['entry_type'] ?? '');
-            $absenceReasonCode = $isLegacyUnchangedAbsence ? null : $this->normalizeAbsenceReason($entryType, $reasonInput);
-            $creditedMinutes = $isLegacyUnchangedAbsence
+            $absenceReasonProvided = array_key_exists('absence_reason_code', $payload);
+            $absenceContextUnchanged = $entryType === (string) ($before['entry_type'] ?? '')
+                && $workDate === (string) ($before['work_date'] ?? '')
+                && !$absenceReasonProvided;
+            $isLegacyUnchangedAbsence = $absenceContextUnchanged && trim((string) ($before['absence_reason_code'] ?? '')) === '';
+            $absenceReasonCode = $absenceContextUnchanged
+                ? (trim((string) ($before['absence_reason_code'] ?? '')) === '' ? null : (string) $before['absence_reason_code'])
+                : $this->normalizeAbsenceReason($entryType, $reasonInput);
+            $creditedMinutes = $absenceContextUnchanged || $isLegacyUnchangedAbsence
                 ? (isset($before['credited_minutes']) ? (int) $before['credited_minutes'] : null)
                 : $this->creditedMinutesForAbsence((int) ($before['user_id'] ?? 0), $workDate, $absenceReasonCode);
         }

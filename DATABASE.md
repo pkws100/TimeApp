@@ -25,7 +25,9 @@
 - `timesheets.credited_minutes` speichert ausschliesslich Zeitgutschriften fuer nicht geleistete Arbeit; `absence_reason_code` differenziert Abwesenheiten wie bezahlten Urlaub, bezahlte Krankheit, unbezahlte Abwesenheit und unentschuldigtes Fehlen.
 - Ein finaler Einfuehrungsstichtag in `employee_account_cutovers` definiert den verbindlich uebernommenen Zeitkontostand am Ende des Vortages. Zeiten vor `effective_from` veraendern den neuen kumulierten Zeitkontostand nicht mehr.
 - `time_account_entries` und `vacation_account_entries` sind unveraenderliche Journale fuer Eroeffnungen, manuelle Korrekturen, Auszahlungen, Verfall und Gegenbuchungen. Fehler werden durch `reversal`-Buchungen mit `reversal_of_id` korrigiert, nicht durch Bearbeiten oder Loeschen alter Journalzeilen.
-- `users.vacation_days_year` und `users.vacation_carryover_days` bleiben als Vorschlagswerte fuer neue Stichtage bzw. Urlaubsjahre erhalten; sobald jahresbezogene Urlaubskonto-Journalbuchungen vorhanden sind, veraendern diese User-Felder historische Urlaubskonten nicht rueckwirkend.
+- Journalzeilen tragen `cutover_id` und gehoeren dadurch zu genau einer Stichtagsgeneration. Aktive Zeit- und Urlaubskontoberechnungen verwenden nur Eintraege der aktiven finalen Generation; revidierte Generationen bleiben historisch erhalten, sind aber aus aktiven Salden ausgeschlossen.
+- `accounting_closures.source_type/source_id` kennzeichnen interne Stichtagssperren strukturell. `source_type = employee_account_cutover` sperrt Timesheet-Schreibpfade vor dem Stichtag, wird aber aus normalen Abschlusslisten und -exporten herausgefiltert.
+- `users.vacation_days_year` und `users.vacation_carryover_days` bleiben als Vorschlagswerte fuer neue Stichtage bzw. Urlaubsjahre erhalten; sobald jahresbezogene Urlaubskonto-Journalbuchungen vorhanden sind, veraendern diese User-Felder historische Urlaubskonten nicht rueckwirkend. Jahreseroeffnungen werden je `user_id`, `leave_year` und `cutover_id` idempotent gebucht.
 - GoBD-konforme Archivierung wird ueber `is_deleted`, `deleted_at` und `deleted_by_user_id` auf den relevanten Stammdaten umgesetzt.
 - SMTP- und GEO-Vorbereitungsfelder liegen zentral im globalen Settings-Datensatz, damit Backend und spaeteres Frontend dieselbe Quelle nutzen.
 
@@ -39,6 +41,14 @@
 - Der aktuelle Monat rechnet fuer den aktuellen Kontostand nur bis zum Standdatum, standardmaessig heute. Zukuenftige Arbeitstage erzeugen keine aktuellen Minusstunden.
 - Feiertage und bezahlte Betriebsschliessungen reduzieren das Soll. Sie erzeugen keine zusaetzliche automatische Zeitgutschrift, damit keine Doppelwertung entsteht.
 - Ohne finalisierten Stichtag bleiben Monatsauswertungen verfuegbar, aber es wird kein kumulierter Zeitkontostand erfunden.
+- Monate vollstaendig vor dem aktiven Stichtag liefern `cutover_status = not_active_in_period` und zeigen keinen kuenstlichen Eroeffnungs- oder Endbestand.
+- Manuelle ganztagige Abwesenheiten sind nur an Tagen mit positivem effektivem Tages-Soll erlaubt. Wochenenden, Feiertage und Betriebsschliessungen erzeugen keinen zusaetzlichen Abwesenheitsgutschrift-Bedarf.
+- Mehrere Arbeitsbuchungen am selben Tag sind zulaessig. Arbeit plus ganztagige Abwesenheit sowie doppelte ganztagige Abwesenheiten werden zentral serverseitig blockiert.
+
+## Uebergangsschutz
+- Arbeitszeitmodell-Aenderungen bei aktiven Zeitkonten mit Bewegungen werden blockiert, weil historische Arbeitszeitmodellversionen noch nicht voll modelliert sind.
+- Feiertagsregionen und rueckwirkende Betriebsschliessungen werden blockiert, wenn aktive Zeitkonten betroffen waeren.
+- Die feste Sperrreihenfolge fuer Stichtagsfinalisierung und Revidierung lautet: Mitarbeiter-Stichtagslock, globaler `accounting-timesheet-write`-Lock, erneute Vorschau/Pruefung, DB-Transaktion, Freigabe in umgekehrter Reihenfolge.
 
 ## Seeder-Startpunkt
 - Standard-Seeds liefern Rollen, Rechte und notwendige Referenzdaten.

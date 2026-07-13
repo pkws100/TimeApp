@@ -106,17 +106,45 @@ if ($connection->tableExists('employee_account_cutovers')) {
 }
 
 if ($connection->tableExists('time_account_entries')) {
-    foreach (['user_id', 'effective_date', 'minutes', 'entry_type', 'source_type', 'source_id', 'reversal_of_id'] as $column) {
+    foreach (['user_id', 'cutover_id', 'effective_date', 'minutes', 'entry_type', 'source_type', 'source_id', 'reversal_of_id'] as $column) {
         if (!$connection->columnExists('time_account_entries', $column)) {
             $errors[] = sprintf('time_account_entries.%s fehlt', $column);
+        }
+    }
+
+    if ($connection->columnExists('time_account_entries', 'cutover_id')) {
+        $unassigned = (int) ($connection->fetchColumn(
+            'SELECT COUNT(*) FROM time_account_entries WHERE cutover_id IS NULL'
+        ) ?? 0);
+
+        if ($unassigned > 0) {
+            $errors[] = sprintf('%d Zeitkonto-Journalzeilen sind keiner Stichtagsgeneration zugeordnet und werden aus aktiven Salden ausgeschlossen.', $unassigned);
         }
     }
 }
 
 if ($connection->tableExists('vacation_account_entries')) {
-    foreach (['user_id', 'leave_year', 'effective_date', 'days', 'entry_type', 'source_type', 'source_id', 'reversal_of_id'] as $column) {
+    foreach (['user_id', 'cutover_id', 'leave_year', 'effective_date', 'days', 'entry_type', 'source_type', 'source_id', 'reversal_of_id'] as $column) {
         if (!$connection->columnExists('vacation_account_entries', $column)) {
             $errors[] = sprintf('vacation_account_entries.%s fehlt', $column);
+        }
+    }
+
+    if ($connection->columnExists('vacation_account_entries', 'cutover_id')) {
+        $unassigned = (int) ($connection->fetchColumn(
+            'SELECT COUNT(*) FROM vacation_account_entries WHERE cutover_id IS NULL'
+        ) ?? 0);
+
+        if ($unassigned > 0) {
+            $errors[] = sprintf('%d Urlaubskonto-Journalzeilen sind keiner Stichtagsgeneration zugeordnet und werden aus aktiven Salden ausgeschlossen.', $unassigned);
+        }
+    }
+}
+
+if ($connection->tableExists('accounting_closures')) {
+    foreach (['source_type', 'source_id'] as $column) {
+        if (!$connection->columnExists('accounting_closures', $column)) {
+            $errors[] = sprintf('accounting_closures.%s fehlt', $column);
         }
     }
 }

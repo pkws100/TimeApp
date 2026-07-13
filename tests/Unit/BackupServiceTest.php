@@ -94,6 +94,46 @@ final class BackupServiceTest extends TestCase
         self::assertArrayHasKey('restore_plan', $result);
     }
 
+    public function testValidateImportAcceptsCompleteAccountJournalBackup(): void
+    {
+        $tables = ['employee_account_cutovers', 'time_account_entries', 'users', 'vacation_account_entries'];
+        $service = $this->backupServiceExpectingTables($tables);
+        $manifest = $this->validManifest(['database' => ['tables' => $this->manifestTables($tables)]]);
+        $zipPath = $this->zipWithManifest($manifest, $this->databaseFilesForTables($tables), false);
+
+        try {
+            $result = $service->validateImport(['tmp_name' => $zipPath]);
+
+            self::assertTrue($result['ok']);
+            self::assertSame([
+                'database/employee_account_cutovers.json',
+                'database/time_account_entries.json',
+                'database/users.json',
+                'database/vacation_account_entries.json',
+            ], $result['database_files']);
+        } finally {
+            @unlink($zipPath);
+        }
+    }
+
+    public function testValidateImportRejectsMissingAccountJournalTable(): void
+    {
+        $expectedTables = ['employee_account_cutovers', 'time_account_entries', 'users', 'vacation_account_entries'];
+        $manifestTables = ['employee_account_cutovers', 'users', 'vacation_account_entries'];
+        $service = $this->backupServiceExpectingTables($expectedTables);
+        $manifest = $this->validManifest(['database' => ['tables' => $this->manifestTables($manifestTables)]]);
+        $zipPath = $this->zipWithManifest($manifest, $this->databaseFilesForTables($manifestTables), false);
+
+        try {
+            $this->expectException(\RuntimeException::class);
+            $this->expectExceptionMessage('Die Tabellenliste im Backup passt nicht zum aktuellen System.');
+
+            $service->validateImport(['tmp_name' => $zipPath]);
+        } finally {
+            @unlink($zipPath);
+        }
+    }
+
     public function testValidateImportWarnsAboutExcludedRuntimeOverride(): void
     {
         $service = new BackupService(new DatabaseConnection([]), []);
@@ -478,6 +518,67 @@ final class BackupServiceTest extends TestCase
         }
 
         return $this->zipWithFiles($files + $extraFiles);
+    }
+
+    /**
+     * @param list<string> $tables
+     */
+    private function backupServiceExpectingTables(array $tables): BackupService
+    {
+        return new BackupService(
+            new DatabaseConnection([]),
+            [],
+            new class ($tables) implements BackupDatabaseSource {
+                /**
+                 * @param list<string> $tables
+                 */
+                public function __construct(private array $tables)
+                {
+                }
+
+                public function applicationTables(): array
+                {
+                    return $this->tables;
+                }
+
+                public function fetchRows(string $table): array
+                {
+                    return [];
+                }
+            }
+        );
+    }
+
+    /**
+     * @param list<string> $tables
+     * @return list<array{table: string, filename: string, rows: int, size_bytes: int}>
+     */
+    private function manifestTables(array $tables): array
+    {
+        return array_map(
+            static fn (string $table): array => [
+                'table' => $table,
+                'filename' => 'database/' . $table . '.json',
+                'rows' => 0,
+                'size_bytes' => 2,
+            ],
+            $tables
+        );
+    }
+
+    /**
+     * @param list<string> $tables
+     * @return array<string, string>
+     */
+    private function databaseFilesForTables(array $tables): array
+    {
+        $files = ['uploads/example.txt' => ''];
+
+        foreach ($tables as $table) {
+            $files['database/' . $table . '.json'] = '[]';
+        }
+
+        return $files;
     }
 
     private function zipWithFiles(array $files): string

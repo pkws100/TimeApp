@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\TimeAccounts;
 
+use App\Domain\Timesheets\TimesheetWriteGuard;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
 use InvalidArgumentException;
@@ -13,8 +14,17 @@ final class EmployeeAccountCutoverService
 {
     public function __construct(
         private DatabaseConnection $connection,
-        private AccountJournalService $journalService
+        private AccountJournalService $journalService,
+        private ?TimesheetWriteGuard $writeGuard = null
     ) {
+        $this->writeGuard ??= new TimesheetWriteGuard($connection);
+    }
+
+    private ?VacationAccountYearService $vacationYearService = null;
+
+    public function setVacationYearService(VacationAccountYearService $vacationYearService): void
+    {
+        $this->vacationYearService = $vacationYearService;
     }
 
     public function preview(array $payload): array
@@ -79,10 +89,12 @@ final class EmployeeAccountCutoverService
 
     public function finalize(array $payload, int $adminUserId): array
     {
-        $preview = $this->preview($payload);
-        $userId = (int) $preview['user_id'];
+        $initial = $this->preview($payload);
+        $userId = (int) $initial['user_id'];
 
-        return $this->withUserLock($userId, function () use ($preview, $adminUserId): array {
+        return $this->withUserAndAccountingLocks($userId, function () use ($payload, $adminUserId): array {
+            $preview = $this->preview($payload);
+
             return $this->connection->transaction(function () use ($preview, $adminUserId): array {
                 $userId = (int) $preview['user_id'];
 
@@ -90,35 +102,7 @@ final class EmployeeAccountCutoverService
                     throw new InvalidArgumentException('Fuer diesen Mitarbeiter ist bereits ein finaler Stichtag eingerichtet.');
                 }
 
-                $this->connection->execute(
-                    'INSERT INTO employee_account_cutovers (
-                        user_id, active_final_user_id, effective_from, opening_time_balance_minutes, leave_year,
-                        annual_leave_entitlement_days, leave_carryover_days, opening_remaining_leave_days,
-                        source_reference, note, status, created_by_user_id, finalized_by_user_id, finalized_at,
-                        reversed_by_user_id, reversed_at, reversal_note, created_at, updated_at
-                     ) VALUES (
-                        :user_id, :active_final_user_id, :effective_from, :opening_time_balance_minutes, :leave_year,
-                        :annual_leave_entitlement_days, :leave_carryover_days, :opening_remaining_leave_days,
-                        :source_reference, :note, "final", :created_by_user_id, :finalized_by_user_id, NOW(),
-                        NULL, NULL, NULL, NOW(), NOW()
-                     )',
-                    [
-                        'user_id' => $userId,
-                        'active_final_user_id' => $userId,
-                        'effective_from' => (string) $preview['effective_from'],
-                        'opening_time_balance_minutes' => (int) $preview['opening_time_balance_minutes'],
-                        'leave_year' => (int) $preview['leave_year'],
-                        'annual_leave_entitlement_days' => number_format((float) $preview['annual_leave_entitlement_days'], 2, '.', ''),
-                        'leave_carryover_days' => number_format((float) $preview['leave_carryover_days'], 2, '.', ''),
-                        'opening_remaining_leave_days' => number_format((float) $preview['opening_remaining_leave_days'], 2, '.', ''),
-                        'source_reference' => $preview['source_reference'] ?: null,
-                        'note' => $preview['note'] ?: null,
-                        'created_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
-                        'finalized_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
-                    ]
-                );
-
-                $cutoverId = $this->connection->lastInsertId();
+                $cutoverId = $this->finalizeDraftOrInsert($preview, $adminUserId);
                 $this->journalService->addTimeEntry(
                     $userId,
                     (string) $preview['effective_from'],
@@ -128,13 +112,15 @@ final class EmployeeAccountCutoverService
                     $cutoverId,
                     'Eroeffnungssaldo zum Stichtag ' . (string) $preview['effective_from'],
                     $adminUserId,
-                    $adminUserId
+                    $adminUserId,
+                    null,
+                    $cutoverId
                 );
 
                 $leaveYear = (int) $preview['leave_year'];
-                $this->journalService->addVacationEntry($userId, $leaveYear, (string) $preview['effective_from'], (float) $preview['annual_leave_entitlement_days'], 'annual_entitlement', 'employee_account_cutover', $cutoverId, 'Jahresurlaub zum Stichtag', $adminUserId, $adminUserId);
-                $this->journalService->addVacationEntry($userId, $leaveYear, (string) $preview['effective_from'], (float) $preview['leave_carryover_days'], 'carryover', 'employee_account_cutover', $cutoverId, 'Uebertrag zum Stichtag', $adminUserId, $adminUserId);
-                $this->journalService->addVacationEntry($userId, $leaveYear, (string) $preview['effective_from'], (float) $preview['opening_adjustment_days'], 'opening_adjustment', 'employee_account_cutover', $cutoverId, 'Anpassung auf Resturlaub am Stichtag', $adminUserId, $adminUserId);
+                $this->journalService->addVacationEntry($userId, $leaveYear, (string) $preview['effective_from'], (float) $preview['annual_leave_entitlement_days'], 'annual_entitlement', 'employee_account_cutover', $cutoverId, 'Jahresurlaub zum Stichtag', $adminUserId, $adminUserId, null, $cutoverId);
+                $this->journalService->addVacationEntry($userId, $leaveYear, (string) $preview['effective_from'], (float) $preview['leave_carryover_days'], 'carryover', 'employee_account_cutover', $cutoverId, 'Uebertrag zum Stichtag', $adminUserId, $adminUserId, null, $cutoverId);
+                $this->journalService->addVacationEntry($userId, $leaveYear, (string) $preview['effective_from'], (float) $preview['opening_adjustment_days'], 'opening_adjustment', 'employee_account_cutover', $cutoverId, 'Anpassung auf Resturlaub am Stichtag', $adminUserId, $adminUserId, null, $cutoverId);
                 $this->createLegacyClosure($cutoverId, $userId, (string) $preview['effective_from'], $adminUserId);
 
                 return $this->find($cutoverId) ?? [];
@@ -158,7 +144,7 @@ final class EmployeeAccountCutoverService
 
         $userId = (int) $cutover['user_id'];
 
-        return $this->withUserLock($userId, function () use ($cutoverId, $adminUserId, $reason, $userId): array {
+        return $this->withUserAndAccountingLocks($userId, function () use ($cutoverId, $adminUserId, $reason, $userId): array {
             return $this->connection->transaction(function () use ($cutoverId, $adminUserId, $reason, $userId): array {
                 $fresh = $this->find($cutoverId);
 
@@ -199,36 +185,51 @@ final class EmployeeAccountCutoverService
 
     public function addManualTimeAdjustment(int $userId, string $effectiveDate, int $minutes, string $reason, int $adminUserId, string $type = 'manual_adjustment'): int
     {
-        $reason = trim($reason);
+        return $this->withUserAndAccountingLocks($userId, function () use ($userId, $effectiveDate, $minutes, $reason, $adminUserId, $type): int {
+            $reason = trim($reason);
 
-        if ($reason === '') {
-            throw new InvalidArgumentException('Bitte eine Begruendung angeben.');
-        }
+            if ($reason === '') {
+                throw new InvalidArgumentException('Bitte eine Begruendung angeben.');
+            }
 
-        if (!in_array($type, ['manual_adjustment', 'payout', 'time_off_compensation'], true)) {
-            $type = 'manual_adjustment';
-        }
+            $type = in_array($type, ['manual_adjustment', 'payout', 'time_off_compensation'], true) ? $type : 'manual_adjustment';
+            $this->assertEffectiveDateAfterCutover($userId, $effectiveDate);
+            $cutover = $this->activeCutover($userId);
 
-        $this->assertEffectiveDateAfterCutover($userId, $effectiveDate);
-
-        return $this->journalService->addTimeEntry($userId, $effectiveDate, $minutes, $type, null, null, $reason, $adminUserId, $adminUserId);
+            return $this->journalService->addTimeEntry($userId, $effectiveDate, $minutes, $type, null, null, $reason, $adminUserId, $adminUserId, null, $cutover !== null ? (int) $cutover['id'] : null);
+        });
     }
 
     public function addManualVacationAdjustment(int $userId, int $leaveYear, string $effectiveDate, float $days, string $reason, int $adminUserId, string $type = 'manual_adjustment'): int
     {
-        $reason = trim($reason);
+        return $this->withUserAndAccountingLocks($userId, function () use ($userId, $leaveYear, $effectiveDate, $days, $reason, $adminUserId, $type): int {
+            $reason = trim($reason);
 
-        if ($reason === '') {
-            throw new InvalidArgumentException('Bitte eine Begruendung angeben.');
-        }
+            if ($reason === '') {
+                throw new InvalidArgumentException('Bitte eine Begruendung angeben.');
+            }
 
-        if (!in_array($type, ['manual_adjustment', 'expiry'], true)) {
-            $type = 'manual_adjustment';
-        }
+            $type = in_array($type, ['manual_adjustment', 'expiry'], true) ? $type : 'manual_adjustment';
+            $this->assertEffectiveDateAfterCutover($userId, $effectiveDate);
+            $this->vacationYearService?->ensureYearOpened($userId, $leaveYear, $adminUserId);
+            $cutover = $this->activeCutover($userId);
 
-        $this->assertEffectiveDateAfterCutover($userId, $effectiveDate);
+            return $this->journalService->addVacationEntry($userId, $leaveYear, $effectiveDate, $days, $type, null, null, $reason, $adminUserId, $adminUserId, null, $cutover !== null ? (int) $cutover['id'] : null);
+        });
+    }
 
-        return $this->journalService->addVacationEntry($userId, $leaveYear, $effectiveDate, $days, $type, null, null, $reason, $adminUserId, $adminUserId);
+    public function reverseTimeEntry(int $entryId, int $adminUserId, string $reason): int
+    {
+        return $this->writeGuard?->withAccountingWriteLock(
+            fn (): int => $this->journalService->reverseTimeEntry($entryId, $adminUserId, $reason)
+        ) ?? $this->journalService->reverseTimeEntry($entryId, $adminUserId, $reason);
+    }
+
+    public function reverseVacationEntry(int $entryId, int $adminUserId, string $reason): int
+    {
+        return $this->writeGuard?->withAccountingWriteLock(
+            fn (): int => $this->journalService->reverseVacationEntry($entryId, $adminUserId, $reason)
+        ) ?? $this->journalService->reverseVacationEntry($entryId, $adminUserId, $reason);
     }
 
     public function saveDraft(array $payload, int $adminUserId): array
@@ -240,8 +241,16 @@ final class EmployeeAccountCutoverService
             throw new InvalidArgumentException('Bitte einen gueltigen Mitarbeiter auswaehlen.');
         }
 
+        if ($this->activeCutover($userId) !== null) {
+            throw new InvalidArgumentException('Fuer diesen Mitarbeiter ist bereits ein finaler Stichtag eingerichtet.');
+        }
+
         return $this->withUserLock($userId, function () use ($record, $adminUserId, $userId): array {
             return $this->connection->transaction(function () use ($record, $adminUserId, $userId): array {
+                if ($this->activeCutover($userId) !== null) {
+                    throw new InvalidArgumentException('Fuer diesen Mitarbeiter ist bereits ein finaler Stichtag eingerichtet.');
+                }
+
                 $existing = $this->connection->fetchOne(
                     'SELECT id FROM employee_account_cutovers WHERE user_id = :user_id AND status = "draft" ORDER BY id DESC LIMIT 1',
                     ['user_id' => $userId]
@@ -489,23 +498,31 @@ final class EmployeeAccountCutoverService
             return;
         }
 
+        $sourceColumns = $this->connection->columnExists('accounting_closures', 'source_type') ? ', source_type, source_id' : '';
+        $sourceValues = $sourceColumns !== '' ? ', "employee_account_cutover", :source_id' : '';
+        $bindings = [
+            'closure_number' => 'ZK-' . $cutoverId,
+            'period_end' => $periodEnd,
+            'user_id' => $userId,
+            'snapshot_hash' => hash('sha256', 'employee-account-cutover-' . $cutoverId),
+            'created_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
+            'finalized_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
+            'note' => 'Zeitkonto-Stichtag: Altzeitraum bis ' . $periodEnd . ' festgeschrieben.',
+        ];
+
+        if ($sourceColumns !== '') {
+            $bindings['source_id'] = $cutoverId;
+        }
+
         $this->connection->execute(
             'INSERT INTO accounting_closures (
-                closure_number, closure_type, status, period_start, period_end, project_id, user_id, original_closure_id,
+                closure_number, closure_type, status, period_start, period_end, project_id, user_id, original_closure_id' . $sourceColumns . ',
                 snapshot_hash, item_count, total_net_minutes, created_by_user_id, finalized_by_user_id, created_at, finalized_at, note
              ) VALUES (
-                :closure_number, "month", "final", "1900-01-01", :period_end, NULL, :user_id, NULL,
+                :closure_number, "month", "final", "1900-01-01", :period_end, NULL, :user_id, NULL' . $sourceValues . ',
                 :snapshot_hash, 0, 0, :created_by_user_id, :finalized_by_user_id, NOW(), NOW(), :note
              )',
-            [
-                'closure_number' => 'ZK-' . $cutoverId,
-                'period_end' => $periodEnd,
-                'user_id' => $userId,
-                'snapshot_hash' => hash('sha256', 'employee-account-cutover-' . $cutoverId),
-                'created_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
-                'finalized_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
-                'note' => 'Zeitkonto-Stichtag: Altzeitraum bis ' . $periodEnd . ' festgeschrieben.',
-            ]
+            $bindings
         );
     }
 
@@ -515,12 +532,23 @@ final class EmployeeAccountCutoverService
             return;
         }
 
+        $where = $this->connection->columnExists('accounting_closures', 'source_type')
+            ? 'source_type = "employee_account_cutover" AND source_id = :source_id'
+            : 'closure_number = :closure_number';
+        $bindings = ['reason' => $reason];
+
+        if (str_contains($where, ':source_id')) {
+            $bindings['source_id'] = $cutoverId;
+        } else {
+            $bindings['closure_number'] = 'ZK-' . $cutoverId;
+        }
+
         $this->connection->execute(
             'UPDATE accounting_closures
              SET status = "draft",
                  note = CONCAT(COALESCE(note, ""), "\nRevidiert: ", :reason)
-             WHERE closure_number = :closure_number',
-            ['closure_number' => 'ZK-' . $cutoverId, 'reason' => $reason]
+             WHERE ' . $where,
+            $bindings
         );
     }
 
@@ -550,7 +578,8 @@ final class EmployeeAccountCutoverService
              WHERE status IN ("final", "correction")
                AND period_start <= :legacy_end
                AND period_end >= "1900-01-01"
-               AND (user_id IS NULL OR user_id = :user_id)',
+               AND (user_id IS NULL OR user_id = :user_id)
+               AND ' . ($this->connection->columnExists('accounting_closures', 'source_type') ? '(source_type IS NULL OR source_type <> "employee_account_cutover")' : 'closure_number NOT LIKE "ZK-%"'),
             ['legacy_end' => $legacyEnd, 'user_id' => $userId]
         ) ?? 0);
     }
@@ -618,10 +647,82 @@ final class EmployeeAccountCutoverService
             return [];
         }
 
+        $where = $this->connection->columnExists($table, 'cutover_id')
+            ? 'cutover_id = :cutover_id'
+            : 'source_type = "employee_account_cutover" AND source_id = :cutover_id';
+
         return $this->connection->fetchAll(
-            'SELECT * FROM ' . $table . ' WHERE source_type = "employee_account_cutover" AND source_id = :source_id ORDER BY id ASC',
-            ['source_id' => $cutoverId]
+            'SELECT * FROM ' . $table . ' WHERE ' . $where . ' ORDER BY id ASC',
+            ['cutover_id' => $cutoverId]
         );
+    }
+
+    private function finalizeDraftOrInsert(array $preview, int $adminUserId): int
+    {
+        $userId = (int) $preview['user_id'];
+        $draft = $this->connection->fetchOne(
+            'SELECT id FROM employee_account_cutovers WHERE user_id = :user_id AND status = "draft" ORDER BY id DESC LIMIT 1',
+            ['user_id' => $userId]
+        );
+        $bindings = [
+            'user_id' => $userId,
+            'active_final_user_id' => $userId,
+            'effective_from' => (string) $preview['effective_from'],
+            'opening_time_balance_minutes' => (int) $preview['opening_time_balance_minutes'],
+            'leave_year' => (int) $preview['leave_year'],
+            'annual_leave_entitlement_days' => number_format((float) $preview['annual_leave_entitlement_days'], 2, '.', ''),
+            'leave_carryover_days' => number_format((float) $preview['leave_carryover_days'], 2, '.', ''),
+            'opening_remaining_leave_days' => number_format((float) $preview['opening_remaining_leave_days'], 2, '.', ''),
+            'source_reference' => $preview['source_reference'] ?: null,
+            'note' => $preview['note'] ?: null,
+            'created_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
+            'finalized_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
+        ];
+
+        if ($draft !== null) {
+            $this->connection->execute(
+                'UPDATE employee_account_cutovers
+                 SET active_final_user_id = :active_final_user_id,
+                     effective_from = :effective_from,
+                     opening_time_balance_minutes = :opening_time_balance_minutes,
+                     leave_year = :leave_year,
+                     annual_leave_entitlement_days = :annual_leave_entitlement_days,
+                     leave_carryover_days = :leave_carryover_days,
+                     opening_remaining_leave_days = :opening_remaining_leave_days,
+                     source_reference = :source_reference,
+                     note = :note,
+                     status = "final",
+                     finalized_by_user_id = :finalized_by_user_id,
+                     finalized_at = NOW(),
+                     updated_at = NOW()
+                 WHERE id = :id AND user_id = :user_id AND status = "draft"',
+                ['id' => (int) $draft['id']] + $bindings
+            );
+
+            return (int) $draft['id'];
+        }
+
+        $this->connection->execute(
+            'INSERT INTO employee_account_cutovers (
+                user_id, active_final_user_id, effective_from, opening_time_balance_minutes, leave_year,
+                annual_leave_entitlement_days, leave_carryover_days, opening_remaining_leave_days,
+                source_reference, note, status, created_by_user_id, finalized_by_user_id, finalized_at,
+                reversed_by_user_id, reversed_at, reversal_note, created_at, updated_at
+             ) VALUES (
+                :user_id, :active_final_user_id, :effective_from, :opening_time_balance_minutes, :leave_year,
+                :annual_leave_entitlement_days, :leave_carryover_days, :opening_remaining_leave_days,
+                :source_reference, :note, "final", :created_by_user_id, :finalized_by_user_id, NOW(),
+                NULL, NULL, NULL, NOW(), NOW()
+             )',
+            $bindings
+        );
+
+        return $this->connection->lastInsertId();
+    }
+
+    private function withUserAndAccountingLocks(int $userId, callable $callback): mixed
+    {
+        return $this->withUserLock($userId, fn (): mixed => $this->writeGuard?->withAccountingWriteLock($callback) ?? $callback());
     }
 
     private function withUserLock(int $userId, callable $callback): mixed

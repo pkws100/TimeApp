@@ -36,6 +36,17 @@ final class CalendarPolicyService implements CalendarPolicyProvider
     {
     }
 
+    private ?string $currentRegionCache = null;
+
+    /** @var array<string, array<string, mixed>> */
+    private array $dayPolicyCache = [];
+
+    /** @var array<string, array<string, array{name: string, region: string}>> */
+    private array $holidayCache = [];
+
+    /** @var array<int, array<int, array<string, mixed>>> */
+    private array $closuresByYearCache = [];
+
     /**
      * @return array<string, string>
      */
@@ -46,16 +57,20 @@ final class CalendarPolicyService implements CalendarPolicyProvider
 
     public function currentRegion(): string
     {
+        if ($this->currentRegionCache !== null) {
+            return $this->currentRegionCache;
+        }
+
         if (!$this->connection->tableExists('company_settings')
             || !$this->connection->columnExists('company_settings', 'holiday_region')) {
-            return '';
+            return $this->currentRegionCache = '';
         }
 
         $region = strtoupper(trim((string) ($this->connection->fetchColumn(
             'SELECT holiday_region FROM company_settings WHERE id = 1 LIMIT 1'
         ) ?? '')));
 
-        return array_key_exists($region, self::REGIONS) ? $region : '';
+        return $this->currentRegionCache = (array_key_exists($region, self::REGIONS) ? $region : '');
     }
 
     public function saveRegion(string $region): void
@@ -71,11 +86,19 @@ final class CalendarPolicyService implements CalendarPolicyProvider
             throw new RuntimeException('Die Kalender-Settings sind noch nicht migriert.');
         }
 
+        $current = $this->currentRegion();
+
+        if ($region !== $current && $this->hasActiveHistoricalTimeAccounts()) {
+            throw new InvalidArgumentException('Die Feiertagsregion ist Bestandteil aktiver Zeitkonten. Rueckwirkende Aenderungen benoetigen ein versioniertes Kalenderregelmodell oder dokumentierte Kontokorrekturen.');
+        }
+
         $this->ensureCompanySettingsRow();
         $this->connection->execute(
             'UPDATE company_settings SET holiday_region = :region, updated_at = NOW() WHERE id = 1',
             ['region' => $region === '' ? null : $region]
         );
+        $this->currentRegionCache = $region === '' ? '' : $region;
+        $this->dayPolicyCache = [];
     }
 
     /**
@@ -93,7 +116,11 @@ final class CalendarPolicyService implements CalendarPolicyProvider
             default => 'is_deleted = 0',
         };
 
-        return array_map(
+        if ($scope === 'active' && isset($this->closuresByYearCache[$year])) {
+            return $this->closuresByYearCache[$year];
+        }
+
+        $rows = array_map(
             fn (array $row): array => $this->normalizeClosureRow($row),
             $this->connection->fetchAll(
                 'SELECT id, title, date_from, date_to, year, notes, created_at, updated_at, is_deleted, deleted_at
@@ -103,6 +130,12 @@ final class CalendarPolicyService implements CalendarPolicyProvider
                 ['year' => $year]
             )
         );
+
+        if ($scope === 'active') {
+            $this->closuresByYearCache[$year] = $rows;
+        }
+
+        return $rows;
     }
 
     public function createClosure(array $payload): array
@@ -123,6 +156,10 @@ final class CalendarPolicyService implements CalendarPolicyProvider
             throw new InvalidArgumentException('Das Enddatum darf nicht vor dem Startdatum liegen.');
         }
 
+        if ($dateFrom->format('Y-m-d') <= (new DateTimeImmutable('today'))->format('Y-m-d') && $this->hasActiveHistoricalTimeAccounts()) {
+            throw new InvalidArgumentException('Rueckwirkende Betriebsschliessungen sind Bestandteil aktiver Zeitkonten und koennen hier nicht normal angelegt werden.');
+        }
+
         $notes = trim((string) ($payload['notes'] ?? ''));
         $this->connection->execute(
             'INSERT INTO company_closures (title, date_from, date_to, year, notes, created_at, updated_at, is_deleted, deleted_at, deleted_by_user_id)
@@ -135,6 +172,8 @@ final class CalendarPolicyService implements CalendarPolicyProvider
                 'notes' => $notes !== '' ? $notes : null,
             ]
         );
+        unset($this->closuresByYearCache[(int) $dateFrom->format('Y')]);
+        $this->dayPolicyCache = [];
 
         return [
             'id' => $this->connection->lastInsertId(),
@@ -153,7 +192,13 @@ final class CalendarPolicyService implements CalendarPolicyProvider
             return false;
         }
 
-        return $this->connection->execute(
+        $closure = $this->connection->fetchOne('SELECT date_from, date_to FROM company_closures WHERE id = :id LIMIT 1', ['id' => $id]);
+
+        if ($closure !== null && (string) ($closure['date_from'] ?? '') <= (new DateTimeImmutable('today'))->format('Y-m-d') && $this->hasActiveHistoricalTimeAccounts()) {
+            throw new InvalidArgumentException('Rueckwirkende Betriebsschliessungen sind Bestandteil aktiver Zeitkonten und koennen hier nicht normal archiviert werden.');
+        }
+
+        $result = $this->connection->execute(
             'UPDATE company_closures
              SET is_deleted = 1, deleted_at = NOW(), deleted_by_user_id = :deleted_by_user_id, updated_at = NOW()
              WHERE id = :id',
@@ -162,6 +207,10 @@ final class CalendarPolicyService implements CalendarPolicyProvider
                 'deleted_by_user_id' => $userId,
             ]
         );
+        $this->closuresByYearCache = [];
+        $this->dayPolicyCache = [];
+
+        return $result;
     }
 
     public function requiresTimeTracking(string $date): bool
@@ -177,12 +226,18 @@ final class CalendarPolicyService implements CalendarPolicyProvider
     public function dayPolicy(string $date): array
     {
         $normalized = $this->normalizeDate($date);
+        $cacheKey = $normalized->format('Y-m-d');
+
+        if (isset($this->dayPolicyCache[$cacheKey])) {
+            return $this->dayPolicyCache[$cacheKey];
+        }
+
         $publicHoliday = $this->publicHolidayForDate($normalized);
         $closures = $this->closuresForDate($normalized);
         $isClosure = $closures !== [];
         $isHoliday = $publicHoliday !== null;
 
-        return [
+        return $this->dayPolicyCache[$cacheKey] = [
             'date' => $normalized->format('Y-m-d'),
             'holiday_region' => $this->currentRegion(),
             'is_public_holiday' => $isHoliday,
@@ -218,6 +273,12 @@ final class CalendarPolicyService implements CalendarPolicyProvider
 
         if ($region === '' || !array_key_exists($region, self::REGIONS)) {
             return [];
+        }
+
+        $cacheKey = $region . ':' . $year;
+
+        if (isset($this->holidayCache[$cacheKey])) {
+            return $this->holidayCache[$cacheKey];
         }
 
         $easter = $this->easterSunday($year);
@@ -267,7 +328,7 @@ final class CalendarPolicyService implements CalendarPolicyProvider
 
         ksort($holidays);
 
-        return array_map(
+        return $this->holidayCache[$cacheKey] = array_map(
             static fn (string $name): array => ['name' => $name, 'region' => $region],
             $holidays
         );
@@ -282,22 +343,42 @@ final class CalendarPolicyService implements CalendarPolicyProvider
             return [];
         }
 
-        return array_map(
-            fn (array $row): array => $this->normalizeClosureRow($row),
-	            $this->connection->fetchAll(
-	                'SELECT id, title, date_from, date_to, year, notes, created_at, updated_at, is_deleted, deleted_at
-	                 FROM company_closures
-	                 WHERE is_deleted = 0
-	                   AND date_from <= :date_from
-	                   AND date_to >= :date_to
-	                 ORDER BY date_from ASC, id ASC',
-	                [
-	                    'date_from' => $date->format('Y-m-d'),
-	                    'date_to' => $date->format('Y-m-d'),
-	                ]
-	            )
-	        );
-	    }
+        $year = (int) $date->format('Y');
+
+        if (!isset($this->closuresByYearCache[$year])) {
+            $this->closuresByYearCache[$year] = array_map(
+                fn (array $row): array => $this->normalizeClosureRow($row),
+                $this->connection->fetchAll(
+                    'SELECT id, title, date_from, date_to, year, notes, created_at, updated_at, is_deleted, deleted_at
+                     FROM company_closures
+                     WHERE is_deleted = 0
+                       AND year = :year
+                     ORDER BY date_from ASC, id ASC',
+                    ['year' => $year]
+                )
+            );
+        }
+
+        return array_values(array_filter(
+            $this->closuresByYearCache[$year],
+            static fn (array $closure): bool => (string) $closure['date_from'] <= $date->format('Y-m-d') && (string) $closure['date_to'] >= $date->format('Y-m-d')
+        ));
+    }
+
+    private function hasActiveHistoricalTimeAccounts(): bool
+    {
+        if (!$this->connection->tableExists('employee_account_cutovers')) {
+            return false;
+        }
+
+        return (int) ($this->connection->fetchColumn(
+            'SELECT COUNT(*)
+             FROM employee_account_cutovers
+             WHERE status = "final"
+               AND active_final_user_id IS NOT NULL
+               AND effective_from <= CURDATE()'
+        ) ?? 0) > 0;
+    }
 
     /**
      * @return array<string, mixed>

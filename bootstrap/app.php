@@ -41,9 +41,11 @@ use App\Domain\TimeAccounts\AccountJournalService;
 use App\Domain\TimeAccounts\DailyTargetService;
 use App\Domain\TimeAccounts\EmployeeAccountCutoverService;
 use App\Domain\TimeAccounts\TimeAccountService;
+use App\Domain\TimeAccounts\VacationAccountYearService;
 use App\Domain\Timesheets\AdminBookingService;
 use App\Domain\Timesheets\AdminCalendarService;
 use App\Domain\Timesheets\AppTimesheetSyncService;
+use App\Domain\Timesheets\TimesheetDayConflictService;
 use App\Domain\Timesheets\TimesheetCalculator;
 use App\Domain\Timesheets\TimesheetGeoLocationService;
 use App\Domain\Timesheets\TimesheetSignatureService;
@@ -169,7 +171,11 @@ $storageUsage = new StorageUsageService(storage_path());
 $calendarPolicyService = new CalendarPolicyService($connection);
 $dailyTargetService = new DailyTargetService($calendarPolicyService);
 $accountJournalService = new AccountJournalService($connection);
-$employeeAccountCutoverService = new EmployeeAccountCutoverService($connection, $accountJournalService);
+$timesheetWriteGuard = new TimesheetWriteGuard($connection);
+$employeeAccountCutoverService = new EmployeeAccountCutoverService($connection, $accountJournalService, $timesheetWriteGuard);
+$vacationAccountYearService = new VacationAccountYearService($connection, $accountJournalService, $employeeAccountCutoverService);
+$employeeAccountCutoverService->setVacationYearService($vacationAccountYearService);
+$timesheetDayConflictService = new TimesheetDayConflictService($connection);
 $attendanceService = new AttendanceService($connection, $calendarPolicyService);
 $userService = new UserService($connection);
 $roleService = new RoleService($connection, $permissionMatrix);
@@ -180,9 +186,8 @@ $assetService = new AssetService($connection);
 $timesheetCalculator = new TimesheetCalculator();
 $workdayStateCalculator = new WorkdayStateCalculator();
 $timesheetSignatureService = new TimesheetSignatureService($connection, $config->get('uploads', []), (string) $config->get('app.settings_encryption_key', ''));
-$timesheetWriteGuard = new TimesheetWriteGuard($connection);
 $timesheetService = new TimesheetService($connection, $timesheetCalculator);
-$adminBookingService = new AdminBookingService($connection, $timesheetCalculator, $timesheetSignatureService, $timesheetWriteGuard, $dailyTargetService);
+$adminBookingService = new AdminBookingService($connection, $timesheetCalculator, $timesheetSignatureService, $timesheetWriteGuard, $dailyTargetService, $timesheetDayConflictService);
 $adminCalendarService = new AdminCalendarService($connection, $adminBookingService, $calendarPolicyService, $personnelEventService);
 $timesheetGeoLocationService = new TimesheetGeoLocationService($connection);
 $settingsSecretService = new SettingsSecretService((string) $config->get('app.settings_encryption_key', ''));
@@ -213,10 +218,10 @@ $accountingDocumentExportService = new AccountingDocumentExportService($companyS
 $backupService = new BackupService($connection, $config->get('uploads', []));
 $smtpTestService = new SmtpTestService();
 $mobileAppService = new MobileAppService($connection, $projectService, $companySettingsService, $workdayStateCalculator, $fileService, $timesheetGeoLocationService, $calendarPolicyService, $timesheetSignatureService, $personnelEventService, $personnelLabelService);
-$appTimesheetSyncService = new AppTimesheetSyncService($connection, $timesheetCalculator, $companySettingsService, $workdayStateCalculator, $timesheetSignatureService);
+$appTimesheetSyncService = new AppTimesheetSyncService($connection, $timesheetCalculator, $companySettingsService, $workdayStateCalculator, $timesheetSignatureService, $timesheetDayConflictService);
 $timeAccountService = new TimeAccountService($connection, $calendarPolicyService, $dailyTargetService, $accountJournalService, $employeeAccountCutoverService);
 $timeAccountExportService = new TimeAccountExportService($timeAccountService);
-$vacationRequestService = new VacationRequestService($connection, $calendarPolicyService, $timesheetWriteGuard, $dailyTargetService);
+$vacationRequestService = new VacationRequestService($connection, $calendarPolicyService, $timesheetWriteGuard, $dailyTargetService, $timesheetDayConflictService);
 $terminalService = new TerminalService($connection, $companySettingsService);
 $nfcTagService = new NfcTagService($connection, (string) $config->get('app.settings_encryption_key', ''));
 $terminalPunchService = new TerminalPunchService($connection, $terminalService, $nfcTagService, $appTimesheetSyncService);
@@ -285,7 +290,7 @@ $adminBookingController = new AdminBookingController(
     $csrfService,
     $timesheetSignatureService
 );
-$adminTimeAccountController = new AdminTimeAccountController($adminView, $timeAccountService, $timeAccountExportService, $userService, $employeeAccountCutoverService, $accountJournalService, $authService, $csrfService, $companySettingsService);
+$adminTimeAccountController = new AdminTimeAccountController($adminView, $timeAccountService, $timeAccountExportService, $userService, $employeeAccountCutoverService, $authService, $csrfService, $companySettingsService);
 $adminVacationRequestController = new AdminVacationRequestController($adminView, $vacationRequestService, $userService, $authService, $csrfService);
 $adminCalendarController = new AdminCalendarController(
     $adminView,
@@ -388,6 +393,7 @@ $router->get('/admin/timesheet-signatures/{id}/image', $admin([$adminTimesheetSi
 $router->post('/admin/timesheet-signatures/{id}/archive', $admin([$adminTimesheetSignatureController, 'archive'], 'timesheets.archive'));
 $router->get('/admin/time-accounts', $admin([$adminTimeAccountController, 'index'], 'time_accounts.view'));
 $router->get('/admin/time-accounts/export', $admin([$adminTimeAccountController, 'export'], 'time_accounts.view'));
+$router->get('/admin/time-accounts/users/{id}/entries', $admin([$adminTimeAccountController, 'entries'], 'time_accounts.view'));
 $router->post('/admin/time-accounts/cutovers/preview', $admin([$adminTimeAccountController, 'previewCutover'], 'time_accounts.manage'));
 $router->post('/admin/time-accounts/cutovers/draft', $admin([$adminTimeAccountController, 'saveDraft'], 'time_accounts.manage'));
 $router->post('/admin/time-accounts/cutovers/finalize', $admin([$adminTimeAccountController, 'finalizeCutover'], 'time_accounts.manage'));
@@ -480,6 +486,7 @@ $router->post('/api/v1/terminal/scan', [$terminalApiController, 'scan']);
 $router->get('/api/v1/app/me/day', $api([$appApiController, 'meDay'], 'timesheets.view_own'));
 $router->get('/api/v1/app/me/timesheets', $api([$appApiController, 'meTimesheets'], 'timesheets.view_own'));
 $router->get('/api/v1/app/time-account/summary', $api([$appTimeAccountController, 'summary'], 'timesheets.view_own'));
+$router->get('/api/v1/app/time-account/entries', $api([$appTimeAccountController, 'entries'], 'timesheets.view_own'));
 $router->get('/api/v1/app/vacation-requests', $api([$appVacationRequestController, 'index'], 'timesheets.view_own'));
 $router->get('/api/v1/app/vacation-requests/preview', $api([$appVacationRequestController, 'preview'], 'timesheets.view_own'));
 $router->post('/api/v1/app/vacation-requests', $api([$appVacationRequestController, 'store'], 'timesheets.create'));

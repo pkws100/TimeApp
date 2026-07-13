@@ -11,7 +11,7 @@ aktuelle Wahrheit liegt im Code, in Tests und in der Git-Historie.
 - Monatsberichte mit produktionsreifem mPDF-Layout und finalen Excel-Templates ausbauen.
 - Versionshistorie und Archivierungsstrategie fuer Settings-Dateien wie Logo, AGB-PDF und Datenschutz-PDF vervollstaendigen.
 - Validierung, Fehlermeldungen und Wiederherstellen archivierter Datensaetze weiter ausbauen.
-- Historische Arbeitszeitmodelle mit zeitlicher Gueltigkeit ausbauen; aktuell wird das heutige User-Arbeitszeitmodell fuer die Tages-Soll-Verteilung verwendet.
+- Historische Arbeitszeitmodelle, Feiertagsregionen und Betriebsschliessungen mit zeitlicher Gueltigkeit ausbauen. Bis dahin blockiert die App riskante rueckwirkende Aenderungen, sobald aktive Zeitkonten betroffen waeren.
 
 ## Mobile App und Offline
 - Verbesserte Sync-Konfliktbehandlung fuer Offline-/Wiederverbindungsfaelle ausbauen.

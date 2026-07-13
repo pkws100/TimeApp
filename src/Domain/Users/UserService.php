@@ -201,23 +201,22 @@ final class UserService
 
     public function update(int $id, array $payload): ?array
     {
-        if (!array_key_exists('time_tracking_required', $payload)) {
-            $existing = $this->find($id);
+        $existing = $this->find($id);
 
+        if (!array_key_exists('time_tracking_required', $payload)) {
             if ($existing !== null) {
                 $payload['time_tracking_required'] = $existing['time_tracking_required'] ?? true;
             }
         }
 
         if (!array_key_exists('app_ui_settings', $payload)) {
-            $existing = $existing ?? $this->find($id);
-
             if ($existing !== null) {
                 $payload['app_ui_settings'] = $existing['app_ui_settings'] ?? AppUiSettings::defaults();
             }
         }
 
         $record = $this->normalize($payload);
+        $this->assertTimeModelChangeAllowed($id, $existing, $record);
 
         if (!$this->connection->tableExists('users')) {
             $record['id'] = $id;
@@ -520,6 +519,74 @@ final class UserService
         sort($normalized);
 
         return $normalized;
+    }
+
+    private function assertTimeModelChangeAllowed(int $userId, ?array $existing, array $record): void
+    {
+        if ($existing === null || !$this->connection->tableExists('employee_account_cutovers')) {
+            return;
+        }
+
+        foreach (['target_hours_mode', 'target_hours_week', 'target_hours_month', 'workdays_mask'] as $field) {
+            $before = $existing[$field] ?? null;
+            $after = $record[$field] ?? null;
+
+            if ((string) $before !== (string) $after && $this->hasActiveTimeAccountMovements($userId)) {
+                throw new InvalidArgumentException('Das Arbeitszeitmodell ist Bestandteil eines aktiven Zeitkontos. Rueckwirkende Aenderungen benoetigen ein zeitlich gueltiges Arbeitszeitmodell oder eine dokumentierte Kontokorrektur.');
+            }
+        }
+    }
+
+    private function hasActiveTimeAccountMovements(int $userId): bool
+    {
+        $cutover = $this->connection->fetchOne(
+            'SELECT id, effective_from
+             FROM employee_account_cutovers
+             WHERE user_id = :user_id
+               AND status = "final"
+               AND active_final_user_id = :user_id_active
+             ORDER BY effective_from DESC, id DESC
+             LIMIT 1',
+            ['user_id' => $userId, 'user_id_active' => $userId]
+        );
+
+        if ($cutover === null) {
+            return false;
+        }
+
+        $timesheets = $this->connection->tableExists('timesheets')
+            ? (int) ($this->connection->fetchColumn(
+                'SELECT COUNT(*) FROM timesheets WHERE user_id = :user_id AND work_date >= :effective_from AND COALESCE(is_deleted, 0) = 0',
+                ['user_id' => $userId, 'effective_from' => (string) $cutover['effective_from']]
+            ) ?? 0)
+            : 0;
+
+        if ($timesheets > 0) {
+            return true;
+        }
+
+        foreach (['time_account_entries', 'vacation_account_entries'] as $table) {
+            if (!$this->connection->tableExists($table)) {
+                continue;
+            }
+
+            $clauses = ['user_id = :user_id'];
+            $bindings = ['user_id' => $userId];
+
+            if ($this->connection->columnExists($table, 'cutover_id')) {
+                $clauses[] = 'cutover_id = :cutover_id';
+                $bindings['cutover_id'] = (int) $cutover['id'];
+            } else {
+                $clauses[] = 'effective_date >= :effective_from';
+                $bindings['effective_from'] = (string) $cutover['effective_from'];
+            }
+
+            if ((int) ($this->connection->fetchColumn('SELECT COUNT(*) FROM ' . $table . ' WHERE ' . implode(' AND ', $clauses), $bindings) ?? 0) > 0) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function scopeWhereClause(string $table, string $scope): string

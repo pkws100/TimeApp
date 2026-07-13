@@ -2856,8 +2856,13 @@
         const requests = Array.isArray(state.vacationRequests) ? state.vacationRequests : [];
         const preview = state.vacationPreview;
         const form = state.vacationForm || {};
+        const notActiveInPeriod = account.cutover_status === 'not_active_in_period';
+        const accountMessage = account.account_message || '';
+        const balanceLabel = notActiveInPeriod ? 'Noch nicht aktiv' : (account.closing_balance_label || 'Nicht eingerichtet');
+        const balanceMeta = accountMessage || (account.cutover_date ? ('Seit ' + account.cutover_date) : 'Zeitkonto noch nicht eingerichtet');
         const loading = state.vacationLoading ? '<div class="app-empty">Urlaubsdaten werden geladen ...</div>' : '';
         const offline = state.vacationOffline ? '<div class="app-empty">Letzter bekannter Stand. Antraege koennen nur online gesendet werden.</div>' : '';
+        const accountNotice = accountMessage ? '<div class="app-empty">' + escapeHtml(accountMessage) + '</div>' : '';
         const previewMarkup = preview
             ? '<div class="app-empty"><strong>Vorschau:</strong> ' + escapeHtml(String(preview.day_count || 0)) + ' Urlaubstage<br><span class="muted">' + escapeHtml((preview.work_dates || []).join(', ') || 'Keine anrechenbaren Arbeitstage') + '</span></div>'
             : '';
@@ -2867,7 +2872,7 @@
 
         return shell(
             '<section class="app-grid app-metrics">'
-            + metric('Zeitkontostand', escapeHtml(account.closing_balance_label || 'Nicht eingerichtet'), account.cutover_date ? ('Seit ' + account.cutover_date) : 'Zeitkonto noch nicht eingerichtet')
+            + metric('Zeitkontostand', escapeHtml(balanceLabel), balanceMeta)
             + metric('Monatsveraenderung', escapeHtml(account.period_delta_label || account.saldo_label || '+00:00'), 'Stand ' + (account.as_of_date || 'heute'))
             + metric('Arbeitszeit', escapeHtml(account.actual_label || '00:00'), 'Gutschriften ' + (account.credited_absence_label || '00:00'))
             + metric('Resturlaub', escapeHtml(formatVacationDays(vacation.remaining_days || 0)), 'Ohne offene Antraege')
@@ -2875,6 +2880,7 @@
             + '</section>'
             + loading
             + offline
+            + accountNotice
             + '<section class="app-card app-grid">'
             + '<div><p class="muted">Urlaubskonto</p><h1>Urlaub und Zeitkonto</h1></div>'
             + appInfoRows([
@@ -2891,7 +2897,7 @@
             + '<section class="app-card app-grid">'
             + '<div><p class="muted">Zeitkonto</p><h2>Aktueller Stand</h2></div>'
             + appInfoRows([
-                { label: 'Zeitkonto seit', value: account.cutover_date || 'Nicht eingerichtet' },
+                { label: 'Zeitkonto seit', value: notActiveInPeriod && account.cutover_date ? ('Ab ' + account.cutover_date) : (account.cutover_date || 'Nicht eingerichtet') },
                 { label: 'Stand zum', value: account.as_of_date || '-' },
                 { label: 'Monatssoll gesamt', value: account.month_target_label || '00:00' },
                 { label: 'Soll bis Stand', value: account.target_label || '00:00' },
@@ -4053,8 +4059,19 @@
                 apiJson('/api/v1/app/time-account/summary'),
                 apiJson('/api/v1/app/vacation-requests')
             ]);
+            const entriesResult = await apiJson('/api/v1/app/time-account/entries?limit=10').catch((error) => {
+                if (isSessionExpiredError(error)) {
+                    throw error;
+                }
+
+                return { data: { time_entries: [], vacation_entries: [] } };
+            });
 
             state.timeAccount = summaryResult.data || null;
+            if (state.timeAccount && entriesResult.data) {
+                state.timeAccount.time_entries = Array.isArray(entriesResult.data.time_entries) ? entriesResult.data.time_entries : [];
+                state.timeAccount.vacation_entries = Array.isArray(entriesResult.data.vacation_entries) ? entriesResult.data.vacation_entries : [];
+            }
             state.vacationRequests = requestsResult.data && Array.isArray(requestsResult.data.items) ? requestsResult.data.items : [];
             state.vacationOffline = false;
 

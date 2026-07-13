@@ -15,6 +15,9 @@ final class DailyTargetService
     {
     }
 
+    /** @var array<string, array<string, array{date: string, contract_minutes: int, holiday_reduction_minutes: int, company_closure_reduction_minutes: int, effective_minutes: int, is_workday: bool}>> */
+    private array $monthBreakdownCache = [];
+
     /**
      * @return array<string, array{date: string, contract_minutes: int, holiday_reduction_minutes: int, company_closure_reduction_minutes: int, effective_minutes: int, is_workday: bool}>
      */
@@ -94,6 +97,12 @@ final class DailyTargetService
      */
     private function monthBreakdown(array $user, DateTimeImmutable $monthStart, DateTimeImmutable $monthEnd): array
     {
+        $cacheKey = $this->monthCacheKey($user, $monthStart);
+
+        if (isset($this->monthBreakdownCache[$cacheKey])) {
+            return $this->monthBreakdownCache[$cacheKey];
+        }
+
         $workdays = $this->workdays($user);
         $workDates = [];
 
@@ -126,7 +135,19 @@ final class DailyTargetService
             ];
         }
 
-        return $days;
+        return $this->monthBreakdownCache[$cacheKey] = $days;
+    }
+
+    private function monthCacheKey(array $user, DateTimeImmutable $monthStart): string
+    {
+        return implode('|', [
+            (string) ($user['id'] ?? ''),
+            (string) ($user['target_hours_mode'] ?? 'month'),
+            (string) ($user['target_hours_week'] ?? ''),
+            (string) ($user['target_hours_month'] ?? ''),
+            (string) ($user['workdays_mask'] ?? '1,2,3,4,5'),
+            $monthStart->format('Y-m'),
+        ]);
     }
 
     /**

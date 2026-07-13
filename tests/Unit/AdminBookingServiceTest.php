@@ -223,6 +223,32 @@ final class AdminBookingServiceTest extends TestCase
         ]);
     }
 
+    public function testNormalizeBookingPayloadKeepsAbsenceCreditAndReasonForNoteOnlyUpdate(): void
+    {
+        $service = new AdminBookingService(new DatabaseConnection([]), new TimesheetCalculator());
+        $method = new ReflectionMethod($service, 'normalizeBookingPayload');
+        $method->setAccessible(true);
+
+        $payload = $method->invoke($service, [
+            'note' => 'Nur Notiz korrigiert',
+        ], [
+            'user_id' => 7,
+            'project_id' => null,
+            'work_date' => '2026-05-08',
+            'entry_type' => 'sick',
+            'start_time' => null,
+            'end_time' => null,
+            'break_minutes' => 0,
+            'absence_reason_code' => 'sick_paid',
+            'credited_minutes' => 480,
+            'note' => 'Alt',
+        ]);
+
+        self::assertSame('sick_paid', $payload['absence_reason_code']);
+        self::assertSame(480, $payload['credited_minutes']);
+        self::assertSame('Nur Notiz korrigiert', $payload['note']);
+    }
+
     public function testHydrateBookingRowMarksOnlyActiveWorkWithoutProjectAsOpenAssignment(): void
     {
         $service = new AdminBookingService(new DatabaseConnection([]), new TimesheetCalculator());

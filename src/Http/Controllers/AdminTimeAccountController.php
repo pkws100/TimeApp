@@ -8,7 +8,6 @@ use App\Domain\Exports\TimeAccountExportService;
 use App\Domain\Auth\AuthService;
 use App\Domain\Auth\CsrfService;
 use App\Domain\Settings\CompanySettingsService;
-use App\Domain\TimeAccounts\AccountJournalService;
 use App\Domain\TimeAccounts\EmployeeAccountCutoverService;
 use App\Domain\TimeAccounts\TimeAccountService;
 use App\Domain\Users\UserService;
@@ -26,7 +25,6 @@ final class AdminTimeAccountController
         private TimeAccountExportService $exportService,
         private UserService $userService,
         private ?EmployeeAccountCutoverService $cutoverService = null,
-        private ?AccountJournalService $journalService = null,
         private ?AuthService $authService = null,
         private ?CsrfService $csrfService = null,
         private ?CompanySettingsService $companySettingsService = null
@@ -173,7 +171,7 @@ final class AdminTimeAccountController
 
         try {
             $user = $this->authService?->currentUser() ?? [];
-            $this->journalService?->reverseTimeEntry((int) ($params['id'] ?? 0), (int) ($user['id'] ?? 0), (string) $request->input('reason', ''));
+            $this->cutoverService?->reverseTimeEntry((int) ($params['id'] ?? 0), (int) ($user['id'] ?? 0), (string) $request->input('reason', ''));
 
             return Response::redirect('/admin/time-accounts?notice=time_reversed');
         } catch (InvalidArgumentException $exception) {
@@ -189,7 +187,7 @@ final class AdminTimeAccountController
 
         try {
             $user = $this->authService?->currentUser() ?? [];
-            $this->journalService?->reverseVacationEntry((int) ($params['id'] ?? 0), (int) ($user['id'] ?? 0), (string) $request->input('reason', ''));
+            $this->cutoverService?->reverseVacationEntry((int) ($params['id'] ?? 0), (int) ($user['id'] ?? 0), (string) $request->input('reason', ''));
 
             return Response::redirect('/admin/time-accounts?notice=vacation_reversed');
         } catch (InvalidArgumentException $exception) {
@@ -222,6 +220,19 @@ final class AdminTimeAccountController
         } catch (RuntimeException) {
             return Response::redirect('/admin/time-accounts?error=export');
         }
+    }
+
+    public function entries(Request $request, array $params): Response
+    {
+        $userId = (int) ($params['id'] ?? 0);
+        $year = (int) $request->query('year', (int) date('Y'));
+        $limit = max(1, min(100, (int) $request->query('limit', 50)));
+        $page = max(1, (int) $request->query('page', 1));
+
+        return Response::json([
+            'ok' => true,
+            'data' => $this->timeAccountService->journalEntries($userId, $year, $limit, $page),
+        ]);
     }
 
     private function renderPage(array $overview, array $users, string $notice = '', ?array $cutoverPreview = null): string
@@ -333,15 +344,22 @@ HTML;
             $saldoClass = (int) ($row['saldo_minutes'] ?? 0) < 0 ? ' class="badge warn"' : ' class="badge ok"';
             $closing = $row['closing_balance_label'] ?? null;
             $closingClass = (int) ($row['closing_balance_minutes'] ?? 0) < 0 ? ' class="badge warn"' : ' class="badge ok"';
+            $notActiveInPeriod = (string) ($row['cutover_status'] ?? '') === 'not_active_in_period';
+            $cutoverCell = $this->e((string) (($row['cutover_date'] ?? null) ?: 'Nicht eingerichtet'));
+
+            if ($notActiveInPeriod && (string) ($row['account_message'] ?? '') !== '') {
+                $cutoverCell .= '<br><span class="muted">' . $this->e((string) $row['account_message']) . '</span>';
+            }
+
             $html .= '<tr>'
                 . '<td>' . $this->e((string) ($row['user'] ?? '')) . '</td>'
-                . '<td>' . $this->e((string) (($row['cutover_date'] ?? null) ?: 'Nicht eingerichtet')) . '</td>'
+                . '<td>' . $cutoverCell . '</td>'
                 . '<td>' . $this->e((string) (($row['opening_balance_at_period_start_label'] ?? null) ?: '-')) . '</td>'
                 . '<td>' . $this->e((string) ($row['target_label'] ?? '00:00')) . '</td>'
                 . '<td>' . $this->e((string) ($row['actual_label'] ?? '00:00')) . '</td>'
                 . '<td>' . $this->e((string) ($row['credited_absence_label'] ?? '00:00')) . '</td>'
                 . '<td><span' . $saldoClass . '>' . $this->e((string) ($row['saldo_label'] ?? '+00:00')) . '</span></td>'
-                . '<td>' . ($closing === null ? '<span class="badge warn">Nicht eingerichtet</span>' : '<span' . $closingClass . '>' . $this->e((string) $closing) . '</span>') . '</td>'
+                . '<td>' . ($notActiveInPeriod ? '<span class="badge warn">Noch nicht aktiv</span>' : ($closing === null ? '<span class="badge warn">Nicht eingerichtet</span>' : '<span' . $closingClass . '>' . $this->e((string) $closing) . '</span>')) . '</td>'
                 . '<td>' . $this->number($vacation['approved_taken_days'] ?? 0) . '</td>'
                 . '<td>' . $this->number($vacation['pending_days'] ?? 0) . '</td>'
                 . '<td>' . $this->number($vacation['remaining_days'] ?? 0) . '</td>'
@@ -360,9 +378,15 @@ HTML;
     private function rowActions(array $row, string $csrfToken, bool $canManage): string
     {
         $cutoverId = (int) ($row['cutover_id'] ?? 0);
+        $userId = (int) ($row['user_id'] ?? 0);
+        $year = (int) ($row['year'] ?? date('Y'));
         $actions = $cutoverId > 0
             ? '<a class="button button-secondary" href="/admin/time-accounts/cutovers/' . $cutoverId . '/protocol">Protokoll</a>'
             : '<span class="muted">Stichtag offen</span>';
+
+        if ($cutoverId > 0 && $userId > 0) {
+            $actions .= '<a class="button button-secondary" href="/admin/time-accounts/users/' . $userId . '/entries?year=' . $year . '&limit=50&page=1">Detailhistorie</a>';
+        }
 
         if ($canManage && $cutoverId > 0) {
             $actions .= '<form method="post" action="/admin/time-accounts/cutovers/' . $cutoverId . '/reverse" class="inline-form">'

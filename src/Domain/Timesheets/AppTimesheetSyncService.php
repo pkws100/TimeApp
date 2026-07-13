@@ -18,8 +18,10 @@ final class AppTimesheetSyncService
         private TimesheetCalculator $calculator,
         private CompanySettingsService $companySettingsService,
         private WorkdayStateCalculator $workdayStateCalculator,
-        private ?TimesheetSignatureService $signatureService = null
+        private ?TimesheetSignatureService $signatureService = null,
+        private ?TimesheetDayConflictService $dayConflictService = null
     ) {
+        $this->dayConflictService ??= new TimesheetDayConflictService($connection);
     }
 
     public function sync(int|array $user, array $payload): array
@@ -80,6 +82,7 @@ final class AppTimesheetSyncService
         $projectId = $this->normalizeProjectId($payload['project_id'] ?? ($entry['project_id'] ?? null));
         $this->assertProjectVisibleToUser($projectId, $userId, $permissions, $workDate);
         $this->assertAccountingWriteAllowed($entry, $userId, $projectId, $workDate);
+        $this->dayConflictService?->assertNoConflictForWork($userId, $workDate, $entry !== null ? (int) $entry['id'] : null);
         $note = $this->nullableTrimmed($payload['note'] ?? ($entry['note'] ?? null));
         $source = $this->normalizeSource($payload['source'] ?? ($entry['source'] ?? 'app'));
         $manualBreakMinutes = isset($entry['break_minutes']) ? (int) $entry['break_minutes'] : $this->workdayStateCalculator->completedBreakMinutes($existingBreaks);

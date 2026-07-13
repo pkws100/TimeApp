@@ -6,6 +6,7 @@ namespace App\Domain\Vacation;
 
 use App\Domain\Calendar\CalendarPolicyService;
 use App\Domain\TimeAccounts\DailyTargetService;
+use App\Domain\Timesheets\TimesheetDayConflictService;
 use App\Domain\Timesheets\TimesheetWriteGuard;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateInterval;
@@ -21,9 +22,11 @@ final class VacationRequestService
         private DatabaseConnection $connection,
         private CalendarPolicyService $calendarPolicyService,
         private TimesheetWriteGuard $writeGuard,
-        private ?DailyTargetService $dailyTargetService = null
+        private ?DailyTargetService $dailyTargetService = null,
+        private ?TimesheetDayConflictService $dayConflictService = null
     ) {
         $this->dailyTargetService ??= new DailyTargetService($calendarPolicyService);
+        $this->dayConflictService ??= new TimesheetDayConflictService($connection);
     }
 
     public function listForUser(int $userId): array
@@ -188,7 +191,7 @@ final class VacationRequestService
                 $this->assertPendingTransition($fresh, 'approved');
                 $this->assertNoOverlappingRequest($userId, (string) $fresh['date_from'], (string) $fresh['date_to'], $requestId);
                 $this->writeGuard->assertAccountingPeriodsOpen($userId, $workDates);
-                $this->assertNoTimesheetConflicts($userId, $workDates, $requestId);
+                $this->dayConflictService?->assertNoConflictsForVacationRequest($userId, $workDates, $requestId);
 
                 $this->connection->transaction(function ($pdo) use ($requestId, $adminUserId, $decisionNote, $workDates, $userId): void {
                     $updated = $this->executeAffected(
@@ -512,13 +515,18 @@ final class VacationRequestService
                 continue;
             }
 
-            $policy = $this->calendarPolicyService->dayPolicy($date->format('Y-m-d'));
+            $dateString = $date->format('Y-m-d');
+            $policy = $this->calendarPolicyService->dayPolicy($dateString);
 
             if ((bool) ($policy['is_public_holiday'] ?? false) || (bool) ($policy['is_company_closure'] ?? false)) {
                 continue;
             }
 
-            $dates[] = $date->format('Y-m-d');
+            if ((int) ($this->dailyTargetService?->effectiveTargetForDate($user, $dateString) ?? 0) <= 0) {
+                continue;
+            }
+
+            $dates[] = $dateString;
         }
 
         return $dates;

@@ -107,7 +107,7 @@ final class VacationRequestServiceTest extends TestCase
         $pdo->timesheets[] = ['id' => 1, 'user_id' => 1, 'work_date' => '2026-05-04', 'entry_type' => 'work', 'is_deleted' => 0, 'vacation_request_id' => null];
 
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('existiert bereits');
+        $this->expectExceptionMessage('bereits eine Arbeitsbuchung');
         $this->service($pdo)->approve(9, 99, 'OK');
     }
 
@@ -253,6 +253,12 @@ final class VacationPdoDouble extends PDO
             return [['holiday_region' => $this->holidayRegion]];
         }
 
+        if (str_contains($sql, 'FROM company_closures') && str_contains($sql, 'year = :year')) {
+            $year = (int) ($params['year'] ?? 0);
+
+            return array_values(array_filter($this->closures, static fn (array $closure): bool => (int) ($closure['is_deleted'] ?? 0) === 0 && (int) ($closure['year'] ?? substr((string) $closure['date_from'], 0, 4)) === $year));
+        }
+
         if (str_contains($sql, 'FROM company_closures') && str_contains($sql, 'date_from <= :date_from')) {
             $date = (string) ($params['date_from'] ?? '');
 
@@ -285,6 +291,13 @@ final class VacationPdoDouble extends PDO
                     'email' => $user['email'] ?? '',
                 ];
             }, $rows);
+        }
+
+        if (str_contains($sql, 'FROM timesheets') && str_contains($sql, 'entry_type IN')) {
+            $userId = (int) ($params['user_id'] ?? 0);
+            $workDate = (string) ($params['work_date'] ?? '');
+
+            return array_values(array_filter($this->timesheets, static fn (array $row): bool => (int) ($row['user_id'] ?? 0) === $userId && (string) ($row['work_date'] ?? '') === $workDate && (int) ($row['is_deleted'] ?? 0) === 0));
         }
 
         if (str_contains($sql, 'FROM vacation_requests') && str_contains($sql, 'status IN ("pending", "approved")')) {

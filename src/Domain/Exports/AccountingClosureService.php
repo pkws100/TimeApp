@@ -228,7 +228,7 @@ final class AccountingClosureService
             return [];
         }
 
-        $clauses = ['1 = 1'];
+        $clauses = [$this->publicClosureClause()];
         $bindings = [];
 
         if (($filters['status'] ?? '') !== '') {
@@ -322,7 +322,8 @@ final class AccountingClosureService
                AND period_start = :period_start
                AND period_end = :period_end
                AND ((project_id IS NULL AND :project_id_is_null = 1) OR project_id = :project_id)
-               AND ((user_id IS NULL AND :user_id_is_null = 1) OR user_id = :user_id)',
+               AND ((user_id IS NULL AND :user_id_is_null = 1) OR user_id = :user_id)
+               AND ' . $this->publicClosureClause(),
             [
                 'closure_type' => (string) ($selection['type'] ?? 'month'),
                 'period_start' => $periodStart,
@@ -342,6 +343,13 @@ final class AccountingClosureService
     private function lockName(array $selection): string
     {
         return self::ACCOUNTING_WRITE_LOCK;
+    }
+
+    private function publicClosureClause(): string
+    {
+        return $this->connection->columnExists('accounting_closures', 'source_type')
+            ? '(accounting_closures.source_type IS NULL OR accounting_closures.source_type <> "employee_account_cutover")'
+            : 'accounting_closures.closure_number NOT LIKE "ZK-%"';
     }
 
     private function acquireLock(string $lockName): void
