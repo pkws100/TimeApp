@@ -236,6 +236,15 @@ final class TimeAccountPdoDouble extends PDO
             return array_values(array_filter($this->closures, static fn (array $closure): bool => (int) ($closure['is_deleted'] ?? 0) === 0 && (int) ($closure['year'] ?? substr((string) $closure['date_from'], 0, 4)) === $year));
         }
 
+        if (str_contains($sql, 'FROM company_closures') && str_contains($sql, 'date_from <= :year_end')) {
+            $yearStart = (string) ($params['year_start'] ?? '');
+            $yearEnd = (string) ($params['year_end'] ?? '');
+
+            return array_values(array_filter($this->closures, static fn (array $closure): bool => (int) ($closure['is_deleted'] ?? 0) === 0
+                && (string) $closure['date_from'] <= $yearEnd
+                && (string) $closure['date_to'] >= $yearStart));
+        }
+
         if (str_contains($sql, 'FROM company_closures') && str_contains($sql, 'date_from <= :date_from')) {
             $date = (string) ($params['date_from'] ?? '');
 

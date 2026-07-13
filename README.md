@@ -186,9 +186,23 @@ oder per HTTP-Smoke-Check geprueft werden.
 - Zeitkonten koennen je Mitarbeiter mit einem Einfuehrungsstichtag finalisiert werden. Der Eroeffnungssaldo ist der uebernommene Stand am Ende des Vortages; ab dem Stichtag berechnet die App den kumulierten Stand selbst.
 - Finale Stichtage erzeugen unveraenderliche Journalbuchungen fuer Zeitkonto und Urlaubskonto sowie eine userbezogene Sperre des Altzeitraums ueber `accounting_closures`.
 - Journalbuchungen gehoeren ueber `cutover_id` zu genau einer Stichtagsgeneration. Aktive Berechnungen beruecksichtigen nur Journalzeilen der aktiven finalen Generation; revidierte Generationen bleiben historisch sichtbar, wirken aber nicht mehr in aktuelle Salden.
+- Neue Finalisierungen erzeugen keine wirkungslosen Null-Journalzeilen. Revidierungen verarbeiten nur offene Ursprungsbuchungen; historische Nullzeilen und bereits einzeln ausgeglichene Korrekturen blockieren die Revidierung nicht.
+- Nicht eindeutig belegbare Altzuordnungen bleiben mit `cutover_id = NULL` aus aktiven Salden ausgeschlossen. Der read-only Bericht `php bin/inspect-time-account-generations.php` beziehungsweise `--json` zeigt betroffene Journalzeilen und moegliche Stichtage.
 - Interne Stichtagssperren sind in `accounting_closures` mit `source_type = employee_account_cutover` gekennzeichnet. Sie wirken fuer Timesheet-Schreibschutz, werden in normalen Abschlusslisten und Exporten aber ausgeblendet.
 - Finalisierung und Revidierung sperren zuerst den Mitarbeiter-Stichtag, danach den globalen `accounting-timesheet-write`-Lock, pruefen die Vorschau erneut und schreiben erst dann innerhalb der DB-Transaktion.
+- Beim Wiederherstellen archivierter Buchungen werden aktuelle Periodensperren, Tageskonflikte und die Anrechenbarkeit des Tages erneut geprueft. Betriebsschliessungen ueber einen Jahreswechsel werden in beiden Jahren beruecksichtigt.
 - Korrekturen, Auszahlungen, Freizeitausgleich, Urlaubsanpassungen und Revidierungen laufen ueber Journal- und Gegenbuchungen, nicht ueber physische Loeschung oder direkte Aenderung alter Journalzeilen.
+
+MariaDB-Kernintegrationstests laufen mit zufaelligen Scratch-Datenbanken und benoetigen `CREATE DATABASE` fuer den Testbenutzer (lokal standardmaessig `root` ueber den MariaDB-Socket):
+
+```bash
+vendor/bin/phpunit tests/Integration/RevisableCutoverDatabaseTest.php
+vendor/bin/phpunit tests/Integration/RevisableAccountMigrationTest.php
+```
+
+Mit `TIMEAPP_TEST_DB_*` lassen sich separate Testzugangsdaten setzen. `DB_OVERRIDE_FILE` erlaubt Testprozessen einen vom produktiven Runtime-Override getrennten Konfigurationspfad.
+
+`npm run ui:test` fuehrt zuerst die schnellen Playwright-Smokes und danach den realen Zeitkonto-Workflow gegen eine automatisch erzeugte `timeapp_ui_*`-Scratch-Datenbank aus. Der Runner verwendet nur synthetische Benutzer, einen eigenen PHP-Testserver und temporaere Artefakte. Fuer einen reinen Smoke-Lauf ohne MariaDB-Fixture steht `npm run ui:test:smoke` bereit.
 - Bezahlte Abwesenheiten speichern eine separate Zeitgutschrift in `timesheets.credited_minutes`; tatsaechliche Arbeitszeit bleibt davon getrennt.
 - Urlaubskonten werden jahresbezogen aus dem Urlaubskonto-Journal berechnet. Die User-Felder fuer Jahresurlaub und Uebertrag dienen weiter als Vorschlagswerte fuer neue Stichtage und neue Urlaubsjahre. Vor der ersten schreibenden Urlaubskonto-Bewegung eines Jahres wird die Jahreseroeffnung je `user_id`, `leave_year` und `cutover_id` idempotent gebucht.
 - Arbeit plus ganztagige Abwesenheit sowie doppelte ganztagige Abwesenheiten am selben Tag werden serverseitig blockiert; mehrere Arbeitsbuchungen pro Tag bleiben erlaubt.

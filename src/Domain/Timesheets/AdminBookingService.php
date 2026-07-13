@@ -727,14 +727,24 @@ final class AdminBookingService
         }
 
         $this->withAccountingWriteLock(function () use ($id, $archived, $changedByUserId, $reason, $before): void {
+            $current = $this->find($id);
+
+            if ($current === null) {
+                throw new InvalidArgumentException('Die Buchung wurde nicht gefunden.');
+            }
+
             $this->assertNotLockedByAccountingClosure($id);
             $this->assertAccountingPeriodOpen(
-                (int) ($before['user_id'] ?? 0),
-                isset($before['project_id']) ? (int) $before['project_id'] : null,
-                (string) ($before['work_date'] ?? '')
+                (int) ($current['user_id'] ?? 0),
+                isset($current['project_id']) ? (int) $current['project_id'] : null,
+                (string) ($current['work_date'] ?? '')
             );
 
-            $this->connection->transaction(function () use ($id, $archived, $changedByUserId, $reason, $before): void {
+            if (!$archived) {
+                $this->assertDayConflictFree($current, $id);
+            }
+
+            $this->connection->transaction(function () use ($id, $archived, $changedByUserId, $reason, $current): void {
                 $this->connection->execute(
                     'UPDATE timesheets SET
                         is_deleted = :is_deleted,
@@ -755,7 +765,7 @@ final class AdminBookingService
                 }
 
                 $after = $this->find($id);
-                $this->logChange($id, $archived ? 'archived' : 'restored', $changedByUserId, $reason, $before, $after);
+                $this->logChange($id, $archived ? 'archived' : 'restored', $changedByUserId, $reason, $current, $after);
             });
         });
     }

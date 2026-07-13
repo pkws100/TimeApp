@@ -118,7 +118,7 @@ if ($connection->tableExists('time_account_entries')) {
         ) ?? 0);
 
         if ($unassigned > 0) {
-            $errors[] = sprintf('%d Zeitkonto-Journalzeilen sind keiner Stichtagsgeneration zugeordnet und werden aus aktiven Salden ausgeschlossen.', $unassigned);
+            $errors[] = sprintf('%d Zeitkonto-Journalzeilen sind keiner Stichtagsgeneration zugeordnet und werden aus aktiven Salden ausgeschlossen. Details: php bin/inspect-time-account-generations.php', $unassigned);
         }
     }
 }
@@ -136,7 +136,7 @@ if ($connection->tableExists('vacation_account_entries')) {
         ) ?? 0);
 
         if ($unassigned > 0) {
-            $errors[] = sprintf('%d Urlaubskonto-Journalzeilen sind keiner Stichtagsgeneration zugeordnet und werden aus aktiven Salden ausgeschlossen.', $unassigned);
+            $errors[] = sprintf('%d Urlaubskonto-Journalzeilen sind keiner Stichtagsgeneration zugeordnet und werden aus aktiven Salden ausgeschlossen. Details: php bin/inspect-time-account-generations.php', $unassigned);
         }
     }
 }

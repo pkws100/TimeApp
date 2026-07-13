@@ -3,7 +3,9 @@
   "private": true,
   "description": "Playwright UI smoke checks fuer die Baustellen- und Zeiterfassungs-App",
   "scripts": {
-    "ui:test": "playwright test",
+    "ui:test": "npm run ui:test:smoke && npm run ui:test:real",
+    "ui:test:smoke": "REAL_ACCOUNT_UI=0 UI_ISOLATED_ACCOUNT_RUNNER=0 playwright test",
+    "ui:test:real": "php bin/run-revisable-account-ui-tests.php",
     "ui:test:headed": "playwright test --headed"
   },
   "devDependencies": {

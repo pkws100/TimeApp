@@ -103,24 +103,32 @@ final class EmployeeAccountCutoverService
                 }
 
                 $cutoverId = $this->finalizeDraftOrInsert($preview, $adminUserId);
-                $this->journalService->addTimeEntry(
-                    $userId,
-                    (string) $preview['effective_from'],
-                    (int) $preview['opening_time_balance_minutes'],
-                    'opening_balance',
-                    'employee_account_cutover',
-                    $cutoverId,
-                    'Eroeffnungssaldo zum Stichtag ' . (string) $preview['effective_from'],
-                    $adminUserId,
-                    $adminUserId,
-                    null,
-                    $cutoverId
-                );
+                if ((int) $preview['opening_time_balance_minutes'] !== 0) {
+                    $this->journalService->addTimeEntry(
+                        $userId,
+                        (string) $preview['effective_from'],
+                        (int) $preview['opening_time_balance_minutes'],
+                        'opening_balance',
+                        'employee_account_cutover',
+                        $cutoverId,
+                        'Eroeffnungssaldo zum Stichtag ' . (string) $preview['effective_from'],
+                        $adminUserId,
+                        $adminUserId,
+                        null,
+                        $cutoverId
+                    );
+                }
 
                 $leaveYear = (int) $preview['leave_year'];
-                $this->journalService->addVacationEntry($userId, $leaveYear, (string) $preview['effective_from'], (float) $preview['annual_leave_entitlement_days'], 'annual_entitlement', 'employee_account_cutover', $cutoverId, 'Jahresurlaub zum Stichtag', $adminUserId, $adminUserId, null, $cutoverId);
-                $this->journalService->addVacationEntry($userId, $leaveYear, (string) $preview['effective_from'], (float) $preview['leave_carryover_days'], 'carryover', 'employee_account_cutover', $cutoverId, 'Uebertrag zum Stichtag', $adminUserId, $adminUserId, null, $cutoverId);
-                $this->journalService->addVacationEntry($userId, $leaveYear, (string) $preview['effective_from'], (float) $preview['opening_adjustment_days'], 'opening_adjustment', 'employee_account_cutover', $cutoverId, 'Anpassung auf Resturlaub am Stichtag', $adminUserId, $adminUserId, null, $cutoverId);
+                if (abs((float) $preview['annual_leave_entitlement_days']) >= 0.005) {
+                    $this->journalService->addVacationEntry($userId, $leaveYear, (string) $preview['effective_from'], (float) $preview['annual_leave_entitlement_days'], 'annual_entitlement', 'employee_account_cutover', $cutoverId, 'Jahresurlaub zum Stichtag', $adminUserId, $adminUserId, null, $cutoverId);
+                }
+                if (abs((float) $preview['leave_carryover_days']) >= 0.005) {
+                    $this->journalService->addVacationEntry($userId, $leaveYear, (string) $preview['effective_from'], (float) $preview['leave_carryover_days'], 'carryover', 'employee_account_cutover', $cutoverId, 'Uebertrag zum Stichtag', $adminUserId, $adminUserId, null, $cutoverId);
+                }
+                if (abs((float) $preview['opening_adjustment_days']) >= 0.005) {
+                    $this->journalService->addVacationEntry($userId, $leaveYear, (string) $preview['effective_from'], (float) $preview['opening_adjustment_days'], 'opening_adjustment', 'employee_account_cutover', $cutoverId, 'Anpassung auf Resturlaub am Stichtag', $adminUserId, $adminUserId, null, $cutoverId);
+                }
                 $this->createLegacyClosure($cutoverId, $userId, (string) $preview['effective_from'], $adminUserId);
 
                 return $this->find($cutoverId) ?? [];
@@ -152,11 +160,17 @@ final class EmployeeAccountCutoverService
                     throw new InvalidArgumentException('Der finale Stichtag wurde nicht gefunden.');
                 }
 
-                foreach ($this->entriesForCutover('time_account_entries', $cutoverId) as $entry) {
+                foreach ($this->journalService->openTimeEntriesForCutover($cutoverId) as $entry) {
+                    if ((int) ($entry['minutes'] ?? 0) === 0) {
+                        continue;
+                    }
                     $this->journalService->reverseTimeEntry((int) $entry['id'], $adminUserId, $reason, (string) $fresh['effective_from'], true);
                 }
 
-                foreach ($this->entriesForCutover('vacation_account_entries', $cutoverId) as $entry) {
+                foreach ($this->journalService->openVacationEntriesForCutover($cutoverId) as $entry) {
+                    if (abs((float) ($entry['days'] ?? 0)) < 0.005) {
+                        continue;
+                    }
                     $this->journalService->reverseVacationEntry((int) $entry['id'], $adminUserId, $reason, (string) $fresh['effective_from'], true);
                 }
 
@@ -211,7 +225,7 @@ final class EmployeeAccountCutoverService
 
             $type = in_array($type, ['manual_adjustment', 'expiry'], true) ? $type : 'manual_adjustment';
             $this->assertEffectiveDateAfterCutover($userId, $effectiveDate);
-            $this->vacationYearService?->ensureYearOpened($userId, $leaveYear, $adminUserId);
+            $this->vacationYearService?->ensureYearOpenedWithinAccountLocks($userId, $leaveYear, $adminUserId);
             $cutover = $this->activeCutover($userId);
 
             return $this->journalService->addVacationEntry($userId, $leaveYear, $effectiveDate, $days, $type, null, null, $reason, $adminUserId, $adminUserId, null, $cutover !== null ? (int) $cutover['id'] : null);
@@ -641,22 +655,6 @@ final class EmployeeAccountCutoverService
         return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
     }
 
-    private function entriesForCutover(string $table, int $cutoverId): array
-    {
-        if (!$this->connection->tableExists($table)) {
-            return [];
-        }
-
-        $where = $this->connection->columnExists($table, 'cutover_id')
-            ? 'cutover_id = :cutover_id'
-            : 'source_type = "employee_account_cutover" AND source_id = :cutover_id';
-
-        return $this->connection->fetchAll(
-            'SELECT * FROM ' . $table . ' WHERE ' . $where . ' ORDER BY id ASC',
-            ['cutover_id' => $cutoverId]
-        );
-    }
-
     private function finalizeDraftOrInsert(array $preview, int $adminUserId): int
     {
         $userId = (int) $preview['user_id'];
@@ -723,6 +721,15 @@ final class EmployeeAccountCutoverService
     private function withUserAndAccountingLocks(int $userId, callable $callback): mixed
     {
         return $this->withUserLock($userId, fn (): mixed => $this->writeGuard?->withAccountingWriteLock($callback) ?? $callback());
+    }
+
+    public function withAccountWriteLocks(int $userId, callable $callback): mixed
+    {
+        if ($userId <= 0) {
+            throw new InvalidArgumentException('Bitte einen gueltigen Mitarbeiter auswaehlen.');
+        }
+
+        return $this->withUserAndAccountingLocks($userId, $callback);
     }
 
     private function withUserLock(int $userId, callable $callback): mixed

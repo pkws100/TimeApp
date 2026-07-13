@@ -25,7 +25,9 @@
 - `timesheets.credited_minutes` speichert ausschliesslich Zeitgutschriften fuer nicht geleistete Arbeit; `absence_reason_code` differenziert Abwesenheiten wie bezahlten Urlaub, bezahlte Krankheit, unbezahlte Abwesenheit und unentschuldigtes Fehlen.
 - Ein finaler Einfuehrungsstichtag in `employee_account_cutovers` definiert den verbindlich uebernommenen Zeitkontostand am Ende des Vortages. Zeiten vor `effective_from` veraendern den neuen kumulierten Zeitkontostand nicht mehr.
 - `time_account_entries` und `vacation_account_entries` sind unveraenderliche Journale fuer Eroeffnungen, manuelle Korrekturen, Auszahlungen, Verfall und Gegenbuchungen. Fehler werden durch `reversal`-Buchungen mit `reversal_of_id` korrigiert, nicht durch Bearbeiten oder Loeschen alter Journalzeilen.
+- Stichtagsfinalisierungen speichern fachliche Nullwerte weiterhin im Stichtagsdatensatz und Protokoll, erzeugen dafuer aber keine wirkungslosen Journalzeilen. Revidierungen gleichen nur offene, von null verschiedene Ursprungsbuchungen aus; bereits ausgeglichene Eintraege und Reversal-Zeilen werden nicht erneut verarbeitet.
 - Journalzeilen tragen `cutover_id` und gehoeren dadurch zu genau einer Stichtagsgeneration. Aktive Zeit- und Urlaubskontoberechnungen verwenden nur Eintraege der aktiven finalen Generation; revidierte Generationen bleiben historisch erhalten, sind aber aus aktiven Salden ausgeschlossen.
+- Historische Generationen werden nur bei direkter Stichtagsquelle, ueber die Ursprungsbuchung eines Reversals oder bei genau einem zeitlich belegbaren Kandidaten automatisch zugeordnet. Mehrdeutige Zeilen behalten `cutover_id = NULL`, bleiben saldoneutral und werden ueber `bin/inspect-time-account-generations.php` gemeldet.
 - `accounting_closures.source_type/source_id` kennzeichnen interne Stichtagssperren strukturell. `source_type = employee_account_cutover` sperrt Timesheet-Schreibpfade vor dem Stichtag, wird aber aus normalen Abschlusslisten und -exporten herausgefiltert.
 - `users.vacation_days_year` und `users.vacation_carryover_days` bleiben als Vorschlagswerte fuer neue Stichtage bzw. Urlaubsjahre erhalten; sobald jahresbezogene Urlaubskonto-Journalbuchungen vorhanden sind, veraendern diese User-Felder historische Urlaubskonten nicht rueckwirkend. Jahreseroeffnungen werden je `user_id`, `leave_year` und `cutover_id` idempotent gebucht.
 - GoBD-konforme Archivierung wird ueber `is_deleted`, `deleted_at` und `deleted_by_user_id` auf den relevanten Stammdaten umgesetzt.
@@ -44,6 +46,8 @@
 - Monate vollstaendig vor dem aktiven Stichtag liefern `cutover_status = not_active_in_period` und zeigen keinen kuenstlichen Eroeffnungs- oder Endbestand.
 - Manuelle ganztagige Abwesenheiten sind nur an Tagen mit positivem effektivem Tages-Soll erlaubt. Wochenenden, Feiertage und Betriebsschliessungen erzeugen keinen zusaetzlichen Abwesenheitsgutschrift-Bedarf.
 - Mehrere Arbeitsbuchungen am selben Tag sind zulaessig. Arbeit plus ganztagige Abwesenheit sowie doppelte ganztagige Abwesenheiten werden zentral serverseitig blockiert.
+- Dieselben Konflikt- und Tages-Soll-Pruefungen gelten beim Wiederherstellen archivierter Buchungen erneut gegen den aktuellen Kalender- und Buchungsstand.
+- Betriebsschliessungen werden fuer Tagesberechnungen ueber `date_from/date_to` nach Kalenderjahresueberlappung geladen; das Hilfsfeld `year` dient nur Listen und Gruppierung.
 
 ## Uebergangsschutz
 - Arbeitszeitmodell-Aenderungen bei aktiven Zeitkonten mit Bewegungen werden blockiert, weil historische Arbeitszeitmodellversionen noch nicht voll modelliert sind.
@@ -55,3 +59,9 @@
 - Der erste Administrator wird anschliessend per CLI angelegt:
   `php bin/bootstrap-admin.php --email=... --password=... --first-name=... --last-name=...`
 - Beispielbenutzer, Demo-Projekte und Demo-Assets liegen in einem separaten optionalen Demo-Seeder.
+
+## MariaDB-Integrationstests
+- Zeitkonto-, Lock-, Migrations-, Foreign-Key- und System-Versioning-Tests verwenden pro Testklasse eine zufaellige Scratch-Datenbank auf MariaDB.
+- Die Testbasis migriert das Schema mit Phinx, leert Testdaten zwischen Methoden und entfernt die Datenbank danach. Produktivdatenbanken werden nicht als Testziel verwendet.
+- Lokale Testzugriffe koennen mit `TIMEAPP_TEST_DB_*` konfiguriert werden. Ein isolierter App-Prozess kann `DB_OVERRIDE_FILE` auf einen separaten oder nicht vorhandenen Override-Pfad setzen.
+- Der reale Playwright-Zeitkonto-Runner erstellt ausschliesslich zufaellige Datenbanken mit dem Praefix `timeapp_ui_`, verwendet synthetische Benutzer und entfernt Datenbank, Serverlogs und Browserartefakte auch bei Fehlern.

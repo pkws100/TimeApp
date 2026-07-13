@@ -4,26 +4,16 @@ declare(strict_types=1);
 
 namespace Tests\Integration;
 
-use App\Config\ConfigRepository;
 use App\Domain\Calendar\CalendarPolicyService;
-use App\Domain\Settings\DatabaseSettingsManager;
-use App\Infrastructure\Database\DatabaseConnection;
+use App\Domain\TimeAccounts\DailyTargetService;
 use PDO;
-use PHPUnit\Framework\TestCase;
+use Tests\Support\MariaDbTestCase;
 
-final class CalendarPolicyDatabaseTest extends TestCase
+final class CalendarPolicyDatabaseTest extends MariaDbTestCase
 {
     public function testCompanyClosureDayPolicyUsesNativePdoPlaceholdersSafely(): void
     {
-        $connection = $this->connection();
-
-        if (!$connection->isAvailable()) {
-            self::markTestSkipped('Keine Test-Datenbank verfuegbar.');
-        }
-
-        if (!$connection->tableExists('company_closures')) {
-            self::markTestSkipped('Migration fuer company_closures ist nicht verfuegbar.');
-        }
+        $connection = parent::connection();
 
         $pdo = $connection->pdo();
         self::assertInstanceOf(PDO::class, $pdo);
@@ -55,14 +45,42 @@ final class CalendarPolicyDatabaseTest extends TestCase
         }
     }
 
-    private function connection(): DatabaseConnection
+    public function testCrossYearClosureIsLoadedByDateOverlapAndCacheIsInvalidated(): void
     {
-        $config = ConfigRepository::load(['database']);
-        $settings = new DatabaseSettingsManager(
-            (array) $config->get('database.connections.mysql', []),
-            (string) $config->get('database.override_file')
-        );
+        $service = new CalendarPolicyService(parent::connection());
+        self::assertFalse($service->dayPolicy('2027-01-02')['is_company_closure']);
+        $closure = $service->createClosure([
+            'title' => 'Jahreswechsel',
+            'date_from' => '2026-12-29',
+            'date_to' => '2027-01-03',
+        ]);
 
-        return new DatabaseConnection($settings->current());
+        self::assertTrue($service->dayPolicy('2026-12-30')['is_company_closure']);
+        self::assertCount(1, $service->closuresForYear(2027));
+        self::assertTrue($service->dayPolicy('2027-01-02')['is_company_closure']);
+        self::assertFalse($service->dayPolicy('2027-01-04')['is_company_closure']);
+        $service->archiveClosure((int) $closure['id']);
+        self::assertFalse($service->dayPolicy('2027-01-02')['is_company_closure']);
+    }
+
+    public function testHolidayAndClosureDoNotReduceTargetTwice(): void
+    {
+        $service = new CalendarPolicyService(parent::connection());
+        $service->saveRegion('NW');
+        $service->createClosure([
+            'title' => 'Neujahrsschliessung',
+            'date_from' => '2027-01-01',
+            'date_to' => '2027-01-01',
+        ]);
+        $stats = (new DailyTargetService($service))->stats([
+            'id' => 7,
+            'target_hours_mode' => 'week',
+            'target_hours_week' => 40,
+            'workdays_mask' => '1,2,3,4,5',
+        ], '2027-01-01', '2027-01-01');
+
+        self::assertSame(480, $stats['holiday_reduction_minutes']);
+        self::assertSame(0, $stats['company_closure_reduction_minutes']);
+        self::assertSame(0, $stats['effective_target_minutes']);
     }
 }

@@ -10,7 +10,7 @@ aktuelle Wahrheit liegt im Code, in Tests und in der Git-Historie.
 - Restore-Apply als separaten produktiven Auftrag konzipieren und bauen: explizites Admin-Gate, Dry-Run-Protokoll, Wartungsmodus, Rollback-Konzept und klare Freigabe.
 - Monatsberichte mit produktionsreifem mPDF-Layout und finalen Excel-Templates ausbauen.
 - Versionshistorie und Archivierungsstrategie fuer Settings-Dateien wie Logo, AGB-PDF und Datenschutz-PDF vervollstaendigen.
-- Validierung, Fehlermeldungen und Wiederherstellen archivierter Datensaetze weiter ausbauen.
+- Validierung und Wiederherstellen archivierter Stammdaten ausserhalb der bereits gehaerteten Timesheet-Konfliktpruefung weiter ausbauen.
 - Historische Arbeitszeitmodelle, Feiertagsregionen und Betriebsschliessungen mit zeitlicher Gueltigkeit ausbauen. Bis dahin blockiert die App riskante rueckwirkende Aenderungen, sobald aktive Zeitkonten betroffen waeren.
 
 ## Mobile App und Offline

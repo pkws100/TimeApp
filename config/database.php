@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 return [
     'default' => 'mysql',
-    'override_file' => storage_path('config/database.override.php'),
+    'override_file' => (string) env('DB_OVERRIDE_FILE', storage_path('config/database.override.php')),
     'connections' => [
         'mysql' => [
             'driver' => (string) env('DB_DRIVER', 'mysql'),

@@ -228,11 +228,68 @@ final class AdminTimeAccountController
         $year = (int) $request->query('year', (int) date('Y'));
         $limit = max(1, min(100, (int) $request->query('limit', 50)));
         $page = max(1, (int) $request->query('page', 1));
+        $entries = $this->timeAccountService->journalEntries($userId, $year, $limit, $page);
+
+        if ((string) $request->query('view', '') === 'html') {
+            $user = $this->userService->find($userId);
+
+            return Response::html($this->view->render(
+                'Zeitkonto-Detailhistorie',
+                $this->renderJournalEntriesPage($userId, $year, $entries, $user)
+            ));
+        }
 
         return Response::json([
             'ok' => true,
-            'data' => $this->timeAccountService->journalEntries($userId, $year, $limit, $page),
+            'data' => $entries,
         ]);
+    }
+
+    private function renderJournalEntriesPage(int $userId, int $year, array $entries, ?array $user): string
+    {
+        $pagination = $entries['pagination'] ?? [];
+        $page = max(1, (int) ($pagination['page'] ?? 1));
+        $limit = max(1, min(100, (int) ($pagination['limit'] ?? 50)));
+        $hasMore = (bool) ($pagination['time_has_more'] ?? false) || (bool) ($pagination['vacation_has_more'] ?? false);
+        $label = trim((string) ($user['first_name'] ?? '') . ' ' . (string) ($user['last_name'] ?? ''));
+        $label = $label !== '' ? $label : 'Mitarbeiter #' . $userId;
+        $base = '/admin/time-accounts/users/' . $userId . '/entries?view=html&year=' . $year . '&limit=' . $limit . '&page=';
+        $pager = '<div class="pagination"><span>Seite ' . $page . '</span>';
+
+        if ($page > 1) {
+            $pager .= '<a class="button button-secondary" href="' . $this->e($base . ($page - 1)) . '">Zurueck</a>';
+        }
+        if ($hasMore) {
+            $pager .= '<a class="button button-secondary" href="' . $this->e($base . ($page + 1)) . '">Weiter</a>';
+        }
+        $pager .= '</div>';
+        $csrf = $this->e($this->csrfService?->token() ?? '');
+        $canManage = $this->authService?->hasPermission('time_accounts.manage') ?? true;
+        $timeRows = $this->journalHistoryRows('time', $entries['time_entries'] ?? [], $csrf, $canManage);
+        $vacationRows = $this->journalHistoryRows('vacation', $entries['vacation_entries'] ?? [], $csrf, $canManage);
+
+        return '<header class="page-header"><div><p class="eyebrow">Zeitkonto</p><h1>Detailhistorie</h1><p>' . $this->e($label) . ' &middot; Generation #' . (int) ($entries['cutover_id'] ?? 0) . '</p></div>'
+            . '<a class="button button-secondary" href="/admin/time-accounts?user_id=' . $userId . '&year=' . $year . '">Zur Zeitkonto-Uebersicht</a></header>'
+            . '<section class="card stack"><form method="get" class="form-grid"><input type="hidden" name="view" value="html"><label><span>Urlaubsjahr</span><input type="number" name="year" min="2000" max="2100" value="' . $year . '"></label><label><span>Eintraege je Seite</span><input type="number" name="limit" min="1" max="100" value="' . $limit . '"></label><button class="button" type="submit">Anzeigen</button></form>' . $pager . '</section>'
+            . '<section class="card stack"><h2>Zeitkonto-Journal</h2><div class="table-scroll"><table><thead><tr><th>Datum</th><th>Art</th><th>Wert</th><th>Beschreibung</th><th>Aktion</th></tr></thead><tbody>' . $timeRows . '</tbody></table></div></section>'
+            . '<section class="card stack"><h2>Urlaubskonto-Journal</h2><div class="table-scroll"><table><thead><tr><th>Datum</th><th>Art</th><th>Wert</th><th>Beschreibung</th><th>Aktion</th></tr></thead><tbody>' . $vacationRows . '</tbody></table></div>' . $pager . '</section>';
+    }
+
+    private function journalHistoryRows(string $kind, array $entries, string $csrfToken, bool $canManage): string
+    {
+        if ($entries === []) {
+            return '<tr><td colspan="5" class="table-empty">Keine Buchungen auf dieser Seite.</td></tr>';
+        }
+
+        $rows = '';
+        foreach ($entries as $entry) {
+            $value = $kind === 'time'
+                ? $this->timeLabel((int) ($entry['minutes'] ?? 0))
+                : $this->number($entry['days'] ?? 0) . ' Tage';
+            $rows .= '<tr><td>' . $this->e((string) ($entry['effective_date'] ?? '')) . '</td><td>' . $this->e((string) ($entry['entry_type'] ?? '')) . '</td><td>' . $this->e($value) . '</td><td>' . $this->e((string) ($entry['description'] ?? '')) . '</td><td>' . $this->journalAction($kind, $entry, $csrfToken, $canManage) . '</td></tr>';
+        }
+
+        return $rows;
     }
 
     private function renderPage(array $overview, array $users, string $notice = '', ?array $cutoverPreview = null): string
@@ -385,7 +442,7 @@ HTML;
             : '<span class="muted">Stichtag offen</span>';
 
         if ($cutoverId > 0 && $userId > 0) {
-            $actions .= '<a class="button button-secondary" href="/admin/time-accounts/users/' . $userId . '/entries?year=' . $year . '&limit=50&page=1">Detailhistorie</a>';
+            $actions .= '<a class="button button-secondary" href="/admin/time-accounts/users/' . $userId . '/entries?view=html&year=' . $year . '&limit=50&page=1">Detailhistorie</a>';
         }
 
         if ($canManage && $cutoverId > 0) {
@@ -422,7 +479,7 @@ HTML;
             : $this->number($entry['days'] ?? 0) . ' Tage';
         $text = $this->e((string) ($entry['effective_date'] ?? '') . ' ' . (string) ($entry['entry_type'] ?? '') . ' ' . $value);
 
-        if (!$canManage || $id <= 0 || $sourceType === 'employee_account_cutover') {
+        if (!$canManage || $id <= 0 || $sourceType === 'employee_account_cutover' || (int) ($entry['is_open'] ?? 0) !== 1) {
             return '<p class="muted">' . $text . '</p>';
         }
 

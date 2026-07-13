@@ -142,8 +142,11 @@ Diese Entscheidungen gelten aktuell als gesetzt und sollen nicht ohne expliziten
 - Stichtagsfinalisierung und Revidierung verwenden die feste Sperrreihenfolge: Mitarbeiter-Stichtagslock, globaler `accounting-timesheet-write`-Lock, erneute Vorschau/Pruefung, DB-Transaktion, Freigabe in umgekehrter Reihenfolge.
 - Korrekturen an Zeit- und Urlaubskonten erfolgen ueber unveraenderliche Journalbuchungen und Gegenbuchungen, nicht durch Bearbeiten oder physisches Loeschen alter Journalzeilen.
 - Journalbuchungen muessen einer aktiven Stichtagsgeneration zugeordnet sein; freie Reversal- oder Nullbuchungen sind fachlich nicht erlaubt, ausser explizit zugelassene Eroeffnungsbuchungen.
+- Neue Stichtagsfinalisierungen erzeugen keine wirkungslosen Null-Journalzeilen. Bei der Revidierung werden nur offene Ursprungsbuchungen ohne bestehende Gegenbuchung verarbeitet; historische Nullzeilen bleiben unveraendert erhalten und werden uebersprungen.
+- Mehrdeutige historische Journalgenerationen duerfen nicht heuristisch geraten werden. Solche Zeilen bleiben mit `cutover_id = NULL` aus aktiven Salden ausgeschlossen und werden mit `bin/inspect-time-account-generations.php` analysiert.
 - Urlaubskonto-Jahreseroeffnungen werden je Mitarbeiter, Urlaubsjahr und Stichtagsgeneration idempotent gebucht. Spaetere Stammdatenaenderungen veraendern eroeffnete Jahre nicht rueckwirkend.
 - Arbeit plus ganztagige Abwesenheit sowie doppelte ganztagige Abwesenheiten am selben Tag werden zentral blockiert; mehrere Arbeitsbuchungen bleiben erlaubt.
+- Beim Wiederherstellen archivierter Buchungen werden Periodensperre, anrechenbarer Arbeitstag und Tageskonflikte erneut gegen den aktuellen Zustand geprueft.
 - Positive rechnerische Zeitkontostaende werden neutral als positiver Zeitkontostand bezeichnet, nicht automatisch als genehmigte Ueberstunden.
 - Fehlende Tagesbuchungen koennen fuer aktive Mitarbeiter an Werktagen als Status angezeigt werden; dieser abgeleitete Fehlend-Status erzeugt keine automatische `timesheets`-Buchung.
 - Gesetzliche Feiertage und Betriebsurlaub sind Anzeige- und Pflichtlogik; sie erzeugen keine automatischen `timesheets`-Buchungen und deaktivieren abgeleitetes Fehlen bzw. Fehlbuchungs-Pushes.
@@ -179,6 +182,7 @@ Regeln:
 - Interne Stichtagssperren muessen `source_type/source_id` setzen und duerfen in normalen Abschlusslisten und -exporten nicht als manuelle Buchhaltungsabschluesse erscheinen.
 - FK-Beziehungen von Usern zu Stichtagen und Journalen muessen historienstabil bleiben; physisches User-Loeschen darf keine Zeitkonto-Historie kaskadierend entfernen.
 - Rueckwirkende Arbeitszeitmodell-, Feiertagsregion- und Betriebsschliessungs-Aenderungen bei betroffenen aktiven Zeitkonten sind bis zu einem versionierten Historienmodell zu blockieren.
+- Betriebsschliessungen werden fuer Tagespolicies nach zeitlicher Jahresueberlappung geladen; eine Schliessung ueber den Jahreswechsel wirkt daher in beiden Kalenderjahren.
 - Archivierungsfelder sind Teil der Historien- und GoBD-Strategie
 - Beziehungen und Historie duerfen durch Archivierung nicht unlesbar werden
 
@@ -330,6 +334,8 @@ Beim Implementieren:
 - neue Features moeglichst auch fuer Admin und API konsistent denken
 - bei Docker-Aenderungen immer `Dockerfile`, Compose-Dateien, `.env.example`, `DEPLOY.md` und README gemeinsam pruefen
 - im Dockerfile nur PHP-Extensions bauen, die im Basisimage fehlen; aktuell sind das fuer Produktion insbesondere `gd`, `pdo_mysql` und `zip`
+- MariaDB-spezifische Zeitkontoablaeufe mit den Scratch-DB-Integrationstests pruefen. Fehlende DB-Verbindung oder fehlendes `CREATE DATABASE` ist ein Testfehler und kein stiller Skip; `DB_OVERRIDE_FILE` darf fuer isolierte Testprozesse auf einen separaten Override-Pfad zeigen.
+- `npm run ui:test` umfasst die schnellen Browser-Smokes und den realen Zeitkonto-Workflow gegen eine automatisch erzeugte `timeapp_ui_*`-Scratch-Datenbank; fuer reine Smokes `npm run ui:test:smoke` verwenden.
 
 Beim Aendern von Dokumentation:
 

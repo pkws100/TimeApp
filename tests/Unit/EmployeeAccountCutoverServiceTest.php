@@ -4,23 +4,26 @@ declare(strict_types=1);
 
 namespace Tests\Unit;
 
+use App\Domain\TimeAccounts\AccountJournalService;
+use App\Domain\TimeAccounts\EmployeeAccountCutoverService;
+use App\Infrastructure\Database\DatabaseConnection;
+use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 
 final class EmployeeAccountCutoverServiceTest extends TestCase
 {
-    public function testCutoverServiceUsesAccountingLockDraftFinalizationAndStructuredClosures(): void
+    public function testPreviewRejectsUnknownEmployeeThroughServiceCall(): void
     {
-        $source = (string) file_get_contents(base_path('src/Domain/TimeAccounts/EmployeeAccountCutoverService.php'));
+        $connection = new DatabaseConnection([]);
+        $service = new EmployeeAccountCutoverService($connection, new AccountJournalService($connection));
 
-        self::assertStringContainsString('withUserAndAccountingLocks', $source);
-        self::assertStringContainsString('withAccountingWriteLock', $source);
-        self::assertStringContainsString('finalizeDraftOrInsert', $source);
-        self::assertStringContainsString('status = "draft"', $source);
-        self::assertStringContainsString('source_type', $source);
-        self::assertStringContainsString('employee_account_cutover', $source);
-        self::assertStringContainsString('cutover_id', $source);
-        self::assertStringContainsString('public function reverseTimeEntry', $source);
-        self::assertStringContainsString('public function reverseVacationEntry', $source);
-        self::assertStringContainsString('Die Urlaubskonto-Jahreseroeffnung ist gerade gesperrt.', (string) file_get_contents(base_path('src/Domain/TimeAccounts/VacationAccountYearService.php')));
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Mitarbeiter');
+        $service->preview([
+            'user_id' => 99,
+            'effective_from' => '2026-01-01',
+            'opening_time_balance' => '0:00',
+            'leave_year' => 2026,
+        ]);
     }
 }

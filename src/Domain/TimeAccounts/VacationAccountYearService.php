@@ -22,6 +22,18 @@ final class VacationAccountYearService
             throw new InvalidArgumentException('Bitte ein gueltiges Urlaubsjahr angeben.');
         }
 
+        $this->cutoverService->withAccountWriteLocks(
+            $userId,
+            fn (): mixed => $this->ensureYearOpenedWithinAccountLocks($userId, $leaveYear, $actorUserId)
+        );
+    }
+
+    public function ensureYearOpenedWithinAccountLocks(int $userId, int $leaveYear, int $actorUserId): void
+    {
+        if ($userId <= 0 || $leaveYear < 2000 || $leaveYear > 2100) {
+            throw new InvalidArgumentException('Bitte ein gueltiges Urlaubsjahr angeben.');
+        }
+
         $cutover = $this->cutoverService->activeCutover($userId);
 
         if ($cutover === null) {
@@ -29,16 +41,20 @@ final class VacationAccountYearService
         }
 
         $cutoverId = (int) $cutover['id'];
-
-        $user = $this->user($userId);
-        $effectiveDate = max(sprintf('%04d-01-01', $leaveYear), (string) $cutover['effective_from']);
-        $entitlement = (float) ($user['vacation_days_year'] ?? 0);
-        $carryover = (float) ($user['vacation_carryover_days'] ?? 0);
-
-        $this->withOpeningLock($userId, $leaveYear, $cutoverId, function () use ($userId, $leaveYear, $cutoverId, $effectiveDate, $entitlement, $carryover, $actorUserId): void {
+        $this->withOpeningLock($userId, $leaveYear, $cutoverId, function () use ($userId, $leaveYear, $cutoverId, $actorUserId): void {
             if ($this->isOpened($userId, $leaveYear, $cutoverId)) {
                 return;
             }
+
+            $cutover = $this->cutoverService->activeCutover($userId);
+            if ($cutover === null || (int) $cutover['id'] !== $cutoverId) {
+                throw new InvalidArgumentException('Die aktive Stichtagsgeneration hat sich geaendert. Bitte erneut versuchen.');
+            }
+
+            $user = $this->user($userId);
+            $effectiveDate = max(sprintf('%04d-01-01', $leaveYear), (string) $cutover['effective_from']);
+            $entitlement = (float) ($user['vacation_days_year'] ?? 0);
+            $carryover = (float) ($user['vacation_carryover_days'] ?? 0);
 
             $this->connection->transaction(function () use ($userId, $leaveYear, $cutoverId, $effectiveDate, $entitlement, $carryover, $actorUserId): void {
                 if ($this->isOpened($userId, $leaveYear, $cutoverId)) {

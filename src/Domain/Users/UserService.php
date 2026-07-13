@@ -385,6 +385,7 @@ final class UserService
     private function normalizeUserSettings(array $user): array
     {
         $user['app_ui_settings'] = AppUiSettings::normalize($user['app_ui_settings'] ?? null);
+        $user['target_hours_month'] = (float) ($user['target_hours_month'] ?? 0);
         $user['target_hours_mode'] = $this->normalizeTargetHoursMode($user['target_hours_mode'] ?? 'month');
         $targetHoursWeek = $user['target_hours_week'] ?? null;
         $user['target_hours_week'] = $targetHoursWeek === null || $targetHoursWeek === ''
@@ -527,14 +528,26 @@ final class UserService
             return;
         }
 
-        foreach (['target_hours_mode', 'target_hours_week', 'target_hours_month', 'workdays_mask'] as $field) {
-            $before = $existing[$field] ?? null;
-            $after = $record[$field] ?? null;
+        $changed = $this->normalizeTargetHoursMode($existing['target_hours_mode'] ?? 'month') !== $this->normalizeTargetHoursMode($record['target_hours_mode'] ?? 'month')
+            || $this->nullableNumericChanged($existing['target_hours_week'] ?? null, $record['target_hours_week'] ?? null)
+            || abs((float) ($existing['target_hours_month'] ?? 0) - (float) ($record['target_hours_month'] ?? 0)) > 0.0001
+            || $this->normalizeWorkdaysMask($existing['workdays_mask'] ?? null) !== $this->normalizeWorkdaysMask($record['workdays_mask'] ?? null);
 
-            if ((string) $before !== (string) $after && $this->hasActiveTimeAccountMovements($userId)) {
-                throw new InvalidArgumentException('Das Arbeitszeitmodell ist Bestandteil eines aktiven Zeitkontos. Rueckwirkende Aenderungen benoetigen ein zeitlich gueltiges Arbeitszeitmodell oder eine dokumentierte Kontokorrektur.');
-            }
+        if ($changed && $this->hasActiveTimeAccountMovements($userId)) {
+            throw new InvalidArgumentException('Das Arbeitszeitmodell ist Bestandteil eines aktiven Zeitkontos. Rueckwirkende Aenderungen benoetigen ein zeitlich gueltiges Arbeitszeitmodell oder eine dokumentierte Kontokorrektur.');
         }
+    }
+
+    private function nullableNumericChanged(mixed $before, mixed $after): bool
+    {
+        $before = $before === null || trim((string) $before) === '' ? null : (float) $before;
+        $after = $after === null || trim((string) $after) === '' ? null : (float) $after;
+
+        if ($before === null || $after === null) {
+            return $before !== $after;
+        }
+
+        return abs($before - $after) > 0.0001;
     }
 
     private function hasActiveTimeAccountMovements(int $userId): bool

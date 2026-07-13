@@ -2940,9 +2940,15 @@
             rows.push('<div class="app-info-row"><span>' + escapeHtml(entry.effective_date || '') + ' · Urlaub</span><strong>' + escapeHtml(formatVacationDays(Number(entry.days || 0))) + '</strong></div>');
         });
 
-        return rows.length === 0
-            ? '<div class="app-empty">Keine Konto-Buchungen vorhanden.</div>'
-            : '<div class="app-info-list">' + rows.join('') + '</div>';
+        const unavailable = account.history_unavailable
+            ? '<div class="app-empty">Journalhistorie ist derzeit nicht verfuegbar. Der letzte bekannte Stand bleibt erhalten.</div>'
+            : '';
+
+        if (rows.length === 0) {
+            return unavailable || '<div class="app-empty">Keine Konto-Buchungen vorhanden.</div>';
+        }
+
+        return unavailable + '<div class="app-info-list">' + rows.join('') + '</div>';
     }
 
     function formatSignedMinutes(minutes) {
@@ -4059,18 +4065,25 @@
                 apiJson('/api/v1/app/time-account/summary'),
                 apiJson('/api/v1/app/vacation-requests')
             ]);
+            const previousTimeEntries = Array.isArray(state.timeAccount && state.timeAccount.time_entries) ? state.timeAccount.time_entries : [];
+            const previousVacationEntries = Array.isArray(state.timeAccount && state.timeAccount.vacation_entries) ? state.timeAccount.vacation_entries : [];
             const entriesResult = await apiJson('/api/v1/app/time-account/entries?limit=10').catch((error) => {
                 if (isSessionExpiredError(error)) {
                     throw error;
                 }
 
-                return { data: { time_entries: [], vacation_entries: [] } };
+                return null;
             });
 
             state.timeAccount = summaryResult.data || null;
-            if (state.timeAccount && entriesResult.data) {
+            if (state.timeAccount && entriesResult && entriesResult.data) {
                 state.timeAccount.time_entries = Array.isArray(entriesResult.data.time_entries) ? entriesResult.data.time_entries : [];
                 state.timeAccount.vacation_entries = Array.isArray(entriesResult.data.vacation_entries) ? entriesResult.data.vacation_entries : [];
+                state.timeAccount.history_unavailable = false;
+            } else if (state.timeAccount) {
+                state.timeAccount.time_entries = previousTimeEntries;
+                state.timeAccount.vacation_entries = previousVacationEntries;
+                state.timeAccount.history_unavailable = true;
             }
             state.vacationRequests = requestsResult.data && Array.isArray(requestsResult.data.items) ? requestsResult.data.items : [];
             state.vacationOffline = false;

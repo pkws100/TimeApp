@@ -138,6 +138,10 @@ final class AccountJournalService
             throw new InvalidArgumentException('Die Zeitkonto-Buchung wurde nicht gefunden.');
         }
 
+        if ((string) ($entry['entry_type'] ?? '') === 'reversal') {
+            throw new InvalidArgumentException('Gegenbuchungen koennen nicht erneut ausgeglichen werden.');
+        }
+
         if (!$allowCutoverOwned && (string) ($entry['source_type'] ?? '') === 'employee_account_cutover') {
             throw new InvalidArgumentException('Eroeffnungsbuchungen eines Stichtags koennen nur ueber die Stichtags-Revidierung ausgeglichen werden.');
         }
@@ -165,6 +169,10 @@ final class AccountJournalService
 
         if ($entry === null) {
             throw new InvalidArgumentException('Die Urlaubskonto-Buchung wurde nicht gefunden.');
+        }
+
+        if ((string) ($entry['entry_type'] ?? '') === 'reversal') {
+            throw new InvalidArgumentException('Gegenbuchungen koennen nicht erneut ausgeglichen werden.');
         }
 
         if (!$allowCutoverOwned && (string) ($entry['source_type'] ?? '') === 'employee_account_cutover') {
@@ -238,7 +246,13 @@ final class AccountJournalService
         }
 
         return $this->connection->fetchAll(
-            'SELECT time_account_entries.*, creators.first_name AS creator_first_name, creators.last_name AS creator_last_name
+            'SELECT time_account_entries.*, creators.first_name AS creator_first_name, creators.last_name AS creator_last_name,
+                    CASE WHEN time_account_entries.entry_type <> "reversal"
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM time_account_entries AS existing_reversal
+                                  WHERE existing_reversal.reversal_of_id = time_account_entries.id
+                              )
+                         THEN 1 ELSE 0 END AS is_open
              FROM time_account_entries
              LEFT JOIN users AS creators ON creators.id = time_account_entries.created_by_user_id
              WHERE ' . implode(' AND ', $clauses) . '
@@ -269,7 +283,13 @@ final class AccountJournalService
         }
 
         return $this->connection->fetchAll(
-            'SELECT vacation_account_entries.*, creators.first_name AS creator_first_name, creators.last_name AS creator_last_name
+            'SELECT vacation_account_entries.*, creators.first_name AS creator_first_name, creators.last_name AS creator_last_name,
+                    CASE WHEN vacation_account_entries.entry_type <> "reversal"
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM vacation_account_entries AS existing_reversal
+                                  WHERE existing_reversal.reversal_of_id = vacation_account_entries.id
+                              )
+                         THEN 1 ELSE 0 END AS is_open
              FROM vacation_account_entries
              LEFT JOIN users AS creators ON creators.id = vacation_account_entries.created_by_user_id
              WHERE ' . implode(' AND ', $clauses) . '
@@ -278,6 +298,16 @@ final class AccountJournalService
              OFFSET ' . max(0, $offset),
             $bindings
         );
+    }
+
+    public function openTimeEntriesForCutover(int $cutoverId): array
+    {
+        return $this->openEntriesForCutover('time_account_entries', $cutoverId);
+    }
+
+    public function openVacationEntriesForCutover(int $cutoverId): array
+    {
+        return $this->openEntriesForCutover('vacation_account_entries', $cutoverId);
     }
 
     public function timeSum(int $userId, ?string $dateFrom, ?string $dateTo): int
@@ -327,6 +357,28 @@ final class AccountJournalService
         if ($count > 0) {
             throw new InvalidArgumentException('Diese Buchung wurde bereits ausgeglichen.');
         }
+    }
+
+    private function openEntriesForCutover(string $table, int $cutoverId): array
+    {
+        if ($cutoverId <= 0 || !$this->connection->tableExists($table)) {
+            return [];
+        }
+
+        $cutoverClause = $this->connection->columnExists($table, 'cutover_id')
+            ? 'original.cutover_id = :cutover_id'
+            : 'original.source_type = "employee_account_cutover" AND original.source_id = :cutover_id';
+
+        return $this->connection->fetchAll(
+            'SELECT original.*
+             FROM ' . $table . ' AS original
+             LEFT JOIN ' . $table . ' AS reversal ON reversal.reversal_of_id = original.id
+             WHERE ' . $cutoverClause . '
+               AND original.entry_type <> "reversal"
+               AND reversal.id IS NULL
+             ORDER BY original.id ASC',
+            ['cutover_id' => $cutoverId]
+        );
     }
 
     private function assertValidTimeEntry(int $userId, string $effectiveDate, int $minutes, string $entryType, string $description, ?int $reversalOfId, ?int $cutoverId): void

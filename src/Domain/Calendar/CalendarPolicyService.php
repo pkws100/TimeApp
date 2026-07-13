@@ -125,9 +125,14 @@ final class CalendarPolicyService implements CalendarPolicyProvider
             $this->connection->fetchAll(
                 'SELECT id, title, date_from, date_to, year, notes, created_at, updated_at, is_deleted, deleted_at
                  FROM company_closures
-                 WHERE year = :year AND ' . $scopeClause . '
+                 WHERE date_from <= :year_end
+                   AND date_to >= :year_start
+                   AND ' . $scopeClause . '
                  ORDER BY date_from ASC, date_to ASC, id ASC',
-                ['year' => $year]
+                [
+                    'year_start' => sprintf('%04d-01-01', $year),
+                    'year_end' => sprintf('%04d-12-31', $year),
+                ]
             )
         );
 
@@ -172,7 +177,7 @@ final class CalendarPolicyService implements CalendarPolicyProvider
                 'notes' => $notes !== '' ? $notes : null,
             ]
         );
-        unset($this->closuresByYearCache[(int) $dateFrom->format('Y')]);
+        $this->closuresByYearCache = [];
         $this->dayPolicyCache = [];
 
         return [
@@ -352,9 +357,13 @@ final class CalendarPolicyService implements CalendarPolicyProvider
                     'SELECT id, title, date_from, date_to, year, notes, created_at, updated_at, is_deleted, deleted_at
                      FROM company_closures
                      WHERE is_deleted = 0
-                       AND year = :year
+                       AND date_from <= :year_end
+                       AND date_to >= :year_start
                      ORDER BY date_from ASC, id ASC',
-                    ['year' => $year]
+                    [
+                        'year_start' => sprintf('%04d-01-01', $year),
+                        'year_end' => sprintf('%04d-12-31', $year),
+                    ]
                 )
             );
         }
