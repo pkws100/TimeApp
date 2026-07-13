@@ -129,6 +129,9 @@ final class DashboardService
 
             $userId = (int) ($row['user_id'] ?? 0);
             $entryType = (string) ($row['entry_type'] ?? '');
+            if ($entryType === 'vacation' && (string) ($row['absence_reason_code'] ?? '') === 'unpaid_leave') {
+                $entryType = 'absent';
+            }
 
             if ($entryType === 'work') {
                 $presentSets[$bucketKey][$userId] = true;
@@ -263,12 +266,16 @@ final class DashboardService
     private function chartRows(string $period): array
     {
         $range = $this->periodRange($period);
+        $absenceReasonSelect = $this->connection->columnExists('timesheets', 'absence_reason_code')
+            ? 'timesheets.absence_reason_code'
+            : 'NULL AS absence_reason_code';
 
         return $this->connection->fetchAll(
             'SELECT
                 timesheets.work_date,
                 timesheets.user_id,
                 timesheets.entry_type,
+                ' . $absenceReasonSelect . ',
                 timesheets.net_minutes,
                 projects.name AS project_name
              FROM timesheets

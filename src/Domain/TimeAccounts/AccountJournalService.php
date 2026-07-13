@@ -248,6 +248,7 @@ final class AccountJournalService
         return $this->connection->fetchAll(
             'SELECT time_account_entries.*, creators.first_name AS creator_first_name, creators.last_name AS creator_last_name,
                     CASE WHEN time_account_entries.entry_type <> "reversal"
+                              AND time_account_entries.minutes <> 0
                               AND NOT EXISTS (
                                   SELECT 1 FROM time_account_entries AS existing_reversal
                                   WHERE existing_reversal.reversal_of_id = time_account_entries.id
@@ -285,6 +286,7 @@ final class AccountJournalService
         return $this->connection->fetchAll(
             'SELECT vacation_account_entries.*, creators.first_name AS creator_first_name, creators.last_name AS creator_last_name,
                     CASE WHEN vacation_account_entries.entry_type <> "reversal"
+                              AND ABS(vacation_account_entries.days) >= 0.005
                               AND NOT EXISTS (
                                   SELECT 1 FROM vacation_account_entries AS existing_reversal
                                   WHERE existing_reversal.reversal_of_id = vacation_account_entries.id

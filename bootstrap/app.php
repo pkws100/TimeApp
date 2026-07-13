@@ -393,6 +393,7 @@ $router->get('/admin/timesheet-signatures/{id}/image', $admin([$adminTimesheetSi
 $router->post('/admin/timesheet-signatures/{id}/archive', $admin([$adminTimesheetSignatureController, 'archive'], 'timesheets.archive'));
 $router->get('/admin/time-accounts', $admin([$adminTimeAccountController, 'index'], 'time_accounts.view'));
 $router->get('/admin/time-accounts/export', $admin([$adminTimeAccountController, 'export'], 'time_accounts.view'));
+$router->get('/admin/time-accounts/users/{id}/cutovers', $admin([$adminTimeAccountController, 'cutovers'], 'time_accounts.view'));
 $router->get('/admin/time-accounts/users/{id}/entries', $admin([$adminTimeAccountController, 'entries'], 'time_accounts.view'));
 $router->post('/admin/time-accounts/cutovers/preview', $admin([$adminTimeAccountController, 'previewCutover'], 'time_accounts.manage'));
 $router->post('/admin/time-accounts/cutovers/draft', $admin([$adminTimeAccountController, 'saveDraft'], 'time_accounts.manage'));

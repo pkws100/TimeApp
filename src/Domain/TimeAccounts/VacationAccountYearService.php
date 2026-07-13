@@ -41,6 +41,10 @@ final class VacationAccountYearService
         }
 
         $cutoverId = (int) $cutover['id'];
+        if ((int) ($cutover['leave_year'] ?? 0) === $leaveYear) {
+            return;
+        }
+
         $this->withOpeningLock($userId, $leaveYear, $cutoverId, function () use ($userId, $leaveYear, $cutoverId, $actorUserId): void {
             if ($this->isOpened($userId, $leaveYear, $cutoverId)) {
                 return;
@@ -96,6 +100,13 @@ final class VacationAccountYearService
 
     private function isOpened(int $userId, int $leaveYear, int $cutoverId): bool
     {
+        $cutover = $this->cutoverService->activeCutover($userId);
+        if ($cutover !== null
+            && (int) ($cutover['id'] ?? 0) === $cutoverId
+            && (int) ($cutover['leave_year'] ?? 0) === $leaveYear) {
+            return true;
+        }
+
         if (!$this->connection->tableExists('vacation_account_entries')
             || !$this->connection->columnExists('vacation_account_entries', 'cutover_id')) {
             return false;

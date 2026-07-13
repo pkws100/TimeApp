@@ -551,7 +551,7 @@ final class AdminBookingService
                 'Mitarbeiter-Nr' => (string) ($row['employee_number'] ?? ''),
                 'Projekt' => (string) ($row['project_name_display'] ?? ''),
                 'Projekt-Nr' => (string) ($row['project_number'] ?? ''),
-                'Typ' => (string) ($row['entry_type'] ?? ''),
+                'Typ' => (string) ($row['semantic_entry_type'] ?? $row['entry_type'] ?? ''),
                 'Herkunft' => (string) ($row['source_label'] ?? $this->sourceLabel((string) ($row['source'] ?? 'app'))),
                 'Start' => (string) ($row['start_time'] ?? ''),
                 'Ende' => (string) ($row['end_time'] ?? ''),
@@ -592,7 +592,7 @@ final class AdminBookingService
                 'employee_name' => (string) ($row['employee_name'] ?? ''),
                 'project_number' => (string) ($row['project_number'] ?? ''),
                 'project_name' => (string) ($row['project_name_display'] ?? ''),
-                'entry_type' => (string) ($row['entry_type'] ?? ''),
+                'entry_type' => (string) ($row['semantic_entry_type'] ?? $row['entry_type'] ?? ''),
                 'source' => (string) ($row['source'] ?? 'app'),
                 'source_label' => (string) ($row['source_label'] ?? 'App'),
                 'gross_minutes' => (int) ($row['gross_minutes'] ?? 0),
@@ -627,7 +627,7 @@ final class AdminBookingService
             'sick_unpaid' => 'Unbezahlte Krankheit',
             'paid_leave' => 'Bezahlte Freistellung',
             'employer_release_paid' => 'Bezahlte Arbeitgeberfreistellung',
-            'unpaid_leave' => 'Unbezahlter Urlaub',
+            'unpaid_leave' => 'Unbezahlte Abwesenheit (kein Erholungsurlaub)',
             'unexcused_absence' => 'Unentschuldigtes Fehlen',
         ];
     }
@@ -780,6 +780,9 @@ final class AdminBookingService
 
         $entryType = trim((string) ($payload['entry_type'] ?? 'work'));
         $entryType = array_key_exists($entryType, $this->entryTypeOptions()) ? $entryType : 'work';
+        if ($entryType === 'vacation' && trim((string) ($payload['absence_reason_code'] ?? '')) === 'unpaid_leave') {
+            $entryType = 'absent';
+        }
         $workDate = $this->normalizeDate($payload['work_date'] ?? null);
 
         if ($workDate === null) {
@@ -894,6 +897,12 @@ final class AdminBookingService
     {
         $entryType = trim((string) ($payload['entry_type'] ?? ($before['entry_type'] ?? 'work')));
         $entryType = array_key_exists($entryType, $this->entryTypeOptions()) ? $entryType : 'work';
+        $requestedReason = trim((string) ($payload['absence_reason_code'] ?? ($before['absence_reason_code'] ?? '')));
+        $absenceContextChanged = $entryType !== (string) ($before['entry_type'] ?? '')
+            || $requestedReason !== trim((string) ($before['absence_reason_code'] ?? ''));
+        if ($absenceContextChanged && $entryType === 'vacation' && $requestedReason === 'unpaid_leave') {
+            $entryType = 'absent';
+        }
         $workDate = $this->normalizeDate($payload['work_date'] ?? ($before['work_date'] ?? null));
 
         if ($workDate === null) {
@@ -938,10 +947,9 @@ final class AdminBookingService
             $breakMinutes = 0;
             $netMinutes = 0;
             $reasonInput = $payload['absence_reason_code'] ?? ($before['absence_reason_code'] ?? null);
-            $absenceReasonProvided = array_key_exists('absence_reason_code', $payload);
             $absenceContextUnchanged = $entryType === (string) ($before['entry_type'] ?? '')
                 && $workDate === (string) ($before['work_date'] ?? '')
-                && !$absenceReasonProvided;
+                && trim((string) ($reasonInput ?? '')) === trim((string) ($before['absence_reason_code'] ?? ''));
             $isLegacyUnchangedAbsence = $absenceContextUnchanged && trim((string) ($before['absence_reason_code'] ?? '')) === '';
             $absenceReasonCode = $absenceContextUnchanged
                 ? (trim((string) ($before['absence_reason_code'] ?? '')) === '' ? null : (string) $before['absence_reason_code'])
@@ -975,7 +983,7 @@ final class AdminBookingService
         $reason = trim((string) ($value ?? ''));
         $allowed = array_keys($this->absenceReasonOptions());
         $validForType = match ($entryType) {
-            'vacation' => ['vacation_paid', 'unpaid_leave'],
+            'vacation' => ['vacation_paid'],
             'sick' => ['sick_paid', 'sick_unpaid'],
             'absent' => ['paid_leave', 'employer_release_paid', 'unpaid_leave', 'unexcused_absence'],
             'holiday' => ['employer_release_paid'],
@@ -1059,9 +1067,17 @@ final class AdminBookingService
         }
 
         if (($filters['entry_type'] ?? '') !== '') {
-            $key = $bindingPrefix . 'entry_type';
-            $clauses[] = $alias . '.entry_type = :' . $key;
-            $bindings[$key] = $filters['entry_type'];
+            $entryType = (string) $filters['entry_type'];
+            if ($this->connection->columnExists('timesheets', 'absence_reason_code') && $entryType === 'vacation') {
+                $clauses[] = $alias . '.entry_type = "vacation"';
+                $clauses[] = '(' . $alias . '.absence_reason_code = "vacation_paid" OR ' . $alias . '.absence_reason_code IS NULL)';
+            } elseif ($this->connection->columnExists('timesheets', 'absence_reason_code') && $entryType === 'absent') {
+                $clauses[] = '(' . $alias . '.entry_type = "absent" OR (' . $alias . '.entry_type = "vacation" AND ' . $alias . '.absence_reason_code = "unpaid_leave"))';
+            } else {
+                $key = $bindingPrefix . 'entry_type';
+                $clauses[] = $alias . '.entry_type = :' . $key;
+                $bindings[$key] = $entryType;
+            }
         }
 
         if (($filters['issue'] ?? '') === 'all') {
@@ -1110,6 +1126,9 @@ final class AdminBookingService
         $employeeName = $employeeName !== '' ? $employeeName : 'Unbekannter Benutzer';
         $projectId = isset($row['project_id']) ? (int) $row['project_id'] : null;
         $entryType = (string) ($row['entry_type'] ?? 'work');
+        $semanticEntryType = $entryType === 'vacation' && (string) ($row['absence_reason_code'] ?? '') === 'unpaid_leave'
+            ? 'absent'
+            : $entryType;
         $isDeleted = (int) ($row['is_deleted'] ?? 0);
 
         if ((int) ($row['user_is_deleted'] ?? 0) === 1) {
@@ -1143,6 +1162,7 @@ final class AdminBookingService
             'credited_minutes' => isset($row['credited_minutes']) ? (int) $row['credited_minutes'] : null,
             'expenses_amount' => (string) ($row['expenses_amount'] ?? '0.00'),
             'entry_type' => $entryType,
+            'semantic_entry_type' => $semanticEntryType,
             'absence_reason_code' => $row['absence_reason_code'] ?? null,
             'absence_reason_label' => $this->absenceReasonOptions()[(string) ($row['absence_reason_code'] ?? '')] ?? '',
             'source' => (string) ($row['source'] ?? 'app'),

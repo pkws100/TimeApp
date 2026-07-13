@@ -10,6 +10,24 @@ use PHPUnit\Framework\TestCase;
 
 final class AttendanceServiceTest extends TestCase
 {
+    public function testLegacyUnpaidVacationIsReportedAsAbsence(): void
+    {
+        $service = new AttendanceService(new DatabaseConnection([]));
+        $summary = $service->summarizeRows([[
+            'id' => 1,
+            'user_id' => 10,
+            'entry_type' => 'vacation',
+            'absence_reason_code' => 'unpaid_leave',
+            'user_is_deleted' => 0,
+            'first_name' => 'Anna',
+            'last_name' => 'Berg',
+        ]], '2026-05-15');
+
+        self::assertSame('absent', $summary['statuses'][0]['entry_type']);
+        self::assertSame(0, $summary['status_counts']['vacation']);
+        self::assertSame(1, $summary['status_counts']['absent']);
+    }
+
     public function testSummarizeRowsUsesLatestEntryPerUserAndSkipsArchivedRecords(): void
     {
         $service = new AttendanceService(new DatabaseConnection([]));

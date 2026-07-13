@@ -2941,7 +2941,7 @@
         });
 
         const unavailable = account.history_unavailable
-            ? '<div class="app-empty">Journalhistorie ist derzeit nicht verfuegbar. Der letzte bekannte Stand bleibt erhalten.</div>'
+            ? '<div class="app-empty">Journalhistorie ist derzeit nicht verfuegbar.</div>'
             : '';
 
         if (rows.length === 0) {
@@ -3773,7 +3773,7 @@
 
         if (routeName() !== '/historie' || !showAppWidget('show_history')) {
             if (routeName() === '/urlaub') {
-                const cachedVacation = await cacheGet(vacationCacheKey());
+                const cachedVacation = await readVacationCache();
 
                 if (cachedVacation) {
                     state.timeAccount = cachedVacation.time_account || null;
@@ -4036,10 +4036,40 @@
         }
     }
 
-    function vacationCacheKey() {
+    function vacationCacheKey(cutoverId = null) {
         const userId = state.session && state.session.user ? Number(state.session.user.id || 0) : 0;
+        const baseKey = 'vacation:' + userId + ':' + currentMonthValue();
 
-        return 'vacation:' + userId + ':' + currentMonthValue();
+        return Number(cutoverId || 0) > 0 ? baseKey + ':cutover:' + Number(cutoverId) : baseKey;
+    }
+
+    async function readVacationCache() {
+        const index = await cacheGet(vacationCacheKey());
+        const cutoverId = Number(index && index.cutover_id ? index.cutover_id : 0);
+
+        if (cutoverId <= 0) {
+            return index;
+        }
+
+        const generation = await cacheGet(vacationCacheKey(cutoverId));
+        if (!generation) {
+            return index;
+        }
+
+        const indexTimestamp = Date.parse(index.cached_at || '') || 0;
+        const generationTimestamp = Date.parse(generation.cached_at || '') || 0;
+
+        return indexTimestamp > generationTimestamp ? index : generation;
+    }
+
+    async function writeVacationCache(payload) {
+        const cutoverId = Number(payload && payload.cutover_id ? payload.cutover_id : 0);
+
+        await cacheSet(vacationCacheKey(), payload);
+
+        if (cutoverId > 0) {
+            await cacheSet(vacationCacheKey(cutoverId), payload);
+        }
     }
 
     async function loadVacationData(force) {
@@ -4048,7 +4078,7 @@
         }
 
         if (!navigator.onLine) {
-            const cached = await cacheGet(vacationCacheKey());
+            const cached = await readVacationCache();
             state.timeAccount = cached ? (cached.time_account || null) : state.timeAccount;
             state.vacationRequests = cached && Array.isArray(cached.requests) ? cached.requests : state.vacationRequests;
             state.vacationOffline = true;
@@ -4065,6 +4095,7 @@
                 apiJson('/api/v1/app/time-account/summary'),
                 apiJson('/api/v1/app/vacation-requests')
             ]);
+            const previousCutoverId = Number(state.timeAccount && state.timeAccount.cutover_id ? state.timeAccount.cutover_id : 0);
             const previousTimeEntries = Array.isArray(state.timeAccount && state.timeAccount.time_entries) ? state.timeAccount.time_entries : [];
             const previousVacationEntries = Array.isArray(state.timeAccount && state.timeAccount.vacation_entries) ? state.timeAccount.vacation_entries : [];
             const entriesResult = await apiJson('/api/v1/app/time-account/entries?limit=10').catch((error) => {
@@ -4076,29 +4107,37 @@
             });
 
             state.timeAccount = summaryResult.data || null;
-            if (state.timeAccount && entriesResult && entriesResult.data) {
+            const summaryCutoverId = Number(state.timeAccount && state.timeAccount.cutover_id ? state.timeAccount.cutover_id : 0);
+            const entriesCutoverId = Number(entriesResult && entriesResult.data && entriesResult.data.cutover_id ? entriesResult.data.cutover_id : 0);
+            if (state.timeAccount && entriesResult && entriesResult.data && entriesCutoverId === summaryCutoverId) {
                 state.timeAccount.time_entries = Array.isArray(entriesResult.data.time_entries) ? entriesResult.data.time_entries : [];
                 state.timeAccount.vacation_entries = Array.isArray(entriesResult.data.vacation_entries) ? entriesResult.data.vacation_entries : [];
                 state.timeAccount.history_unavailable = false;
             } else if (state.timeAccount) {
-                state.timeAccount.time_entries = previousTimeEntries;
-                state.timeAccount.vacation_entries = previousVacationEntries;
+                const mayReusePreviousEntries = previousCutoverId === summaryCutoverId;
+                state.timeAccount.time_entries = mayReusePreviousEntries ? previousTimeEntries : [];
+                state.timeAccount.vacation_entries = mayReusePreviousEntries ? previousVacationEntries : [];
                 state.timeAccount.history_unavailable = true;
             }
             state.vacationRequests = requestsResult.data && Array.isArray(requestsResult.data.items) ? requestsResult.data.items : [];
             state.vacationOffline = false;
 
-            await cacheSet(vacationCacheKey(), {
-                time_account: state.timeAccount,
-                requests: state.vacationRequests,
-                cached_at: new Date().toISOString()
-            });
+            try {
+                await writeVacationCache({
+                    cutover_id: summaryCutoverId > 0 ? summaryCutoverId : null,
+                    time_account: state.timeAccount,
+                    requests: state.vacationRequests,
+                    cached_at: new Date().toISOString()
+                });
+            } catch (cacheError) {
+                console.warn('Urlaubscache konnte nicht geschrieben werden.', cacheError);
+            }
         } catch (error) {
             if (isSessionExpiredError(error)) {
                 return;
             }
 
-            const cached = await cacheGet(vacationCacheKey());
+            const cached = await readVacationCache();
 
             if (cached) {
                 state.timeAccount = cached.time_account || null;

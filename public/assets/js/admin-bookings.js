@@ -48,7 +48,7 @@
     }
 
     var absenceReasonsByType = {
-        vacation: ['vacation_paid', 'unpaid_leave'],
+        vacation: ['vacation_paid'],
         sick: ['sick_paid', 'sick_unpaid'],
         absent: ['paid_leave', 'employer_release_paid', 'unpaid_leave', 'unexcused_absence'],
         holiday: ['employer_release_paid']
@@ -60,7 +60,15 @@
         }
 
         var entryType = entryTypeSelect.value || 'work';
-        var allowed = absenceReasonsByType[entryType] || [];
+        var allowed = (absenceReasonsByType[entryType] || []).slice();
+        var form = reasonSelect.closest('form');
+        var isLegacyVacation = entryType === 'vacation'
+            && reasonSelect.value === 'unpaid_leave'
+            && form
+            && form.querySelector('input[name="_method"][value="PUT"]');
+        if (isLegacyVacation) {
+            allowed.push('unpaid_leave');
+        }
         var requiresReason = allowed.length > 0;
 
         reasonSelect.required = requiresReason;

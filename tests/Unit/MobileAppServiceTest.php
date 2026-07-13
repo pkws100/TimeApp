@@ -270,6 +270,24 @@ final class MobileAppServiceTest extends TestCase
         self::assertArrayNotHasKey('user_id', $item['latest_geo']);
     }
 
+    public function testHistoryItemPresentsLegacyUnpaidVacationAsAbsence(): void
+    {
+        $service = $this->service();
+        $method = new ReflectionMethod($service, 'normalizeHistoryItem');
+        $method->setAccessible(true);
+
+        $item = $method->invoke($service, [
+            'id' => 6,
+            'work_date' => '2026-05-18',
+            'entry_type' => 'vacation',
+            'absence_reason_code' => 'unpaid_leave',
+        ], [], []);
+
+        self::assertSame('absent', $item['entry_type']);
+        self::assertSame('Fehlt', $item['entry_type_label']);
+        self::assertSame('unpaid_leave', $item['absence_reason_code']);
+    }
+
     private function service(): MobileAppService
     {
         $connection = new DatabaseConnection([]);

@@ -94,6 +94,24 @@ final class AdminBookingServiceTest extends TestCase
         );
     }
 
+    public function testLegacyUnpaidVacationKeepsStoredTypeAndExposesSemanticType(): void
+    {
+        $service = new AdminBookingService(new DatabaseConnection([]), new TimesheetCalculator());
+        $hydrate = new ReflectionMethod($service, 'hydrateBookingRow');
+        $export = new ReflectionMethod($service, 'exportRow');
+        $hydrate->setAccessible(true);
+        $export->setAccessible(true);
+        $booking = $hydrate->invoke($service, [
+            'id' => 7,
+            'entry_type' => 'vacation',
+            'absence_reason_code' => 'unpaid_leave',
+        ]);
+
+        self::assertSame('vacation', $booking['entry_type']);
+        self::assertSame('absent', $booking['semantic_entry_type']);
+        self::assertSame('absent', $export->invoke($service, $booking, null)['Typ']);
+    }
+
     public function testNormalizeManualCreatePayloadCalculatesWorkBookingForForcedProject(): void
     {
         $service = new AdminBookingService(new DatabaseConnection([]), new TimesheetCalculator());

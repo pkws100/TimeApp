@@ -17,6 +17,15 @@ $outputDirectory = $temporaryPrefix . '-playwright';
 $serverProcess = null;
 $serverPdo = null;
 $exitCode = 1;
+$accountYear = (int) date('Y');
+$closureYear = (int) date('Y') + 1;
+$closureDateFrom = $closureYear . '-12-29';
+$closureDateTo = ($closureYear + 1) . '-01-03';
+$restoreDateValue = new DateTimeImmutable($accountYear . '-01-08');
+while ((int) $restoreDateValue->format('N') !== 1) {
+    $restoreDateValue = $restoreDateValue->modify('+1 day');
+}
+$restoreDate = $restoreDateValue->format('Y-m-d');
 
 $removeTree = static function (string $path) use (&$removeTree): void {
     if (!is_dir($path)) {
@@ -128,30 +137,33 @@ try {
             annual_leave_entitlement_days, leave_carryover_days, opening_remaining_leave_days,
             status, created_by_user_id, finalized_by_user_id, finalized_at, created_at, updated_at
          ) VALUES (
-            :user_id, :active_user_id, "2026-01-01", 0, 2026, 30, 0, 30,
+            :user_id, :active_user_id, :effective_from, 0, :leave_year, 30, 0, 30,
             "final", :created_by_user_id, :finalized_by_user_id, NOW(), NOW(), NOW()
          )',
         [
             'user_id' => $paginationUserId,
             'active_user_id' => $paginationUserId,
+            'effective_from' => $accountYear . '-01-01',
+            'leave_year' => $accountYear,
             'created_by_user_id' => $adminId,
             'finalized_by_user_id' => $adminId,
         ]
     );
     $paginationCutoverId = $connection->lastInsertId();
-    $connection->transaction(function () use ($connection, $paginationUserId, $paginationCutoverId, $adminId): void {
+    $connection->transaction(function () use ($connection, $paginationUserId, $paginationCutoverId, $adminId, $accountYear): void {
         for ($index = 1; $index <= 105; $index++) {
             $connection->execute(
                 'INSERT INTO time_account_entries (
                     user_id, cutover_id, effective_date, minutes, entry_type, description,
                     created_by_user_id, approved_by_user_id, created_at
                  ) VALUES (
-                    :user_id, :cutover_id, "2026-02-01", :minutes, "manual_adjustment", :description,
+                    :user_id, :cutover_id, :effective_date, :minutes, "manual_adjustment", :description,
                     :created_by_user_id, :approved_by_user_id, NOW()
                  )',
                 [
                     'user_id' => $paginationUserId,
                     'cutover_id' => $paginationCutoverId,
+                    'effective_date' => $accountYear . '-02-01',
                     'minutes' => $index,
                     'description' => 'Pagination ' . $index,
                     'created_by_user_id' => $adminId,
@@ -171,22 +183,32 @@ try {
             user_id, project_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes,
             credited_minutes, entry_type, source, note, updated_at, is_deleted
          ) VALUES (
-            :user_id, :project_id, "2026-05-04", "07:00:00", "15:00:00", 480, 0, 480,
+            :user_id, :project_id, :work_date, "07:00:00", "15:00:00", 480, 0, 480,
             0, "work", "admin", "Aktive Konfliktbuchung", NOW(), 0
          )',
-        ['user_id' => $employeeId, 'project_id' => $projectId]
+        ['user_id' => $employeeId, 'project_id' => $projectId, 'work_date' => $restoreDate]
     );
     $connection->execute(
         'INSERT INTO timesheets (
             user_id, project_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes,
             credited_minutes, absence_reason_code, entry_type, source, note, updated_at, is_deleted, deleted_at
          ) VALUES (
-            :user_id, NULL, "2026-05-04", NULL, NULL, 0, 0, 0,
+            :user_id, NULL, :work_date, NULL, NULL, 0, 0, 0,
             480, "sick_paid", "sick", "admin", "Archivierter Restore-Konflikt", NOW(), 1, NOW()
          )',
-        ['user_id' => $employeeId]
+        ['user_id' => $employeeId, 'work_date' => $restoreDate]
     );
     $restoreBookingId = $connection->lastInsertId();
+    $connection->execute(
+        'INSERT INTO timesheets (
+            user_id, project_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes,
+            credited_minutes, absence_reason_code, entry_type, source, note, updated_at, is_deleted
+         ) VALUES (
+            :user_id, NULL, :work_date, NULL, NULL, 0, 0, 0,
+            0, "unpaid_leave", "vacation", "admin", "Legacy unbezahlter Urlaub", NOW(), 0
+         )',
+        ['user_id' => $employeeId, 'work_date' => $accountYear . '-06-01']
+    );
 
     $listener = stream_socket_server('tcp://127.0.0.1:0', $errorCode, $errorMessage);
     if (!is_resource($listener)) {
@@ -238,6 +260,10 @@ try {
         'UI_TEST_EMPLOYEE_PASSWORD' => $password,
         'UI_TEST_PAGINATION_USER_ID' => (string) $paginationUserId,
         'UI_TEST_RESTORE_BOOKING_ID' => (string) $restoreBookingId,
+        'UI_TEST_ACCOUNT_YEAR' => (string) $accountYear,
+        'UI_TEST_CLOSURE_YEAR' => (string) $closureYear,
+        'UI_TEST_CLOSURE_DATE_FROM' => $closureDateFrom,
+        'UI_TEST_CLOSURE_DATE_TO' => $closureDateTo,
     ]);
     $playwright = base_path('node_modules/.bin/playwright');
     fwrite(STDOUT, $run([$playwright, 'test', 'tests/e2e/revisable-accounts.real.spec.js', '--output=' . $outputDirectory], $playwrightEnvironment));

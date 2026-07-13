@@ -71,6 +71,22 @@ final class AdminCalendarServiceTest extends TestCase
         self::assertSame(0, $summary['issue_count']);
     }
 
+    public function testLegacyUnpaidVacationCountsAsStoredAbsence(): void
+    {
+        $summary = $this->service()->summarizeDay('2026-05-08', [
+            $this->booking([
+                'entry_type' => 'vacation',
+                'absence_reason_code' => 'unpaid_leave',
+                'start_time' => null,
+                'end_time' => null,
+            ]),
+        ]);
+
+        self::assertSame(0, $summary['vacation_count']);
+        self::assertSame(1, $summary['stored_absent_count']);
+    }
+
+
     public function testDaySummaryMarksDerivedMissingForUnbookedActiveUsers(): void
     {
         $service = $this->serviceWithActiveUserRows([

@@ -73,20 +73,69 @@ final class TimeAccountJournalEndpointTest extends MariaDbTestCase
         chmod($overrideFile, 0600);
         $previousOverride = getenv('DB_OVERRIDE_FILE');
         putenv('DB_OVERRIDE_FILE=' . $overrideFile);
-        $request = new Request('GET', '/admin/time-accounts/users/1/entries', [], [], [], [], []);
+        $requests = [
+            new Request('GET', '/admin/time-accounts/users/' . $userId . '/entries', [], [], [], [], []),
+            new Request('GET', '/admin/time-accounts/users/' . $userId . '/cutovers', [], [], [], [], []),
+        ];
 
         try {
             [, $router] = require base_path('bootstrap/app.php');
             $_SESSION = [];
-            self::assertSame(302, $router->dispatch($request)->status());
+            foreach ($requests as $request) {
+                self::assertSame(302, $router->dispatch($request)->status());
+            }
 
             $_SESSION['auth']['user_id'] = $userId;
-            self::assertSame(403, $router->dispatch($request)->status());
+            foreach ($requests as $request) {
+                self::assertSame(403, $router->dispatch($request)->status());
+            }
 
             $this->connection()->execute('INSERT INTO permissions (code, label, scope, created_at) VALUES ("time_accounts.view", "Zeitkonten", "backend", NOW())');
             $permissionId = $this->connection()->lastInsertId();
             $this->connection()->execute('INSERT INTO role_permissions (role_id, permission_id) VALUES (:role_id, :permission_id)', ['role_id' => $roleId, 'permission_id' => $permissionId]);
-            self::assertSame(200, $router->dispatch($request)->status());
+            foreach ($requests as $request) {
+                self::assertSame(200, $router->dispatch($request)->status());
+            }
+        } finally {
+            if ($previousOverride === false) {
+                putenv('DB_OVERRIDE_FILE');
+            } else {
+                putenv('DB_OVERRIDE_FILE=' . $previousOverride);
+            }
+            @unlink($overrideFile);
+        }
+    }
+
+    public function testAdminCannotReadCutoverThroughAnotherEmployeeRoute(): void
+    {
+        $adminId = $this->createUser(['employee_number' => 'ADMIN-O', 'email' => 'admin-owner-check@example.test']);
+        $ownerId = $this->createUser(['email' => 'journal-owner@example.test']);
+        $otherId = $this->createUser(['email' => 'journal-other@example.test']);
+        [, , $cutovers] = $this->services();
+        $cutover = $cutovers->finalize($this->payload($ownerId), $adminId);
+        $this->connection()->execute('INSERT INTO roles (slug, name, is_system_role, created_at, updated_at, is_deleted) VALUES ("history-reader", "Historie", 0, NOW(), NOW(), 0)');
+        $roleId = $this->connection()->lastInsertId();
+        $this->connection()->execute('INSERT INTO permissions (code, label, scope, created_at) VALUES ("time_accounts.view", "Zeitkonten", "backend", NOW())');
+        $permissionId = $this->connection()->lastInsertId();
+        $this->connection()->execute('INSERT INTO role_permissions (role_id, permission_id) VALUES (:role_id, :permission_id)', ['role_id' => $roleId, 'permission_id' => $permissionId]);
+        $this->connection()->execute('INSERT INTO user_roles (user_id, role_id) VALUES (:user_id, :role_id)', ['user_id' => $adminId, 'role_id' => $roleId]);
+        $overrideFile = sys_get_temp_dir() . '/timeapp-owner-route-db-' . bin2hex(random_bytes(5)) . '.php';
+        file_put_contents($overrideFile, "<?php\nreturn " . var_export($this->connectionConfig(), true) . ";\n");
+        chmod($overrideFile, 0600);
+        $previousOverride = getenv('DB_OVERRIDE_FILE');
+        putenv('DB_OVERRIDE_FILE=' . $overrideFile);
+
+        try {
+            [, $router] = require base_path('bootstrap/app.php');
+            $_SESSION['auth']['user_id'] = $adminId;
+            $request = new Request(
+                'GET',
+                '/admin/time-accounts/users/' . $otherId . '/entries',
+                ['cutover_id' => (int) $cutover['id'], 'year' => 2026],
+                [], [], [], []
+            );
+
+            self::assertSame(404, $router->dispatch($request)->status());
         } finally {
             if ($previousOverride === false) {
                 putenv('DB_OVERRIDE_FILE');

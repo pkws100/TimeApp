@@ -347,12 +347,41 @@ final class EmployeeAccountCutoverService
         }
 
         return $this->connection->fetchOne(
-            'SELECT cutovers.*, users.employee_number, users.first_name, users.last_name, users.email
+            'SELECT cutovers.*, users.employee_number, users.first_name, users.last_name, users.email,
+                    TRIM(CONCAT_WS(" ", creators.first_name, creators.last_name)) AS created_by,
+                    TRIM(CONCAT_WS(" ", finalizers.first_name, finalizers.last_name)) AS finalized_by,
+                    TRIM(CONCAT_WS(" ", reversers.first_name, reversers.last_name)) AS reversed_by
              FROM employee_account_cutovers AS cutovers
              INNER JOIN users ON users.id = cutovers.user_id
+             LEFT JOIN users AS creators ON creators.id = cutovers.created_by_user_id
+             LEFT JOIN users AS finalizers ON finalizers.id = cutovers.finalized_by_user_id
+             LEFT JOIN users AS reversers ON reversers.id = cutovers.reversed_by_user_id
              WHERE cutovers.id = :id
              LIMIT 1',
             ['id' => $cutoverId]
+        );
+    }
+
+    public function cutoversForUser(int $userId): array
+    {
+        if ($userId <= 0 || !$this->connection->tableExists('employee_account_cutovers')) {
+            return [];
+        }
+
+        return $this->connection->fetchAll(
+            'SELECT cutovers.*, users.employee_number, users.first_name, users.last_name, users.email,
+                    TRIM(CONCAT_WS(" ", creators.first_name, creators.last_name)) AS created_by,
+                    TRIM(CONCAT_WS(" ", finalizers.first_name, finalizers.last_name)) AS finalized_by,
+                    TRIM(CONCAT_WS(" ", reversers.first_name, reversers.last_name)) AS reversed_by
+             FROM employee_account_cutovers AS cutovers
+             INNER JOIN users ON users.id = cutovers.user_id
+             LEFT JOIN users AS creators ON creators.id = cutovers.created_by_user_id
+             LEFT JOIN users AS finalizers ON finalizers.id = cutovers.finalized_by_user_id
+             LEFT JOIN users AS reversers ON reversers.id = cutovers.reversed_by_user_id
+             WHERE cutovers.user_id = :user_id
+               AND cutovers.status IN ("draft", "final", "reversed")
+             ORDER BY cutovers.effective_from DESC, cutovers.id DESC',
+            ['user_id' => $userId]
         );
     }
 
@@ -382,11 +411,7 @@ final class EmployeeAccountCutoverService
 
     public function protocolPdf(int $cutoverId, array $companySettings = []): array
     {
-        $cutover = $this->find($cutoverId);
-
-        if ($cutover === null) {
-            throw new InvalidArgumentException('Der Stichtag wurde nicht gefunden.');
-        }
+        $cutover = $this->protocolData($cutoverId);
 
         if (!class_exists(\Mpdf\Mpdf::class)) {
             throw new RuntimeException('mPDF ist nicht installiert. Bitte Composer-Abhaengigkeiten installieren.');
@@ -398,11 +423,16 @@ final class EmployeeAccountCutoverService
             trim((string) ($companySettings['postal_code'] ?? '') . ' ' . (string) ($companySettings['city'] ?? '')),
         ])));
         $employee = $this->userLabel($cutover);
+        $reversedNotice = (string) ($cutover['status'] ?? '') === 'reversed'
+            ? '<div style="border:2px solid #991b1b;color:#991b1b;padding:12px;margin-bottom:18px;text-align:center;font-size:20px"><strong>REVIDIERT</strong><br>Dieser Stichtag ist nicht mehr die aktive Kontogeneration.</div>'
+            : '';
         $html = '<h1>Stichtagsprotokoll Zeit- und Urlaubskonto</h1>'
+            . $reversedNotice
             . '<p><strong>' . $this->e($companyName !== '' ? $companyName : 'Unternehmen') . '</strong><br>' . $this->e($address) . '</p>'
             . '<table width="100%" cellpadding="6" cellspacing="0" border="1">'
             . '<tr><th align="left">Mitarbeiter</th><td>' . $this->e($employee) . '</td></tr>'
             . '<tr><th align="left">Personalnummer</th><td>' . $this->e((string) ($cutover['employee_number'] ?? '')) . '</td></tr>'
+            . '<tr><th align="left">Status</th><td><strong>' . $this->e((string) $cutover['status_label']) . '</strong></td></tr>'
             . '<tr><th align="left">Stichtag</th><td>' . $this->e((string) $cutover['effective_from']) . '</td></tr>'
             . '<tr><th align="left">Eroeffnungssaldo Zeitkonto</th><td>' . $this->e($this->signedDurationLabel((int) $cutover['opening_time_balance_minutes'])) . '</td></tr>'
             . '<tr><th align="left">Urlaubsjahr</th><td>' . (int) $cutover['leave_year'] . '</td></tr>'
@@ -412,6 +442,10 @@ final class EmployeeAccountCutoverService
             . '<tr><th align="left">Quelle</th><td>' . $this->e((string) ($cutover['source_reference'] ?? '')) . '</td></tr>'
             . '<tr><th align="left">Bemerkung</th><td>' . nl2br($this->e((string) ($cutover['note'] ?? ''))) . '</td></tr>'
             . '<tr><th align="left">Finalisiert am</th><td>' . $this->e((string) ($cutover['finalized_at'] ?? '')) . '</td></tr>'
+            . '<tr><th align="left">Finalisiert durch</th><td>' . $this->e((string) ($cutover['finalized_by'] ?? '')) . '</td></tr>'
+            . '<tr><th align="left">Revidiert am</th><td>' . $this->e((string) ($cutover['reversed_at'] ?? '')) . '</td></tr>'
+            . '<tr><th align="left">Revidiert durch</th><td>' . $this->e((string) ($cutover['reversed_by'] ?? '')) . '</td></tr>'
+            . '<tr><th align="left">Revidierungsgrund</th><td>' . nl2br($this->e((string) ($cutover['reversal_note'] ?? ''))) . '</td></tr>'
             . '</table>'
             . '<p>Die aufgefuehrten Werte wurden aus den bisherigen Unterlagen in das neue System uebernommen. Gesetzliche, tarifliche oder arbeitsvertragliche Ansprueche werden durch die technische Uebernahme nicht abbedungen. Nachgewiesene Abweichungen koennen durch revisionsfaehige Korrekturbuchungen berichtigt werden.</p>'
             . '<table width="100%" style="margin-top:60px"><tr><td>_____________________________<br>Arbeitgeber</td><td>_____________________________<br>Mitarbeiter/Kenntnisnahme</td></tr></table>';
@@ -427,11 +461,30 @@ final class EmployeeAccountCutoverService
 
         return [
             'content' => $pdf->Output('', 'S'),
+            'source_html' => $html,
             'headers' => [
                 'Content-Type' => 'application/pdf',
                 'Content-Disposition' => 'inline; filename="stichtagsprotokoll-' . $cutoverId . '.pdf"',
+                'X-Time-Account-Cutover-Status' => (string) ($cutover['status'] ?? ''),
             ],
         ];
+    }
+
+    public function protocolData(int $cutoverId): array
+    {
+        $cutover = $this->find($cutoverId);
+
+        if ($cutover === null) {
+            throw new InvalidArgumentException('Der Stichtag wurde nicht gefunden.');
+        }
+
+        $cutover['status_label'] = match ((string) ($cutover['status'] ?? '')) {
+            'final' => 'Final',
+            'reversed' => 'Revidiert',
+            default => 'Entwurf',
+        };
+
+        return $cutover;
     }
 
     private function normalizePayload(array $payload): array

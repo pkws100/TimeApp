@@ -62,8 +62,9 @@ gesonderter Vereinbarung angeboten werden.
 - Zeitkonten: `GET /admin/time-accounts`
 - Stichtag-Vorschau/Finalisierung: `POST /admin/time-accounts/cutovers/preview` und `POST /admin/time-accounts/cutovers/finalize`
 - Stichtagsprotokoll: `GET /admin/time-accounts/cutovers/{id}/protocol`
+- Stichtagshistorie pro Mitarbeiter: `GET /admin/time-accounts/users/{id}/cutovers`
 - Zeit-/Urlaubskonto-Korrekturen: `POST /admin/time-accounts/entries/time` und `POST /admin/time-accounts/entries/vacation`
-- Limitierte Journalhistorie Admin: `GET /admin/time-accounts/users/{id}/entries`
+- Limitierte Journalhistorie Admin: `GET /admin/time-accounts/users/{id}/entries`, historische Generation mit `cutover_id={id}`
 - Limitierte Journalhistorie App: `GET /api/v1/app/time-account/entries`
 - Admin-AGB-PDF: `GET /admin/settings/company/agb-pdf/preview` und `GET /admin/settings/company/agb-pdf/download`
 - Admin-Datenschutz-PDF: `GET /admin/settings/company/datenschutz-pdf/preview` und `GET /admin/settings/company/datenschutz-pdf/download`
@@ -186,6 +187,7 @@ oder per HTTP-Smoke-Check geprueft werden.
 - Zeitkonten koennen je Mitarbeiter mit einem Einfuehrungsstichtag finalisiert werden. Der Eroeffnungssaldo ist der uebernommene Stand am Ende des Vortages; ab dem Stichtag berechnet die App den kumulierten Stand selbst.
 - Finale Stichtage erzeugen unveraenderliche Journalbuchungen fuer Zeitkonto und Urlaubskonto sowie eine userbezogene Sperre des Altzeitraums ueber `accounting_closures`.
 - Journalbuchungen gehoeren ueber `cutover_id` zu genau einer Stichtagsgeneration. Aktive Berechnungen beruecksichtigen nur Journalzeilen der aktiven finalen Generation; revidierte Generationen bleiben historisch sichtbar, wirken aber nicht mehr in aktuelle Salden.
+- Die Admin-Stichtagshistorie zeigt Entwuerfe, finale und revidierte Generationen samt Akteuren, Zeitpunkten und Revidierungsgrund. Historische Journale sind read-only; revidierte PDF-Protokolle tragen einen deutlich sichtbaren Statushinweis.
 - Neue Finalisierungen erzeugen keine wirkungslosen Null-Journalzeilen. Revidierungen verarbeiten nur offene Ursprungsbuchungen; historische Nullzeilen und bereits einzeln ausgeglichene Korrekturen blockieren die Revidierung nicht.
 - Nicht eindeutig belegbare Altzuordnungen bleiben mit `cutover_id = NULL` aus aktiven Salden ausgeschlossen. Der read-only Bericht `php bin/inspect-time-account-generations.php` beziehungsweise `--json` zeigt betroffene Journalzeilen und moegliche Stichtage.
 - Interne Stichtagssperren sind in `accounting_closures` mit `source_type = employee_account_cutover` gekennzeichnet. Sie wirken fuer Timesheet-Schreibschutz, werden in normalen Abschlusslisten und Exporten aber ausgeblendet.
@@ -202,9 +204,11 @@ vendor/bin/phpunit tests/Integration/RevisableAccountMigrationTest.php
 
 Mit `TIMEAPP_TEST_DB_*` lassen sich separate Testzugangsdaten setzen. `DB_OVERRIDE_FILE` erlaubt Testprozessen einen vom produktiven Runtime-Override getrennten Konfigurationspfad.
 
-`npm run ui:test` fuehrt zuerst die schnellen Playwright-Smokes und danach den realen Zeitkonto-Workflow gegen eine automatisch erzeugte `timeapp_ui_*`-Scratch-Datenbank aus. Der Runner verwendet nur synthetische Benutzer, einen eigenen PHP-Testserver und temporaere Artefakte. Fuer einen reinen Smoke-Lauf ohne MariaDB-Fixture steht `npm run ui:test:smoke` bereit.
+`npm run ui:test` fuehrt zuerst die schnellen Playwright-Smokes und danach den realen Zeitkonto-Workflow gegen eine automatisch erzeugte `timeapp_ui_*`-Scratch-Datenbank aus. Der Runner verwendet nur synthetische Benutzer, einen eigenen PHP-Testserver und temporaere Artefakte. Jahreswechsel-Schliessungen werden aus einem sicher zukuenftigen Kalenderjahr berechnet. Fuer einen reinen Smoke-Lauf ohne MariaDB-Fixture steht `npm run ui:test:smoke` bereit.
 - Bezahlte Abwesenheiten speichern eine separate Zeitgutschrift in `timesheets.credited_minutes`; tatsaechliche Arbeitszeit bleibt davon getrennt.
-- Urlaubskonten werden jahresbezogen aus dem Urlaubskonto-Journal berechnet. Die User-Felder fuer Jahresurlaub und Uebertrag dienen weiter als Vorschlagswerte fuer neue Stichtage und neue Urlaubsjahre. Vor der ersten schreibenden Urlaubskonto-Bewegung eines Jahres wird die Jahreseroeffnung je `user_id`, `leave_year` und `cutover_id` idempotent gebucht.
+- Bezahlter Erholungsurlaub wird als `vacation/vacation_paid` erfasst. Legacy-Urlaub ohne Reason-Code zaehlt weiterhin; `unpaid_leave` erhaelt keine Zeitgutschrift, wird als unbezahlte Abwesenheit ausgewiesen und reduziert den Resturlaub nicht.
+- Das Urlaubsjahr des aktiven Stichtags ist ein verbindlicher Snapshot, auch wenn Anspruch, Uebertrag und Resturlaub null sind. Die implizite Anpassung ist `Resturlaub - Anspruch - Uebertrag`; vorhandene Stichtags-Journalzeilen werden dabei nicht doppelt gezaehlt.
+- Spaetere Urlaubskontojahre werden vor der ersten schreibenden Bewegung je `user_id`, `leave_year` und `cutover_id` idempotent aus den damaligen User-Vorschlagswerten eroeffnet. Spaetere Stammdatenaenderungen wirken nicht auf bereits eroeffnete Jahre zurueck.
 - Arbeit plus ganztagige Abwesenheit sowie doppelte ganztagige Abwesenheiten am selben Tag werden serverseitig blockiert; mehrere Arbeitsbuchungen pro Tag bleiben erlaubt.
 - Rueckwirkende Arbeitszeitmodell-, Feiertagsregion- und Betriebsschliessungs-Aenderungen werden bei betroffenen aktiven Zeitkonten blockiert, bis ein versioniertes historisches Regelmodell eingefuehrt ist.
 - Die Mitarbeiter-App zeigt Zeitkontostand, Monatsveraenderung, Arbeitszeit, Zeitgutschriften, Resturlaub und offene bzw. zukuenftig genehmigte Urlaube lesend an. Journalhistorien werden separat und limitiert geladen.

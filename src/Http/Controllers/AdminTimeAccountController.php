@@ -228,7 +228,23 @@ final class AdminTimeAccountController
         $year = (int) $request->query('year', (int) date('Y'));
         $limit = max(1, min(100, (int) $request->query('limit', 50)));
         $page = max(1, (int) $request->query('page', 1));
-        $entries = $this->timeAccountService->journalEntries($userId, $year, $limit, $page);
+        $requestedCutoverId = (int) $request->query('cutover_id', 0);
+
+        try {
+            $entries = $this->timeAccountService->adminJournalEntries(
+                $userId,
+                $year,
+                $limit,
+                $page,
+                $requestedCutoverId > 0 ? $requestedCutoverId : null
+            );
+        } catch (InvalidArgumentException $exception) {
+            if ((string) $request->query('view', '') === 'html') {
+                return Response::html($this->view->render('Stichtagsgeneration nicht gefunden', '<p class="notice error">' . $this->e($exception->getMessage()) . '</p>'), 404);
+            }
+
+            return Response::json(['ok' => false, 'message' => $exception->getMessage()], 404);
+        }
 
         if ((string) $request->query('view', '') === 'html') {
             $user = $this->userService->find($userId);
@@ -245,6 +261,23 @@ final class AdminTimeAccountController
         ]);
     }
 
+    public function cutovers(Request $request, array $params): Response
+    {
+        $userId = (int) ($params['id'] ?? 0);
+        $user = $this->userService->find($userId);
+
+        if ($user === null) {
+            return Response::html($this->view->render('Mitarbeiter nicht gefunden', '<p class="notice error">Der Mitarbeiter wurde nicht gefunden.</p>'), 404);
+        }
+
+        $cutovers = $this->cutoverService?->cutoversForUser($userId) ?? [];
+
+        return Response::html($this->view->render(
+            'Stichtagshistorie',
+            $this->renderCutoverHistoryPage($userId, $user, $cutovers)
+        ));
+    }
+
     private function renderJournalEntriesPage(int $userId, int $year, array $entries, ?array $user): string
     {
         $pagination = $entries['pagination'] ?? [];
@@ -253,7 +286,9 @@ final class AdminTimeAccountController
         $hasMore = (bool) ($pagination['time_has_more'] ?? false) || (bool) ($pagination['vacation_has_more'] ?? false);
         $label = trim((string) ($user['first_name'] ?? '') . ' ' . (string) ($user['last_name'] ?? ''));
         $label = $label !== '' ? $label : 'Mitarbeiter #' . $userId;
-        $base = '/admin/time-accounts/users/' . $userId . '/entries?view=html&year=' . $year . '&limit=' . $limit . '&page=';
+        $cutoverId = (int) ($entries['cutover_id'] ?? 0);
+        $cutoverQuery = $cutoverId > 0 ? '&cutover_id=' . $cutoverId : '';
+        $base = '/admin/time-accounts/users/' . $userId . '/entries?view=html&year=' . $year . '&limit=' . $limit . $cutoverQuery . '&page=';
         $pager = '<div class="pagination"><span>Seite ' . $page . '</span>';
 
         if ($page > 1) {
@@ -264,15 +299,78 @@ final class AdminTimeAccountController
         }
         $pager .= '</div>';
         $csrf = $this->e($this->csrfService?->token() ?? '');
-        $canManage = $this->authService?->hasPermission('time_accounts.manage') ?? true;
+        $readOnly = (bool) ($entries['read_only'] ?? false);
+        $canManage = !$readOnly && ($this->authService?->hasPermission('time_accounts.manage') ?? true);
         $timeRows = $this->journalHistoryRows('time', $entries['time_entries'] ?? [], $csrf, $canManage);
         $vacationRows = $this->journalHistoryRows('vacation', $entries['vacation_entries'] ?? [], $csrf, $canManage);
+        $readOnlyNotice = $readOnly
+            ? '<p class="notice">Diese historische Stichtagsgeneration ist revisionssicher und nur lesbar.</p>'
+            : '';
+        $status = match ((string) ($entries['cutover_status'] ?? '')) {
+            'reversed' => 'Revidiert',
+            'final' => 'Final',
+            default => 'Unbekannt',
+        };
 
-        return '<header class="page-header"><div><p class="eyebrow">Zeitkonto</p><h1>Detailhistorie</h1><p>' . $this->e($label) . ' &middot; Generation #' . (int) ($entries['cutover_id'] ?? 0) . '</p></div>'
-            . '<a class="button button-secondary" href="/admin/time-accounts?user_id=' . $userId . '&year=' . $year . '">Zur Zeitkonto-Uebersicht</a></header>'
-            . '<section class="card stack"><form method="get" class="form-grid"><input type="hidden" name="view" value="html"><label><span>Urlaubsjahr</span><input type="number" name="year" min="2000" max="2100" value="' . $year . '"></label><label><span>Eintraege je Seite</span><input type="number" name="limit" min="1" max="100" value="' . $limit . '"></label><button class="button" type="submit">Anzeigen</button></form>' . $pager . '</section>'
+        return '<header class="page-header"><div><p class="eyebrow">Zeitkonto</p><h1>Detailhistorie</h1><p>' . $this->e($label) . ' &middot; Generation #' . $cutoverId . ' &middot; ' . $this->e($status) . '</p></div>'
+            . '<div class="toolbar-actions"><a class="button button-secondary" href="/admin/time-accounts/users/' . $userId . '/cutovers">Stichtagshistorie</a><a class="button button-secondary" href="/admin/time-accounts?user_id=' . $userId . '&year=' . $year . '">Zur Zeitkonto-Uebersicht</a></div></header>'
+            . $readOnlyNotice
+            . '<section class="card stack"><form method="get" class="form-grid"><input type="hidden" name="view" value="html"><input type="hidden" name="cutover_id" value="' . $cutoverId . '"><label><span>Urlaubsjahr</span><input type="number" name="year" min="2000" max="2100" value="' . $year . '"></label><label><span>Eintraege je Seite</span><input type="number" name="limit" min="1" max="100" value="' . $limit . '"></label><button class="button" type="submit">Anzeigen</button></form>' . $pager . '</section>'
             . '<section class="card stack"><h2>Zeitkonto-Journal</h2><div class="table-scroll"><table><thead><tr><th>Datum</th><th>Art</th><th>Wert</th><th>Beschreibung</th><th>Aktion</th></tr></thead><tbody>' . $timeRows . '</tbody></table></div></section>'
             . '<section class="card stack"><h2>Urlaubskonto-Journal</h2><div class="table-scroll"><table><thead><tr><th>Datum</th><th>Art</th><th>Wert</th><th>Beschreibung</th><th>Aktion</th></tr></thead><tbody>' . $vacationRows . '</tbody></table></div>' . $pager . '</section>';
+    }
+
+    private function renderCutoverHistoryPage(int $userId, array $user, array $cutovers): string
+    {
+        $label = trim((string) ($user['first_name'] ?? '') . ' ' . (string) ($user['last_name'] ?? ''));
+        $label = $label !== '' ? $label : 'Mitarbeiter #' . $userId;
+        $rows = '';
+
+        foreach ($cutovers as $cutover) {
+            $id = (int) ($cutover['id'] ?? 0);
+            $status = (string) ($cutover['status'] ?? 'draft');
+            $statusLabel = match ($status) {
+                'final' => 'Final',
+                'reversed' => 'Revidiert',
+                default => 'Entwurf',
+            };
+            $statusClass = $status === 'final' ? 'ok' : ($status === 'reversed' ? 'warn' : '');
+            $protocol = $status === 'draft'
+                ? '<span class="muted">Noch nicht finalisiert</span>'
+                : '<a class="button button-secondary" href="/admin/time-accounts/cutovers/' . $id . '/protocol">Protokoll</a>';
+            $journal = in_array($status, ['final', 'reversed'], true)
+                ? '<a class="button button-secondary" href="/admin/time-accounts/users/' . $userId . '/entries?view=html&cutover_id=' . $id . '&year=' . (int) ($cutover['leave_year'] ?? date('Y')) . '&limit=50&page=1">Journal</a>'
+                : '';
+            $rows .= '<tr>'
+                . '<td><span class="badge ' . $statusClass . '">' . $this->e($statusLabel) . '</span></td>'
+                . '<td>' . $this->e((string) ($cutover['effective_from'] ?? '')) . '</td>'
+                . '<td>' . $this->e($this->timeLabel((int) ($cutover['opening_time_balance_minutes'] ?? 0))) . '</td>'
+                . '<td>' . (int) ($cutover['leave_year'] ?? 0) . '</td>'
+                . '<td>' . $this->number($cutover['annual_leave_entitlement_days'] ?? 0) . '</td>'
+                . '<td>' . $this->number($cutover['leave_carryover_days'] ?? 0) . '</td>'
+                . '<td>' . $this->number($cutover['opening_remaining_leave_days'] ?? 0) . '</td>'
+                . '<td>' . $this->e((string) ($cutover['source_reference'] ?? '')) . '<br><span class="muted">' . nl2br($this->e((string) ($cutover['note'] ?? ''))) . '</span></td>'
+                . '<td>' . $this->actorAndDate($cutover['created_by'] ?? '', $cutover['created_at'] ?? '') . '</td>'
+                . '<td>' . $this->actorAndDate($cutover['finalized_by'] ?? '', $cutover['finalized_at'] ?? '') . '</td>'
+                . '<td>' . $this->actorAndDate($cutover['reversed_by'] ?? '', $cutover['reversed_at'] ?? '') . '<br><span class="muted">' . nl2br($this->e((string) ($cutover['reversal_note'] ?? ''))) . '</span></td>'
+                . '<td class="table-actions">' . $protocol . $journal . '</td>'
+                . '</tr>';
+        }
+
+        if ($rows === '') {
+            $rows = '<tr><td colspan="12" class="table-empty">Noch keine Stichtagsgeneration vorhanden.</td></tr>';
+        }
+
+        return '<header class="page-header"><div><p class="eyebrow">Zeitkonto</p><h1>Stichtagshistorie</h1><p>' . $this->e($label) . '</p></div><a class="button button-secondary" href="/admin/time-accounts?user_id=' . $userId . '">Zur Zeitkonto-Uebersicht</a></header>'
+            . '<section class="card stack"><div class="table-scroll"><table><thead><tr><th>Status</th><th>Stichtag</th><th>Zeitkonto</th><th>Urlaubsjahr</th><th>Anspruch</th><th>Uebertrag</th><th>Resturlaub</th><th>Quelle/Bemerkung</th><th>Erstellt</th><th>Finalisiert</th><th>Revidiert</th><th>Nachweise</th></tr></thead><tbody>' . $rows . '</tbody></table></div></section>';
+    }
+
+    private function actorAndDate(mixed $actor, mixed $date): string
+    {
+        $actor = trim((string) $actor);
+        $date = trim((string) $date);
+
+        return $this->e($actor !== '' ? $actor : '-') . '<br><span class="muted">' . $this->e($date !== '' ? $date : '-') . '</span>';
     }
 
     private function journalHistoryRows(string $kind, array $entries, string $csrfToken, bool $canManage): string
@@ -441,8 +539,12 @@ HTML;
             ? '<a class="button button-secondary" href="/admin/time-accounts/cutovers/' . $cutoverId . '/protocol">Protokoll</a>'
             : '<span class="muted">Stichtag offen</span>';
 
+        if ($userId > 0) {
+            $actions .= '<a class="button button-secondary" href="/admin/time-accounts/users/' . $userId . '/cutovers">Stichtagshistorie</a>';
+        }
+
         if ($cutoverId > 0 && $userId > 0) {
-            $actions .= '<a class="button button-secondary" href="/admin/time-accounts/users/' . $userId . '/entries?view=html&year=' . $year . '&limit=50&page=1">Detailhistorie</a>';
+            $actions .= '<a class="button button-secondary" href="/admin/time-accounts/users/' . $userId . '/entries?view=html&cutover_id=' . $cutoverId . '&year=' . $year . '&limit=50&page=1">Detailhistorie</a>';
         }
 
         if ($canManage && $cutoverId > 0) {

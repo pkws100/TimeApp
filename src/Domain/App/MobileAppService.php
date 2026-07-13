@@ -162,6 +162,9 @@ final class MobileAppService
 
         if ($this->connection->tableExists('timesheets')) {
             $signatureColumns = $this->projectSignatureColumns();
+            $absenceReasonSelect = $this->connection->columnExists('timesheets', 'absence_reason_code')
+                ? 'timesheets.absence_reason_code'
+                : 'NULL AS absence_reason_code';
             $sql = 'SELECT
                     timesheets.id,
                     timesheets.project_id,
@@ -171,6 +174,7 @@ final class MobileAppService
                     timesheets.break_minutes,
                     timesheets.net_minutes,
                     timesheets.entry_type,
+                    ' . $absenceReasonSelect . ',
                     timesheets.note,
                     timesheets.updated_at,
                     projects.name AS project_name,
@@ -192,8 +196,15 @@ final class MobileAppService
             }
 
             if ($entryType !== 'all') {
-                $sql .= ' AND timesheets.entry_type = :entry_type';
-                $bindings['entry_type'] = $entryType;
+                if ($this->connection->columnExists('timesheets', 'absence_reason_code') && $entryType === 'vacation') {
+                    $sql .= ' AND timesheets.entry_type = "vacation"
+                              AND (timesheets.absence_reason_code = "vacation_paid" OR timesheets.absence_reason_code IS NULL)';
+                } elseif ($this->connection->columnExists('timesheets', 'absence_reason_code') && $entryType === 'absent') {
+                    $sql .= ' AND (timesheets.entry_type = "absent" OR timesheets.absence_reason_code = "unpaid_leave")';
+                } else {
+                    $sql .= ' AND timesheets.entry_type = :entry_type';
+                    $bindings['entry_type'] = $entryType;
+                }
             }
 
             if ($scope === 'project') {
@@ -251,7 +262,11 @@ final class MobileAppService
     private function normalizeHistoryItem(array $row, array $attachments, array $breaks, array $geoRecords = [], ?array $customerSignature = null): array
     {
         $id = (int) ($row['id'] ?? 0);
-        $entryType = (string) ($row['entry_type'] ?? 'work');
+        $storedEntryType = (string) ($row['entry_type'] ?? 'work');
+        $absenceReason = $row['absence_reason_code'] ?? null;
+        $entryType = $storedEntryType === 'vacation' && $absenceReason === 'unpaid_leave'
+            ? 'absent'
+            : $storedEntryType;
         $projectName = trim((string) ($row['project_name'] ?? ''));
 
         return [
@@ -268,6 +283,7 @@ final class MobileAppService
             'net_minutes' => (int) ($row['net_minutes'] ?? 0),
             'entry_type' => $entryType,
             'entry_type_label' => self::entryTypeLabel($entryType),
+            'absence_reason_code' => $absenceReason,
             'note' => self::nullableTrimmed($row['note'] ?? null),
             'updated_at' => self::dateTimeOrNull($row['updated_at'] ?? null),
             'breaks' => $breaks,
@@ -599,8 +615,11 @@ final class MobileAppService
             return null;
         }
 
+        $absenceReasonSelect = $this->connection->columnExists('timesheets', 'absence_reason_code')
+            ? 'absence_reason_code'
+            : 'NULL AS absence_reason_code';
         $entry = $this->connection->fetchOne(
-            'SELECT id, entry_type, note
+            'SELECT id, entry_type, ' . $absenceReasonSelect . ', note
              FROM timesheets
              WHERE user_id = :user_id
                AND COALESCE(is_deleted, 0) = 0
@@ -618,9 +637,15 @@ final class MobileAppService
             return null;
         }
 
+        $entryType = (string) ($entry['entry_type'] ?? '');
+        if ($entryType === 'vacation' && (string) ($entry['absence_reason_code'] ?? '') === 'unpaid_leave') {
+            $entryType = 'absent';
+        }
+
         return [
             'id' => (int) ($entry['id'] ?? 0),
-            'entry_type' => (string) ($entry['entry_type'] ?? ''),
+            'entry_type' => $entryType,
+            'absence_reason_code' => $entry['absence_reason_code'] ?? null,
             'note' => $entry['note'] ?? null,
             'is_derived' => false,
             'status_source' => 'stored',

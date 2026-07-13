@@ -74,6 +74,24 @@ final class AdminTimeAccountControllerTest extends TestCase
         self::assertStringContainsString('Der Export konnte nicht erstellt werden.', $html);
     }
 
+    public function testZeroJournalEntryDoesNotRenderReversalAction(): void
+    {
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'journalAction');
+        $method->setAccessible(true);
+
+        $html = (string) $method->invoke($controller, 'vacation', [
+            'id' => 17,
+            'effective_date' => '2027-01-01',
+            'entry_type' => 'annual_entitlement',
+            'days' => 0,
+            'is_open' => 0,
+        ], 'csrf', true);
+
+        self::assertStringNotContainsString('Ausgleichen', $html);
+        self::assertStringNotContainsString('<form', $html);
+    }
+
     private function controller(): AdminTimeAccountController
     {
         $connection = new DatabaseConnection([]);

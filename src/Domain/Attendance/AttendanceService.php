@@ -23,6 +23,9 @@ final class AttendanceService
         $today = $today ?: (new \DateTimeImmutable('today'))->format('Y-m-d');
 
         if ($this->connection->tableExists('timesheets') && $this->connection->tableExists('users')) {
+            $absenceReasonSelect = $this->connection->columnExists('timesheets', 'absence_reason_code')
+                ? 'timesheets.absence_reason_code'
+                : 'NULL AS absence_reason_code';
             $rows = $this->connection->fetchAll(
                 'SELECT
                     timesheets.id,
@@ -30,6 +33,7 @@ final class AttendanceService
                     timesheets.project_id,
                     timesheets.work_date,
                     timesheets.entry_type,
+                    ' . $absenceReasonSelect . ',
                     timesheets.start_time,
                     timesheets.end_time,
                     timesheets.net_minutes,
@@ -86,7 +90,7 @@ final class AttendanceService
 
             $seenUsers[$userId] = true;
             $usersWithStatus[$userId] = true;
-            $entryType = (string) ($row['entry_type'] ?? '');
+            $entryType = $this->semanticEntryType($row);
             $mapped = $this->mapRow($row);
 
             if ($entryType === 'work') {
@@ -123,6 +127,17 @@ final class AttendanceService
             'derived_missing_count' => $derivedMissingCount,
             'statuses' => $statuses,
         ];
+    }
+
+    private function semanticEntryType(array $row): string
+    {
+        $entryType = (string) ($row['entry_type'] ?? '');
+
+        if ($entryType === 'vacation' && (string) ($row['absence_reason_code'] ?? '') === 'unpaid_leave') {
+            return 'absent';
+        }
+
+        return $entryType;
     }
 
     private function fallbackSummary(string $today): array

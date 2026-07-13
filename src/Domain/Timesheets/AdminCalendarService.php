@@ -131,7 +131,7 @@ final class AdminCalendarService
         ));
         $activeAbsenceBookings = array_values(array_filter(
             $activeBookings,
-            static fn (array $booking): bool => in_array((string) ($booking['entry_type'] ?? 'work'), ['sick', 'vacation', 'holiday', 'absent'], true)
+            fn (array $booking): bool => in_array($this->semanticEntryType($booking), ['sick', 'vacation', 'holiday', 'absent'], true)
         ));
         $absenceCounts = $this->absenceCounts($activeAbsenceBookings);
         $bookedUserIds = array_values(array_unique(array_filter(array_map(
@@ -369,7 +369,7 @@ final class AdminCalendarService
         ];
 
         foreach ($bookings as $booking) {
-            $entryType = (string) ($booking['entry_type'] ?? '');
+            $entryType = $this->semanticEntryType($booking);
 
             if (array_key_exists($entryType, $counts)) {
                 $counts[$entryType]++;
@@ -377,6 +377,17 @@ final class AdminCalendarService
         }
 
         return $counts;
+    }
+
+    private function semanticEntryType(array $booking): string
+    {
+        $entryType = (string) ($booking['entry_type'] ?? '');
+
+        if ($entryType === 'vacation' && (string) ($booking['absence_reason_code'] ?? '') === 'unpaid_leave') {
+            return 'absent';
+        }
+
+        return $entryType;
     }
 
     private function missingUsers(string $date, array $bookedUserIds): array

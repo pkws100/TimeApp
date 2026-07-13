@@ -133,17 +133,32 @@ final class TimeAccountService
         $cutover = $this->cutoverService?->activeCutover($userId);
         $cutoverDate = $cutover !== null ? (string) $cutover['effective_from'] : null;
         $cutoverId = $cutover !== null ? (int) $cutover['id'] : null;
-        $journalTotal = $cutoverId !== null ? $this->vacationJournalSum($userId, $year, $cutoverId) : 0.0;
-        $hasJournal = $cutoverId !== null && $this->hasVacationJournalEntries($userId, $year, $cutoverId);
-        $entitlement = $hasJournal ? $this->vacationJournalTypeSum($userId, $year, 'annual_entitlement', $cutoverId) : (float) ($user['vacation_days_year'] ?? 0);
-        $carryover = $hasJournal ? $this->vacationJournalTypeSum($userId, $year, 'carryover', $cutoverId) : (float) ($user['vacation_carryover_days'] ?? 0);
-        $openingAdjustment = $hasJournal ? $this->vacationJournalTypeSum($userId, $year, 'opening_adjustment', $cutoverId) : 0.0;
-        $manualAdjustments = $hasJournal ? $this->vacationJournalManualSum($userId, $year, $cutoverId) : 0.0;
+        $isCutoverYear = $cutover !== null && (int) ($cutover['leave_year'] ?? 0) === $year;
+        $hasJournal = !$isCutoverYear && $cutoverId !== null && $this->hasVacationJournalEntries($userId, $year, $cutoverId);
+
+        if ($isCutoverYear) {
+            $entitlement = (float) ($cutover['annual_leave_entitlement_days'] ?? 0);
+            $carryover = (float) ($cutover['leave_carryover_days'] ?? 0);
+            $openingBalance = (float) ($cutover['opening_remaining_leave_days'] ?? 0);
+            $openingAdjustment = $openingBalance - $entitlement - $carryover;
+            $manualAdjustments = $cutoverId !== null ? $this->vacationJournalManualSum($userId, $year, $cutoverId) : 0.0;
+            $total = $openingBalance + $manualAdjustments;
+            $source = 'cutover_snapshot';
+        } else {
+            $journalTotal = $cutoverId !== null ? $this->vacationJournalSum($userId, $year, $cutoverId) : 0.0;
+            $entitlement = $hasJournal ? $this->vacationJournalTypeSum($userId, $year, 'annual_entitlement', $cutoverId) : (float) ($user['vacation_days_year'] ?? 0);
+            $carryover = $hasJournal ? $this->vacationJournalTypeSum($userId, $year, 'carryover', $cutoverId) : (float) ($user['vacation_carryover_days'] ?? 0);
+            $openingAdjustment = $hasJournal ? $this->vacationJournalTypeSum($userId, $year, 'opening_adjustment', $cutoverId) : 0.0;
+            $manualAdjustments = $hasJournal ? $this->vacationJournalManualSum($userId, $year, $cutoverId) : 0.0;
+            $total = $hasJournal ? $journalTotal : $entitlement + $carryover;
+            $openingBalance = $hasJournal ? $entitlement + $carryover + $openingAdjustment : $total;
+            $source = $hasJournal ? 'journal' : 'user_defaults';
+        }
+
         $taken = $this->takenVacationDays($userId, $year, $cutoverDate);
         $takenPast = $this->takenVacationDays($userId, $year, $cutoverDate, null, $this->normalizeAsOfDate(null));
         $futureApproved = $this->futureApprovedVacationDays($userId, $year, $cutoverDate, $this->normalizeAsOfDate(null));
         $pending = $this->pendingVacationDays($userId, $year, $user ?? []);
-        $total = $hasJournal ? $journalTotal : $entitlement + $carryover;
         $remaining = $total - $taken;
         $available = $remaining - $pending;
 
@@ -154,14 +169,14 @@ final class TimeAccountService
             'opening_adjustment_days' => $openingAdjustment,
             'manual_adjustment_days' => $manualAdjustments,
             'total_days' => $total,
-            'opening_balance_days' => $hasJournal ? $entitlement + $carryover + $openingAdjustment : $total,
+            'opening_balance_days' => $openingBalance,
             'approved_taken_days' => $taken,
             'approved_taken_past_days' => $takenPast,
             'future_approved_days' => $futureApproved,
             'pending_days' => $pending,
             'remaining_days' => $remaining,
             'available_days' => $available,
-            'source' => $hasJournal ? 'journal' : 'user_defaults',
+            'source' => $source,
         ];
     }
 
@@ -172,27 +187,51 @@ final class TimeAccountService
         $year ??= (int) date('Y');
         $limit = max(1, min(100, $limit));
         $page = max(1, $page);
-        $offset = ($page - 1) * $limit;
 
         if ($cutoverId === null) {
-            return [
-                'cutover_id' => null,
-                'time_entries' => [],
-                'vacation_entries' => [],
-                'pagination' => [
-                    'page' => $page,
-                    'limit' => $limit,
-                    'time_has_more' => false,
-                    'vacation_has_more' => false,
-                ],
-            ];
+            return $this->emptyJournalEntries($page, $limit);
         }
 
+        return $this->journalEntriesForCutover($userId, $year, $limit, $page, $cutover, false);
+    }
+
+    public function adminJournalEntries(int $userId, ?int $year = null, int $limit = 50, int $page = 1, ?int $cutoverId = null): array
+    {
+        if ($cutoverId === null) {
+            return $this->journalEntries($userId, $year, $limit, $page);
+        }
+
+        $cutover = $this->cutoverService?->find($cutoverId);
+        if ($cutover === null
+            || (int) ($cutover['user_id'] ?? 0) !== $userId
+            || !in_array((string) ($cutover['status'] ?? ''), ['final', 'reversed'], true)) {
+            throw new \InvalidArgumentException('Die Stichtagsgeneration wurde fuer diesen Mitarbeiter nicht gefunden.');
+        }
+
+        $active = $this->cutoverService?->activeCutover($userId);
+        $readOnly = $active === null || (int) ($active['id'] ?? 0) !== $cutoverId;
+
+        return $this->journalEntriesForCutover(
+            $userId,
+            $year ?? (int) ($cutover['leave_year'] ?? date('Y')),
+            max(1, min(100, $limit)),
+            max(1, $page),
+            $cutover,
+            $readOnly
+        );
+    }
+
+    private function journalEntriesForCutover(int $userId, int $year, int $limit, int $page, array $cutover, bool $readOnly): array
+    {
+        $cutoverId = (int) ($cutover['id'] ?? 0);
+        $offset = ($page - 1) * $limit;
         $timeEntries = $this->journalService?->timeEntriesForUser($userId, null, null, $cutoverId, $limit + 1, $offset) ?? [];
         $vacationEntries = $this->journalService?->vacationEntriesForUser($userId, $year, $cutoverId, $limit + 1, $offset) ?? [];
 
         return [
             'cutover_id' => $cutoverId,
+            'cutover_status' => (string) ($cutover['status'] ?? ''),
+            'read_only' => $readOnly,
             'time_entries' => array_slice($timeEntries, 0, $limit),
             'vacation_entries' => array_slice($vacationEntries, 0, $limit),
             'pagination' => [
@@ -200,6 +239,23 @@ final class TimeAccountService
                 'limit' => $limit,
                 'time_has_more' => count($timeEntries) > $limit,
                 'vacation_has_more' => count($vacationEntries) > $limit,
+            ],
+        ];
+    }
+
+    private function emptyJournalEntries(int $page, int $limit): array
+    {
+        return [
+            'cutover_id' => null,
+            'cutover_status' => null,
+            'read_only' => true,
+            'time_entries' => [],
+            'vacation_entries' => [],
+            'pagination' => [
+                'page' => $page,
+                'limit' => $limit,
+                'time_has_more' => false,
+                'vacation_has_more' => false,
             ],
         ];
     }
@@ -815,8 +871,12 @@ final class TimeAccountService
         $creditedSelect = $this->connection->columnExists('timesheets', 'credited_minutes')
             ? 'SUM(COALESCE(credited_minutes, 0)) AS credited_minutes'
             : '0 AS credited_minutes';
+        $vacationDaySelect = $this->connection->columnExists('timesheets', 'absence_reason_code')
+            ? 'COUNT(DISTINCT CASE WHEN absence_reason_code = "vacation_paid" OR absence_reason_code IS NULL THEN work_date END) AS paid_vacation_days,
+               COUNT(DISTINCT CASE WHEN absence_reason_code = "unpaid_leave" THEN work_date END) AS unpaid_leave_days'
+            : 'COUNT(DISTINCT work_date) AS paid_vacation_days, 0 AS unpaid_leave_days';
         $rows = $this->connection->fetchAll(
-            'SELECT entry_type, COUNT(DISTINCT work_date) AS day_count, SUM(COALESCE(net_minutes, 0)) AS minutes, ' . $creditedSelect . '
+            'SELECT entry_type, COUNT(DISTINCT work_date) AS day_count, ' . $vacationDaySelect . ', SUM(COALESCE(net_minutes, 0)) AS minutes, ' . $creditedSelect . '
              FROM timesheets
              WHERE user_id = :user_id
                AND work_date >= :date_from
@@ -832,15 +892,17 @@ final class TimeAccountService
 
         foreach ($rows as $row) {
             $type = (string) ($row['entry_type'] ?? '');
+            $dayCount = (float) ($row['day_count'] ?? 0);
 
             if ($type === 'work') {
-                $stats['work_minutes'] = (int) ($row['minutes'] ?? 0);
+                $stats['work_minutes'] += (int) ($row['minutes'] ?? 0);
             } elseif ($type === 'vacation') {
-                $stats['vacation_days'] = (float) ($row['day_count'] ?? 0);
+                $stats['vacation_days'] += (float) ($row['paid_vacation_days'] ?? 0);
+                $stats['absent_days'] += (float) ($row['unpaid_leave_days'] ?? 0);
             } elseif ($type === 'sick') {
-                $stats['sick_days'] = (float) ($row['day_count'] ?? 0);
+                $stats['sick_days'] += $dayCount;
             } elseif ($type === 'absent') {
-                $stats['absent_days'] = (float) ($row['day_count'] ?? 0);
+                $stats['absent_days'] += $dayCount;
             }
 
             $stats['credited_minutes'] += (int) ($row['credited_minutes'] ?? 0);
@@ -866,6 +928,10 @@ final class TimeAccountService
             return 0.0;
         }
 
+        $paidVacationClause = $this->connection->columnExists('timesheets', 'absence_reason_code')
+            ? ' AND (absence_reason_code = "vacation_paid" OR absence_reason_code IS NULL)'
+            : '';
+
         return (float) ((int) ($this->connection->fetchColumn(
             'SELECT COUNT(DISTINCT work_date)
              FROM timesheets
@@ -873,7 +939,7 @@ final class TimeAccountService
                AND entry_type = "vacation"
                AND work_date >= :date_from
                AND work_date <= :date_to
-               AND COALESCE(is_deleted, 0) = 0',
+               AND COALESCE(is_deleted, 0) = 0' . $paidVacationClause,
             [
                 'user_id' => $userId,
                 'date_from' => $dateFrom,
@@ -885,8 +951,10 @@ final class TimeAccountService
     private function futureApprovedVacationDays(int $userId, int $year, ?string $cutoverDate, string $asOfDate): float
     {
         $tomorrow = (new DateTimeImmutable($asOfDate))->modify('+1 day')->format('Y-m-d');
+        $yearStart = sprintf('%04d-01-01', $year);
+        $dateFrom = max($tomorrow, $yearStart);
 
-        return $this->takenVacationDays($userId, $year, $cutoverDate, $tomorrow, sprintf('%04d-12-31', $year));
+        return $this->takenVacationDays($userId, $year, $cutoverDate, $dateFrom, sprintf('%04d-12-31', $year));
     }
 
     private function vacationJournalSum(int $userId, int $year, int $cutoverId): float

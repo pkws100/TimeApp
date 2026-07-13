@@ -12,6 +12,26 @@ use PHPUnit\Framework\TestCase;
 
 final class DashboardServiceTest extends TestCase
 {
+    public function testLegacyUnpaidVacationCountsAsAbsence(): void
+    {
+        $connection = new DatabaseConnection([]);
+        $service = new DashboardService(
+            $connection,
+            new StorageUsageService(storage_path()),
+            new AttendanceService($connection)
+        );
+        $charts = $service->buildChartsFromRows([[
+            'work_date' => (new \DateTimeImmutable('today'))->format('Y-m-d'),
+            'user_id' => 7,
+            'entry_type' => 'vacation',
+            'absence_reason_code' => 'unpaid_leave',
+            'net_minutes' => 0,
+        ]], 'month');
+
+        self::assertSame(0, $charts['entry_types']['datasets'][0]['data'][2]);
+        self::assertSame(1, $charts['entry_types']['datasets'][0]['data'][4]);
+    }
+
     public function testChartsProvideCompatibleDatasetsForRequestedPeriod(): void
     {
         $service = new DashboardService(

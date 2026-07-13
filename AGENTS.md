@@ -113,6 +113,7 @@ Bereits umgesetzt:
 - serverseitige Zeitgutschriften fuer bezahlte Abwesenheiten ueber `timesheets.credited_minutes` und fachliche Abwesenheitsgruende ueber `absence_reason_code`
 - kumulierter Zeitkontostand ab finalisiertem Stichtag, aktuelle Monatsberechnung nur bis Standdatum und neutrale Anzeige von positivem/negativem Zeitkontostand
 - Stichtagsgenerationen ueber `cutover_id` in Zeit- und Urlaubskonto-Journalen; aktive Berechnungen lesen nur die aktive finale Generation, revidierte Generationen bleiben historisch erhalten
+- vollstaendige Admin-Stichtagshistorie mit finalen und revidierten Generationen, generationsbezogenen read-only Journalen und eindeutig gekennzeichneten revidierten PDF-Protokollen
 - interne Stichtagssperren in `accounting_closures` mit `source_type = employee_account_cutover`, wirksam fuer Timesheet-Schreibschutz, aber ausgeblendet in normalen Abschlusslisten und Exporten
 
 Noch nicht final umgesetzt:
@@ -138,6 +139,7 @@ Diese Entscheidungen gelten aktuell als gesetzt und sollen nicht ohne expliziten
   - 45 Minuten bei mehr als 9 Stunden
 - `timesheets` decken mindestens `work`, `sick`, `vacation`, `holiday` und `absent` ab.
 - Tatsaechliche Arbeitszeit und Zeitkonto-Zeitgutschrift sind getrennt: `net_minutes` bleibt geleistete Arbeitszeit, `credited_minutes` ist nur die Gutschrift fuer bezahlte Abwesenheit.
+- Erholungsurlaub wird nur durch `vacation` mit `absence_reason_code = vacation_paid` verbraucht. Historische `vacation`-Zeilen ohne Reason-Code gelten kompatibel als bezahlt; `unpaid_leave` verbraucht keinen Erholungsurlaub und wird bei neuen manuellen Buchungen als `absent` gespeichert.
 - Ein finalisierter Zeitkonto-Stichtag uebernimmt den Stand am Ende des Vortages; Zeiten davor veraendern den neuen kumulierten Zeitkontostand nicht.
 - Stichtagsfinalisierung und Revidierung verwenden die feste Sperrreihenfolge: Mitarbeiter-Stichtagslock, globaler `accounting-timesheet-write`-Lock, erneute Vorschau/Pruefung, DB-Transaktion, Freigabe in umgekehrter Reihenfolge.
 - Korrekturen an Zeit- und Urlaubskonten erfolgen ueber unveraenderliche Journalbuchungen und Gegenbuchungen, nicht durch Bearbeiten oder physisches Loeschen alter Journalzeilen.
@@ -145,6 +147,8 @@ Diese Entscheidungen gelten aktuell als gesetzt und sollen nicht ohne expliziten
 - Neue Stichtagsfinalisierungen erzeugen keine wirkungslosen Null-Journalzeilen. Bei der Revidierung werden nur offene Ursprungsbuchungen ohne bestehende Gegenbuchung verarbeitet; historische Nullzeilen bleiben unveraendert erhalten und werden uebersprungen.
 - Mehrdeutige historische Journalgenerationen duerfen nicht heuristisch geraten werden. Solche Zeilen bleiben mit `cutover_id = NULL` aus aktiven Salden ausgeschlossen und werden mit `bin/inspect-time-account-generations.php` analysiert.
 - Urlaubskonto-Jahreseroeffnungen werden je Mitarbeiter, Urlaubsjahr und Stichtagsgeneration idempotent gebucht. Spaetere Stammdatenaenderungen veraendern eroeffnete Jahre nicht rueckwirkend.
+- Das im aktiven Stichtag gespeicherte Urlaubsjahr ist auch bei vollstaendigen Nullwerten ein verbindlicher Snapshot. Sein implizites Opening Adjustment ist `Resturlaub - Jahresanspruch - Uebertrag`; erst spaetere Urlaubsjahre werden aus den User-Vorschlagswerten explizit im Journal eroeffnet.
+- Historische finale und revidierte Stichtagsgenerationen sind mit `time_accounts.view` im Admin lesbar. Gegenbuchungen werden nur fuer offene, von null verschiedene Eintraege der aktiven finalen Generation angeboten.
 - Arbeit plus ganztagige Abwesenheit sowie doppelte ganztagige Abwesenheiten am selben Tag werden zentral blockiert; mehrere Arbeitsbuchungen bleiben erlaubt.
 - Beim Wiederherstellen archivierter Buchungen werden Periodensperre, anrechenbarer Arbeitstag und Tageskonflikte erneut gegen den aktuellen Zustand geprueft.
 - Positive rechnerische Zeitkontostaende werden neutral als positiver Zeitkontostand bezeichnet, nicht automatisch als genehmigte Ueberstunden.

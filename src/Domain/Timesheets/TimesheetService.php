@@ -17,8 +17,12 @@ final class TimesheetService
     public function list(): array
     {
         if ($this->connection->tableExists('timesheets')) {
+            $absenceReasonSelect = $this->connection->columnExists('timesheets', 'absence_reason_code')
+                ? 'absence_reason_code'
+                : 'NULL AS absence_reason_code';
+
             return $this->connection->fetchAll(
-                'SELECT id, user_id, project_id, work_date, start_time, end_time, break_minutes, net_minutes, entry_type, note FROM timesheets ORDER BY work_date DESC, start_time DESC LIMIT 50'
+                'SELECT id, user_id, project_id, work_date, start_time, end_time, break_minutes, net_minutes, entry_type, ' . $absenceReasonSelect . ', note FROM timesheets ORDER BY work_date DESC, start_time DESC LIMIT 50'
             );
         }
 
@@ -62,12 +66,22 @@ final class TimesheetService
                 'Ende' => $row['end_time'],
                 'Pause (Min)' => $row['break_minutes'],
                 'Netto (Min)' => $row['net_minutes'],
-                'Typ' => $row['entry_type'],
+                'Typ' => self::semanticEntryType($row),
                 'Bemerkung' => $row['note'],
                 'Periode' => $period,
             ],
             $rows
         );
     }
-}
 
+    private static function semanticEntryType(array $row): string
+    {
+        $entryType = (string) ($row['entry_type'] ?? '');
+
+        if ($entryType === 'vacation' && (string) ($row['absence_reason_code'] ?? '') === 'unpaid_leave') {
+            return 'absent';
+        }
+
+        return $entryType;
+    }
+}

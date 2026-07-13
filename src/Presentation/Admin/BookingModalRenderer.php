@@ -35,6 +35,7 @@ final class BookingModalRenderer
             $id = (int) ($booking['id'] ?? 0);
             $isActive = (int) ($booking['is_deleted'] ?? 0) !== 1;
             $entryType = (string) ($booking['entry_type'] ?? 'work');
+            $displayEntryType = (string) ($booking['semantic_entry_type'] ?? $entryType);
             $hasIncompleteTime = $isActive
                 && $entryType === 'work'
                 && (trim((string) ($booking['start_time'] ?? '')) === '' || trim((string) ($booking['end_time'] ?? '')) === '');
@@ -47,7 +48,7 @@ final class BookingModalRenderer
                 $projectDisplay .= '<br><span class="badge warn">Projekt offen</span>';
             }
 
-            $typeLabel = (string) ($entryTypeOptions[$entryType] ?? $entryType);
+            $typeLabel = (string) ($entryTypeOptions[$displayEntryType] ?? $displayEntryType);
             $typeDisplay = $this->e($typeLabel);
 
             if ($hasIncompleteTime) {
