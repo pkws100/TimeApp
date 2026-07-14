@@ -23,7 +23,7 @@ final class TerminalPunchService
     {
         $this->terminalService->assertFeatureEnabled();
 
-        return [
+        $response = [
             'ok' => true,
             'terminal' => [
                 'id' => (int) ($terminal['id'] ?? 0),
@@ -44,6 +44,13 @@ final class TerminalPunchService
             'signal' => ['led' => 'green', 'beep' => 'ready'],
             'server_time' => $this->serverTime(),
         ];
+
+        $bundle = $this->trustBundleMetadata();
+        if ($bundle !== null) {
+            $response['trust_bundle'] = $bundle;
+        }
+
+        return $response;
     }
 
     public function scan(array $terminal, array $payload): array
@@ -414,6 +421,31 @@ final class TerminalPunchService
         $decoded = json_decode($json, true);
 
         return is_array($decoded) ? $decoded : [];
+    }
+
+    private function trustBundleMetadata(): ?array
+    {
+        $path = (string) env('TERMINAL_TRUST_BUNDLE_FILE', storage_path('app/terminal-trust-bundle.json'));
+        if (!is_file($path) || !is_readable($path)) {
+            return null;
+        }
+
+        $bundle = json_decode((string) file_get_contents($path), true);
+        $payload = is_array($bundle) ? ($bundle['payload'] ?? null) : null;
+        if (!is_array($payload) || (int) ($payload['format_version'] ?? 0) !== 1
+            || (int) ($payload['bundle_version'] ?? 0) < 1
+            || ($bundle['signature_algorithm'] ?? '') !== 'ECDSA-P256-SHA256'
+            || trim((string) ($bundle['signature'] ?? '')) === ''
+            || !is_array($payload['certificates'] ?? null) || $payload['certificates'] === []) {
+            return null;
+        }
+
+        return [
+            'latest_version' => (int) $payload['bundle_version'],
+            'download_url' => '/api/v1/terminal/trust-bundle',
+            'warning_after' => (string) ($payload['warning_after'] ?? ''),
+            'replace_before' => (string) ($payload['replace_before'] ?? ''),
+        ];
     }
 
     private function deviceTime(mixed $value): ?string

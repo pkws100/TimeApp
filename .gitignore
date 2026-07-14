@@ -15,3 +15,6 @@
 !/storage/logs/.gitkeep
 /storage/app/uploads/*
 !/storage/app/uploads/.gitkeep
+/terminal/firmware/pkws-time-terminal/dist/
+/terminal/firmware/pkws-time-terminal/.pio/
+/terminal/firmware/pkws-time-terminal/*/.pio/

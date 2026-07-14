@@ -246,7 +246,7 @@ HTML;
                 . '<label><span>Status</span><select name="is_active">' . $this->option('1', 'Aktiv', (int) ($terminal['is_active'] ?? 1) === 1) . $this->option('0', 'Inaktiv', (int) ($terminal['is_active'] ?? 1) !== 1) . '</select></label>'
                 . '<label class="full-span"><span>Settings JSON</span><textarea name="settings_json" rows="3">' . $this->e((string) ($terminal['settings_json'] ?? '')) . '</textarea></label>'
                 . '</div>'
-                . '<p class="muted">Letzter Kontakt: ' . $this->e((string) ($terminal['last_seen_at'] ?? 'nie')) . ' ' . $this->e((string) ($terminal['last_seen_ip'] ?? '')) . '</p>'
+                . '<p class="muted">Letzter Kontakt: ' . $this->e((string) ($terminal['last_seen_at'] ?? 'nie')) . ' ' . $this->e((string) ($terminal['last_seen_ip'] ?? '')) . '<br>Firmware/Transport: ' . $this->e((string) ($terminal['last_firmware_version'] ?? '-')) . ' / ' . $this->e((string) ($terminal['last_transport'] ?? '-')) . '<br>TLS/Trust: ' . $this->e((string) ($terminal['last_tls_state'] ?? '-')) . ' / v' . $this->e((string) ($terminal['active_trust_bundle_version'] ?? '0')) . ' (' . $this->e((string) ($terminal['trust_warning_state'] ?? '-')) . '), geprüft: ' . $this->e((string) ($terminal['last_trust_checked_at'] ?? 'nie')) . '<br>Offline-Queue: ' . $this->e((string) ($terminal['offline_queue_depth'] ?? '-')) . '; HTTPS zuletzt: ' . $this->e((string) ($terminal['last_https_success_at'] ?? 'nie')) . '; Recovery: ' . $this->e((string) ($terminal['last_recovery_status'] ?? '-')) . '</p>'
                 . '<button class="button" type="submit">Speichern</button>'
                 . '</form>'
                 . '<div class="table-actions">'
