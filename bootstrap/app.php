@@ -37,6 +37,7 @@ use App\Domain\Settings\SmtpTestService;
 use App\Domain\Terminals\NfcTagService;
 use App\Domain\Terminals\TerminalPunchService;
 use App\Domain\Terminals\TerminalService;
+use App\Domain\Terminals\TerminalTrustBundleService;
 use App\Domain\TimeAccounts\AccountJournalService;
 use App\Domain\TimeAccounts\DailyTargetService;
 use App\Domain\TimeAccounts\EmployeeAccountCutoverService;
@@ -223,6 +224,7 @@ $timeAccountService = new TimeAccountService($connection, $calendarPolicyService
 $timeAccountExportService = new TimeAccountExportService($timeAccountService);
 $vacationRequestService = new VacationRequestService($connection, $calendarPolicyService, $timesheetWriteGuard, $dailyTargetService, $timesheetDayConflictService);
 $terminalService = new TerminalService($connection, $companySettingsService);
+$terminalTrustBundleService = new TerminalTrustBundleService((string) env('TERMINAL_TRUST_BUNDLE_FILE', storage_path('app/terminal-trust-bundle.json')));
 $nfcTagService = new NfcTagService($connection, (string) $config->get('app.settings_encryption_key', ''));
 $terminalPunchService = new TerminalPunchService($connection, $terminalService, $nfcTagService, $appTimesheetSyncService);
 $appDisplayName = trim((string) ($companySettingsService->current()['app_display_name'] ?? '')) ?: (string) $config->get('app.name');
@@ -258,7 +260,7 @@ $appTimesheetController = new AppTimesheetController($appTimesheetSyncService, $
 $appTimesheetAttachmentController = new AppTimesheetAttachmentController($fileService, $authService);
 $appTimesheetSignatureController = new AppTimesheetSignatureController($timesheetSignatureService, $authService);
 $appProjectAttachmentController = new AppProjectAttachmentController($fileService, $authService);
-$terminalApiController = new TerminalApiController($terminalService, $terminalPunchService);
+$terminalApiController = new TerminalApiController($terminalService, $terminalPunchService, $terminalTrustBundleService);
 $adminTimesheetAttachmentController = new AdminTimesheetAttachmentController($fileService, $authService, $csrfService);
 $adminTimesheetSignatureController = new AdminTimesheetSignatureController($timesheetSignatureService, $authService, $csrfService);
 $adminController = new AdminController($adminView, $dashboardService, $databaseSettings);
@@ -483,6 +485,7 @@ $router->get('/api/v1/auth/session', [$authController, 'session']);
 
 $router->get('/api/v1/terminal/config', [$terminalApiController, 'config']);
 $router->post('/api/v1/terminal/scan', [$terminalApiController, 'scan']);
+$router->get('/api/v1/terminal/trust-bundle', [$terminalApiController, 'trustBundle']);
 
 $router->get('/api/v1/app/me/day', $api([$appApiController, 'meDay'], 'timesheets.view_own'));
 $router->get('/api/v1/app/me/timesheets', $api([$appApiController, 'meTimesheets'], 'timesheets.view_own'));

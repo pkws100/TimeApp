@@ -6,6 +6,7 @@ namespace App\Http\Controllers;
 
 use App\Domain\Terminals\TerminalPunchService;
 use App\Domain\Terminals\TerminalService;
+use App\Domain\Terminals\TerminalTrustBundleService;
 use App\Http\Request;
 use App\Http\Response;
 use RuntimeException;
@@ -14,7 +15,8 @@ final class TerminalApiController
 {
     public function __construct(
         private TerminalService $terminalService,
-        private TerminalPunchService $punchService
+        private TerminalPunchService $punchService,
+        private TerminalTrustBundleService $trustBundleService
     ) {
     }
 
@@ -27,6 +29,18 @@ final class TerminalApiController
         } catch (\Throwable $exception) {
             return Response::json($this->errorPayload($exception->getMessage()), $this->authStatus($exception->getMessage()));
         }
+    }
+
+    /** This endpoint intentionally does not authenticate: its response is public, signed and contains no tenant data. */
+    public function trustBundle(Request $request): Response
+    {
+        $bundle = $this->trustBundleService->publicBundle();
+
+        if ($bundle === null) {
+            return Response::json(['ok' => false, 'code' => 'trust_bundle_unavailable'], 404, ['Cache-Control' => 'public, max-age=300']);
+        }
+
+        return Response::json($bundle, 200, ['Cache-Control' => 'public, max-age=3600, stale-while-revalidate=86400']);
     }
 
     public function scan(Request $request): Response

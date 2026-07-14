@@ -59,6 +59,18 @@ final class TerminalImplementationTest extends TestCase
 
         self::assertStringContainsString('/api/v1/terminal/config', $source);
         self::assertStringContainsString('/api/v1/terminal/scan', $source);
+        self::assertStringContainsString('/api/v1/terminal/trust-bundle', $source);
         self::assertStringContainsString('/admin/terminals', $source);
+    }
+
+    public function testTransportDiagnosticsAreOptionalAndTrustBundleIsPublicOnly(): void
+    {
+        $service = (string) file_get_contents(base_path('src/Domain/Terminals/TerminalService.php'));
+        $controller = (string) file_get_contents(base_path('src/Http/Controllers/TerminalApiController.php'));
+
+        self::assertStringContainsString('X-Terminal-Transport', $service);
+        self::assertStringContainsString('X-Terminal-Trust-Version', $service);
+        self::assertStringContainsString('public, max-age=3600', $controller);
+        self::assertStringContainsString('function trustBundle', $controller);
     }
 }
