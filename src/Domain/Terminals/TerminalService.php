@@ -383,6 +383,12 @@ final class TerminalService
         $warningState = mb_substr(trim((string) $this->header($request, 'X-Terminal-Trust-State', '')), 0, 40);
         $recoveryStatus = mb_substr(trim((string) $this->header($request, 'X-Terminal-Recovery-Status', '')), 0, 80);
         $firmware = mb_substr(trim((string) $this->header($request, 'X-Terminal-Firmware', '')), 0, 120);
+        if (!in_array($tlsState, ['not-applicable', 'not-checked', 'time-invalid', 'trust-missing', 'connecting', 'verified', 'validation-failed', 'recovery'], true)) {
+            $tlsState = '';
+        }
+        if (!in_array($warningState, ['current', 'warning', 'replace-required', 'recovery', 'invalid', 'not-applicable', 'not-checked'], true)) {
+            $warningState = '';
+        }
 
         try {
             $this->connection->execute(

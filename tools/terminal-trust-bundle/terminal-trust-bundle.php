@@ -30,15 +30,36 @@ function args(array $argv): array
 
 function canonical(array $payload): string
 {
-    /* Fixed insertion order is the protocol canonicalization used by firmware 1.1. */
-    return json_encode([
-        'format_version' => (int) $payload['format_version'],
-        'bundle_version' => (int) $payload['bundle_version'],
-        'created_at' => (string) $payload['created_at'],
-        'warning_after' => (string) $payload['warning_after'],
-        'replace_before' => (string) $payload['replace_before'],
-        'certificates' => array_values($payload['certificates']),
-    ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+    $out = "PKWS-TERMINAL-TRUST-V1\n";
+    $append = static function (string $name, string $value) use (&$out): void {
+        $out .= $name . ':' . strlen($value) . "\n" . $value . "\n";
+    };
+    $append('format_version', (string) (int) $payload['format_version']);
+    $append('bundle_version', (string) (int) $payload['bundle_version']);
+    $append('created_at', (string) $payload['created_at']);
+    $append('warning_after', (string) $payload['warning_after']);
+    $append('replace_before', (string) $payload['replace_before']);
+    $append('certificate_count', (string) count($payload['certificates']));
+    foreach ($payload['certificates'] as $certificate) {
+        $append('certificate', trim(str_replace(["\r\n", "\r"], "\n", (string) $certificate)));
+    }
+
+    return $out;
+}
+
+function requireP256Key(string $pem, bool $private): OpenSSLAsymmetricKey
+{
+    $key = $private ? openssl_pkey_get_private($pem) : openssl_pkey_get_public($pem);
+    if (!$key instanceof OpenSSLAsymmetricKey) {
+        throw new RuntimeException('EC P-256 key could not be read.');
+    }
+    $details = openssl_pkey_get_details($key);
+    if (!is_array($details) || ($details['type'] ?? null) !== OPENSSL_KEYTYPE_EC
+        || ($details['ec']['curve_name'] ?? null) !== 'prime256v1') {
+        throw new RuntimeException('Only EC prime256v1 / P-256 keys are permitted.');
+    }
+
+    return $key;
 }
 
 $command = $argv[1] ?? '';
@@ -54,6 +75,7 @@ if ($command === 'sign') {
     if (!is_string($private) || !str_contains($private, 'PRIVATE KEY')) {
         throw new RuntimeException('Private key could not be read.');
     }
+    $privateKey = requireP256Key($private, true);
     $certificates = [];
     foreach ($options['cert'] as $certPath) {
         $certificate = trim(str_replace(["\r\n", "\r"], "\n", (string) file_get_contents($certPath)));
@@ -71,7 +93,7 @@ if ($command === 'sign') {
         'certificates' => $certificates,
     ];
     $signature = '';
-    if (!openssl_sign(canonical($payload), $signature, $private, OPENSSL_ALGO_SHA256)) {
+    if (!openssl_sign(canonical($payload), $signature, $privateKey, OPENSSL_ALGO_SHA256)) {
         throw new RuntimeException('ECDSA P-256 signing failed.');
     }
     $bundle = ['payload' => $payload, 'signature_algorithm' => 'ECDSA-P256-SHA256', 'signature' => base64_encode($signature)];
@@ -92,7 +114,8 @@ if ($command === 'verify') {
     if (!is_string($public) || !is_array($bundle['payload'] ?? null) || ($bundle['signature_algorithm'] ?? '') !== 'ECDSA-P256-SHA256') {
         throw new RuntimeException('Invalid public key or bundle format.');
     }
-    $valid = openssl_verify(canonical($bundle['payload']), base64_decode((string) $bundle['signature'], true) ?: '', $public, OPENSSL_ALGO_SHA256) === 1;
+    $publicKey = requireP256Key($public, false);
+    $valid = openssl_verify(canonical($bundle['payload']), base64_decode((string) $bundle['signature'], true) ?: '', $publicKey, OPENSSL_ALGO_SHA256) === 1;
     echo $valid ? "valid\n" : "invalid\n";
     exit($valid ? 0 : 1);
 }

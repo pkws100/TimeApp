@@ -40,7 +40,12 @@ final class TerminalApiController
             return Response::json(['ok' => false, 'code' => 'trust_bundle_unavailable'], 404, ['Cache-Control' => 'public, max-age=300']);
         }
 
-        return Response::json($bundle, 200, ['Cache-Control' => 'public, max-age=3600, stale-while-revalidate=86400']);
+        $json = json_encode($bundle, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+
+        return Response::json($bundle, 200, [
+            'Cache-Control' => 'public, max-age=3600, stale-while-revalidate=86400',
+            'ETag' => '"' . hash('sha256', $json) . '"',
+        ]);
     }
 
     public function scan(Request $request): Response

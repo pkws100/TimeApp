@@ -1,6 +1,6 @@
 # PK-WS TimeApp Terminal Firmware 1.1
 
-Firmware 1.1 is the new dual-transport generation: `http://` remains available for protected internal networks, while `https://` uses hostname and CA validation. The URL scheme is an explicit security boundary: there is no HTTPS-to-HTTP fallback.
+Firmware 1.1.1 is rebuilt from the complete frozen Firmware 1.0 baseline. It retains the RC522/LCD/LED/buzzer/setup-button workflow, captive portal, WLAN diagnostics and non-blocking display logic, then adds controlled HTTP/HTTPS transport, trust management and an offline queue. The URL scheme is an explicit security boundary: there is no HTTPS-to-HTTP fallback.
 
 ## Build / flash
 
@@ -12,7 +12,7 @@ pio run -t upload
 
 It pins `espressif32@7.0.1` and `framework-arduinoespressif32@3.20017.241212` (Arduino-ESP32 2.0.17). The Arduino IDE wrapper includes only `../../src/main.cpp` in this 1.1 directory.
 
-Before productive flashing, replace `change-me-setup` and `change-me-portal` with unique per-device values and replace the example trust signing public key with PK-WS's offline signing public key. The local portal remains reachable on the terminal LAN only for diagnosis and configuration; treat it as an administrative surface.
+Before a production build, copy `include/TrustConfig.example.h` to the ignored `include/TrustConfig.local.h` and insert the offline PK-WS P-256 public verification key. A missing local header is a deliberate build error; test fixtures are never used by a production build. Replace `change-me-setup` and `change-me-portal` with unique per-device values. The local portal remains reachable on the terminal LAN only for diagnosis and configuration; treat it as an administrative surface.
 
 ## Transport and time
 
@@ -22,13 +22,17 @@ Before productive flashing, replace `change-me-setup` and `change-me-portal` wit
 
 ## Trust bundles and recovery
 
-LittleFS stores independent active and previous signed JSON bundles. Atomic rename means a power loss cannot replace an active bundle with a partial file. The factory fallback contains the two public ISRG/Let's Encrypt root anchors used by the documented Nginx Proxy Manager deployment, rather than a single immutable root. The matching public ECDSA P-256 verifier key is compiled into firmware; no private key is present. Before production release, replace the example verifier key with PK-WS's offline signing public key.
+LittleFS is mounted with `begin(false)` only; it is never automatically formatted. `trust-active`, `trust-previous`, `trust-staging`, `trust-new` and `trust-old-pending` provide recoverable, power-loss-safe installation. The factory fallback is versioned in `FactoryTrust.h`; the public ECDSA verifier is supplied by the ignored local header. No private key is present in firmware or production configuration.
 
 During normal operation new bundles are downloaded only with verified HTTPS (at start/reconnect and no more than once per 24 hours). A TLS trust failure may use `setInsecure()` only for the fixed same-origin public `/api/v1/terminal/trust-bundle` GET: it has no body, no terminal ID, no bearer token and no NFC data; the returned payload is accepted only after local ECDSA verification. The portal permits a signed upload, restoring the previous bundle, or factory fallback after local login and a per-boot form token.
 
 ## Offline scans
 
-Up to 64 scans are persisted atomically in LittleFS. Every record retains its `request_id`; it is removed only after a successful server response, preserving server-side idempotency. TLS failures show “Server nicht sicher / Scan gespeichert”; queue overflow is an explicit red warning. The queue synchronizes after a successful config request.
+Up to 64 scans are stored as individual atomically created records. Every record retains its `request_id`; it is removed only after a successful server response, preserving server-side idempotency. TLS and WLAN failures persist the current scan before recovery/retry. Queue synchronization transfers one record at a time between normal loop cycles.
+
+## Signed payload protocol
+
+The PHP signer and firmware sign the same UTF-8 block: a magic line followed by fixed-order `name:length` fields and their byte values. PEM line endings are normalized to LF before the certificate fields are written. This avoids hand-written JSON escaping rules. Interoperability vectors reside in `tests/fixtures/terminal-trust/`.
 
 ## Nginx Proxy Manager
 

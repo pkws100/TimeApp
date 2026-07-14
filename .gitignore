@@ -18,3 +18,4 @@
 /terminal/firmware/pkws-time-terminal/dist/
 /terminal/firmware/pkws-time-terminal/.pio/
 /terminal/firmware/pkws-time-terminal/*/.pio/
+/terminal/firmware/pkws-time-terminal/1.1/include/TrustConfig.local.h

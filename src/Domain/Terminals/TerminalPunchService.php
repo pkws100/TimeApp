@@ -15,7 +15,8 @@ final class TerminalPunchService
         private DatabaseConnection $connection,
         private TerminalService $terminalService,
         private NfcTagService $nfcTagService,
-        private AppTimesheetSyncService $syncService
+        private AppTimesheetSyncService $syncService,
+        private TerminalTrustBundleService $trustBundleService
     ) {
     }
 
@@ -425,27 +426,7 @@ final class TerminalPunchService
 
     private function trustBundleMetadata(): ?array
     {
-        $path = (string) env('TERMINAL_TRUST_BUNDLE_FILE', storage_path('app/terminal-trust-bundle.json'));
-        if (!is_file($path) || !is_readable($path)) {
-            return null;
-        }
-
-        $bundle = json_decode((string) file_get_contents($path), true);
-        $payload = is_array($bundle) ? ($bundle['payload'] ?? null) : null;
-        if (!is_array($payload) || (int) ($payload['format_version'] ?? 0) !== 1
-            || (int) ($payload['bundle_version'] ?? 0) < 1
-            || ($bundle['signature_algorithm'] ?? '') !== 'ECDSA-P256-SHA256'
-            || trim((string) ($bundle['signature'] ?? '')) === ''
-            || !is_array($payload['certificates'] ?? null) || $payload['certificates'] === []) {
-            return null;
-        }
-
-        return [
-            'latest_version' => (int) $payload['bundle_version'],
-            'download_url' => '/api/v1/terminal/trust-bundle',
-            'warning_after' => (string) ($payload['warning_after'] ?? ''),
-            'replace_before' => (string) ($payload['replace_before'] ?? ''),
-        ];
+        return $this->trustBundleService->metadata();
     }
 
     private function deviceTime(mixed $value): ?string
