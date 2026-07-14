@@ -5,7 +5,12 @@ declare(strict_types=1);
 namespace Tests\Unit;
 
 use App\Domain\Terminals\TerminalTrustBundleService;
+use App\Http\Controllers\TerminalApiController;
+use App\Http\Request;
+use App\Http\Response;
 use PHPUnit\Framework\TestCase;
+use ReflectionClass;
+use ReflectionProperty;
 
 final class TerminalTrustBundleServiceTest extends TestCase
 {
@@ -75,6 +80,36 @@ final class TerminalTrustBundleServiceTest extends TestCase
         self::assertNull((new TerminalTrustBundleService($this->directory . '/bundle.json', $this->directory . '/public.pem'))->publicBundle());
     }
 
+    public function testExpiredAndOversizedCertificatesAreNotPublished(): void
+    {
+        file_put_contents($this->directory . '/public.pem', (string) file_get_contents(base_path('tests/fixtures/terminal-trust/public.pem')));
+        file_put_contents($this->directory . '/bundle.json', json_encode($this->signedBundle([$this->caCertificate(0)]), JSON_THROW_ON_ERROR));
+        self::assertNull((new TerminalTrustBundleService($this->directory . '/bundle.json', $this->directory . '/public.pem'))->publicBundle());
+
+        $oversized = "-----BEGIN CERTIFICATE-----\n" . str_repeat('A', 8200) . "\n-----END CERTIFICATE-----\n";
+        file_put_contents($this->directory . '/bundle.json', json_encode($this->signedBundle([$oversized]), JSON_THROW_ON_ERROR));
+        self::assertNull((new TerminalTrustBundleService($this->directory . '/bundle.json', $this->directory . '/public.pem'))->publicBundle());
+    }
+
+    public function testTrustBundleEtagAndIfNoneMatch(): void
+    {
+        file_put_contents($this->directory . '/public.pem', (string) file_get_contents(base_path('tests/fixtures/terminal-trust/public.pem')));
+        file_put_contents($this->directory . '/bundle.json', json_encode($this->signedBundle([$this->validCaCertificate()]), JSON_THROW_ON_ERROR));
+        $controller = $this->controllerWithTrustService(new TerminalTrustBundleService($this->directory . '/bundle.json', $this->directory . '/public.pem'));
+
+        $first = $controller->trustBundle($this->request());
+        self::assertSame(200, $first->status());
+        self::assertSame('public, max-age=3600, stale-while-revalidate=86400', $first->headers()['Cache-Control']);
+        $body = $this->responseContent($first);
+        $etag = '"' . hash('sha256', $body) . '"';
+        self::assertSame($etag, $first->headers()['ETag']);
+
+        $cached = $controller->trustBundle($this->request(['If-None-Match' => $etag]));
+        self::assertSame(304, $cached->status());
+        self::assertSame($etag, $cached->headers()['ETag']);
+        self::assertSame('', $this->responseContent($cached));
+    }
+
     /** @param list<string> $certificates */
     private function signedBundle(array $certificates): array
     {
@@ -109,14 +144,40 @@ final class TerminalTrustBundleServiceTest extends TestCase
 
     private function validCaCertificate(): string
     {
+        return $this->caCertificate(365);
+    }
+
+    private function caCertificate(int $days): string
+    {
         $key = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_RSA, 'private_key_bits' => 2048]);
         self::assertNotFalse($key);
         $csr = openssl_csr_new(['commonName' => 'PKWS Test CA'], $key, ['digest_alg' => 'sha256']);
         self::assertNotFalse($csr);
-        $certificate = openssl_csr_sign($csr, null, $key, 365, ['digest_alg' => 'sha256', 'x509_extensions' => 'v3_ca']);
+        $certificate = openssl_csr_sign($csr, null, $key, $days, ['digest_alg' => 'sha256', 'x509_extensions' => 'v3_ca']);
         self::assertNotFalse($certificate);
         self::assertTrue(openssl_x509_export($certificate, $pem));
         return $pem;
+    }
+
+    private function controllerWithTrustService(TerminalTrustBundleService $service): TerminalApiController
+    {
+        $reflection = new ReflectionClass(TerminalApiController::class);
+        $controller = $reflection->newInstanceWithoutConstructor();
+        $property = $reflection->getProperty('trustBundleService');
+        $property->setValue($controller, $service);
+        return $controller;
+    }
+
+    /** @param array<string, string> $headers */
+    private function request(array $headers = []): Request
+    {
+        return new Request('GET', '/api/v1/terminal/trust-bundle', [], [], $headers, [], []);
+    }
+
+    private function responseContent(Response $response): string
+    {
+        $property = new ReflectionProperty(Response::class, 'content');
+        return (string) $property->getValue($response);
     }
 
     private function nonCaCertificate(): string

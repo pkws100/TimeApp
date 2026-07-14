@@ -17,6 +17,8 @@
 #include <mbedtls/x509_crt.h>
 #include <time.h>
 
+#include "../include/TerminalDecisionLogic.h"
+
 #if defined(PKWS_TEST_BUILD)
 #include "../test-config/TrustConfig.test.h"
 #elif __has_include("../include/TrustConfig.local.h")
@@ -86,9 +88,11 @@ static const char *TRUST_STAGING = "/trust-staging.json";
 static const char *TRUST_NEW = "/trust-new.json";
 static const char *TRUST_OLD_PENDING = "/trust-old-pending.json";
 static const char *TRUST_RECOVERY_MARKER = "/trust-recovery.marker";
+static const char *TRUST_QUARANTINE = "/trust-unverified-candidate.json";
 static const char *QUEUE_DIRECTORY = "/queue";
 static const char *QUEUE_REJECTED_DIRECTORY = "/queue-rejected";
 static const char *QUEUE_SEQUENCE_FILE = "/queue/sequence";
+static const char *QUEUE_SYNC_BLOCK_FILE = "/queue-sync-block.json";
 
 enum class DeviceState {
     BOOT,
@@ -109,8 +113,7 @@ enum class DeviceState {
 enum class ApiTransport { HTTP_PLAIN, HTTPS_VERIFIED, INVALID };
 enum class TlsState { NOT_APPLICABLE, NOT_CHECKED, TIME_INVALID, TRUST_MISSING, CONNECTING, VERIFIED, VALIDATION_FAILED, RECOVERY };
 enum class ScanLifecycle { NONE, VOLATILE, PERSISTED, SENT_CONFIRMED, REJECTED };
-enum class RetryClass { TEMPORARY, PERMANENT };
-enum class QueueSyncOutcome { EMPTY, CONFIRMED, TEMPORARY, TLS_FAILURE, REJECTED, CORRUPT };
+enum class QueueSyncOutcome { EMPTY, CONFIRMED, TEMPORARY, TLS_FAILURE, REJECTED, BLOCKED, CORRUPT };
 
 struct TerminalConfig {
     String ssid;
@@ -187,6 +190,7 @@ unsigned long lastUidAt = 0;
 unsigned long resultUntil = 0;
 unsigned long nextApiRetryAt = 0;
 unsigned long nextQueueSyncCycleAt = 0;
+unsigned long lastRetryAfterMs = 0;
 String savedDisplayLines[4] = {"PK-WS TimeApp", "Tag vorhalten", "Bereit", ""};
 bool temporaryDisplayActive = false;
 unsigned long temporaryDisplayUntil = 0;
@@ -212,6 +216,11 @@ String uploadedTrustBundle;
 bool trustUploadTooLarge = false;
 bool provisioningSecurityValid = true;
 QueueSyncContext queueSync;
+bool queueSyncBlocked = false;
+String queueSyncBlockReason;
+int queueSyncBlockHttpStatus = 0;
+String queueSyncBlockServerCode;
+String queueSyncBlockedAt;
 
 enum class LedTestState {
     OFF,
@@ -237,12 +246,21 @@ bool beepActive = false;
 unsigned long beepStepUntil = 0;
 
 void applySignalFromJson(JsonVariantConst root, const String &fallbackLed, const String &fallbackBeep);
+void applyLedSignal(const String &signal);
+void lcdShow(const String &line1, const String &line2, const String &line3, const String &line4);
 bool persistCurrentScan(const String &reason);
 bool apiGet(const String &path, String &body, int &status, String &why, bool authenticated = true, size_t responseLimit = MAX_CONFIG_RESPONSE_BYTES);
 bool installTrustBundle(const String &raw, bool allowRollback, String &why);
 void finishTrustInstall(bool verified);
 bool restorePreviousTrust(String &why);
 void restoreFactoryTrust();
+bool readLimitedResponse(HTTPClient &http, String &body, size_t limit, String &why);
+bool writeFileAtomically(const char *target, const String &content, const char *temporary);
+
+const char *blockedMaintenanceMessage()
+{
+    return "Aktion während eines laufenden Scans, einer Queue-Synchronisierung oder einer TLS-Wiederherstellung nicht zulässig.";
+}
 QueueSyncOutcome syncOneQueuedScan();
 void enterState(DeviceState next);
 String isoDeviceTimeOrNull();
@@ -336,6 +354,90 @@ bool storageMutationBlocked()
     return state == DeviceState::SEND_SCAN || state == DeviceState::QUEUE_SYNC || state == DeviceState::TLS_RECOVERY
         || queueSync.active || scanLifecycle != ScanLifecycle::NONE
         || currentRequestId.length() > 0 || currentUid.length() > 0;
+}
+
+void loadQueueSyncBlock()
+{
+    preferences.begin(NVS_NAMESPACE, true);
+    queueSyncBlocked = preferences.getBool("q_block", false);
+    queueSyncBlockReason = preferences.getString("q_reason", "");
+    queueSyncBlockHttpStatus = preferences.getInt("q_status", 0);
+    queueSyncBlockServerCode = preferences.getString("q_code", "");
+    queueSyncBlockedAt = preferences.getString("q_at", "");
+    preferences.end();
+    if (!queueSyncBlocked && filesystemMounted && LittleFS.exists(QUEUE_SYNC_BLOCK_FILE)) {
+        File file = LittleFS.open(QUEUE_SYNC_BLOCK_FILE, "r");
+        if (file && file.size() > 0 && file.size() <= 768) {
+            DynamicJsonDocument document(640);
+            if (!deserializeJson(document, file) && (document["blocked"] | false)) {
+                queueSyncBlocked = true;
+                queueSyncBlockReason = document["reason"] | "queue_sync_blocked";
+                queueSyncBlockHttpStatus = document["http_status"] | 0;
+                queueSyncBlockServerCode = document["server_code"] | "";
+                queueSyncBlockedAt = document["blocked_at"] | "";
+            }
+        }
+        if (file) file.close();
+    }
+}
+
+bool persistQueueSyncBlock(int status, const String &code)
+{
+    queueSyncBlocked = true;
+    queueSyncBlockHttpStatus = status;
+    queueSyncBlockServerCode = code;
+    queueSyncBlockReason = code.length() ? code : String("http_") + status;
+    queueSyncBlockedAt = isoDeviceTimeOrNull();
+    preferences.begin(NVS_NAMESPACE, false);
+    preferences.putBool("q_block", true);
+    preferences.putString("q_reason", queueSyncBlockReason);
+    preferences.putInt("q_status", status);
+    preferences.putString("q_code", code);
+    preferences.putString("q_at", queueSyncBlockedAt);
+    preferences.end();
+    preferences.begin(NVS_NAMESPACE, true);
+    bool persisted = preferences.getBool("q_block", false)
+        && preferences.getInt("q_status", 0) == status
+        && preferences.getString("q_reason", "") == queueSyncBlockReason;
+    preferences.end();
+    DynamicJsonDocument document(640);
+    document["blocked"] = true;
+    document["reason"] = queueSyncBlockReason;
+    document["http_status"] = status;
+    document["server_code"] = code;
+    document["blocked_at"] = queueSyncBlockedAt;
+    String body;
+    serializeJson(document, body);
+    bool filePersisted = filesystemMounted
+        && writeFileAtomically(QUEUE_SYNC_BLOCK_FILE, body, "/queue-sync-block.tmp");
+    if (!persisted && !filePersisted) lastTerminalError = "queue_sync_block_persist_failed";
+    return persisted || filePersisted;
+}
+
+bool clearQueueSyncBlock()
+{
+    preferences.begin(NVS_NAMESPACE, false);
+    preferences.remove("q_block");
+    preferences.remove("q_reason");
+    preferences.remove("q_status");
+    preferences.remove("q_code");
+    preferences.remove("q_at");
+    preferences.end();
+    preferences.begin(NVS_NAMESPACE, true);
+    bool nvsCleared = !preferences.getBool("q_block", false);
+    preferences.end();
+    bool fileCleared = !filesystemMounted || !LittleFS.exists(QUEUE_SYNC_BLOCK_FILE)
+        || (LittleFS.remove(QUEUE_SYNC_BLOCK_FILE) && !LittleFS.exists(QUEUE_SYNC_BLOCK_FILE));
+    if (!nvsCleared || !fileCleared) {
+        lastTerminalError = "queue_sync_block_clear_failed";
+        return false;
+    }
+    queueSyncBlocked = false;
+    queueSyncBlockReason = "";
+    queueSyncBlockHttpStatus = 0;
+    queueSyncBlockServerCode = "";
+    queueSyncBlockedAt = "";
+    return true;
 }
 
 bool isTimeValid()
@@ -560,16 +662,52 @@ bool validInstallRecoveryMarker(uint32_t &candidateVersion)
     return candidateVersion > 0;
 }
 
-bool activateRecoveredTrust(const char *sourcePath, const TrustBundle &source, String &why)
+bool quarantineActiveTrust(String &why)
 {
-    if (LittleFS.exists(TRUST_ACTIVE)) {
-        LittleFS.remove("/trust-unverified-candidate.json");
-        if (!LittleFS.rename(TRUST_ACTIVE, "/trust-unverified-candidate.json")) { why = "trust_candidate_quarantine_failed"; return false; }
+    if (!LittleFS.exists(TRUST_ACTIVE)) return true;
+    LittleFS.remove(TRUST_QUARANTINE);
+    if (!LittleFS.rename(TRUST_ACTIVE, TRUST_QUARANTINE)) {
+        why = "trust_candidate_quarantine_failed";
+        return false;
     }
-    if (!LittleFS.rename(sourcePath, TRUST_ACTIVE)) { why = "trust_recovery_activate_failed"; return false; }
-    activeTrust = source;
-    activeTrustSource = "recovered";
     return true;
+}
+
+bool removeTrustTransactionFile(const char *path, String &why)
+{
+    if (!LittleFS.exists(path)) return true;
+    if (LittleFS.remove(path) && !LittleFS.exists(path)) return true;
+    why = String("trust_cleanup_failed:") + path;
+    return false;
+}
+
+bool cleanupTrustTransactionFiles(String &why)
+{
+    return removeTrustTransactionFile(TRUST_OLD_PENDING, why)
+        && removeTrustTransactionFile(TRUST_NEW, why)
+        && removeTrustTransactionFile(TRUST_STAGING, why);
+}
+
+bool activateTrustFile(const char *sourcePath, const String &sourceLabel, String &why)
+{
+    if (LittleFS.exists(TRUST_ACTIVE)) { why = "trust_recovery_active_not_empty"; return false; }
+    if (!LittleFS.rename(sourcePath, TRUST_ACTIVE)) { why = "trust_recovery_activate_failed"; return false; }
+    TrustBundle verified;
+    if (!readTrustFile(TRUST_ACTIVE, verified, why)) { why = "trust_recovery_reread_failed"; return false; }
+    activeTrust = verified;
+    activeTrustSource = sourceLabel;
+    return true;
+}
+
+void markTrustRollbackFailed(const String &why)
+{
+    loadFactoryTrust();
+    tlsState = TlsState::NOT_CHECKED;
+    lastCompletedTlsState = TlsState::NOT_CHECKED;
+    recoveryStatus = "trust_rollback_failed";
+    lastTerminalError = why.length() ? why : "trust_rollback_failed";
+    lcdShow("Trust Rollback", "fehlgeschlagen", "Factory aktiv", "Admin informieren");
+    applyLedSignal("red");
 }
 
 void recoverTrustAtBoot()
@@ -585,36 +723,42 @@ void recoverTrustAtBoot()
     bool markerValid = markerPresent && validInstallRecoveryMarker(candidateVersion);
 
     if (markerPresent) {
-        // A marker is written before activation and is only removed after a real
-        // verified HTTPS request. Therefore an active candidate is never trusted
-        // after a power loss, even when it parses successfully.
-        bool restored = false;
-        if (markerValid && hasActive && active.version != candidateVersion) {
-            // Power failed before the candidate replaced active. The existing
-            // active bundle is already a previously validated trust anchor.
-            activeTrust = active;
-            activeTrustSource = "active";
-            recoveryStatus = "recovered_unverified_candidate";
-            LittleFS.remove(TRUST_RECOVERY_MARKER);
-            restored = true;
-        } else if (markerValid && hasPrevious) restored = activateRecoveredTrust(TRUST_PREVIOUS, previous, why);
-        else if (markerValid && hasPending) restored = activateRecoveredTrust(TRUST_OLD_PENDING, pending, why);
-        if (restored) {
-            if (recoveryStatus != "recovered_unverified_candidate") recoveryStatus = "rolled_back_to_previous";
-            LittleFS.remove(TRUST_RECOVERY_MARKER);
-        } else if (markerValid) {
-            if (LittleFS.exists(TRUST_ACTIVE)) {
-                LittleFS.remove("/trust-unverified-candidate.json");
-                LittleFS.rename(TRUST_ACTIVE, "/trust-unverified-candidate.json");
-            }
-            loadFactoryTrust();
-            recoveryStatus = "rolled_back_to_factory";
-            LittleFS.remove(TRUST_RECOVERY_MARKER);
-        } else {
+        bool activeIsCandidate = hasActive && markerValid && active.version == candidateVersion;
+        TrustRecoveryAction action = trustRecoveryActionFor(markerPresent, markerValid, hasActive, activeIsCandidate, hasPrevious, hasPending);
+        if (action == TrustRecoveryAction::FAIL_SAFE_FACTORY) {
+            if (!quarantineActiveTrust(why)) lastTerminalError = why;
             loadFactoryTrust();
             recoveryStatus = "trust_recovery_failed";
-            // Preserve an invalid marker for forensic diagnosis instead of
-            // accepting any on-disk candidate.
+            refreshTrustStatus();
+            return;
+        }
+        if (action == TrustRecoveryAction::KEEP_VALID_ACTIVE) {
+            activeTrust = active;
+            activeTrustSource = "active";
+            if (!cleanupTrustTransactionFiles(why) || !LittleFS.remove(TRUST_RECOVERY_MARKER)) {
+                markTrustRollbackFailed(why.length() ? why : "trust_marker_remove_failed");
+                refreshTrustStatus();
+                return;
+            }
+            recoveryStatus = "recovered_existing_active";
+        } else {
+            if (!quarantineActiveTrust(why)) { markTrustRollbackFailed(why); refreshTrustStatus(); return; }
+            bool restored = action == TrustRecoveryAction::RESTORE_PREVIOUS
+                ? activateTrustFile(TRUST_PREVIOUS, "previous", why)
+                : action == TrustRecoveryAction::RESTORE_OLD_PENDING
+                    ? activateTrustFile(TRUST_OLD_PENDING, "old-pending", why)
+                    : false;
+            if (action == TrustRecoveryAction::USE_FACTORY) {
+                loadFactoryTrust();
+                restored = true;
+            }
+            if (!restored) { markTrustRollbackFailed(why); refreshTrustStatus(); return; }
+            if (!cleanupTrustTransactionFiles(why) || !LittleFS.remove(TRUST_RECOVERY_MARKER)) {
+                markTrustRollbackFailed(why.length() ? why : "trust_marker_remove_failed");
+                refreshTrustStatus();
+                return;
+            }
+            recoveryStatus = action == TrustRecoveryAction::USE_FACTORY ? "rolled_back_to_factory" : "rolled_back_to_previous";
         }
     } else if (!hasActive && hasPending) {
         LittleFS.remove(TRUST_ACTIVE);
@@ -670,30 +814,48 @@ bool installTrustBundle(const String &raw, bool allowRollback, String &why)
 
 void finishTrustInstall(bool verified)
 {
-    if (verified && tlsState == TlsState::VERIFIED) { LittleFS.remove(TRUST_RECOVERY_MARKER); recoveryStatus = "verified"; return; }
-    TrustBundle previous; String why;
-    if (readTrustFile(TRUST_PREVIOUS, previous, why)) {
-        LittleFS.remove(TRUST_OLD_PENDING);
-        if (LittleFS.rename(TRUST_ACTIVE, TRUST_OLD_PENDING) && LittleFS.rename(TRUST_PREVIOUS, TRUST_ACTIVE)) {
-            activeTrust = previous;
-            activeTrustSource = "previous";
-            recoveryStatus = "rolled_back_to_previous";
-            LittleFS.remove(TRUST_RECOVERY_MARKER);
-        } else {
-            recoveryStatus = "rollback_pending_recovery";
+    String why;
+    if (verified && tlsState == TlsState::VERIFIED) {
+        if (!cleanupTrustTransactionFiles(why) || !LittleFS.remove(TRUST_RECOVERY_MARKER)) {
+            recoveryStatus = "trust_finalize_failed";
+            lastTerminalError = why.length() ? why : "trust_marker_remove_failed";
+            return;
         }
-    } else { loadFactoryTrust(); recoveryStatus = "rolled_back_to_factory"; LittleFS.remove(TRUST_RECOVERY_MARKER); }
+        recoveryStatus = "verified";
+        return;
+    }
+    TrustBundle previous;
+    bool hasPrevious = readTrustFile(TRUST_PREVIOUS, previous, why);
+    if (!quarantineActiveTrust(why)) { markTrustRollbackFailed(why); return; }
+    bool restored = hasPrevious ? activateTrustFile(TRUST_PREVIOUS, "previous", why) : true;
+    if (!hasPrevious) loadFactoryTrust();
+    if (!restored) { markTrustRollbackFailed(why); return; }
+    if (!cleanupTrustTransactionFiles(why) || !LittleFS.remove(TRUST_RECOVERY_MARKER)) {
+        markTrustRollbackFailed(why.length() ? why : "trust_marker_remove_failed");
+        return;
+    }
+    recoveryStatus = hasPrevious ? "rolled_back_to_previous" : "rolled_back_to_factory";
+    refreshTrustStatus();
 }
 
 bool restorePreviousTrust(String &why)
 {
     TrustBundle previous;
     if (!readTrustFile(TRUST_PREVIOUS, previous, why)) return false;
+    TrustBundle quarantined;
+    String ignored;
+    if (readTrustFile(TRUST_QUARANTINE, quarantined, ignored) && quarantined.version == previous.version) {
+        why = "trust_previous_is_quarantined_candidate";
+        return false;
+    }
     LittleFS.remove(TRUST_ACTIVE);
     if (!LittleFS.rename(TRUST_PREVIOUS, TRUST_ACTIVE)) { why = "trust_previous_activate_failed"; return false; }
     activeTrust = previous;
     activeTrustSource = "previous";
     recoveryStatus = "previous_restored";
+    refreshTrustStatus();
+    tlsState = TlsState::NOT_CHECKED;
+    lastCompletedTlsState = TlsState::NOT_CHECKED;
     return true;
 }
 
@@ -702,6 +864,9 @@ void restoreFactoryTrust()
     if (filesystemMounted) LittleFS.remove(TRUST_ACTIVE);
     loadFactoryTrust();
     recoveryStatus = "factory_selected";
+    refreshTrustStatus();
+    tlsState = TlsState::NOT_CHECKED;
+    lastCompletedTlsState = TlsState::NOT_CHECKED;
 }
 
 String queuePath(uint32_t sequence, const char *suffix = ".json")
@@ -740,10 +905,17 @@ uint32_t nextQueueSequence()
     if (directory && directory.isDirectory()) {
         for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
             String name = entry.name();
-            if (name.endsWith(".json")) {
-                uint32_t existing = queueSequenceFromPath(name);
-                if (existing > sequence) sequence = existing;
-            }
+            uint32_t existing = queueSequenceFromPath(name);
+            if (existing > sequence) sequence = existing;
+            entry.close();
+        }
+        directory.close();
+    }
+    directory = LittleFS.open(QUEUE_REJECTED_DIRECTORY, "r");
+    if (directory && directory.isDirectory()) {
+        for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
+            uint32_t existing = queueSequenceFromPath(String(entry.name()));
+            if (existing > sequence) sequence = existing;
             entry.close();
         }
         directory.close();
@@ -890,15 +1062,32 @@ bool rejectQueuedScan(const OfflineScan &scan, int status, const String &code, c
     serializeJson(document, body);
     String target = rejectedQueuePath(scan.sequence);
     String temporary = target + ".tmp";
-    if (!writeFileAtomically(target.c_str(), body, temporary.c_str())) return false;
-    return LittleFS.remove(queuePath(scan.sequence).c_str());
-}
-
-RetryClass retryClassFor(int status, const String &code)
-{
-    if (status == 408 || status == 429 || status >= 500 || status <= 0) return RetryClass::TEMPORARY;
-    if (status == 400 || status == 401 || status == 403 || code == "terminal_disabled" || code == "terminal_auth_failed" || code == "nfc_tag_invalid") return RetryClass::PERMANENT;
-    return status >= 200 && status < 300 ? RetryClass::PERMANENT : RetryClass::TEMPORARY;
+    if (LittleFS.exists(target)) {
+        lastTerminalError = "queue_dead_letter_sequence_collision";
+        return false;
+    }
+    if (!writeFileAtomically(target.c_str(), body, temporary.c_str())) { lastTerminalError = "queue_dead_letter_write_failed"; return false; }
+    File check = LittleFS.open(target, "r");
+    if (!check || check.size() == 0 || check.size() > 1536) {
+        if (check) check.close();
+        LittleFS.remove(target);
+        lastTerminalError = "queue_dead_letter_write_failed";
+        return false;
+    }
+    DynamicJsonDocument verified(1280);
+    DeserializationError verifyError = deserializeJson(verified, check);
+    check.close();
+    if (verifyError || (uint32_t) (verified["sequence"] | 0) != scan.sequence
+        || verified["request_id"].as<String>() != scan.requestId) {
+        LittleFS.remove(target);
+        lastTerminalError = "queue_dead_letter_write_failed";
+        return false;
+    }
+    if (!LittleFS.remove(queuePath(scan.sequence).c_str())) {
+        lastTerminalError = "queue_dead_letter_write_failed";
+        return false;
+    }
+    return true;
 }
 
 String fitLcdLine(String value)
@@ -1258,6 +1447,7 @@ String setupHtml()
         apiBaseLabel = config.apiBaseUrl;
     }
     bool formatBlocked = storageMutationBlocked();
+    bool hardwareTestsBlocked = state != DeviceState::SETUP_MODE;
 
     String page;
     page.reserve(15000);
@@ -1293,6 +1483,12 @@ String setupHtml()
     page += transportLabel() + " / aktuell " + tlsStateHuman(tlsState) + " / zuletzt " + tlsStateHuman(lastCompletedTlsState);
     page += F("</code><span>Trust / Queue</span><code>");
     page += activeTrustSource + " v" + String(activeTrust.version) + " / " + trustStatusHuman() + " / aktiv " + String(queueDepth()) + " / abgelehnt " + String(queueRejectedDepth()) + " / defekt " + String(queueCorruptDepth());
+    page += F("</code><span>Queue-Sync</span><code>");
+    page += queueSyncBlocked
+        ? htmlEscape("GESPERRT / " + queueSyncBlockReason + " / HTTP " + String(queueSyncBlockHttpStatus) + " / " + queueSyncBlockServerCode + " / " + queueSyncBlockedAt)
+        : String("freigegeben");
+    page += F("</code><span>Trust-Quarantaene</span><code>");
+    page += LittleFS.exists(TRUST_QUARANTINE) ? "Unverifizierter Trust-Kandidat vorhanden" : "leer";
     page += F("</code><span>Trust-Fristen</span><code>");
     page += htmlEscape("CA: " + activeTrust.earliestCaExpiry + " · Warnung: " + activeTrust.effectiveWarningDeadline + " · Ersetzen: " + activeTrust.effectiveReplaceDeadline);
     page += F("</code><span>NTP / Zeit</span><code>");
@@ -1304,23 +1500,27 @@ String setupHtml()
     page += F("</code><span>Speicher</span><code>");
     page += "Heap " + String(ESP.getFreeHeap()) + " / Minimum " + String(ESP.getMinFreeHeap()) + " / Stack " + String(uxTaskGetStackHighWaterMark(nullptr));
     page += F("</code></div><form method=\"post\" action=\"/logout\"><button class=\"secondary\" type=\"submit\">Ausloggen</button></form></section>");
-    page += F("<section class=\"panel\"><h2>WLAN suchen</h2><button type=\"button\" onclick=\"scanWifi()\">WLANs suchen</button><div id=\"networks\" class=\"muted\">Noch nicht gesucht.</div></section>");
+    page += F("<section class=\"panel\"><h2>WLAN suchen</h2><button type=\"button\" onclick=\"scanWifi()\"");
+    if (formatBlocked) page += F(" disabled");
+    page += F(">WLANs suchen</button><div id=\"networks\" class=\"muted\" aria-live=\"polite\">Noch nicht gesucht.</div></section>");
     page += F("<section class=\"panel\"><h2>Konfiguration</h2><form id=\"configForm\" method=\"post\" action=\"/save\">");
     page += setupKeyInput();
-    page += F("<label>WLAN-SSID</label><input id=\"ssid\" name=\"ssid\" required value=\"");
+    page += F("<label for=\"ssid\">WLAN-SSID</label><input id=\"ssid\" name=\"ssid\" required value=\"");
     page += htmlEscape(config.ssid);
-    page += F("\"><label>WLAN-Passwort</label><input name=\"wifi_password\" type=\"password\" placeholder=\"");
+    page += F("\"><label for=\"wifi-password\">WLAN-Passwort</label><input id=\"wifi-password\" name=\"wifi_password\" type=\"password\" placeholder=\"");
     page += config.wifiPassword.length() > 0 ? F("gespeichert - leer lassen zum Beibehalten") : F("");
-    page += F("\"><label>TimeApp API Base URL</label><input name=\"api_base_url\" required placeholder=\"http://192.168.1.10\" value=\"");
+    page += F("\"><label for=\"api-base-url\">TimeApp API Base URL</label><input id=\"api-base-url\" name=\"api_base_url\" required placeholder=\"http://192.168.1.10\" value=\"");
     page += htmlEscape(config.apiBaseUrl);
-    page += F("\"><label>Terminal-ID</label><input name=\"terminal_id\" required placeholder=\"terminal-empfang\" value=\"");
+    page += F("\"><label for=\"terminal-id\">Terminal-ID</label><input id=\"terminal-id\" name=\"terminal_id\" required placeholder=\"terminal-empfang\" value=\"");
     page += htmlEscape(config.terminalId);
-    page += F("\"><label>Terminal-Token</label><input name=\"terminal_token\" type=\"password\" placeholder=\"");
+    page += F("\"><label for=\"terminal-token\">Terminal-Token</label><input id=\"terminal-token\" name=\"terminal_token\" type=\"password\" placeholder=\"");
     page += maskedToken.length() > 0 ? F("gespeichert - leer lassen zum Beibehalten") : F("");
-    page += F("\"><label>Geraetename optional</label><input name=\"device_name\" value=\"");
+    page += F("\"><label for=\"device-name\">Geraetename optional</label><input id=\"device-name\" name=\"device_name\" value=\"");
     page += htmlEscape(config.deviceName);
-    page += F("\"><button type=\"submit\">Speichern und verbinden</button><button class=\"good\" type=\"button\" onclick=\"testApi()\">API testen</button></form>");
-    page += F("<div id=\"apiResult\" class=\"result muted\">");
+    page += F("\"><button type=\"submit\">Speichern und verbinden</button><button class=\"good\" type=\"button\" onclick=\"testApi()\"");
+    if (formatBlocked) page += F(" disabled");
+    page += F(">API testen</button></form>");
+    page += F("<div id=\"apiResult\" class=\"result muted\" aria-live=\"polite\">");
     page += htmlEscape(lastApiTestDetails.length() > 0 ? lastApiTestDetails : "Noch kein API-Test ausgefuehrt.");
     page += F("</div></section>");
     page += F("<section class=\"panel\"><h2>Diagnose</h2><p class=\"muted\">WLAN und Geraete einzeln pruefen.</p><div class=\"status\"><span>SSID</span><code id=\"diagSsid\">");
@@ -1328,10 +1528,16 @@ String setupHtml()
     page += F("</code><span>WLAN Staerke</span><code id=\"diagSignal\">");
     page += htmlEscape(wifiSignalLabel());
     page += F("</code></div><button class=\"secondary\" type=\"button\" onclick=\"refreshDiag()\">WLAN aktualisieren</button><div class=\"grid\">");
-    page += F("<button type=\"button\" onclick=\"postAction('/test/lcd','LCD-Test gestartet')\">LCD</button>");
-    page += F("<button type=\"button\" onclick=\"postAction('/test/leds','LED-Test gestartet')\">LEDs</button>");
-    page += F("<button type=\"button\" onclick=\"postAction('/test/buzzer','Buzzer-Test gestartet')\">Buzzer</button>");
-    page += F("<button type=\"button\" onclick=\"startNfcTest()\">NFC Reader</button></div><div id=\"hardwareResult\" class=\"result muted\">Bereit fuer Hardwaretests.</div></section>");
+    for (const char *button : {"<button type=\"button\" onclick=\"postAction('/test/lcd','LCD-Test gestartet')\"", "<button type=\"button\" onclick=\"postAction('/test/leds','LED-Test gestartet')\"", "<button type=\"button\" onclick=\"postAction('/test/buzzer','Buzzer-Test gestartet')\"", "<button type=\"button\" onclick=\"startNfcTest()\""}) {
+        page += button;
+        if (hardwareTestsBlocked) page += F(" disabled");
+        page += F(">");
+        page += strstr(button, "lcd") ? "LCD" : strstr(button, "leds") ? "LEDs" : strstr(button, "buzzer") ? "Buzzer" : "NFC Reader";
+        page += F("</button>");
+    }
+    page += F("</div><div id=\"hardwareResult\" class=\"result muted\" aria-live=\"polite\">Bereit fuer Hardwaretests.</div>");
+    if (hardwareTestsBlocked) page += F("<p class=\"muted\">Hardwaretests sind nur im per Setup-Taster aktivierten Setup-Modus verfügbar, damit keine reale Buchung beeinflusst wird.</p>");
+    page += F("</section>");
     page += F("<section class=\"panel\"><form method=\"post\" action=\"/reset\" onsubmit=\"return confirm('Konfiguration wirklich loeschen?')\"><input type=\"hidden\" name=\"setup_key\" value=\"");
     page += htmlEscape(setupFormKey);
     page += F("\"><button class=\"danger\" type=\"submit\">Konfiguration loeschen</button></form>");
@@ -1342,19 +1548,23 @@ String setupHtml()
     page += setupKeyInput();
     page += F("<button class=\"secondary\" type=\"submit\">Signiertes Bundle pruefen</button></form><form method=\"post\" action=\"/trust/upload\" enctype=\"multipart/form-data\">");
     page += setupKeyInput();
-    page += F("<input name=\"bundle\" type=\"file\" accept=\"application/json\" required><button class=\"secondary\" type=\"submit\">Signiertes Bundle hochladen</button></form><form method=\"post\" action=\"/trust/previous\">");
+    page += F("<label for=\"trust-bundle-file\">Bundle-Datei</label><input id=\"trust-bundle-file\" name=\"bundle\" type=\"file\" accept=\"application/json\" required><button class=\"secondary\" type=\"submit\">Signiertes Bundle hochladen</button></form><form method=\"post\" action=\"/trust/previous\">");
     page += setupKeyInput();
     page += F("<button class=\"secondary\" type=\"submit\">Previous aktivieren</button></form><form method=\"post\" action=\"/trust/factory\">");
     page += setupKeyInput();
     page += F("<button class=\"secondary\" type=\"submit\">Factory-Trust aktivieren</button></form><form method=\"post\" action=\"/queue/sync\">");
     page += setupKeyInput();
-    page += F("<button class=\"secondary\" type=\"submit\">Queue synchronisieren</button></form><div class=\"result muted\"><strong>Abgelehnte Offline-Buchungen</strong><br>Maximal ");
+    page += F("<button class=\"secondary\" type=\"submit\">Queue synchronisieren</button></form><form method=\"post\" action=\"/queue/unblock\">");
+    page += setupKeyInput();
+    page += F("<button class=\"secondary\" type=\"submit\">Terminal-Zugang pruefen und Queue entsperren</button></form><form method=\"post\" action=\"/trust/quarantine/delete\" onsubmit=\"return confirm('Unverifizierten Trust-Kandidaten dauerhaft loeschen?')\">");
+    page += setupKeyInput();
+    page += F("<label for=\"confirm-quarantine-delete\">Bestaetigung</label><input id=\"confirm-quarantine-delete\" name=\"confirm_delete\" placeholder=\"LOESCHEN\" required><button class=\"danger\" type=\"submit\">Trust-Kandidaten aus Quarantaene loeschen</button></form><div class=\"result muted\"><strong>Abgelehnte Offline-Buchungen</strong><br>Maximal ");
     page += String(MAX_REJECTED_QUEUE_ENTRIES);
-    page += F(" Eintraege; bei Erreichen bleibt die aktive Buchung sicher erhalten und der Admin muss bereinigen. <button class=\"secondary\" type=\"button\" onclick=\"loadRejected(0)\">Abgelehnte Eintraege laden</button><button id=\"nextRejected\" class=\"secondary\" type=\"button\" style=\"display:none\">Weitere Eintraege</button><pre id=\"rejectedQueue\">Noch nicht geladen.</pre><form method=\"post\" action=\"/queue/rejected/delete\" onsubmit=\"return confirm('Abgelehnten Queue-Eintrag unwiderruflich loeschen?')\">");
+    page += F(" Eintraege; bei Erreichen bleibt die aktive Buchung sicher erhalten und der Admin muss bereinigen. <button class=\"secondary\" type=\"button\" onclick=\"loadRejected(0)\">Abgelehnte Eintraege laden</button><button id=\"nextRejected\" class=\"secondary\" type=\"button\" style=\"display:none\">Weitere Eintraege</button><pre id=\"rejectedQueue\" aria-live=\"polite\">Noch nicht geladen.</pre><form method=\"post\" action=\"/queue/rejected/delete\" onsubmit=\"return confirm('Abgelehnten Queue-Eintrag unwiderruflich loeschen?')\">");
     page += setupKeyInput();
-    page += F("<label>Sequenz</label><input name=\"sequence\" type=\"number\" min=\"1\" required><label>Bestaetigung</label><input name=\"confirm_delete\" placeholder=\"LOESCHEN\" required><button class=\"danger\" type=\"submit\">Abgelehnten Eintrag loeschen</button></form></div><form method=\"post\" action=\"/filesystem/format\" onsubmit=\"return confirm('Aktive Queue, abgelehnte Diagnoseeintraege und Trust-Dateien werden unwiderruflich geloescht. Fortfahren?')\">");
+    page += F("<label for=\"rejected-sequence\">Sequenz</label><input id=\"rejected-sequence\" name=\"sequence\" type=\"number\" min=\"1\" required><label for=\"confirm-rejected-delete\">Bestaetigung</label><input id=\"confirm-rejected-delete\" name=\"confirm_delete\" placeholder=\"LOESCHEN\" required><button class=\"danger\" type=\"submit\">Abgelehnten Eintrag loeschen</button></form></div><form method=\"post\" action=\"/filesystem/format\" onsubmit=\"return confirm('Aktive Queue, abgelehnte Diagnoseeintraege und Trust-Dateien werden unwiderruflich geloescht. Fortfahren?')\">");
     page += setupKeyInput();
-    page += F("<input name=\"confirm_format\" placeholder=\"FORMATIEREN eingeben\"");
+    page += F("<label for=\"confirm-format\">Bestaetigung</label><input id=\"confirm-format\" name=\"confirm_format\" placeholder=\"FORMATIEREN eingeben\"");
     if (formatBlocked) page += F(" disabled");
     page += F("><button class=\"danger\" type=\"submit\"");
     if (formatBlocked) page += F(" disabled");
@@ -1379,7 +1589,7 @@ String setupHtml()
 
 void sendSetupStatus()
 {
-    DynamicJsonDocument doc(1536);
+    DynamicJsonDocument doc(2048);
     if (!portalAuthenticated()) {
         doc["ok"] = false;
         doc["message"] = "Portal-Login erforderlich.";
@@ -1409,6 +1619,11 @@ void sendSetupStatus()
     doc["offline_queue_depth"] = queueDepth();
     doc["rejected_queue_depth"] = queueRejectedDepth();
     doc["corrupt_queue_depth"] = queueCorruptDepth();
+    doc["queue_sync_blocked"] = queueSyncBlocked;
+    doc["queue_sync_block_reason"] = queueSyncBlockReason;
+    doc["queue_sync_block_http_status"] = queueSyncBlockHttpStatus;
+    doc["queue_sync_block_server_code"] = queueSyncBlockServerCode;
+    doc["queue_sync_blocked_at"] = queueSyncBlockedAt;
     doc["free_heap"] = ESP.getFreeHeap();
     doc["minimum_free_heap"] = ESP.getMinFreeHeap();
     doc["stack_high_water_mark"] = uxTaskGetStackHighWaterMark(nullptr);
@@ -1417,10 +1632,10 @@ void sendSetupStatus()
     doc["trust_bundle_version"] = activeTrust.version;
     doc["earliest_ca_expiry"] = activeTrust.earliestCaExpiry;
     doc["trust_warning"] = trustStatus;
+    doc["unverified_trust_candidate_present"] = LittleFS.exists(TRUST_QUARANTINE);
     doc["recovery_status"] = recoveryStatus;
-    doc["offline_queue_depth"] = queueDepth();
     doc["filesystem_mounted"] = filesystemMounted;
-    doc["free_heap"] = ESP.getFreeHeap();
+    // Legacy alias retained for older diagnostic collectors.
     doc["min_free_heap"] = ESP.getMinFreeHeap();
     doc["last_error"] = lastTerminalError;
 
@@ -1519,6 +1734,12 @@ void handleApiTestRequest()
         sendJson(response, 403);
         return;
     }
+    if (storageMutationBlocked()) {
+        response["ok"] = false;
+        response["message"] = blockedMaintenanceMessage();
+        sendJson(response, 409);
+        return;
+    }
 
     TerminalConfig candidate = configFromPortalRequest();
     if (!apiFieldsReady(candidate)) {
@@ -1570,8 +1791,12 @@ void handleApiTestRequest()
     }
 
     addApiHeadersFor(http, candidate);
+    static const char *responseHeaders[] = {"Content-Type"};
+    http.collectHeaders(responseHeaders, 1);
     int httpStatus = http.GET();
-    String body = http.getString();
+    String body;
+    String readWhy;
+    bool responseRead = httpStatus > 0 && readLimitedResponse(http, body, MAX_CONFIG_RESPONSE_BYTES, readWhy);
     http.end();
 
     response["http_status"] = httpStatus;
@@ -1582,6 +1807,21 @@ void handleApiTestRequest()
         lastApiTestSummary = "Keine API-Antwort";
         lastApiTestDetails = "Keine Antwort von der TimeApp API.";
         sendJson(response, 504);
+        return;
+    }
+
+    if (!responseRead) {
+        bool timeout = readWhy == "response_timeout";
+        bool contentType = readWhy == "unexpected_response_content_type";
+        response["ok"] = false;
+        response["code"] = timeout ? "portal_api_response_timeout"
+            : (contentType ? "portal_api_unexpected_content_type" : "portal_api_response_too_large");
+        response["message"] = timeout ? "API-Antwort wurde nicht rechtzeitig vollständig empfangen."
+            : (contentType ? "API-Antwort hat keinen JSON-Inhaltstyp." : "API-Antwort überschreitet die zulässige Größe.");
+        lastApiTestSummary = timeout ? "API-Antwort Timeout"
+            : (contentType ? "API-Inhaltstyp ungueltig" : "API-Antwort zu gross");
+        lastApiTestDetails = response["message"].as<String>();
+        sendJson(response, timeout ? 504 : 502);
         return;
     }
 
@@ -1694,6 +1934,13 @@ void setupRoutes()
             sendJson(doc, 403);
             return;
         }
+        if (storageMutationBlocked()) {
+            DynamicJsonDocument doc(256);
+            doc["ok"] = false;
+            doc["message"] = blockedMaintenanceMessage();
+            sendJson(doc, 409);
+            return;
+        }
 
         scanWifi();
     });
@@ -1707,6 +1954,7 @@ void setupRoutes()
             setupServer.send(403, "text/html", "<p>Setup-Sitzung ungueltig. Bitte Seite neu laden.</p><p><a href=\"/\">Zurueck</a></p>");
             return;
         }
+        if (storageMutationBlocked()) { setupServer.send(409, "text/plain", blockedMaintenanceMessage()); return; }
 
         String ssid = setupServer.arg("ssid");
         String apiBaseUrl = setupServer.arg("api_base_url");
@@ -1736,6 +1984,7 @@ void setupRoutes()
 
     setupServer.on("/trust/check", HTTP_POST, []() {
         if (!setupPostAuthorized()) { setupServer.send(403, "text/plain", "Setup-Sitzung ungueltig."); return; }
+        if (storageMutationBlocked()) { setupServer.send(409, "text/plain", blockedMaintenanceMessage()); return; }
         String raw, why;
         int status = 0;
         bool candidateInstalled = apiGet("/api/v1/terminal/trust-bundle", raw, status, why, false, MAX_TRUST_BUNDLE_BYTES) && status == 200 && installTrustBundle(raw, false, why);
@@ -1752,6 +2001,7 @@ void setupRoutes()
 
     setupServer.on("/trust/upload", HTTP_POST, []() {
         if (!setupPostAuthorized()) { uploadedTrustBundle = ""; setupServer.send(403, "text/plain", "Setup-Sitzung ungueltig."); return; }
+        if (storageMutationBlocked()) { uploadedTrustBundle = ""; trustUploadTooLarge = false; setupServer.send(409, "text/plain", blockedMaintenanceMessage()); return; }
         String why;
         bool installed = !trustUploadTooLarge && uploadedTrustBundle.length() > 0 && installTrustBundle(uploadedTrustBundle, false, why);
         if (installed) {
@@ -1765,7 +2015,7 @@ void setupRoutes()
         setupServer.send(installed ? 200 : 422, "text/plain", installed ? "Signiertes Bundle installiert. HTTPS-Verbindung pruefen." : "Upload nicht installiert: " + (why.length() ? why : "ungueltig oder zu gross"));
     }, []() {
         HTTPUpload &upload = setupServer.upload();
-        if (upload.status == UPLOAD_FILE_START) { uploadedTrustBundle = ""; trustUploadTooLarge = upload.type != "application/json"; }
+        if (upload.status == UPLOAD_FILE_START) { uploadedTrustBundle = ""; trustUploadTooLarge = storageMutationBlocked() || upload.type != "application/json"; }
         else if (upload.status == UPLOAD_FILE_WRITE) {
             if (trustUploadTooLarge || uploadedTrustBundle.length() + upload.currentSize > MAX_TRUST_BUNDLE_BYTES) { trustUploadTooLarge = true; return; }
             uploadedTrustBundle.concat(reinterpret_cast<const char *>(upload.buf), upload.currentSize);
@@ -1774,6 +2024,7 @@ void setupRoutes()
 
     setupServer.on("/trust/previous", HTTP_POST, []() {
         if (!setupPostAuthorized()) { setupServer.send(403, "text/plain", "Setup-Sitzung ungueltig."); return; }
+        if (storageMutationBlocked()) { setupServer.send(409, "text/plain", blockedMaintenanceMessage()); return; }
         String why;
         bool restored = restorePreviousTrust(why);
         setupServer.send(restored ? 200 : 422, "text/plain", restored ? "Vorheriges Bundle aktiv." : "Previous nicht aktivierbar: " + why);
@@ -1781,12 +2032,22 @@ void setupRoutes()
 
     setupServer.on("/trust/factory", HTTP_POST, []() {
         if (!setupPostAuthorized()) { setupServer.send(403, "text/plain", "Setup-Sitzung ungueltig."); return; }
+        if (storageMutationBlocked()) { setupServer.send(409, "text/plain", blockedMaintenanceMessage()); return; }
         restoreFactoryTrust();
         setupServer.send(200, "text/plain", "Factory-Trust aktiv. Bitte HTTPS-Verbindung testen.");
     });
 
+    setupServer.on("/trust/quarantine/delete", HTTP_POST, []() {
+        if (!setupPostAuthorized() || setupServer.arg("confirm_delete") != "LOESCHEN") { setupServer.send(403, "text/plain", "Explizite Loeschbestaetigung fehlt."); return; }
+        if (storageMutationBlocked()) { setupServer.send(409, "text/plain", blockedMaintenanceMessage()); return; }
+        if (!LittleFS.exists(TRUST_QUARANTINE)) { setupServer.send(404, "text/plain", "Kein Trust-Kandidat in Quarantaene vorhanden."); return; }
+        bool removed = LittleFS.remove(TRUST_QUARANTINE);
+        setupServer.send(removed ? 200 : 500, "text/plain", removed ? "Trust-Kandidat aus Quarantaene geloescht." : "Trust-Kandidat konnte nicht geloescht werden.");
+    });
+
     setupServer.on("/queue/sync", HTTP_POST, []() {
         if (!setupPostAuthorized()) { setupServer.send(403, "text/plain", "Setup-Sitzung ungueltig."); return; }
+        if (queueSyncBlocked) { setupServer.send(409, "text/plain", "Queue-Synchronisierung ist wegen eines globalen Terminalfehlers gesperrt. Bitte Terminal-Zugang pruefen und entsperren."); return; }
         if (WiFi.status() != WL_CONNECTED) { setupServer.send(409, "text/plain", "WLAN nicht verbunden."); return; }
         if (state == DeviceState::SEND_SCAN || state == DeviceState::TLS_RECOVERY || scanLifecycle != ScanLifecycle::NONE
             || currentRequestId.length() > 0 || currentUid.length() > 0) {
@@ -1795,6 +2056,20 @@ void setupRoutes()
         }
         enterState(DeviceState::QUEUE_SYNC);
         setupServer.send(202, "text/plain", "Queue-Synchronisierung wurde gestartet.");
+    });
+
+    setupServer.on("/queue/unblock", HTTP_POST, []() {
+        if (!setupPostAuthorized()) { setupServer.send(403, "text/plain", "Setup-Sitzung ungueltig."); return; }
+        if (storageMutationBlocked()) { setupServer.send(409, "text/plain", blockedMaintenanceMessage()); return; }
+        if (WiFi.status() != WL_CONNECTED) { setupServer.send(409, "text/plain", "WLAN nicht verbunden."); return; }
+        String body, why;
+        int status = 0;
+        bool requestOk = apiGet("/api/v1/terminal/config", body, status, why) && status >= 200 && status < 300;
+        DynamicJsonDocument doc(4096);
+        bool apiOk = requestOk && !deserializeJson(doc, body) && (doc["ok"] | false);
+        if (!apiOk) { setupServer.send(422, "text/plain", "Terminal-Zugang nicht bestaetigt; Queue bleibt gesperrt: " + (why.length() ? why : String("HTTP ") + status)); return; }
+        if (!clearQueueSyncBlock()) { setupServer.send(500, "text/plain", "Terminal-Zugang bestaetigt, aber der persistente Queue-Block konnte nicht sicher geloescht werden."); return; }
+        setupServer.send(200, "text/plain", "Terminal-Zugang bestaetigt; Queue-Synchronisierung ist wieder freigegeben.");
     });
 
     setupServer.on("/queue/rejected", HTTP_GET, []() {
@@ -1835,6 +2110,7 @@ void setupRoutes()
 
     setupServer.on("/queue/rejected/delete", HTTP_POST, []() {
         if (!setupPostAuthorized() || setupServer.arg("confirm_delete") != "LOESCHEN") { setupServer.send(403, "text/plain", "Explizite Loeschbestaetigung fehlt."); return; }
+        if (storageMutationBlocked()) { setupServer.send(409, "text/plain", blockedMaintenanceMessage()); return; }
         uint32_t sequence = static_cast<uint32_t>(setupServer.arg("sequence").toInt());
         if (sequence == 0 || !LittleFS.remove(rejectedQueuePath(sequence).c_str())) { setupServer.send(404, "text/plain", "Abgelehnter Queue-Eintrag nicht gefunden."); return; }
         setupServer.send(200, "text/plain", "Abgelehnter Queue-Eintrag geloescht.");
@@ -1842,7 +2118,7 @@ void setupRoutes()
 
     setupServer.on("/filesystem/format", HTTP_POST, []() {
         if (!setupPostAuthorized() || setupServer.arg("confirm_format") != "FORMATIEREN") { setupServer.send(403, "text/plain", "Doppelte Formatbestaetigung fehlt."); return; }
-        if (storageMutationBlocked()) { setupServer.send(409, "text/plain", "Formatierung ist waehrend eines laufenden Scans, TLS-Recovery oder Queue-Sync gesperrt."); return; }
+        if (storageMutationBlocked()) { setupServer.send(409, "text/plain", blockedMaintenanceMessage()); return; }
         // This is the only intentional formatting path. It also initializes a
         // factory-fresh or damaged LittleFS volume that could not be mounted.
         bool formatted = LittleFS.format();
@@ -1865,6 +2141,7 @@ void setupRoutes()
             sendJson(doc, 403);
             return;
         }
+        if (state != DeviceState::SETUP_MODE) { setupServer.send(409, "application/json", "{\"ok\":false,\"message\":\"Hardwaretests sind nur im Setup-Modus zulässig.\"}"); return; }
 
         lcdShowTemporary("LCD Test", "Zeile 2 OK", "Zeile 3 OK", "Zeile 4 OK", 5000);
         handleHardwareTestResponse("lcd", "LCD-Test fuer 5 Sekunden angezeigt.");
@@ -1878,6 +2155,7 @@ void setupRoutes()
             sendJson(doc, 403);
             return;
         }
+        if (state != DeviceState::SETUP_MODE) { setupServer.send(409, "application/json", "{\"ok\":false,\"message\":\"Hardwaretests sind nur im Setup-Modus zulässig.\"}"); return; }
 
         ledTestState = LedTestState::RED;
         ledTestNextAt = millis();
@@ -1893,6 +2171,7 @@ void setupRoutes()
             sendJson(doc, 403);
             return;
         }
+        if (state != DeviceState::SETUP_MODE) { setupServer.send(409, "application/json", "{\"ok\":false,\"message\":\"Hardwaretests sind nur im Setup-Modus zulässig.\"}"); return; }
 
         static const uint16_t buzzerTestPattern[] = {80, 80, 80, 160, 250, 120, 250};
         startBeepPattern(buzzerTestPattern, 7);
@@ -1908,6 +2187,7 @@ void setupRoutes()
             sendJson(doc, 403);
             return;
         }
+        if (state != DeviceState::SETUP_MODE) { setupServer.send(409, "application/json", "{\"ok\":false,\"message\":\"Hardwaretests sind nur im Setup-Modus zulässig.\"}"); return; }
 
         nfcTestActive = true;
         nfcTestUid = "";
@@ -1946,6 +2226,7 @@ void setupRoutes()
             setupServer.send(403, "text/html", "<p>Setup-Sitzung ungueltig. Bitte Seite neu laden.</p><p><a href=\"/\">Zurueck</a></p>");
             return;
         }
+        if (storageMutationBlocked()) { setupServer.send(409, "text/plain", blockedMaintenanceMessage()); return; }
 
         clearConfig();
         lcdShow("Konfiguration", "geloescht", "Neustart...", "");
@@ -1959,6 +2240,7 @@ void setupRoutes()
             setupServer.send(403, "text/html", "<p>Setup-Sitzung ungueltig. Bitte Seite neu laden.</p><p><a href=\"/\">Zurueck</a></p>");
             return;
         }
+        if (storageMutationBlocked()) { setupServer.send(409, "text/plain", blockedMaintenanceMessage()); return; }
 
         lcdShow("Neustart", "bitte warten", "", "");
         setupServer.send(200, "text/html", "<p>Neustart...</p>");
@@ -2285,6 +2567,7 @@ bool fetchApiConfig()
 
     bool ok = doc["ok"] | false;
     if (status >= 200 && status < 300 && ok) {
+        if (queueSyncBlocked) clearQueueSyncBlock();
         for (uint8_t i = 0; i < 4; i++) {
             welcomeLines[i] = doc["display"]["lines"][i] | welcomeLines[i];
         }
@@ -2386,7 +2669,15 @@ bool sendScanRequest()
     String why;
     if (!beginApiRequest(http, plain, secure, httpUrl("/api/v1/terminal/scan"), why)) { apiStatus = why; return false; }
     addApiHeaders(http);
+    const char *responseHeaders[] = {"Retry-After"};
+    http.collectHeaders(responseHeaders, 1);
+    lastRetryAfterMs = 0;
     int status = http.POST(body);
+    if (status == 429) {
+        String retryAfter = http.header("Retry-After");
+        retryAfter.trim();
+        lastRetryAfterMs = retryAfterMilliseconds(retryAfter.c_str());
+    }
     lastHttpStatus = status;
     lastServerCode = "";
     lastServerMessage = "";
@@ -2416,10 +2707,17 @@ bool sendScanRequest()
     String code = doc["code"] | "";
     lastServerCode = code;
     lastServerMessage = doc["message"] | "";
-    RetryClass classification = retryClassFor(status, code);
+    QueueFailureAction classification = queueFailureActionFor(status, code.c_str());
     if (status < 200 || status >= 300) {
-        if (classification == RetryClass::TEMPORARY) {
+        if (classification == QueueFailureAction::RETRY_TEMPORARY) {
             apiStatus = String("scan_temporary_") + status;
+            return false;
+        }
+        if (classification == QueueFailureAction::BLOCK_GLOBAL_KEEP_ACTIVE) {
+            // A live scan still owns these identifiers until it has been
+            // persisted. Queue sync already has the same data on LittleFS.
+            scanLifecycle = ScanLifecycle::REJECTED;
+            apiStatus = String("scan_global_block_") + status;
             return false;
         }
         String fallbackRejected[4] = {"Scan abgelehnt", "Bitte Admin", "informieren", ""};
@@ -2502,6 +2800,19 @@ QueueSyncOutcome syncOneQueuedScan()
         return QueueSyncOutcome::CONFIRMED;
     }
     if (scanLifecycle == ScanLifecycle::REJECTED) {
+        QueueFailureAction action = queueFailureActionFor(lastHttpStatus, lastServerCode.c_str());
+        if (action == QueueFailureAction::BLOCK_GLOBAL_KEEP_ACTIVE) {
+            bool blockPersisted = persistQueueSyncBlock(lastHttpStatus, lastServerCode);
+            currentUid = "";
+            currentRequestId = "";
+            currentDeviceTime = "";
+            queueSync.active = false;
+            if (!blockPersisted) queueSync.lastError = "queue_sync_block_persist_failed";
+            return QueueSyncOutcome::BLOCKED;
+        }
+        if (action != QueueFailureAction::DEAD_LETTER_RECORD) {
+            return QueueSyncOutcome::TEMPORARY;
+        }
         if (!rejectQueuedScan(queueSync.scan, lastHttpStatus, lastServerCode, lastServerMessage.length() ? lastServerMessage : "Server hat die Offline-Buchung abgelehnt.")) {
             queueSync.lastError = lastTerminalError.length() ? lastTerminalError : "queue_dead_letter_write_failed";
             return QueueSyncOutcome::TEMPORARY;
@@ -2523,6 +2834,14 @@ unsigned long queueRetryDelay(uint8_t attempt)
 
 void handleQueueSync()
 {
+    if (queueSyncBlocked) {
+        queueSync.active = false;
+        scanLifecycle = ScanLifecycle::NONE;
+        lcdShow("Queue gesperrt", "Terminal-Zugang", "pruefen", "Admin informieren");
+        applyLedSignal("red");
+        enterState(DeviceState::ERROR_RETRY);
+        return;
+    }
     if (queueSync.active && millis() < queueSync.nextAttemptAt) return;
     QueueSyncOutcome outcome = syncOneQueuedScan();
     if (outcome == QueueSyncOutcome::EMPTY) { queueSync.active = false; enterState(DeviceState::READY); return; }
@@ -2533,6 +2852,16 @@ void handleQueueSync()
         scanLifecycle = ScanLifecycle::NONE;
         lastTerminalError = "queue_rejected";
         lcdShow("Queue abgelehnt", "Admin erforderlich", "Automatik stoppt", "Portal pruefen");
+        applyLedSignal("red");
+        triggerBeep("error");
+        enterState(DeviceState::ERROR_RETRY);
+        return;
+    }
+    if (outcome == QueueSyncOutcome::BLOCKED) {
+        queueSync.active = false;
+        scanLifecycle = ScanLifecycle::NONE;
+        if (lastTerminalError != "queue_sync_block_persist_failed") lastTerminalError = "queue_sync_blocked";
+        lcdShow("Queue gesperrt", "Terminal-Zugang", "pruefen", "Admin informieren");
         applyLedSignal("red");
         triggerBeep("error");
         enterState(DeviceState::ERROR_RETRY);
@@ -2549,7 +2878,9 @@ void handleQueueSync()
         return;
     }
     queueSync.lastError = apiStatus;
-    queueSync.nextAttemptAt = millis() + queueRetryDelay(queueSync.attempt + 1);
+    unsigned long retryDelay = lastRetryAfterMs > 0 ? lastRetryAfterMs : queueRetryDelay(queueSync.attempt + 1);
+    lastRetryAfterMs = 0;
+    queueSync.nextAttemptAt = millis() + retryDelay;
 }
 
 void startWifiAttempt()
@@ -2766,10 +3097,27 @@ void handleSendScan()
         return;
     }
 
+    if (scanLifecycle == ScanLifecycle::REJECTED
+        && queueFailureActionFor(lastHttpStatus, lastServerCode.c_str()) == QueueFailureAction::BLOCK_GLOBAL_KEEP_ACTIVE) {
+        if (persistCurrentScan(lastServerCode.length() ? lastServerCode : String("global_terminal_error"))) {
+            bool blockPersisted = persistQueueSyncBlock(lastHttpStatus, lastServerCode);
+            lcdShow("Queue gesperrt", "Scan gespeichert", blockPersisted ? "Zugang pruefen" : "Speicher pruefen", "Admin informieren");
+            applyLedSignal("red");
+            triggerBeep("error");
+            resultUntil = millis() + 8000;
+            enterState(DeviceState::SHOW_RESULT);
+        } else {
+            retainOpenScanForPersistenceRetry();
+        }
+        return;
+    }
+
     if (currentScanAttempt < 3) {
         lcdShow("API Retry", "Scan wird", "wiederholt", "bitte warten");
         applyLedSignal("yellow");
-        nextScanAttemptAt = millis() + (currentScanAttempt == 1 ? 1000 : 3000);
+        unsigned long retryDelay = lastRetryAfterMs > 0 ? lastRetryAfterMs : (currentScanAttempt == 1 ? 1000UL : 3000UL);
+        lastRetryAfterMs = 0;
+        nextScanAttemptAt = millis() + retryDelay;
         return;
     }
     if (persistCurrentScan("network_failed")) {
@@ -2837,6 +3185,7 @@ void setup()
     bootCounter = preferences.getUInt("boot_counter", 0) + 1;
     preferences.putUInt("boot_counter", bootCounter);
     preferences.end();
+    loadQueueSyncBlock();
 
     setupButtonWasPressedAtBoot = isSetupButtonPressed();
     stateEnteredAt = millis();
@@ -2949,6 +3298,7 @@ void loop()
                 String verifyBody;
                 int verifyStatus = 0;
                 recovered = apiGet("/api/v1/terminal/config", verifyBody, verifyStatus, why) && verifyStatus >= 200 && verifyStatus < 300;
+                if (recovered && queueSyncBlocked) clearQueueSyncBlock();
             }
             if (installed) finishTrustInstall(recovered);
             recoveryStatus = recovered ? "recovered" : (why.length() > 0 ? why : "tls_recovery_failed");
@@ -2966,7 +3316,7 @@ void loop()
             break;
 
         case DeviceState::NFC_SCAN:
-            if (queueDepth() > 0 && (nextQueueSyncCycleAt == 0 || millis() >= nextQueueSyncCycleAt)) {
+            if (!queueSyncBlocked && queueDepth() > 0 && (nextQueueSyncCycleAt == 0 || millis() >= nextQueueSyncCycleAt)) {
                 enterState(DeviceState::QUEUE_SYNC);
                 break;
             }

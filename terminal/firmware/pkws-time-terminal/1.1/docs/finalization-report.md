@@ -1,44 +1,65 @@
-# Finalisierungsbericht – Terminal-Firmware 1.1.1
+# Abschlussbericht – Terminal-Firmware 1.1.1 Werkbankkandidat
 
-Branch: `fix/terminal-firmware-1.1.1-finalize`
+Branch: `fix/terminal-firmware-1.1.1-release-candidate`
 
-Ausgangscommit: `c056969772ad52340122b132b140e2d994be49a6`
-Endcommit: Commit, der diesen Bericht enthält (nach Erstellung mit `git rev-parse HEAD` nachvollziehbar).
+Ausgangscommit: `d92ca7a9714f8d6c399529005eb5bb4c1c757b5c`
+
+Der Endcommit ist der Commit, der diesen Bericht enthält. Ein Draft-PR wird nach den abschließenden Agentenreviews erstellt; ein Merge oder eine Pilotfreigabe ist nicht Bestandteil dieses Auftrags.
 
 ## Schutz des Rückfallstands
 
-`sha256sum terminal/firmware/pkws-time-terminal/1.0/src/main.cpp` ergab vor den Änderungen:
+`terminal/firmware/pkws-time-terminal/1.0/src/main.cpp` hatte vor und nach der Arbeit denselben SHA-256:
 
 ```text
 3d9d60a22eae9b5895929c42c892d28dddb912cedfe3515eb0c86cdc6295f325
 ```
 
-Die Dateien unter `1.0/src`, `1.0/platformio.ini` und `1.0/arduino` wurden nicht geändert.
-Die abschließende Hashprüfung ist vor Merge/Flash erneut auszuführen.
+Firmware 1.0 wurde nicht geändert.
 
-## Behobene Befunde
+## Geänderte Dateien
 
-- Der Trust-Recovery-Marker ist ein validiertes, versionsgebundenes Installationsprotokoll. Ein Neustart mit Marker quarantänisiert einen nicht bestätigten Kandidaten und stellt `previous`/`old-pending` oder Factory-Trust wieder her; der Marker wird erst danach entfernt.
-- Queue-Sync speichert Kontext, arbeitet mit 0/2/10/60-Sekunden-Backoff, endet nach vier Versuchen und führt TLS-Fehler in die Recovery. Erfolgreiche Übertragungen werden einzeln bestätigt.
-- Permanente Serverablehnungen werden atomar nach `/queue-rejected/` verschoben. Sie enthalten Status/Code/Zeitpunkt, werden im Portal ohne UID sichtbar und nur nach Login, Formularschlüssel und `LOESCHEN` gelöscht.
-- Bei fehlgeschlagener Persistierung während WLAN-Verlust bleibt der offene Scan samt `request_id` im RAM, neue NFC-Scans bleiben gesperrt und der identische Request wird nach Reconnect fortgesetzt.
-- Dasselbe gilt bei jedem anderen Persistierungsfehler, etwa voller Queue oder LittleFS-Fehler: Das Terminal bleibt in `SEND_SCAN`, zeigt die Sperre an und versucht ausschließlich den unveränderten offenen Scan erneut; es wechselt nicht in `SHOW_RESULT` oder `NFC_SCAN`.
-- Diagnoseheader verwenden den letzten abgeschlossenen TLS-Zustand. `verified` wird nur nach erfolgreichem HTTPS-Request gesetzt.
-- Recovery-, Config- und Scan-Antworten haben Content-Length-, Größen-, Gesamt- und Idle-Timeout-Grenzen. Der einzige `setInsecure()`-Pfad bleibt der öffentliche Recovery-GET ohne Header oder Body.
-- Firmware und Server erzwingen P-256; der Server prüft zusätzlich PEM, CA:TRUE, Zertifikatsanzahl/-größe und Gültigkeit. ETag wird aus dem exakt ausgelieferten JSON erzeugt; `If-None-Match` liefert 304.
-- Platzhalter-Provisionierung ist per Pflicht-ID, Compile-Sentinels und Boot-Sperre blockiert. Der Testbuild verwendet ausdrücklich getrennte, nicht produktive Werte.
+- `1.1/src/main.cpp`: Trust-, Queue-, Transport-, Portal- und Diagnosekorrekturen.
+- `1.1/include/TerminalDecisionLogic.h`: host-testbare Queue-/Trust-/Retry-Entscheidungen.
+- `1.1/test/test_decision_logic/test_main.cpp` und `1.1/platformio.ini`: native Tests und expliziter Produktions-Default.
+- `build-test.sh`: reproduzierbare 1.0-/1.1-Builds plus native Tests.
+- `tests/Unit/TerminalTrustBundleServiceTest.php`: Zertifikats-, ETag- und 304-Nachweise.
+- `1.1/README.md` sowie `1.1/docs/build-report.md`, `finalization-report.md` und `hardware-acceptance.md`: Betriebs-, Build- und Abnahmenachweise.
 
-## Nachweise
+## Korrekturen
 
-Die echten Builddaten stehen in [build-report.md](build-report.md). Der Testbuild von 1.0 und 1.1 war erfolgreich.
+- Fehlgeschlagene Trust-Kandidaten werden aus `active` nach `/trust-unverified-candidate.json` verschoben. Sie werden weder als `previous` noch beim normalen Boot automatisch aktiviert. Das Portal zeigt nur ihre Existenz und löscht sie ausschließlich nach Login, Formularschlüssel und Texteingabe `LOESCHEN`.
+- Die Recovery-Entscheidung bevorzugt bei einem Stromausfall zwischen Backup und Kandidatenaktivierung den unmittelbar vorherigen `old-pending`-Stand vor einem älteren `previous`. Wiederhergestellte Dateien werden erneut gelesen und kryptografisch geparst. Der Recovery-Marker bleibt erhalten, solange Rollback, Bereinigung oder Markerentfernung nicht vollständig abgeschlossen sind; im Fehlerfall läuft nur Factory-Trust im RAM.
+- Previous- und Factory-Auswahl setzen `tlsState` und `lastCompletedTlsState` auf `NOT_CHECKED`. Ein neuer Zustand `VERIFIED` entsteht erst durch einen tatsächlich erfolgreichen HTTPS-Request.
+- Queuefehler verwenden die expliziten Aktionen `RETRY_TEMPORARY`, `BLOCK_GLOBAL_KEEP_ACTIVE`, `DEAD_LETTER_RECORD` und `CONFIRMED`. Ein globaler Fehler persistiert auch einen gerade erst gelesenen Live-Scan mit unveränderter `request_id`, lässt den aktiven Datensatz unverändert und sperrt alle weiteren Queueeinträge. Grund, HTTP-Status, Servercode und Zeitpunkt werden redundant in NVS und einer atomaren LittleFS-Fallbackdatei gespeichert; die Sperre übersteht Neustarts und bleibt bei einem einzelnen Speicherausfall fail-closed.
+- Die Sperre wird ausschließlich nach einem erfolgreichen authentifizierten `GET /api/v1/terminal/config` mit der aktuell gespeicherten Terminal-ID und dem aktuellen Token aufgehoben. Das Portal bietet dafür eine geschützte Prüfaktion; eine blinde Entsperrung gibt es nicht.
+- Globale Fehler: HTTP 401/403 sowie `terminal_auth_required`, `terminal_auth_failed`, `terminal_disabled`, `terminal_unknown`, `terminal_ip_denied`, `terminal_storage_missing` und `feature_disabled`.
+- Datensatzbezogene Dead-Letter-Fehler: `nfc_tag_invalid`, `nfc_tag_not_found`, `employee_mapping_invalid`, `nfc_uid_missing`, `invalid_uid`, `unknown_tag` und `unassigned_tag`. Die letzten vier entsprechen den aktuell vom Server verwendeten NFC-Codes. Unbekannte permanente Fehler sperren konservativ die Queue.
+- Ein Dead-Letter-Datensatz wird atomar geschrieben, geschlossen, erneut geöffnet und anhand von JSON, Sequenz und `request_id` verifiziert. Erst danach wird die aktive Datei entfernt. Sequenz-Recovery berücksichtigt aktive, temporäre, defekte und bereits abgelehnte Dateien; ein bereits vorhandenes Dead-Letter-Ziel wird niemals überschrieben. Jeder Fehler behält den aktiven Eintrag und setzt einen eindeutigen Dead-Letter-Fehler.
+- Der Portal-API-Test nutzt denselben begrenzten Streamleser wie Config/Scan: maximal 16.384 Byte, Content-Length-Prüfung, JSON-Content-Type, Gesamt- und Idle-Timeout. Teilantworten werden nicht geparst; Formularwerte überschreiben die gespeicherte Konfiguration nicht.
+- HTTP 425 gilt als temporär. HTTP 429 liest einen vorab registrierten `Retry-After`-Header; unterstützt wird die Sekundenform, begrenzt auf 1 bis 900 Sekunden. Ein gültiger Wert hat Vorrang vor dem normalen Live- und Queue-Backoff. HTTP-Datumswerte fallen auf den normalen Backoff zurück.
+- `/trust/check`, `/trust/upload`, `/trust/previous`, `/trust/factory`, `/queue/rejected/delete`, `/filesystem/format`, `/save`, `/reset`, `/reboot`, die Queue-Entsperrung und das Quarantänelöschen sind während Live-Scan, Queue-Sync oder TLS-Recovery mit HTTP 409 gesperrt. WLAN-/API-Diagnosen sind während dieser Vorgänge ebenfalls gesperrt. Hardwaretests sind ausschließlich im bewusst per Setup-Taster aktivierten Setup-Modus möglich, damit ein NFC-Test keine reale Buchung konsumieren kann. Abgewiesene oder abgebrochene Uploads hinterlassen keinen Pufferrest.
+- Die Status-JSON enthält jedes Feld nur einmal, verwendet `free_heap`, `minimum_free_heap`, `stack_high_water_mark` und behält `min_free_heap` als eindeutigen Legacy-Alias. Neu sind Queue-Sperrstatus und Quarantäneanzeige.
 
-- `vendor/bin/phpunit --no-progress`: erfolgreich abgeschlossen. Die Suite enthält 312 Tests; sechs bekannte Tests waren übersprungen. Der vorherige Sandbox-Lauf meldete 12 MariaDB-Socketfehler, der Lauf mit lokaler Testdatenbank lief anschließend erfolgreich durch.
-- Der fokussierte Nachweis für Trust-Service und Firmware-Implementierung ergab `12 tests, 51 assertions`, ohne Fehler oder Warnings.
-- Das Signierwerkzeug wurde real mit einem temporären Test-CA-Zertifikat geprüft: P-256 sign/verify erfolgreich; manipuliertes Payload und manipulierte Signatur abgelehnt; RSA- und P-384-Privat- sowie öffentliche Schlüssel abgelehnt.
-- Statische Prüfung: kein `LittleFS.begin(true)`; genau eine Quellcode-Stelle für `setInsecure()` im anonymen Recovery-GET; Platzhalter nur in Example-Datei und expliziter Boot-Sperre; `PRIVATE KEY` nur in der Tool-Prüfung, Projekt-README und klar markierter Testfixture. Der Recovery-Pfad ruft `addApiHeaders()` nicht auf.
+## Builds und Tests
+
+Die endgültigen Messwerte und Binärprüfsummen stehen in [build-report.md](build-report.md): Firmware 1.0 und der reproduzierbare 1.1-Testbuild waren erfolgreich. PlatformIO Core 6.1.19, Espressif32 7.0.1, Arduino-ESP32 2.0.17 und DOIT ESP32 DEVKIT V1 wurden verwendet. Ein Produktionsbuild wurde bewusst nicht behauptet, weil im Workspace keine lokalen Produktionsdateien `TrustConfig.local.h` und `ProvisioningConfig.local.h` vorhanden waren; ohne diese echten lokalen Werte muss er fehlschlagen.
+
+- Native Firmwarelogik: 3 Testfälle erfolgreich. Abgedeckt sind globale/datensatzbezogene/temporäre Queueentscheidungen, HTTP 425/429/500, unbekanntes HTTP 400, Retry-After-Grenzen sowie Trust-Recovery mit Previous, Factory, Old-Pending, beschädigtem Marker und vorhandener Quarantäne.
+- Fokussierte PHP-Verifikation: 14 Tests, 70 Assertions erfolgreich für Firmware-Implementierung und Trust-Service. Enthalten sind ungültiges CA-Zertifikat, fehlendes `CA:TRUE`, Zertifikatsanzahl, abgelaufenes und zu großes Zertifikat, RSA-Key-Ablehnung, ETag und HTTP 304.
+- Vollständiger PHPUnit-Lauf nach den letzten Review-Fixes: 314 Tests, 1.378 Assertions, 0 Fehler, 0 Failures und 0 Skips in 4:46 Minuten. PHPUnit meldete einen nicht fehlschlagenden Warning- und einen Deprecation-Hinweis; der JUnit-Bericht enthielt keine testbezogenen Warnings. Der Lauf endete erfolgreich.
+- Testdatenbank: isolierte MariaDB-Scratch-Datenbanken über `/run/mysqld/mysqld.sock`, Benutzer `root`, separater temporärer `DB_OVERRIDE_FILE`; fehlendes `CREATE DATABASE` wurde nicht als Erfolg oder Skip gewertet.
+
+## Statische Prüfungen
+
+- Kein `LittleFS.begin(true)`.
+- Genau ein produktiver `setInsecure()`-Treffer in `src/main.cpp`, ausschließlich im festen Same-Origin-Recovery-GET ohne Auth-, Terminal- oder NFC-Header und ohne Body.
+- Kein `http.getString()` in `1.1/src`.
+- `change-me-` nur in der Example-Konfiguration und den expliziten Boot-Sperrvergleichen.
+- Private Schlüssel nur in der klar markierten Testfixture; Tool und Dokumentation erwähnen lediglich den Prüfbegriff.
+- `git diff --check` ohne Befund.
 
 ## Hardware und Freigabe
 
-Es war kein ESP32 angeschlossen. Alle realen Hardware-, Recovery- und Speichermessungen sind daher **Nicht ausgeführt – reale Hardware erforderlich**. Die ausfüllbare Checkliste steht in [hardware-acceptance.md](hardware-acceptance.md).
+Es war kein ESP32 angeschlossen. Sämtliche realen HTTP-/HTTPS-, Trust-, Stromausfall-, Queue-, Speicher-, Portal-, NFC-, Signal- und Rückflashprüfungen sind **Nicht ausgeführt – reale Hardware erforderlich** und in [hardware-acceptance.md](hardware-acceptance.md) einzeln markiert.
 
-Empfehlung: **Werkbanktest möglich, noch kein Pilotbetrieb.** Ein Pilot darf erst nach vollständig dokumentierter Werkbank-Abnahme mit Produktions-Trust, echter Terminalkonfiguration und den dort aufgeführten Negativtests starten.
+Bewertung: **Werkbanktest möglich, noch kein Pilotbetrieb.** Die Pilotfreigabe darf erst nach vollständig dokumentiertem Werkbanktest mit Produktions-Trust-Key, signiertem Produktionsbundle, individuellen Portalzugängen, echten HTTP-/HTTPS-Endpunkten und allen Negativ-/Stromausfalltests erfolgen.

@@ -20,7 +20,8 @@ ESP32 core, required libraries, board settings and post-flash checks.
 
 For reproducible CI/review builds without any local production configuration,
 run `PIO_CMD=pio sh terminal/firmware/pkws-time-terminal/build-test.sh`. It builds
-1.0 and the explicit `esp32doit-devkit-v1-test` environment. The test firmware
+1.0, the explicit `esp32doit-devkit-v1-test` environment and runs the native
+decision-logic tests. The test firmware
 uses only the tracked `test-config/` public test key and test portal credentials;
 it must never be flashed into production.
 
@@ -32,13 +33,17 @@ it must never be flashed into production.
 
 ## Trust bundles and recovery
 
-LittleFS is mounted with `begin(false)` only; it is never automatically formatted. `trust-active`, `trust-previous`, `trust-staging`, `trust-new` and `trust-old-pending` provide recoverable, power-loss-safe installation. The factory fallback is versioned in `FactoryTrust.h`; the public ECDSA verifier is supplied by the ignored local header. No private key is present in firmware or production configuration.
+LittleFS is mounted with `begin(false)` only; it is never automatically formatted. `trust-active`, `trust-previous`, `trust-staging`, `trust-new` and `trust-old-pending` provide recoverable, power-loss-safe installation. A candidate that fails its real HTTPS verification is moved to `trust-unverified-candidate` and is never treated as active or previous trust. The portal only reports this quarantine and permits an explicitly confirmed deletion. The factory fallback is versioned in `FactoryTrust.h`; the public ECDSA verifier is supplied by the ignored local header. No private key is present in firmware or production configuration.
 
 During normal operation new bundles are downloaded only with verified HTTPS (at start/reconnect and no more than once per 24 hours). A TLS trust failure may use `setInsecure()` only for the fixed same-origin public `/api/v1/terminal/trust-bundle` GET: it has no body, no terminal ID, no bearer token and no NFC data; the returned payload is accepted only after local ECDSA verification. The portal permits a signed upload, restoring the previous bundle, or factory fallback after local login and a per-boot form token.
 
 ## Offline scans
 
 Up to 64 scans are stored as individual atomically created records. Every record retains its `request_id`; it is removed only after a successful server response, preserving server-side idempotency. TLS and WLAN failures persist the current scan before recovery/retry. Queue synchronization transfers one record at a time between normal loop cycles.
+
+HTTP 408, 425, 429 and 5xx responses are temporary. A numeric `Retry-After` value on HTTP 429 is honored between 1 and 900 seconds; HTTP-date values are deliberately not interpreted. Global terminal failures (`401`, `403`, `terminal_auth_required`, `terminal_auth_failed`, `terminal_disabled`, `terminal_unknown`, `terminal_ip_denied`, `terminal_storage_missing`, `feature_disabled`) keep the current record active and persistently block all automatic queue work. Only a successful authenticated config request with the current terminal identity can clear that block. Data-specific codes (`nfc_tag_invalid`, `nfc_tag_not_found`, `employee_mapping_invalid`, `nfc_uid_missing`, `invalid_uid`, `unknown_tag`, `unassigned_tag`) are moved to a reread-and-verified dead-letter record before the active file is removed. Unknown permanent failures conservatively block the queue.
+
+Config, scan, recovery and portal API-test responses use bounded reads with content-length, total-time and idle-time limits. Trust and storage mutations return HTTP 409 while a live scan, queue synchronization or TLS recovery owns the state.
 
 ## Signed payload protocol
 
