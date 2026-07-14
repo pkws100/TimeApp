@@ -41,11 +41,18 @@ final class TerminalApiController
         }
 
         $json = json_encode($bundle, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
-
-        return Response::json($bundle, 200, [
+        $etag = '"' . hash('sha256', $json) . '"';
+        $headers = [
+            'Content-Type' => 'application/json; charset=utf-8',
             'Cache-Control' => 'public, max-age=3600, stale-while-revalidate=86400',
-            'ETag' => '"' . hash('sha256', $json) . '"',
-        ]);
+            'ETag' => $etag,
+        ];
+
+        if (trim((string) $request->header('If-None-Match', '')) === $etag) {
+            return new Response('', 304, $headers);
+        }
+
+        return new Response($json, 200, $headers);
     }
 
     public function scan(Request $request): Response

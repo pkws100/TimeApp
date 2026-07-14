@@ -17,7 +17,9 @@ und Arduino-ESP32 **2.0.17**.
 3. `include/ProvisioningConfig.example.h` nach
    `include/ProvisioningConfig.local.h` kopieren und beide Platzhalter durch
    gerätespezifische, starke Zugangsdaten ersetzen. Diese lokale Datei darf nie
-   eingecheckt werden. Danach `PKWS_PROVISIONING_CONFIGURED` auf `1` setzen.
+   eingecheckt werden. Zusätzlich `PKWS_PROVISIONING_ID` durch eine eindeutige
+   Terminal- oder Batchkennung ersetzen. Danach `PKWS_PROVISIONING_CONFIGURED`
+   auf `1` setzen.
    Keine WLAN-Passwörter oder Terminal-Tokens in den Quellcode schreiben.
 
 ## Trust-Server vor dem ersten HTTPS-Flash vorbereiten

@@ -10,7 +10,9 @@ namespace App\Domain\Terminals;
  */
 final class TerminalTrustBundleService
 {
-    private const MAX_BUNDLE_BYTES = 32768;
+    private const MAX_BUNDLE_BYTES = 24576;
+    private const MAX_CERTIFICATES = 8;
+    private const MAX_CERTIFICATE_BYTES = 8192;
 
     public function __construct(private string $bundlePath, private string $publicKeyPath)
     {
@@ -36,11 +38,16 @@ final class TerminalTrustBundleService
 
         $payload = $bundle['payload'];
         if (($payload['format_version'] ?? null) !== 1 || (int) ($payload['bundle_version'] ?? 0) < 1
-            || !is_array($payload['certificates'] ?? null) || $payload['certificates'] === []) {
+            || !is_array($payload['certificates'] ?? null) || $payload['certificates'] === []
+            || count($payload['certificates']) > self::MAX_CERTIFICATES) {
             return null;
         }
 
         if (!$this->verifySignature($bundle)) {
+            return null;
+        }
+
+        if (!$this->validCertificates($payload['certificates'])) {
             return null;
         }
 
@@ -88,6 +95,38 @@ final class TerminalTrustBundleService
         }
 
         return openssl_verify($this->signedPayload($bundle['payload']), $signature, $key, OPENSSL_ALGO_SHA256) === 1;
+    }
+
+    /** @param list<mixed> $certificates */
+    private function validCertificates(array $certificates): bool
+    {
+        $now = time();
+        foreach ($certificates as $certificate) {
+            if (!is_string($certificate) || $certificate === '' || strlen($certificate) > self::MAX_CERTIFICATE_BYTES) {
+                return false;
+            }
+
+            $x509 = @openssl_x509_read($certificate);
+            if ($x509 === false) {
+                return false;
+            }
+
+            $details = openssl_x509_parse($x509);
+            if (!is_array($details)
+                || !isset($details['validFrom_time_t'], $details['validTo_time_t'])
+                || (int) $details['validFrom_time_t'] > $now
+                || (int) $details['validTo_time_t'] <= $now
+                || (int) $details['validTo_time_t'] <= (int) $details['validFrom_time_t']) {
+                return false;
+            }
+
+            $basicConstraints = (string) ($details['extensions']['basicConstraints'] ?? '');
+            if (stripos($basicConstraints, 'CA:TRUE') === false) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private function signedPayload(array $payload): string
