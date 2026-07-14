@@ -224,9 +224,12 @@ $timeAccountService = new TimeAccountService($connection, $calendarPolicyService
 $timeAccountExportService = new TimeAccountExportService($timeAccountService);
 $vacationRequestService = new VacationRequestService($connection, $calendarPolicyService, $timesheetWriteGuard, $dailyTargetService, $timesheetDayConflictService);
 $terminalService = new TerminalService($connection, $companySettingsService);
-$terminalTrustBundleService = new TerminalTrustBundleService((string) env('TERMINAL_TRUST_BUNDLE_FILE', storage_path('app/terminal-trust-bundle.json')));
+$terminalTrustBundleService = new TerminalTrustBundleService(
+    (string) env('TERMINAL_TRUST_BUNDLE_FILE', storage_path('app/terminal-trust-bundle.json')),
+    (string) env('TERMINAL_TRUST_PUBLIC_KEY_FILE', '')
+);
 $nfcTagService = new NfcTagService($connection, (string) $config->get('app.settings_encryption_key', ''));
-$terminalPunchService = new TerminalPunchService($connection, $terminalService, $nfcTagService, $appTimesheetSyncService);
+$terminalPunchService = new TerminalPunchService($connection, $terminalService, $nfcTagService, $appTimesheetSyncService, $terminalTrustBundleService);
 $appDisplayName = trim((string) ($companySettingsService->current()['app_display_name'] ?? '')) ?: (string) $config->get('app.name');
 
 $adminContextService = new AdminContextService(

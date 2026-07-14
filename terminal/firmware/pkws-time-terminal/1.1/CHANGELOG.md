@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.1 — 2026-07-14
+
+- Restored the complete Firmware 1.0 functional baseline before integrating transport changes.
+- Added separate `NFC_SCAN`, `SHOW_RESULT`, `TLS_RECOVERY` and `QUEUE_SYNC` states.
+- Added non-formatting LittleFS handling, power-loss recovery files and individual FIFO queue records.
+- Moved production trust-key provisioning to ignored `TrustConfig.local.h` and introduced shared length-delimited signing.
+
 ## 1.1.0 — 2026-07-14
 
 - Independent firmware generation with pinned ESP32 platform/core.

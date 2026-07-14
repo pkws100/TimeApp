@@ -71,6 +71,7 @@ final class TerminalImplementationTest extends TestCase
         self::assertStringContainsString('X-Terminal-Transport', $service);
         self::assertStringContainsString('X-Terminal-Trust-Version', $service);
         self::assertStringContainsString('public, max-age=3600', $controller);
+        self::assertStringContainsString("'ETag'", $controller);
         self::assertStringContainsString('function trustBundle', $controller);
     }
 }

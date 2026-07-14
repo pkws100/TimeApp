@@ -1,16 +1,5 @@
 #pragma once
 
-/*
- * Public P-256 verification key for the offline PK-WS trust-bundle signing
- * key. Replace only during a controlled firmware release. The matching
- * private key is deliberately not part of this repository or of a terminal.
- */
-static const char TRUST_SIGNING_PUBLIC_KEY[] PROGMEM = R"pem(-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIKpk4S1C5DbcoVHXFVqrTww/EGOt
-pA3wxClTcKPsfkJwtog6WV5lnVGEbmBm+S8TXGRgh77hJ/9bP0fPX2Oh1w==
------END PUBLIC KEY-----
-)pem";
-
 /* Factory fallback: two public Let's Encrypt / ISRG anchors for the documented
  * Nginx Proxy Manager deployment. Active and previous signed bundles can add
  * or replace anchors without reflashing. No private key is included. */

@@ -1,0 +1,17 @@
+PKWS-TERMINAL-TRUST-V1
+format_version:1
+1
+bundle_version:1
+7
+created_at:20
+2026-07-14T12:00:00Z
+warning_after:0
+
+replace_before:0
+
+certificate_count:1
+1
+certificate:93
+-----BEGIN CERTIFICATE-----
+TEST / slash \\ quote " unicode: Grüß
+-----END CERTIFICATE-----
