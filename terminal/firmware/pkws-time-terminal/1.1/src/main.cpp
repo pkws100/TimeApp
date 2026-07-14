@@ -2462,8 +2462,6 @@ bool persistCurrentScan(const String &reason)
         lcdShow("Scan nicht", "gespeichert", why, "Admin informieren");
         applyLedSignal("red");
         triggerBeep("error");
-        resultUntil = millis() + 15000;
-        enterState(DeviceState::SHOW_RESULT);
         return false;
     }
     scanLifecycle = ScanLifecycle::PERSISTED;
@@ -2471,6 +2469,17 @@ bool persistCurrentScan(const String &reason)
     currentRequestId = "";
     currentDeviceTime = "";
     return true;
+}
+
+void retainOpenScanForPersistenceRetry()
+{
+    // Never transition to READY/SHOW_RESULT here: currentUid and request_id
+    // remain the sole live scan until it can be sent or persisted safely.
+    scanLifecycle = ScanLifecycle::VOLATILE;
+    currentScanAttempt = 0;
+    nextScanAttemptAt = millis() + API_RETRY_MS;
+    lcdShow("Scan noch offen", "nicht gespeichert", "Retry folgt", "Tag nicht scannen");
+    applyLedSignal("red");
 }
 
 QueueSyncOutcome syncOneQueuedScan()
@@ -2753,6 +2762,7 @@ void handleSendScan()
 
     if (apiStatus == "tls_validation_failed" || apiStatus == "tls_time_invalid" || apiStatus == "tls_trust_missing") {
         if (persistCurrentScan(apiStatus)) enterState(DeviceState::TLS_RECOVERY);
+        else retainOpenScanForPersistenceRetry();
         return;
     }
 
@@ -2768,7 +2778,7 @@ void handleSendScan()
         triggerBeep("wait");
         resultUntil = millis() + 8000;
         enterState(DeviceState::SHOW_RESULT);
-    }
+    } else retainOpenScanForPersistenceRetry();
 }
 
 void handleBoot()

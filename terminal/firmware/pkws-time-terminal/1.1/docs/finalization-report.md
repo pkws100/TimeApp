@@ -22,6 +22,7 @@ Die abschließende Hashprüfung ist vor Merge/Flash erneut auszuführen.
 - Queue-Sync speichert Kontext, arbeitet mit 0/2/10/60-Sekunden-Backoff, endet nach vier Versuchen und führt TLS-Fehler in die Recovery. Erfolgreiche Übertragungen werden einzeln bestätigt.
 - Permanente Serverablehnungen werden atomar nach `/queue-rejected/` verschoben. Sie enthalten Status/Code/Zeitpunkt, werden im Portal ohne UID sichtbar und nur nach Login, Formularschlüssel und `LOESCHEN` gelöscht.
 - Bei fehlgeschlagener Persistierung während WLAN-Verlust bleibt der offene Scan samt `request_id` im RAM, neue NFC-Scans bleiben gesperrt und der identische Request wird nach Reconnect fortgesetzt.
+- Dasselbe gilt bei jedem anderen Persistierungsfehler, etwa voller Queue oder LittleFS-Fehler: Das Terminal bleibt in `SEND_SCAN`, zeigt die Sperre an und versucht ausschließlich den unveränderten offenen Scan erneut; es wechselt nicht in `SHOW_RESULT` oder `NFC_SCAN`.
 - Diagnoseheader verwenden den letzten abgeschlossenen TLS-Zustand. `verified` wird nur nach erfolgreichem HTTPS-Request gesetzt.
 - Recovery-, Config- und Scan-Antworten haben Content-Length-, Größen-, Gesamt- und Idle-Timeout-Grenzen. Der einzige `setInsecure()`-Pfad bleibt der öffentliche Recovery-GET ohne Header oder Body.
 - Firmware und Server erzwingen P-256; der Server prüft zusätzlich PEM, CA:TRUE, Zertifikatsanzahl/-größe und Gültigkeit. ETag wird aus dem exakt ausgelieferten JSON erzeugt; `If-None-Match` liefert 304.
