@@ -12,7 +12,11 @@ pio run -t upload
 
 It pins `espressif32@7.0.1` and `framework-arduinoespressif32@3.20017.241212` (Arduino-ESP32 2.0.17). The Arduino IDE wrapper includes only `../../src/main.cpp` in this 1.1 directory.
 
-Before a production build, copy `include/TrustConfig.example.h` to the ignored `include/TrustConfig.local.h` and insert the offline PK-WS P-256 public verification key. A missing local header is a deliberate build error; test fixtures are never used by a production build. Replace `change-me-setup` and `change-me-portal` with unique per-device values. The local portal remains reachable on the terminal LAN only for diagnosis and configuration; treat it as an administrative surface.
+Before a production build, copy `include/TrustConfig.example.h` to the ignored `include/TrustConfig.local.h`, insert the offline PK-WS P-256 public verification key, and set `PKWS_TRUST_CONFIGURED` to `1`. Also copy `include/ProvisioningConfig.example.h` to ignored `include/ProvisioningConfig.local.h`, set unique portal credentials, and set `PKWS_PROVISIONING_CONFIGURED` to `1`. Missing local headers or unset confirmation macros are deliberate build errors; test fixtures are never used by a production build. The local portal remains reachable on the terminal LAN only for diagnosis and configuration; treat it as an administrative surface.
+
+For a PlatformIO-free build and flash with Arduino IDE 2.x, follow the dedicated
+[Arduino IDE flash guide](docs/arduino-ide-flash.md). It pins the compatible
+ESP32 core, required libraries, board settings and post-flash checks.
 
 ## Transport and time
 

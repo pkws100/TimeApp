@@ -31,4 +31,6 @@ Der Arduino-IDE-Wrapper bindet ausschließlich `../../src/main.cpp` dieser Versi
 3. `pio run -t upload` auf dem richtigen seriellen Port starten.
 4. Nach dem Neustart im lokalen Portal die Firmware-Version `pkws-time-terminal-v0.1.1` und einen erfolgreichen API-Test prüfen.
 
-Ein Firmware-Flash überschreibt die 1.1-spezifischen LittleFS-Daten; die 1.0-Firmware verwendet diese Daten nicht.
+Ein normaler Firmware-Upload erhält LittleFS üblicherweise, sofern Partitionsschema und Upload-Einstellungen unverändert bleiben und kein vollständiges Löschen gewählt wird. Die 1.1-spezifischen Trust-/Queue-Daten werden von 1.0 dennoch nicht verwendet und müssen vor dem Rollback gesichert bzw. synchronisiert werden.
+
+Die eingefrorene Firmware 1.0 enthält historische Standard-Zugangsdaten für Setup-AP und Portal. Sie ist deshalb ausschließlich als kurzfristiger Rollback in einem isolierten Notfallnetz vorgesehen; anschließend wieder auf 1.1 aktualisieren.

@@ -17,17 +17,31 @@
 #include <mbedtls/x509_crt.h>
 #include <time.h>
 
-#if __has_include("TrustConfig.local.h")
-#include "TrustConfig.local.h"
+#if __has_include("../include/TrustConfig.local.h")
+#include "../include/TrustConfig.local.h"
 #else
 #error "TrustConfig.local.h fehlt. TrustConfig.example.h kopieren und den echten PK-WS P-256-Pruefschluessel eintragen."
 #endif
-#include "FactoryTrust.h"
+#if !defined(PKWS_TRUST_CONFIGURED) || PKWS_TRUST_CONFIGURED != 1
+#error "PKWS_TRUST_CONFIGURED muss erst nach Eintragen des echten Produktions-Pruefschluessels auf 1 gesetzt werden."
+#endif
+#include "../include/FactoryTrust.h"
+
+#if __has_include("../include/ProvisioningConfig.local.h")
+#include "../include/ProvisioningConfig.local.h"
+#else
+#error "ProvisioningConfig.local.h fehlt. ProvisioningConfig.example.h kopieren und individuelle Portal-Zugangsdaten setzen."
+#endif
+#if !defined(PKWS_PROVISIONING_CONFIGURED) || PKWS_PROVISIONING_CONFIGURED != 1
+#error "PKWS_PROVISIONING_CONFIGURED muss erst nach Setzen individueller Portal-Zugangsdaten auf 1 gesetzt werden."
+#endif
+static_assert(sizeof(PKWS_SETUP_AP_PASSWORD) >= 13, "PKWS_SETUP_AP_PASSWORD muss mindestens 12 Zeichen haben.");
+static_assert(sizeof(PKWS_PORTAL_ADMIN_PASSWORD) >= 13, "PKWS_PORTAL_ADMIN_PASSWORD muss mindestens 12 Zeichen haben.");
 
 static const char *FIRMWARE_VERSION = "pkws-time-terminal-v1.1.1";
 static const char *NVS_NAMESPACE = "pkws-time";
-static const char *SETUP_AP_PASSWORD = "change-me-setup";
-static const char *PORTAL_ADMIN_PASSWORD = "change-me-portal";
+static const char *SETUP_AP_PASSWORD = PKWS_SETUP_AP_PASSWORD;
+static const char *PORTAL_ADMIN_PASSWORD = PKWS_PORTAL_ADMIN_PASSWORD;
 static const uint8_t LCD_ADDRESS = 0x27;
 static const uint8_t LCD_COLS = 20;
 static const uint8_t LCD_ROWS = 4;
@@ -1483,11 +1497,17 @@ void setupRoutes()
 
     setupServer.on("/filesystem/format", HTTP_POST, []() {
         if (!setupPostAuthorized() || setupServer.arg("confirm_format") != "FORMATIEREN") { setupServer.send(403, "text/plain", "Doppelte Formatbestaetigung fehlt."); return; }
-        if (!filesystemMounted) { setupServer.send(409, "text/plain", "Dateisystem nicht eingebunden."); return; }
+        // This is the only intentional formatting path. It also initializes a
+        // factory-fresh or damaged LittleFS volume that could not be mounted.
         bool formatted = LittleFS.format();
         filesystemMounted = formatted && LittleFS.begin(false);
-        if (filesystemMounted) LittleFS.mkdir(QUEUE_DIRECTORY);
-        setupServer.send(formatted ? 200 : 500, "text/plain", formatted ? "Dateisystem formatiert. Neustart erforderlich." : "Formatierung fehlgeschlagen.");
+        if (filesystemMounted) {
+            LittleFS.mkdir(QUEUE_DIRECTORY);
+            loadFactoryTrust();
+            recoveryStatus = "filesystem_formatted";
+            scheduleRestart(1500);
+        }
+        setupServer.send(filesystemMounted ? 200 : 500, "text/plain", filesystemMounted ? "Dateisystem formatiert. Terminal startet neu." : "Formatierung fehlgeschlagen.");
     });
 
     setupServer.on("/test/lcd", HTTP_POST, []() {

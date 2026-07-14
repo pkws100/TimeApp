@@ -1,5 +1,8 @@
 #pragma once
 
+// Set to 1 only after replacing the placeholder PEM with the real PK-WS key.
+#define PKWS_TRUST_CONFIGURED 0
+
 /*
  * Copy this file to TrustConfig.local.h before a production firmware build.
  * The value is public, but it is intentionally supplied outside Git so that a
