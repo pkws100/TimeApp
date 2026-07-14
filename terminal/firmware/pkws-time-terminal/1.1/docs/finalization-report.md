@@ -21,7 +21,13 @@ Firmware 1.0 wurde nicht geändert.
 - `1.1/src/main.cpp`: Trust-, Queue-, Transport-, Portal- und Diagnosekorrekturen.
 - `1.1/include/TerminalDecisionLogic.h`: host-testbare Queue-/Trust-/Retry-Entscheidungen.
 - `1.1/test/test_decision_logic/test_main.cpp` und `1.1/platformio.ini`: native Tests und expliziter Produktions-Default.
-- `build-test.sh`: reproduzierbare 1.0-/1.1-Builds plus native Tests.
+- `build-test.sh`: reproduzierbare 1.0-/1.1-Builds plus native Tests; die eingefrorene
+  1.0-Konfiguration bleibt unverändert, während das Skript ihre verifizierten
+  Bibliotheksversionen explizit und ohne Speichern in `platformio.ini` installiert.
+- `prepare-1.0-build.sh` und `build-all.sh`: auch der operative Sammel- und
+  Rollback-Build verwendet dieselbe gepinnte 1.0-Abhängigkeitsvorbereitung.
+- `.github/workflows/ci.yml`: eigener Firmwarejob mit PlatformIO Core 6.1.19, beiden
+  Firmwarebuilds und den nativen Entscheidungstests.
 - `tests/Unit/TerminalTrustBundleServiceTest.php`: Zertifikats-, ETag- und 304-Nachweise.
 - `1.1/README.md` sowie `1.1/docs/build-report.md`, `finalization-report.md` und `hardware-acceptance.md`: Betriebs-, Build- und Abnahmenachweise.
 

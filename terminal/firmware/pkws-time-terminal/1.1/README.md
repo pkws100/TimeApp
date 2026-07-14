@@ -21,7 +21,10 @@ ESP32 core, required libraries, board settings and post-flash checks.
 For reproducible CI/review builds without any local production configuration,
 run `PIO_CMD=pio sh terminal/firmware/pkws-time-terminal/build-test.sh`. It builds
 1.0, the explicit `esp32doit-devkit-v1-test` environment and runs the native
-decision-logic tests. The test firmware
+decision-logic tests. PlatformIO Core, the 1.1 platform, native test platform and
+all direct libraries are version-pinned; the script explicitly installs the
+historically verified 1.0 libraries without modifying its frozen source tree.
+The same command is enforced by GitHub CI. The test firmware
 uses only the tracked `test-config/` public test key and test portal credentials;
 it must never be flashed into production.
 

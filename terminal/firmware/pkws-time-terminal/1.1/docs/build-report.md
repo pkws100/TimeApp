@@ -16,6 +16,11 @@ explizit `-e esp32doit-devkit-v1-test` und ausschließlich `1.1/test-config/`; e
 Produktionskonfiguration wird dabei nicht gelesen. Dasselbe Skript führte anschließend
 `pio test -e native` aus: 3 von 3 Testfällen waren erfolgreich.
 
+Die 1.1-Plattform, die native Testplattform und alle direkten Bibliotheken sind exakt
+versioniert. Für den unveränderten 1.0-Quellstand installiert `build-test.sh` die bei
+diesem Nachweis verwendeten Bibliotheksversionen explizit mit `--no-save`. GitHub CI führt
+denselben Build mit PlatformIO Core 6.1.19 als eigenen Pflichtlauf aus.
+
 Erzeugte, ignorierte Prüfsummen in `dist-test/SHA256SUMS`:
 
 ```text
