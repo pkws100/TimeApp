@@ -1,10 +1,11 @@
 #pragma once
 
-// Set to 1 only after both placeholders have been replaced.
+// Set to 1 only after all three placeholders have been replaced.
 #define PKWS_PROVISIONING_CONFIGURED 0
+#define PKWS_PROVISIONING_ID "change-me-provisioning"
 
 /*
- * Copy to ProvisioningConfig.local.h and replace both values per terminal or
+ * Copy to ProvisioningConfig.local.h and replace all values per terminal or
  * provisioning batch. The local file is ignored by Git and must never be
  * committed. Use WPA2-safe AP and portal passwords with at least 12 characters.
  */

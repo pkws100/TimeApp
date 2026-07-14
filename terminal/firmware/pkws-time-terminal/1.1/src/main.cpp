@@ -17,7 +17,9 @@
 #include <mbedtls/x509_crt.h>
 #include <time.h>
 
-#if __has_include("../include/TrustConfig.local.h")
+#if defined(PKWS_TEST_BUILD)
+#include "../test-config/TrustConfig.test.h"
+#elif __has_include("../include/TrustConfig.local.h")
 #include "../include/TrustConfig.local.h"
 #else
 #error "TrustConfig.local.h fehlt. TrustConfig.example.h kopieren und den echten PK-WS P-256-Pruefschluessel eintragen."
@@ -27,7 +29,9 @@
 #endif
 #include "../include/FactoryTrust.h"
 
-#if __has_include("../include/ProvisioningConfig.local.h")
+#if defined(PKWS_TEST_BUILD)
+#include "../test-config/ProvisioningConfig.test.h"
+#elif __has_include("../include/ProvisioningConfig.local.h")
 #include "../include/ProvisioningConfig.local.h"
 #else
 #error "ProvisioningConfig.local.h fehlt. ProvisioningConfig.example.h kopieren und individuelle Portal-Zugangsdaten setzen."
@@ -37,6 +41,10 @@
 #endif
 static_assert(sizeof(PKWS_SETUP_AP_PASSWORD) >= 13, "PKWS_SETUP_AP_PASSWORD muss mindestens 12 Zeichen haben.");
 static_assert(sizeof(PKWS_PORTAL_ADMIN_PASSWORD) >= 13, "PKWS_PORTAL_ADMIN_PASSWORD muss mindestens 12 Zeichen haben.");
+#if !defined(PKWS_PROVISIONING_ID)
+#error "PKWS_PROVISIONING_ID muss eine individuelle, nicht standardisierte Kennung enthalten."
+#endif
+static_assert(sizeof(PKWS_PROVISIONING_ID) >= 13, "PKWS_PROVISIONING_ID muss mindestens 12 Zeichen haben.");
 
 static const char *FIRMWARE_VERSION = "pkws-time-terminal-v1.1.1";
 static const char *NVS_NAMESPACE = "pkws-time";
@@ -62,11 +70,16 @@ static const unsigned long WIFI_ATTEMPT_MS = 5000;
 static const uint8_t WIFI_MAX_ATTEMPTS = 4;
 static const unsigned long API_RETRY_MS = 15000;
 static const uint16_t HTTP_TIMEOUT_MS = 5000;
+static const unsigned long DOWNLOAD_TOTAL_TIMEOUT_MS = 15000;
+static const unsigned long DOWNLOAD_IDLE_TIMEOUT_MS = 3000;
 static const unsigned long TIME_SYNC_TIMEOUT_MS = 30000;
 static const unsigned long TRUST_WARNING_BUFFER_SECONDS = 90UL * 24UL * 60UL * 60UL;
 static const size_t MAX_TRUST_BUNDLE_BYTES = 24576;
+static const size_t MAX_CONFIG_RESPONSE_BYTES = 16384;
+static const size_t MAX_SCAN_RESPONSE_BYTES = 16384;
 static const size_t MAX_TRUST_CERTIFICATES = 8;
 static const size_t MAX_QUEUE_ENTRIES = 64;
+static const size_t MAX_REJECTED_QUEUE_ENTRIES = 32;
 static const char *TRUST_ACTIVE = "/trust-active.json";
 static const char *TRUST_PREVIOUS = "/trust-previous.json";
 static const char *TRUST_STAGING = "/trust-staging.json";
@@ -74,6 +87,7 @@ static const char *TRUST_NEW = "/trust-new.json";
 static const char *TRUST_OLD_PENDING = "/trust-old-pending.json";
 static const char *TRUST_RECOVERY_MARKER = "/trust-recovery.marker";
 static const char *QUEUE_DIRECTORY = "/queue";
+static const char *QUEUE_REJECTED_DIRECTORY = "/queue-rejected";
 static const char *QUEUE_SEQUENCE_FILE = "/queue/sequence";
 
 enum class DeviceState {
@@ -96,6 +110,7 @@ enum class ApiTransport { HTTP_PLAIN, HTTPS_VERIFIED, INVALID };
 enum class TlsState { NOT_APPLICABLE, NOT_CHECKED, TIME_INVALID, TRUST_MISSING, CONNECTING, VERIFIED, VALIDATION_FAILED, RECOVERY };
 enum class ScanLifecycle { NONE, VOLATILE, PERSISTED, SENT_CONFIRMED, REJECTED };
 enum class RetryClass { TEMPORARY, PERMANENT };
+enum class QueueSyncOutcome { EMPTY, CONFIRMED, TEMPORARY, TLS_FAILURE, REJECTED, CORRUPT };
 
 struct TerminalConfig {
     String ssid;
@@ -111,7 +126,8 @@ struct TrustBundle {
     String warningAfter;
     String replaceBefore;
     String earliestCaExpiry;
-    String effectiveMaintenanceDeadline;
+    String effectiveWarningDeadline;
+    String effectiveReplaceDeadline;
     String certificates;
     bool valid = false;
 };
@@ -122,6 +138,15 @@ struct OfflineScan {
     String deviceTime;
     String reason;
     uint32_t sequence = 0;
+};
+
+struct QueueSyncContext {
+    bool active = false;
+    OfflineScan scan;
+    uint8_t attempt = 0;
+    unsigned long nextAttemptAt = 0;
+    unsigned long startedAt = 0;
+    String lastError;
 };
 
 LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLS, LCD_ROWS);
@@ -143,6 +168,9 @@ unsigned long restartAt = 0;
 uint8_t wifiAttempt = 0;
 unsigned long wifiAttemptStartedAt = 0;
 String apiStatus = "not_checked";
+int lastHttpStatus = 0;
+String lastServerCode;
+String lastServerMessage;
 String setupFormKey;
 String portalSessionKey;
 String lastApiTestSummary = "Noch nicht getestet";
@@ -158,6 +186,7 @@ unsigned long nextScanAttemptAt = 0;
 unsigned long lastUidAt = 0;
 unsigned long resultUntil = 0;
 unsigned long nextApiRetryAt = 0;
+unsigned long nextQueueSyncCycleAt = 0;
 String savedDisplayLines[4] = {"PK-WS TimeApp", "Tag vorhalten", "Bereit", ""};
 bool temporaryDisplayActive = false;
 unsigned long temporaryDisplayUntil = 0;
@@ -166,9 +195,13 @@ bool resumeScanAfterWifiReconnect = false;
 bool filesystemMounted = false;
 bool timeSyncStarted = false;
 unsigned long timeSyncStartedAt = 0;
-unsigned long lastTrustCheckAt = 0;
+unsigned long lastTrustCheckAttemptAt = 0;
+unsigned long lastSuccessfulTrustCheckAt = 0;
+unsigned long nextTrustCheckAt = 0;
+uint8_t trustCheckFailureCount = 0;
 uint32_t bootCounter = 0;
 TlsState tlsState = TlsState::NOT_CHECKED;
+TlsState lastCompletedTlsState = TlsState::NOT_CHECKED;
 ScanLifecycle scanLifecycle = ScanLifecycle::NONE;
 TrustBundle activeTrust;
 String activeTrustSource = "factory";
@@ -177,6 +210,8 @@ String recoveryStatus = "none";
 String lastTerminalError;
 String uploadedTrustBundle;
 bool trustUploadTooLarge = false;
+bool provisioningSecurityValid = true;
+QueueSyncContext queueSync;
 
 enum class LedTestState {
     OFF,
@@ -203,12 +238,12 @@ unsigned long beepStepUntil = 0;
 
 void applySignalFromJson(JsonVariantConst root, const String &fallbackLed, const String &fallbackBeep);
 bool persistCurrentScan(const String &reason);
-bool apiGet(const String &path, String &body, int &status, String &why, bool authenticated = true);
+bool apiGet(const String &path, String &body, int &status, String &why, bool authenticated = true, size_t responseLimit = MAX_CONFIG_RESPONSE_BYTES);
 bool installTrustBundle(const String &raw, bool allowRollback, String &why);
 void finishTrustInstall(bool verified);
 bool restorePreviousTrust(String &why);
 void restoreFactoryTrust();
-bool syncOneQueuedScan();
+QueueSyncOutcome syncOneQueuedScan();
 void enterState(DeviceState next);
 String isoDeviceTimeOrNull();
 
@@ -251,9 +286,9 @@ String transportLabel()
     }
 }
 
-String tlsStateLabel()
+String tlsStateLabel(TlsState value)
 {
-    switch (tlsState) {
+    switch (value) {
         case TlsState::NOT_APPLICABLE: return "not-applicable";
         case TlsState::NOT_CHECKED: return "not-checked";
         case TlsState::TIME_INVALID: return "time-invalid";
@@ -266,9 +301,41 @@ String tlsStateLabel()
     return "not-checked";
 }
 
+String tlsStateLabel()
+{
+    return tlsStateLabel(tlsState);
+}
+
+String tlsStateHuman(TlsState value)
+{
+    if (value == TlsState::NOT_APPLICABLE) return "nicht anwendbar (HTTP)";
+    if (value == TlsState::NOT_CHECKED) return "noch nicht geprüft";
+    if (value == TlsState::TIME_INVALID) return "Zeit nicht synchronisiert";
+    if (value == TlsState::TRUST_MISSING) return "Trust fehlt";
+    if (value == TlsState::CONNECTING) return "Verbindung wird aufgebaut";
+    if (value == TlsState::VERIFIED) return "verifiziert";
+    if (value == TlsState::VALIDATION_FAILED) return "Zertifikatsprüfung fehlgeschlagen";
+    if (value == TlsState::RECOVERY) return "Trust-Recovery läuft";
+    return "unbekannt";
+}
+
 bool isHttpsTransport()
 {
     return transportFor(config.apiBaseUrl) == ApiTransport::HTTPS_VERIFIED;
+}
+
+bool provisioningCredentialsAreSafe()
+{
+    return strcmp(SETUP_AP_PASSWORD, "change-me-setup") != 0
+        && strcmp(PORTAL_ADMIN_PASSWORD, "change-me-portal") != 0
+        && strcmp(PKWS_PROVISIONING_ID, "change-me-provisioning") != 0;
+}
+
+bool storageMutationBlocked()
+{
+    return state == DeviceState::SEND_SCAN || state == DeviceState::QUEUE_SYNC || state == DeviceState::TLS_RECOVERY
+        || queueSync.active || scanLifecycle != ScanLifecycle::NONE
+        || currentRequestId.length() > 0 || currentUid.length() > 0;
 }
 
 bool isTimeValid()
@@ -311,6 +378,19 @@ String signedTrustPayload(JsonObjectConst payload)
     return out;
 }
 
+bool trustSigningKeyIsP256()
+{
+    mbedtls_pk_context key;
+    mbedtls_pk_init(&key);
+    int parsed = mbedtls_pk_parse_public_key(&key, reinterpret_cast<const unsigned char *>(TRUST_SIGNING_PUBLIC_KEY), strlen(TRUST_SIGNING_PUBLIC_KEY) + 1);
+    bool valid = parsed == 0
+        && mbedtls_pk_get_type(&key) == MBEDTLS_PK_ECKEY
+        && mbedtls_pk_ec(key) != nullptr
+        && mbedtls_pk_ec(key)->grp.id == MBEDTLS_ECP_DP_SECP256R1;
+    mbedtls_pk_free(&key);
+    return valid;
+}
+
 bool verifyTrustSignature(JsonObjectConst payload, const char *signature)
 {
     if (signature == nullptr || strlen(signature) == 0) return false;
@@ -324,7 +404,11 @@ bool verifyTrustSignature(JsonObjectConst payload, const char *signature)
     mbedtls_pk_context key;
     mbedtls_pk_init(&key);
     int parsed = mbedtls_pk_parse_public_key(&key, reinterpret_cast<const unsigned char *>(TRUST_SIGNING_PUBLIC_KEY), strlen(TRUST_SIGNING_PUBLIC_KEY) + 1);
-    bool valid = parsed == 0 && mbedtls_pk_get_type(&key) == MBEDTLS_PK_ECKEY && mbedtls_pk_verify(&key, MBEDTLS_MD_SHA256, hash, sizeof(hash), decodedSignature, signatureLength) == 0;
+    bool valid = parsed == 0
+        && mbedtls_pk_get_type(&key) == MBEDTLS_PK_ECKEY
+        && mbedtls_pk_ec(key) != nullptr
+        && mbedtls_pk_ec(key)->grp.id == MBEDTLS_ECP_DP_SECP256R1
+        && mbedtls_pk_verify(&key, MBEDTLS_MD_SHA256, hash, sizeof(hash), decodedSignature, signatureLength) == 0;
     mbedtls_pk_free(&key);
     return valid;
 }
@@ -346,6 +430,7 @@ bool parseTrustBundle(const String &raw, TrustBundle &bundle, String &why)
     if (payload.isNull() || String((const char *) (root["signature_algorithm"] | "")) != "ECDSA-P256-SHA256" || (uint32_t) (payload["format_version"] | 0) != 1) { why = "trust_bundle_format_invalid"; return false; }
     JsonArrayConst certificates = payload["certificates"].as<JsonArrayConst>();
     if (certificates.isNull() || certificates.size() == 0 || certificates.size() > MAX_TRUST_CERTIFICATES) { why = "trust_bundle_certificates_invalid"; return false; }
+    if (!trustSigningKeyIsP256()) { why = "trust_signing_key_curve_invalid"; return false; }
     if (!verifyTrustSignature(payload, root["signature"] | "")) { why = "trust_signature_invalid"; return false; }
     TrustBundle parsed;
     parsed.version = (uint32_t) (payload["bundle_version"] | 0);
@@ -413,20 +498,78 @@ time_t trustDateToEpoch(const String &value)
     return mktime(&parsed);
 }
 
+String trustEpochToDate(time_t value)
+{
+    if (value <= 0) return "";
+    struct tm parsed = {};
+    gmtime_r(&value, &parsed);
+    char buffer[24];
+    strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &parsed);
+    return String(buffer);
+}
+
+time_t earliestTrustDeadline(time_t first, time_t second)
+{
+    if (first <= 0) return second;
+    if (second <= 0) return first;
+    return first < second ? first : second;
+}
+
 void refreshTrustStatus()
 {
     if (!isHttpsTransport()) { trustStatus = "not-applicable"; return; }
     if (!activeTrust.valid) { trustStatus = "invalid"; return; }
     if (!isTimeValid()) { trustStatus = "not-checked"; return; }
-    time_t warningDeadline = trustDateToEpoch(activeTrust.warningAfter);
-    time_t replaceDeadline = trustDateToEpoch(activeTrust.replaceBefore);
-    time_t certificateDeadline = trustDateToEpoch(activeTrust.earliestCaExpiry);
-    if (certificateDeadline > 0) certificateDeadline -= TRUST_WARNING_BUFFER_SECONDS;
-    if (certificateDeadline > 0 && (warningDeadline == 0 || certificateDeadline < warningDeadline)) warningDeadline = certificateDeadline;
-    activeTrust.effectiveMaintenanceDeadline = warningDeadline > 0 ? String((uint32_t) warningDeadline) : "";
+    time_t metadataWarning = trustDateToEpoch(activeTrust.warningAfter);
+    time_t metadataReplace = trustDateToEpoch(activeTrust.replaceBefore);
+    time_t certificateExpiry = trustDateToEpoch(activeTrust.earliestCaExpiry);
+    time_t replaceDeadline = earliestTrustDeadline(certificateExpiry, metadataReplace);
+    time_t replacementWarning = replaceDeadline > TRUST_WARNING_BUFFER_SECONDS ? replaceDeadline - TRUST_WARNING_BUFFER_SECONDS : replaceDeadline;
+    time_t warningDeadline = earliestTrustDeadline(metadataWarning, replacementWarning);
+    activeTrust.effectiveWarningDeadline = trustEpochToDate(warningDeadline);
+    activeTrust.effectiveReplaceDeadline = trustEpochToDate(replaceDeadline);
     if (replaceDeadline > 0 && time(nullptr) >= replaceDeadline) trustStatus = "replace-required";
     else if (warningDeadline > 0 && time(nullptr) >= warningDeadline) trustStatus = "warning";
     else trustStatus = "current";
+}
+
+bool readSmallFile(const char *path, String &content, size_t limit = 1024)
+{
+    if (!LittleFS.exists(path)) return false;
+    File file = LittleFS.open(path, "r");
+    if (!file || file.size() > limit) { if (file) file.close(); return false; }
+    content = file.readString();
+    file.close();
+    return true;
+}
+
+bool validInstallRecoveryMarker(uint32_t &candidateVersion)
+{
+    String marker;
+    if (!readSmallFile(TRUST_RECOVERY_MARKER, marker)) return false;
+    marker.replace("\r\n", "\n");
+    marker.replace("\r", "\n");
+    int versionStart = marker.indexOf("candidate_version=");
+    int phaseStart = marker.indexOf("phase=candidate_activated");
+    int operationStart = marker.indexOf("operation=install");
+    int bootStart = marker.indexOf("created_at_boot=");
+    if (operationStart < 0 || versionStart < 0 || phaseStart < 0 || bootStart < 0) return false;
+    int lineEnd = marker.indexOf('\n', versionStart);
+    String version = marker.substring(versionStart + strlen("candidate_version="), lineEnd < 0 ? marker.length() : lineEnd);
+    candidateVersion = (uint32_t) version.toInt();
+    return candidateVersion > 0;
+}
+
+bool activateRecoveredTrust(const char *sourcePath, const TrustBundle &source, String &why)
+{
+    if (LittleFS.exists(TRUST_ACTIVE)) {
+        LittleFS.remove("/trust-unverified-candidate.json");
+        if (!LittleFS.rename(TRUST_ACTIVE, "/trust-unverified-candidate.json")) { why = "trust_candidate_quarantine_failed"; return false; }
+    }
+    if (!LittleFS.rename(sourcePath, TRUST_ACTIVE)) { why = "trust_recovery_activate_failed"; return false; }
+    activeTrust = source;
+    activeTrustSource = "recovered";
+    return true;
 }
 
 void recoverTrustAtBoot()
@@ -437,7 +580,43 @@ void recoverTrustAtBoot()
     bool hasActive = readTrustFile(TRUST_ACTIVE, active, why);
     bool hasPrevious = readTrustFile(TRUST_PREVIOUS, previous, why);
     bool hasPending = readTrustFile(TRUST_OLD_PENDING, pending, why);
-    if (!hasActive && hasPending) {
+    uint32_t candidateVersion = 0;
+    bool markerPresent = LittleFS.exists(TRUST_RECOVERY_MARKER);
+    bool markerValid = markerPresent && validInstallRecoveryMarker(candidateVersion);
+
+    if (markerPresent) {
+        // A marker is written before activation and is only removed after a real
+        // verified HTTPS request. Therefore an active candidate is never trusted
+        // after a power loss, even when it parses successfully.
+        bool restored = false;
+        if (markerValid && hasActive && active.version != candidateVersion) {
+            // Power failed before the candidate replaced active. The existing
+            // active bundle is already a previously validated trust anchor.
+            activeTrust = active;
+            activeTrustSource = "active";
+            recoveryStatus = "recovered_unverified_candidate";
+            LittleFS.remove(TRUST_RECOVERY_MARKER);
+            restored = true;
+        } else if (markerValid && hasPrevious) restored = activateRecoveredTrust(TRUST_PREVIOUS, previous, why);
+        else if (markerValid && hasPending) restored = activateRecoveredTrust(TRUST_OLD_PENDING, pending, why);
+        if (restored) {
+            if (recoveryStatus != "recovered_unverified_candidate") recoveryStatus = "rolled_back_to_previous";
+            LittleFS.remove(TRUST_RECOVERY_MARKER);
+        } else if (markerValid) {
+            if (LittleFS.exists(TRUST_ACTIVE)) {
+                LittleFS.remove("/trust-unverified-candidate.json");
+                LittleFS.rename(TRUST_ACTIVE, "/trust-unverified-candidate.json");
+            }
+            loadFactoryTrust();
+            recoveryStatus = "rolled_back_to_factory";
+            LittleFS.remove(TRUST_RECOVERY_MARKER);
+        } else {
+            loadFactoryTrust();
+            recoveryStatus = "trust_recovery_failed";
+            // Preserve an invalid marker for forensic diagnosis instead of
+            // accepting any on-disk candidate.
+        }
+    } else if (!hasActive && hasPending) {
         LittleFS.remove(TRUST_ACTIVE);
         LittleFS.rename(TRUST_OLD_PENDING, TRUST_ACTIVE);
         activeTrust = pending; activeTrustSource = "active"; recoveryStatus = "active_restored_from_pending";
@@ -458,7 +637,6 @@ void recoverTrustAtBoot()
         TrustBundle ignored;
         if (LittleFS.exists(path) && !readTrustFile(path, ignored, why)) LittleFS.remove(path);
     }
-    LittleFS.remove(TRUST_RECOVERY_MARKER);
     refreshTrustStatus();
 }
 
@@ -471,7 +649,11 @@ bool installTrustBundle(const String &raw, bool allowRollback, String &why)
     if (!writeFileAtomically(TRUST_NEW, raw, TRUST_STAGING)) { why = "trust_staging_write_failed"; return false; }
     TrustBundle reread;
     if (!readTrustFile(TRUST_NEW, reread, why)) { LittleFS.remove(TRUST_NEW); return false; }
-    if (!writeFileAtomically(TRUST_RECOVERY_MARKER, String("install=") + String(candidate.version), "/trust-marker.tmp")) { why = "trust_marker_write_failed"; return false; }
+    String marker = "operation=install\n";
+    marker += "candidate_version=" + String(candidate.version) + "\n";
+    marker += "phase=candidate_activated\n";
+    marker += "created_at_boot=" + String(bootCounter) + "\n";
+    if (!writeFileAtomically(TRUST_RECOVERY_MARKER, marker, "/trust-marker.tmp")) { why = "trust_marker_write_failed"; return false; }
     LittleFS.remove(TRUST_OLD_PENDING);
     if (LittleFS.exists(TRUST_ACTIVE) && !LittleFS.rename(TRUST_ACTIVE, TRUST_OLD_PENDING)) { why = "trust_active_backup_failed"; return false; }
     if (!LittleFS.rename(TRUST_NEW, TRUST_ACTIVE)) {
@@ -488,7 +670,7 @@ bool installTrustBundle(const String &raw, bool allowRollback, String &why)
 
 void finishTrustInstall(bool verified)
 {
-    if (verified) { LittleFS.remove(TRUST_RECOVERY_MARKER); recoveryStatus = "verified"; return; }
+    if (verified && tlsState == TlsState::VERIFIED) { LittleFS.remove(TRUST_RECOVERY_MARKER); recoveryStatus = "verified"; return; }
     TrustBundle previous; String why;
     if (readTrustFile(TRUST_PREVIOUS, previous, why)) {
         LittleFS.remove(TRUST_OLD_PENDING);
@@ -496,10 +678,11 @@ void finishTrustInstall(bool verified)
             activeTrust = previous;
             activeTrustSource = "previous";
             recoveryStatus = "rolled_back_to_previous";
+            LittleFS.remove(TRUST_RECOVERY_MARKER);
         } else {
             recoveryStatus = "rollback_pending_recovery";
         }
-    } else { loadFactoryTrust(); recoveryStatus = "rollback_factory"; }
+    } else { loadFactoryTrust(); recoveryStatus = "rolled_back_to_factory"; LittleFS.remove(TRUST_RECOVERY_MARKER); }
 }
 
 bool restorePreviousTrust(String &why)
@@ -523,7 +706,28 @@ void restoreFactoryTrust()
 
 String queuePath(uint32_t sequence, const char *suffix = ".json")
 {
-    return String(QUEUE_DIRECTORY) + "/" + String(sequence) + suffix;
+    char filename[32];
+    snprintf(filename, sizeof(filename), "/%010lu%s", static_cast<unsigned long>(sequence), suffix);
+    return String(QUEUE_DIRECTORY) + filename;
+}
+
+String rejectedQueuePath(uint32_t sequence)
+{
+    char filename[32];
+    snprintf(filename, sizeof(filename), "/%010lu.json", static_cast<unsigned long>(sequence));
+    return String(QUEUE_REJECTED_DIRECTORY) + filename;
+}
+
+uint32_t queueSequenceFromPath(const String &path)
+{
+    int slash = path.lastIndexOf('/');
+    int dot = path.lastIndexOf('.');
+    if (slash < 0 || dot <= slash + 1) return 0;
+    String value = path.substring(slash + 1, dot);
+    char *end = nullptr;
+    unsigned long parsed = strtoul(value.c_str(), &end, 10);
+    if (end == value.c_str() || *end != '\0' || parsed == 0 || parsed > UINT32_MAX) return 0;
+    return static_cast<uint32_t>(parsed);
 }
 
 uint32_t nextQueueSequence()
@@ -537,14 +741,14 @@ uint32_t nextQueueSequence()
         for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
             String name = entry.name();
             if (name.endsWith(".json")) {
-                int slash = name.lastIndexOf('/');
-                uint32_t existing = (uint32_t) name.substring(slash + 1, name.length() - 5).toInt();
+                uint32_t existing = queueSequenceFromPath(name);
                 if (existing > sequence) sequence = existing;
             }
             entry.close();
         }
         directory.close();
     }
+    if (sequence == UINT32_MAX) return 0;
     sequence++;
     if (!writeFileAtomically(QUEUE_SEQUENCE_FILE, String(sequence), "/queue/sequence.tmp")) return 0;
     return sequence;
@@ -559,6 +763,34 @@ size_t queueDepth()
     for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
         String name = entry.name();
         if (name.endsWith(".json")) count++;
+        entry.close();
+    }
+    directory.close();
+    return count;
+}
+
+size_t queueRejectedDepth()
+{
+    if (!filesystemMounted) return 0;
+    File directory = LittleFS.open(QUEUE_REJECTED_DIRECTORY, "r");
+    if (!directory || !directory.isDirectory()) return 0;
+    size_t count = 0;
+    for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
+        if (String(entry.name()).endsWith(".json")) count++;
+        entry.close();
+    }
+    directory.close();
+    return count;
+}
+
+size_t queueCorruptDepth()
+{
+    if (!filesystemMounted) return 0;
+    File directory = LittleFS.open(QUEUE_DIRECTORY, "r");
+    if (!directory || !directory.isDirectory()) return 0;
+    size_t count = 0;
+    for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
+        if (String(entry.name()).endsWith(".corrupt")) count++;
         entry.close();
     }
     directory.close();
@@ -599,8 +831,7 @@ bool nextQueuedScan(OfflineScan &scan)
     for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
         String name = entry.name();
         if (name.endsWith(".json")) {
-            int slash = name.lastIndexOf('/');
-            uint32_t sequence = (uint32_t) name.substring(slash + 1, name.length() - 5).toInt();
+            uint32_t sequence = queueSequenceFromPath(name);
             if (sequence > 0 && sequence < selectedSequence) { selected = name; selectedSequence = sequence; }
         }
         entry.close();
@@ -635,6 +866,32 @@ void acknowledgeQueuedScan(const OfflineScan &scan)
     String pending = queuePath(scan.sequence);
     String acknowledged = queuePath(scan.sequence, ".acked");
     if (LittleFS.rename(pending, acknowledged)) LittleFS.remove(acknowledged);
+}
+
+bool rejectQueuedScan(const OfflineScan &scan, int status, const String &code, const String &message)
+{
+    if (queueRejectedDepth() >= MAX_REJECTED_QUEUE_ENTRIES) {
+        lastTerminalError = "queue_rejected_full";
+        return false;
+    }
+    DynamicJsonDocument document(1280);
+    document["request_id"] = scan.requestId;
+    document["nfc_uid"] = scan.uid;
+    document["device_time"] = scan.deviceTime;
+    document["sequence"] = scan.sequence;
+    document["queued_reason"] = scan.reason;
+    JsonObject rejection = document.createNestedObject("rejection");
+    rejection["http_status"] = status;
+    rejection["server_code"] = code;
+    rejection["message"] = message;
+    rejection["rejected_at"] = isoDeviceTimeOrNull();
+    rejection["retry_blocked"] = true;
+    String body;
+    serializeJson(document, body);
+    String target = rejectedQueuePath(scan.sequence);
+    String temporary = target + ".tmp";
+    if (!writeFileAtomically(target.c_str(), body, temporary.c_str())) return false;
+    return LittleFS.remove(queuePath(scan.sequence).c_str());
 }
 
 RetryClass retryClassFor(int status, const String &code)
@@ -963,6 +1220,25 @@ String loginHtml(const String &message = "")
     return page;
 }
 
+String trustStatusHuman()
+{
+    if (trustStatus == "current") return "aktuell";
+    if (trustStatus == "warning") return "WARNUNG: Austausch vorbereiten";
+    if (trustStatus == "replace-required") return "KRITISCH: Austausch erforderlich";
+    if (trustStatus == "not-checked") return "noch nicht geprüft";
+    if (trustStatus == "invalid") return "FEHLER: Trust ungueltig";
+    return trustStatus;
+}
+
+String recoveryStatusHuman()
+{
+    if (recoveryStatus == "rolled_back_to_previous") return "Trust auf vorheriges Bundle zurueckgesetzt";
+    if (recoveryStatus == "rolled_back_to_factory") return "Trust auf Factory-Trust zurueckgesetzt";
+    if (recoveryStatus == "trust_recovery_failed") return "KRITISCH: Trust-Recovery fehlgeschlagen";
+    if (recoveryStatus == "queue_rejected") return "WARNUNG: Offline-Buchung abgelehnt";
+    return recoveryStatus;
+}
+
 String setupHtml()
 {
     if (!portalAuthenticated()) {
@@ -981,6 +1257,7 @@ String setupHtml()
     if (config.apiBaseUrl.length() > 0) {
         apiBaseLabel = config.apiBaseUrl;
     }
+    bool formatBlocked = storageMutationBlocked();
 
     String page;
     page.reserve(15000);
@@ -1013,17 +1290,19 @@ String setupHtml()
     page += F("</code><span>API Test</span><code>");
     page += htmlEscape(lastApiTestSummary);
     page += F("</code><span>Transport / TLS</span><code>");
-    page += transportLabel() + " / " + tlsStateLabel();
+    page += transportLabel() + " / aktuell " + tlsStateHuman(tlsState) + " / zuletzt " + tlsStateHuman(lastCompletedTlsState);
     page += F("</code><span>Trust / Queue</span><code>");
-    page += activeTrustSource + " v" + String(activeTrust.version) + " / " + trustStatus + " / " + String(queueDepth()) + "/" + String(MAX_QUEUE_ENTRIES);
+    page += activeTrustSource + " v" + String(activeTrust.version) + " / " + trustStatusHuman() + " / aktiv " + String(queueDepth()) + " / abgelehnt " + String(queueRejectedDepth()) + " / defekt " + String(queueCorruptDepth());
     page += F("</code><span>Trust-Fristen</span><code>");
-    page += htmlEscape("Warnung: " + activeTrust.warningAfter + " · Ersetzen: " + activeTrust.replaceBefore + " · CA: " + activeTrust.earliestCaExpiry);
+    page += htmlEscape("CA: " + activeTrust.earliestCaExpiry + " · Warnung: " + activeTrust.effectiveWarningDeadline + " · Ersetzen: " + activeTrust.effectiveReplaceDeadline);
     page += F("</code><span>NTP / Zeit</span><code>");
     page += isTimeValid() ? isoDeviceTimeOrNull() : "nicht synchronisiert";
     page += F("</code><span>Dateisystem</span><code>");
     page += filesystemMounted ? "eingebunden" : "FEHLER: nicht eingebunden";
     page += F("</code><span>Recovery / Fehler</span><code>");
-    page += htmlEscape(recoveryStatus + " / " + lastTerminalError);
+    page += htmlEscape(recoveryStatusHuman() + " / " + lastTerminalError);
+    page += F("</code><span>Speicher</span><code>");
+    page += "Heap " + String(ESP.getFreeHeap()) + " / Minimum " + String(ESP.getMinFreeHeap()) + " / Stack " + String(uxTaskGetStackHighWaterMark(nullptr));
     page += F("</code></div><form method=\"post\" action=\"/logout\"><button class=\"secondary\" type=\"submit\">Ausloggen</button></form></section>");
     page += F("<section class=\"panel\"><h2>WLAN suchen</h2><button type=\"button\" onclick=\"scanWifi()\">WLANs suchen</button><div id=\"networks\" class=\"muted\">Noch nicht gesucht.</div></section>");
     page += F("<section class=\"panel\"><h2>Konfiguration</h2><form id=\"configForm\" method=\"post\" action=\"/save\">");
@@ -1069,9 +1348,19 @@ String setupHtml()
     page += setupKeyInput();
     page += F("<button class=\"secondary\" type=\"submit\">Factory-Trust aktivieren</button></form><form method=\"post\" action=\"/queue/sync\">");
     page += setupKeyInput();
-    page += F("<button class=\"secondary\" type=\"submit\">Queue synchronisieren</button></form><form method=\"post\" action=\"/filesystem/format\" onsubmit=\"return confirm('Offline-Queue und Trust-Dateien werden geloescht. Fortfahren?')\">");
+    page += F("<button class=\"secondary\" type=\"submit\">Queue synchronisieren</button></form><div class=\"result muted\"><strong>Abgelehnte Offline-Buchungen</strong><br>Maximal ");
+    page += String(MAX_REJECTED_QUEUE_ENTRIES);
+    page += F(" Eintraege; bei Erreichen bleibt die aktive Buchung sicher erhalten und der Admin muss bereinigen. <button class=\"secondary\" type=\"button\" onclick=\"loadRejected(0)\">Abgelehnte Eintraege laden</button><button id=\"nextRejected\" class=\"secondary\" type=\"button\" style=\"display:none\">Weitere Eintraege</button><pre id=\"rejectedQueue\">Noch nicht geladen.</pre><form method=\"post\" action=\"/queue/rejected/delete\" onsubmit=\"return confirm('Abgelehnten Queue-Eintrag unwiderruflich loeschen?')\">");
     page += setupKeyInput();
-    page += F("<input name=\"confirm_format\" placeholder=\"FORMATIEREN eingeben\"><button class=\"danger\" type=\"submit\">Dateisystem doppelt bestaetigt formatieren</button></form></section>");
+    page += F("<label>Sequenz</label><input name=\"sequence\" type=\"number\" min=\"1\" required><label>Bestaetigung</label><input name=\"confirm_delete\" placeholder=\"LOESCHEN\" required><button class=\"danger\" type=\"submit\">Abgelehnten Eintrag loeschen</button></form></div><form method=\"post\" action=\"/filesystem/format\" onsubmit=\"return confirm('Aktive Queue, abgelehnte Diagnoseeintraege und Trust-Dateien werden unwiderruflich geloescht. Fortfahren?')\">");
+    page += setupKeyInput();
+    page += F("<input name=\"confirm_format\" placeholder=\"FORMATIEREN eingeben\"");
+    if (formatBlocked) page += F(" disabled");
+    page += F("><button class=\"danger\" type=\"submit\"");
+    if (formatBlocked) page += F(" disabled");
+    page += F(">Dateisystem doppelt bestaetigt formatieren</button></form>");
+    if (formatBlocked) page += F("<p class=\"error\">Formatierung waehrend laufendem Scan, TLS-Recovery oder Queue-Sync gesperrt.</p>");
+    page += F("</section>");
     page += F("<script>const setupKey='");
     page += htmlEscape(setupFormKey);
     page += F("';async function scanWifi(){const box=document.getElementById('networks');box.textContent='Suche laeuft...';try{const r=await fetch('/scan-wifi?setup_key='+encodeURIComponent(setupKey));const d=await r.json();if(!r.ok)throw new Error(d.message||'WLAN-Scan nicht erlaubt.');if(!d.networks||!d.networks.length){box.textContent='Keine WLANs gefunden.';return;}box.innerHTML=d.networks.map(n=>'<div class=\"net\"><button type=\"button\" onclick=\"pickSsid(this.dataset.ssid)\" data-ssid=\"'+esc(n.ssid)+'\">'+esc(n.ssid)+'</button><span>'+n.rssi+' dBm</span></div>').join('');}catch(e){box.textContent=e.message||'WLAN-Scan fehlgeschlagen.';}}");
@@ -1082,6 +1371,7 @@ String setupHtml()
     page += F("function renderNfc(d){return 'NFC Reader\\nRC522 Version: '+(d.reader_version||'-')+'\\nReader Status: '+(d.reader_ok?'OK':'Pruefen')+'\\nDebug: '+(d.debug||'-')+'\\nUID: '+(d.uid||'-')+'\\nUID Bytes: '+(d.uid_bytes||0)+'\\nRestzeit: '+(d.remaining_ms||0)+' ms';}");
     page += F("async function postAction(url,msg){const box=document.getElementById('hardwareResult');box.textContent=msg;try{const b=new URLSearchParams();b.set('setup_key',setupKey);const r=await fetch(url,{method:'POST',body:b});const d=await r.json();box.textContent=JSON.stringify(d,null,2);}catch(e){box.textContent='Test fehlgeschlagen.';}}");
     page += F("async function startNfcTest(){await postAction('/test/nfc/start','NFC-Test gestartet. Tag vorhalten.');pollNfc(0);}async function pollNfc(i){const box=document.getElementById('hardwareResult');try{const r=await fetch('/test/nfc/status?setup_key='+encodeURIComponent(setupKey));const d=await r.json();if(!r.ok)throw new Error(d.message||'Bitte neu einloggen.');box.textContent=renderNfc(d);if(d.active&&!d.uid&&i<20)setTimeout(()=>pollNfc(i+1),1000);}catch(e){box.textContent=e.message||'NFC-Status fehlgeschlagen.';}}");
+    page += F("async function loadRejected(offset){const box=document.getElementById('rejectedQueue'),next=document.getElementById('nextRejected');box.textContent='Lade...';try{const r=await fetch('/queue/rejected?offset='+offset+'&limit=20');const d=await r.json();if(!r.ok)throw new Error('Abgelehnte Queue nicht abrufbar.');box.textContent=(d.entries||[]).map(e=>'#'+e.sequence+' / HTTP '+e.http_status+' / '+(e.server_code||'-')+' / '+(e.rejected_at||'-')).join('\\n')||'Keine abgelehnten Eintraege.';if((d.total||0)>offset+20){next.style.display='block';next.onclick=()=>loadRejected(offset+20);}else next.style.display='none';}catch(e){box.textContent=e.message||'Abruf fehlgeschlagen.';}}");
     page += F("function esc(s){return String(s||'').replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[m]));}</script>");
     page += F("</main></body></html>");
     return page;
@@ -1115,6 +1405,13 @@ void sendSetupStatus()
     doc["last_api_test"] = lastApiTestSummary;
     doc["transport"] = transportLabel();
     doc["tls_state"] = tlsStateLabel();
+    doc["last_completed_tls_state"] = tlsStateLabel(lastCompletedTlsState);
+    doc["offline_queue_depth"] = queueDepth();
+    doc["rejected_queue_depth"] = queueRejectedDepth();
+    doc["corrupt_queue_depth"] = queueCorruptDepth();
+    doc["free_heap"] = ESP.getFreeHeap();
+    doc["minimum_free_heap"] = ESP.getMinFreeHeap();
+    doc["stack_high_water_mark"] = uxTaskGetStackHighWaterMark(nullptr);
     doc["ntp_status"] = isTimeValid() ? "synchronized" : "not_synchronized";
     doc["trust_source"] = activeTrustSource;
     doc["trust_bundle_version"] = activeTrust.version;
@@ -1441,7 +1738,7 @@ void setupRoutes()
         if (!setupPostAuthorized()) { setupServer.send(403, "text/plain", "Setup-Sitzung ungueltig."); return; }
         String raw, why;
         int status = 0;
-        bool candidateInstalled = apiGet("/api/v1/terminal/trust-bundle", raw, status, why, false) && status == 200 && installTrustBundle(raw, false, why);
+        bool candidateInstalled = apiGet("/api/v1/terminal/trust-bundle", raw, status, why, false, MAX_TRUST_BUNDLE_BYTES) && status == 200 && installTrustBundle(raw, false, why);
         bool installed = candidateInstalled;
         if (candidateInstalled) {
             String checkBody;
@@ -1491,18 +1788,68 @@ void setupRoutes()
     setupServer.on("/queue/sync", HTTP_POST, []() {
         if (!setupPostAuthorized()) { setupServer.send(403, "text/plain", "Setup-Sitzung ungueltig."); return; }
         if (WiFi.status() != WL_CONNECTED) { setupServer.send(409, "text/plain", "WLAN nicht verbunden."); return; }
+        if (state == DeviceState::SEND_SCAN || state == DeviceState::TLS_RECOVERY || scanLifecycle != ScanLifecycle::NONE
+            || currentRequestId.length() > 0 || currentUid.length() > 0) {
+            setupServer.send(409, "text/plain", "Queue-Synchronisierung kann während eines laufenden Scans nicht gestartet werden.");
+            return;
+        }
         enterState(DeviceState::QUEUE_SYNC);
         setupServer.send(202, "text/plain", "Queue-Synchronisierung wurde gestartet.");
     });
 
+    setupServer.on("/queue/rejected", HTTP_GET, []() {
+        if (!portalAuthenticated()) { setupServer.send(403, "text/plain", "Portal-Login erforderlich."); return; }
+        DynamicJsonDocument doc(4096);
+        JsonArray entries = doc.createNestedArray("entries");
+        long requestedOffset = setupServer.arg("offset").toInt();
+        size_t offset = static_cast<size_t>(requestedOffset > 0 ? requestedOffset : 0);
+        size_t limit = static_cast<size_t>(constrain(setupServer.arg("limit").toInt(), 1, 20));
+        size_t index = 0;
+        if (filesystemMounted) {
+            File directory = LittleFS.open(QUEUE_REJECTED_DIRECTORY, "r");
+            if (directory && directory.isDirectory()) {
+                for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
+                    String name = entry.name();
+                    if (!name.endsWith(".json") || entry.size() > 1536) { entry.close(); continue; }
+                    if (index++ < offset) { entry.close(); continue; }
+                    if (entries.size() >= limit) { entry.close(); continue; }
+                    DynamicJsonDocument itemDoc(1024);
+                    if (!deserializeJson(itemDoc, entry)) {
+                        JsonObject item = entries.createNestedObject();
+                        item["file"] = name.substring(name.lastIndexOf('/') + 1);
+                        item["sequence"] = itemDoc["sequence"] | 0;
+                        item["http_status"] = itemDoc["rejection"]["http_status"] | 0;
+                        item["server_code"] = itemDoc["rejection"]["server_code"] | "";
+                        item["rejected_at"] = itemDoc["rejection"]["rejected_at"] | "";
+                    }
+                    entry.close();
+                }
+                directory.close();
+            }
+        }
+        doc["total"] = queueRejectedDepth();
+        doc["offset"] = offset;
+        doc["limit"] = limit;
+        sendJson(doc);
+    });
+
+    setupServer.on("/queue/rejected/delete", HTTP_POST, []() {
+        if (!setupPostAuthorized() || setupServer.arg("confirm_delete") != "LOESCHEN") { setupServer.send(403, "text/plain", "Explizite Loeschbestaetigung fehlt."); return; }
+        uint32_t sequence = static_cast<uint32_t>(setupServer.arg("sequence").toInt());
+        if (sequence == 0 || !LittleFS.remove(rejectedQueuePath(sequence).c_str())) { setupServer.send(404, "text/plain", "Abgelehnter Queue-Eintrag nicht gefunden."); return; }
+        setupServer.send(200, "text/plain", "Abgelehnter Queue-Eintrag geloescht.");
+    });
+
     setupServer.on("/filesystem/format", HTTP_POST, []() {
         if (!setupPostAuthorized() || setupServer.arg("confirm_format") != "FORMATIEREN") { setupServer.send(403, "text/plain", "Doppelte Formatbestaetigung fehlt."); return; }
+        if (storageMutationBlocked()) { setupServer.send(409, "text/plain", "Formatierung ist waehrend eines laufenden Scans, TLS-Recovery oder Queue-Sync gesperrt."); return; }
         // This is the only intentional formatting path. It also initializes a
         // factory-fresh or damaged LittleFS volume that could not be mounted.
         bool formatted = LittleFS.format();
         filesystemMounted = formatted && LittleFS.begin(false);
         if (filesystemMounted) {
             LittleFS.mkdir(QUEUE_DIRECTORY);
+            LittleFS.mkdir(QUEUE_REJECTED_DIRECTORY);
             loadFactoryTrust();
             recoveryStatus = "filesystem_formatted";
             scheduleRestart(1500);
@@ -1689,7 +2036,7 @@ void enterState(DeviceState next)
         lcdShow("API pruefen", "Terminal config", "bitte warten", "");
         setAllLeds(false, true, false);
     } else if (next == DeviceState::READY) {
-        resumeScanAfterWifiReconnect = false;
+        if (currentUid.length() == 0 && currentRequestId.length() == 0) resumeScanAfterWifiReconnect = false;
         lcdShowLines(welcomeLines);
         rememberDisplay(welcomeLines);
         setAllLeds(false, false, true);
@@ -1708,6 +2055,7 @@ void enterState(DeviceState next)
 
 void handleSetupButton()
 {
+    if (!provisioningSecurityValid) return;
     if (state == DeviceState::SETUP_MODE) {
         return;
     }
@@ -1740,7 +2088,9 @@ void addApiHeaders(HTTPClient &http)
     http.addHeader("Content-Type", "application/json");
     http.addHeader("X-Terminal-Firmware", FIRMWARE_VERSION);
     http.addHeader("X-Terminal-Transport", transportLabel());
-    http.addHeader("X-Terminal-TLS-State", tlsStateLabel());
+    // The server must receive the last completed handshake result, never the
+    // transient CONNECTING state of this request.
+    http.addHeader("X-Terminal-TLS-State", tlsStateLabel(lastCompletedTlsState));
     http.addHeader("X-Terminal-Trust-Version", String(activeTrust.version));
     http.addHeader("X-Terminal-Trust-State", trustStatus);
     http.addHeader("X-Terminal-Queue-Depth", String(queueDepth()));
@@ -1753,6 +2103,7 @@ bool beginApiRequest(HTTPClient &http, WiFiClient &plain, WiFiClientSecure &secu
     ApiTransport transport = transportFor(config.apiBaseUrl);
     if (transport == ApiTransport::HTTP_PLAIN) {
         tlsState = TlsState::NOT_APPLICABLE;
+        lastCompletedTlsState = TlsState::NOT_APPLICABLE;
         return http.begin(plain, url);
     }
     if (transport != ApiTransport::HTTPS_VERIFIED) { why = "api_url_invalid"; return false; }
@@ -1772,7 +2123,40 @@ bool isTlsTrustFailure(WiFiClientSecure &client)
     return error.indexOf("certificate") >= 0 || error.indexOf("x509") >= 0 || error.indexOf("verify") >= 0 || error.indexOf("ca ") >= 0;
 }
 
-bool apiGet(const String &path, String &body, int &status, String &why, bool authenticated)
+bool readLimitedResponse(HTTPClient &http, String &body, size_t limit, String &why)
+{
+    int remaining = http.getSize();
+    if (remaining > static_cast<int>(limit)) { why = "response_too_large"; return false; }
+    String contentType = http.header("Content-Type");
+    if (contentType.length() > 0) {
+        contentType.toLowerCase();
+        if (contentType.indexOf("application/json") < 0) { why = "unexpected_response_content_type"; return false; }
+    }
+    WiFiClient *stream = http.getStreamPtr();
+    unsigned long startedAt = millis();
+    unsigned long lastProgressAt = startedAt;
+    while (remaining != 0) {
+        size_t available = stream->available();
+        if (available > 0) {
+            if (body.length() + available > limit) { why = "response_too_large"; return false; }
+            uint8_t buffer[256];
+            size_t wanted = min(available, sizeof(buffer));
+            size_t read = stream->readBytes(buffer, wanted);
+            if (read == 0) { why = "response_timeout"; return false; }
+            body.concat(reinterpret_cast<const char *>(buffer), read);
+            if (remaining > 0) remaining -= read;
+            lastProgressAt = millis();
+            continue;
+        }
+        unsigned long now = millis();
+        if (now - startedAt >= DOWNLOAD_TOTAL_TIMEOUT_MS || now - lastProgressAt >= DOWNLOAD_IDLE_TIMEOUT_MS) { why = "response_timeout"; return false; }
+        if (!http.connected()) return remaining == -1 && body.length() > 0;
+        delay(1);
+    }
+    return body.length() <= limit;
+}
+
+bool apiGet(const String &path, String &body, int &status, String &why, bool authenticated, size_t responseLimit)
 {
     WiFiClient plain;
     WiFiClientSecure secure;
@@ -1780,31 +2164,19 @@ bool apiGet(const String &path, String &body, int &status, String &why, bool aut
     if (!beginApiRequest(http, plain, secure, httpUrl(path), why)) return false;
     if (authenticated) addApiHeaders(http);
     status = http.GET();
-    if (status > 0) body = http.getString();
+    if (status > 0 && !readLimitedResponse(http, body, responseLimit, why)) {
+        http.end();
+        if (why == "response_too_large") why = responseLimit == MAX_TRUST_BUNDLE_BYTES ? "trust_bundle_too_large" : "config_response_too_large";
+        return false;
+    }
     http.end();
     if (status <= 0) {
-        if (isHttpsTransport() && isTlsTrustFailure(secure)) { tlsState = TlsState::VALIDATION_FAILED; why = "tls_validation_failed"; }
+        if (isHttpsTransport() && isTlsTrustFailure(secure)) { tlsState = TlsState::VALIDATION_FAILED; lastCompletedTlsState = TlsState::VALIDATION_FAILED; why = "tls_validation_failed"; }
         else why = "http_connect_failed";
         return false;
     }
-    if (isHttpsTransport()) tlsState = TlsState::VERIFIED;
+    if (isHttpsTransport()) { tlsState = TlsState::VERIFIED; lastCompletedTlsState = TlsState::VERIFIED; }
     return true;
-}
-
-bool readLimitedResponse(HTTPClient &http, String &body, size_t limit)
-{
-    WiFiClient *stream = http.getStreamPtr();
-    int remaining = http.getSize();
-    while (http.connected() && (remaining > 0 || remaining == -1)) {
-        size_t available = stream->available();
-        if (available == 0) { delay(1); continue; }
-        if (body.length() + available > limit) return false;
-        uint8_t buffer[256];
-        size_t read = stream->readBytes(buffer, min(available, sizeof(buffer)));
-        body.concat(reinterpret_cast<const char *>(buffer), read);
-        if (remaining > 0) remaining -= read;
-    }
-    return body.length() <= limit;
 }
 
 bool recoveryDownload(String &bundle, String &why)
@@ -1817,9 +2189,9 @@ bool recoveryDownload(String &bundle, String &why)
     http.setTimeout(HTTP_TIMEOUT_MS);
     if (!http.begin(client, httpUrl("/api/v1/terminal/trust-bundle"))) { why = "tls_recovery_connect_failed"; return false; }
     int status = http.GET();
-    bool read = status == 200 && readLimitedResponse(http, bundle, MAX_TRUST_BUNDLE_BYTES);
+    bool read = status == 200 && readLimitedResponse(http, bundle, MAX_TRUST_BUNDLE_BYTES, why);
     http.end();
-    if (!read) { why = status == 200 ? "trust_bundle_too_large" : "tls_recovery_failed"; return false; }
+    if (!read) { if (why.length() == 0) why = status == 200 ? "trust_bundle_too_large" : "tls_recovery_failed"; return false; }
     return true;
 }
 
@@ -1854,6 +2226,23 @@ void applySignalFromJson(JsonVariantConst root, const String &fallbackLed, const
     String beep = root["signal"]["beep"] | fallbackBeep;
     applyLedSignal(led);
     triggerBeep(beep);
+}
+
+void scheduleNextTrustCheck(bool successful)
+{
+    lastTrustCheckAttemptAt = millis();
+    if (successful) {
+        trustCheckFailureCount = 0;
+        lastSuccessfulTrustCheckAt = lastTrustCheckAttemptAt;
+        nextTrustCheckAt = lastTrustCheckAttemptAt + 24UL * 60UL * 60UL * 1000UL;
+        return;
+    }
+    if (trustCheckFailureCount < 255) trustCheckFailureCount++;
+    unsigned long delayMs = trustCheckFailureCount == 1 ? 5UL * 60UL * 1000UL
+        : trustCheckFailureCount == 2 ? 30UL * 60UL * 1000UL
+        : trustCheckFailureCount == 3 ? 2UL * 60UL * 60UL * 1000UL
+        : 6UL * 60UL * 60UL * 1000UL;
+    nextTrustCheckAt = lastTrustCheckAttemptAt + delayMs;
 }
 
 bool fetchApiConfig()
@@ -1901,11 +2290,10 @@ bool fetchApiConfig()
         }
         uint32_t advertisedVersion = (uint32_t) (doc["trust_bundle"]["latest_version"] | 0);
         if (isHttpsTransport() && advertisedVersion > activeTrust.version
-            && (lastTrustCheckAt == 0 || millis() - lastTrustCheckAt >= 24UL * 60UL * 60UL * 1000UL)) {
-            lastTrustCheckAt = millis();
+            && (nextTrustCheckAt == 0 || millis() >= nextTrustCheckAt)) {
             String bundle, trustWhy;
             int trustStatusCode = 0;
-            bool candidateInstalled = apiGet("/api/v1/terminal/trust-bundle", bundle, trustStatusCode, trustWhy, false)
+            bool candidateInstalled = apiGet("/api/v1/terminal/trust-bundle", bundle, trustStatusCode, trustWhy, false, MAX_TRUST_BUNDLE_BYTES)
                 && trustStatusCode == 200 && installTrustBundle(bundle, false, trustWhy);
             if (candidateInstalled) {
                 String verifyBody;
@@ -1914,8 +2302,10 @@ bool fetchApiConfig()
                     && verifyStatus >= 200 && verifyStatus < 300;
                 finishTrustInstall(verified);
                 recoveryStatus = verified ? "automatic_update_verified" : trustWhy;
-            } else if (trustWhy.length() > 0) {
-                lastTerminalError = trustWhy;
+                scheduleNextTrustCheck(verified);
+            } else {
+                if (trustWhy.length() > 0) lastTerminalError = trustWhy;
+                scheduleNextTrustCheck(false);
             }
         }
         apiStatus = "ok";
@@ -1997,16 +2387,24 @@ bool sendScanRequest()
     if (!beginApiRequest(http, plain, secure, httpUrl("/api/v1/terminal/scan"), why)) { apiStatus = why; return false; }
     addApiHeaders(http);
     int status = http.POST(body);
-    String response = status > 0 ? http.getString() : "";
+    lastHttpStatus = status;
+    lastServerCode = "";
+    lastServerMessage = "";
+    String response;
+    bool responseRead = status > 0 && readLimitedResponse(http, response, MAX_SCAN_RESPONSE_BYTES, why);
     http.end();
 
     if (status <= 0) {
         bool trustFailure = isHttpsTransport() && isTlsTrustFailure(secure);
-        if (trustFailure) tlsState = TlsState::VALIDATION_FAILED;
+        if (trustFailure) { tlsState = TlsState::VALIDATION_FAILED; lastCompletedTlsState = TlsState::VALIDATION_FAILED; }
         apiStatus = trustFailure ? "tls_validation_failed" : "scan_unreachable";
         return false;
     }
-    if (isHttpsTransport()) tlsState = TlsState::VERIFIED;
+    if (!responseRead) {
+        apiStatus = why == "response_too_large" ? "scan_response_too_large" : (why.length() ? why : "response_timeout");
+        return false;
+    }
+    if (isHttpsTransport()) { tlsState = TlsState::VERIFIED; lastCompletedTlsState = TlsState::VERIFIED; }
 
     DynamicJsonDocument doc(8192);
     DeserializationError error = deserializeJson(doc, response);
@@ -2016,6 +2414,8 @@ bool sendScanRequest()
     }
 
     String code = doc["code"] | "";
+    lastServerCode = code;
+    lastServerMessage = doc["message"] | "";
     RetryClass classification = retryClassFor(status, code);
     if (status < 200 || status >= 300) {
         if (classification == RetryClass::TEMPORARY) {
@@ -2073,24 +2473,74 @@ bool persistCurrentScan(const String &reason)
     return true;
 }
 
-bool syncOneQueuedScan()
+QueueSyncOutcome syncOneQueuedScan()
 {
-    OfflineScan queued;
-    if (!nextQueuedScan(queued)) return false;
-    currentUid = queued.uid;
-    currentRequestId = queued.requestId;
-    currentDeviceTime = queued.deviceTime;
+    if (!queueSync.active) {
+        if (!nextQueuedScan(queueSync.scan)) return queueDepth() == 0 ? QueueSyncOutcome::EMPTY : QueueSyncOutcome::CORRUPT;
+        queueSync.active = true;
+        queueSync.attempt = 0;
+        queueSync.startedAt = millis();
+    }
+
+    currentUid = queueSync.scan.uid;
+    currentRequestId = queueSync.scan.requestId;
+    currentDeviceTime = queueSync.scan.deviceTime;
     scanLifecycle = ScanLifecycle::PERSISTED;
     bool sent = sendScanRequest();
-    if (scanLifecycle == ScanLifecycle::SENT_CONFIRMED || scanLifecycle == ScanLifecycle::REJECTED) {
-        acknowledgeQueuedScan(queued);
+    if (scanLifecycle == ScanLifecycle::SENT_CONFIRMED) {
+        acknowledgeQueuedScan(queueSync.scan);
+        queueSync.active = false;
+        return QueueSyncOutcome::CONFIRMED;
     }
-    if (scanLifecycle == ScanLifecycle::PERSISTED) {
-        currentUid = "";
-        currentRequestId = "";
-        currentDeviceTime = "";
+    if (scanLifecycle == ScanLifecycle::REJECTED) {
+        if (!rejectQueuedScan(queueSync.scan, lastHttpStatus, lastServerCode, lastServerMessage.length() ? lastServerMessage : "Server hat die Offline-Buchung abgelehnt.")) {
+            queueSync.lastError = lastTerminalError.length() ? lastTerminalError : "queue_dead_letter_write_failed";
+            return QueueSyncOutcome::TEMPORARY;
+        }
+        queueSync.active = false;
+        return QueueSyncOutcome::REJECTED;
     }
-    return sent;
+    currentUid = "";
+    currentRequestId = "";
+    currentDeviceTime = "";
+    if (apiStatus == "tls_validation_failed" || apiStatus == "tls_time_invalid" || apiStatus == "tls_trust_missing") return QueueSyncOutcome::TLS_FAILURE;
+    return sent ? QueueSyncOutcome::CONFIRMED : QueueSyncOutcome::TEMPORARY;
+}
+
+unsigned long queueRetryDelay(uint8_t attempt)
+{
+    return attempt <= 1 ? 0 : attempt == 2 ? 2000UL : attempt == 3 ? 10000UL : 60000UL;
+}
+
+void handleQueueSync()
+{
+    if (queueSync.active && millis() < queueSync.nextAttemptAt) return;
+    QueueSyncOutcome outcome = syncOneQueuedScan();
+    if (outcome == QueueSyncOutcome::EMPTY) { queueSync.active = false; enterState(DeviceState::READY); return; }
+    if (outcome == QueueSyncOutcome::CORRUPT) { queueSync.active = false; queueSync.nextAttemptAt = millis() + 50; return; }
+    if (outcome == QueueSyncOutcome::CONFIRMED) { queueSync.active = false; scanLifecycle = ScanLifecycle::NONE; nextQueueSyncCycleAt = millis() + 1000; enterState(DeviceState::READY); return; }
+    if (outcome == QueueSyncOutcome::REJECTED) {
+        queueSync.active = false;
+        scanLifecycle = ScanLifecycle::NONE;
+        lastTerminalError = "queue_rejected";
+        lcdShow("Queue abgelehnt", "Admin erforderlich", "Automatik stoppt", "Portal pruefen");
+        applyLedSignal("red");
+        triggerBeep("error");
+        enterState(DeviceState::ERROR_RETRY);
+        return;
+    }
+    if (outcome == QueueSyncOutcome::TLS_FAILURE) { enterState(DeviceState::TLS_RECOVERY); return; }
+    queueSync.attempt++;
+    if (queueSync.attempt >= 4) {
+        queueSync.active = false;
+        scanLifecycle = ScanLifecycle::NONE;
+        lastTerminalError = "queue_retry_exhausted";
+        nextQueueSyncCycleAt = millis() + 5UL * 60UL * 1000UL;
+        enterState(DeviceState::READY);
+        return;
+    }
+    queueSync.lastError = apiStatus;
+    queueSync.nextAttemptAt = millis() + queueRetryDelay(queueSync.attempt + 1);
 }
 
 void startWifiAttempt()
@@ -2152,7 +2602,14 @@ void checkWifiHealth()
 
     if (WiFi.status() != WL_CONNECTED) {
         if (state == DeviceState::SEND_SCAN && currentUid.length() > 0 && currentRequestId.length() > 0) {
-            persistCurrentScan("wifi_lost");
+            bool persisted = persistCurrentScan("wifi_lost");
+            if (!persisted) {
+                // Keep the same request_id in RAM and prevent a second NFC scan.
+                // It will be sent again after reconnect, preserving idempotency.
+                resumeScanAfterWifiReconnect = true;
+                lcdShow("Scan noch offen", "nicht gespeichert", "Reconnect laeuft", "Tag nicht scannen");
+                applyLedSignal("red");
+            }
         }
 
         apiStatus = "wifi_lost";
@@ -2273,6 +2730,7 @@ void handleNfcScan()
     currentUid = uid;
     currentRequestId = generateRequestId();
     currentDeviceTime = isoDeviceTimeOrNull();
+    scanLifecycle = ScanLifecycle::VOLATILE;
     currentScanAttempt = 0;
     nextScanAttemptAt = now;
 
@@ -2363,6 +2821,7 @@ void setup()
     filesystemMounted = LittleFS.begin(false);
     if (filesystemMounted) {
         LittleFS.mkdir(QUEUE_DIRECTORY);
+        LittleFS.mkdir(QUEUE_REJECTED_DIRECTORY);
     }
     preferences.begin(NVS_NAMESPACE, false);
     bootCounter = preferences.getUInt("boot_counter", 0) + 1;
@@ -2382,8 +2841,9 @@ void setup()
         Serial.println(F("LittleFS mount failed; no automatic format was attempted."));
         lastTerminalError = "filesystem_mount_failed";
     }
-    if (strcmp(SETUP_AP_PASSWORD, "change-me-setup") == 0 || strcmp(PORTAL_ADMIN_PASSWORD, "change-me-portal") == 0) {
-        Serial.println(F("SECURITY WARNING: default portal credentials are configured; production flashing is forbidden."));
+    provisioningSecurityValid = provisioningCredentialsAreSafe();
+    if (!provisioningSecurityValid) {
+        Serial.println(F("SECURITY CONFIG ERROR: placeholder portal credentials or provisioning ID detected."));
         lastTerminalError = "default_portal_credentials";
     }
 }
@@ -2416,6 +2876,11 @@ void loop()
             break;
 
         case DeviceState::CONFIG_CHECK:
+            if (!provisioningSecurityValid) {
+                lcdShow("SECURITY CONFIG", "ERROR", "Firmware darf nicht", "in Betrieb gehen");
+                setAllLeds(true, false, false);
+                break;
+            }
             if (loadConfig()) {
                 Serial.println(F("Configuration loaded. Secrets are hidden."));
                 recoverTrustAtBoot();
@@ -2452,12 +2917,12 @@ void loop()
 
         case DeviceState::API_CONFIG:
             if (fetchApiConfig()) {
-                if (queueDepth() > 0) {
-                    enterState(DeviceState::QUEUE_SYNC);
-                } else if (resumeScanAfterWifiReconnect && currentUid.length() > 0 && currentRequestId.length() > 0) {
+                if (resumeScanAfterWifiReconnect && currentUid.length() > 0 && currentRequestId.length() > 0) {
                     lcdShow("Scan Fortsetzung", "WLAN wieder da", "sende Anfrage", "");
                     nextScanAttemptAt = millis();
                     enterState(DeviceState::SEND_SCAN);
+                } else if (queueDepth() > 0) {
+                    enterState(DeviceState::QUEUE_SYNC);
                 } else {
                     enterState(DeviceState::READY);
                 }
@@ -2483,11 +2948,7 @@ void loop()
         }
 
         case DeviceState::QUEUE_SYNC:
-            if (queueDepth() == 0) {
-                enterState(DeviceState::READY);
-            } else {
-                syncOneQueuedScan();
-            }
+            handleQueueSync();
             break;
 
         case DeviceState::READY:
@@ -2495,6 +2956,10 @@ void loop()
             break;
 
         case DeviceState::NFC_SCAN:
+            if (queueDepth() > 0 && (nextQueueSyncCycleAt == 0 || millis() >= nextQueueSyncCycleAt)) {
+                enterState(DeviceState::QUEUE_SYNC);
+                break;
+            }
             handleNfcScan();
             break;
 
@@ -2504,6 +2969,7 @@ void loop()
 
         case DeviceState::SHOW_RESULT:
             if (millis() >= resultUntil) {
+                scanLifecycle = ScanLifecycle::NONE;
                 enterState(queueDepth() > 0 ? DeviceState::QUEUE_SYNC : DeviceState::READY);
             }
             break;
