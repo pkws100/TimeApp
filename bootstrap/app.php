@@ -8,6 +8,7 @@ use App\Domain\Admin\AdminContextService;
 use App\Domain\App\MobileAppService;
 use App\Domain\Assets\AssetService;
 use App\Domain\Attendance\AttendanceService;
+use App\Domain\Attendance\AttendanceReportService;
 use App\Domain\Auth\AuthService;
 use App\Domain\Auth\CsrfService;
 use App\Domain\Auth\RouteGuard;
@@ -212,13 +213,20 @@ $dashboardService = new DashboardService($connection, $storageUsage, $attendance
 $fileService = new FileAttachmentService($connection, $config->get('uploads', []));
 $documentStatusService = new DocumentStatusService($connection);
 $reportService = new ReportService($connection, $config->get('exports', []), $timesheetService);
+$attendanceReportService = new AttendanceReportService(
+    $attendanceService,
+    $companySettingsService,
+    $config->get('exports', []),
+    (string) $config->get('app.timezone', 'Europe/Berlin')
+);
 $bookingExportService = new BookingExportService($adminBookingService);
 $accountingExportService = new AccountingExportService($adminBookingService);
 $accountingClosureService = new AccountingClosureService($connection, $adminBookingService);
 $accountingDocumentExportService = new AccountingDocumentExportService($companySettingsService, $config->get('exports', []));
 $backupService = new BackupService($connection, $config->get('uploads', []));
 $smtpTestService = new SmtpTestService();
-$mobileAppService = new MobileAppService($connection, $projectService, $companySettingsService, $workdayStateCalculator, $fileService, $timesheetGeoLocationService, $calendarPolicyService, $timesheetSignatureService, $personnelEventService, $personnelLabelService);
+$nfcTagService = new NfcTagService($connection, (string) $config->get('app.settings_encryption_key', ''));
+$mobileAppService = new MobileAppService($connection, $projectService, $companySettingsService, $workdayStateCalculator, $fileService, $timesheetGeoLocationService, $calendarPolicyService, $timesheetSignatureService, $personnelEventService, $personnelLabelService, $nfcTagService);
 $appTimesheetSyncService = new AppTimesheetSyncService($connection, $timesheetCalculator, $companySettingsService, $workdayStateCalculator, $timesheetSignatureService, $timesheetDayConflictService);
 $timeAccountService = new TimeAccountService($connection, $calendarPolicyService, $dailyTargetService, $accountJournalService, $employeeAccountCutoverService);
 $timeAccountExportService = new TimeAccountExportService($timeAccountService);
@@ -228,7 +236,6 @@ $terminalTrustBundleService = new TerminalTrustBundleService(
     (string) env('TERMINAL_TRUST_BUNDLE_FILE', storage_path('app/terminal-trust-bundle.json')),
     (string) env('TERMINAL_TRUST_PUBLIC_KEY_FILE', '')
 );
-$nfcTagService = new NfcTagService($connection, (string) $config->get('app.settings_encryption_key', ''));
 $terminalPunchService = new TerminalPunchService($connection, $terminalService, $nfcTagService, $appTimesheetSyncService, $terminalTrustBundleService);
 $appDisplayName = trim((string) ($companySettingsService->current()['app_display_name'] ?? '')) ?: (string) $config->get('app.name');
 
@@ -280,7 +287,9 @@ $adminManagementController = new AdminManagementController(
     $csrfService,
     $timesheetSignatureService,
     $personnelLabelService,
-    $personnelEventService
+    $personnelEventService,
+    $nfcTagService,
+    $terminalService
 );
 $adminBookingController = new AdminBookingController(
     $adminView,
@@ -325,7 +334,7 @@ $calendarSettingsController = new CalendarSettingsController($adminView, $calend
 $documentStatusController = new DocumentStatusController($adminView, $documentStatusService, $authService, $csrfService);
 $adminPushController = new AdminPushController($adminView, $pushSettingsService, $pushSubscriptionService, $pushNotificationService, $csrfService);
 $personnelController = new PersonnelController($adminView, $personnelLabelService, $personnelEventService, $userService, $authService, $csrfService);
-$attendanceController = new AttendanceController($attendanceService, $adminView);
+$attendanceController = new AttendanceController($attendanceService, $attendanceReportService, $adminView);
 $accountingExportController = new AccountingExportController($accountingExportService);
 $backupController = new BackupController($backupService);
 
@@ -369,6 +378,7 @@ $router->get('/admin/accounting/export', $admin([$adminAccountingController, 'ex
 $router->post('/admin/accounting/closures', $admin([$adminAccountingController, 'createClosure'], 'accounting.finalize'));
 $router->get('/admin/accounting/closures/{id}/download', $admin([$adminAccountingController, 'download'], 'reports.accounting.export'));
 $router->get('/admin/attendance', $admin([$attendanceController, 'index'], 'attendance.view'));
+$router->get('/admin/attendance/report.pdf', $admin([$attendanceController, 'report'], 'attendance.view'));
 $router->get('/admin/personnel', $admin([$personnelController, 'index'], 'personnel.view'));
 $router->get('/admin/personnel/charts', $admin([$personnelController, 'charts'], 'personnel.view'));
 $router->get('/admin/personnel/labels', $admin([$personnelController, 'labels'], 'personnel.view'));
@@ -429,6 +439,7 @@ $router->get('/admin/users/{id}/edit', $admin([$adminManagementController, 'user
 $router->post('/admin/users', $admin([$adminManagementController, 'userStore'], 'users.manage'));
 $router->put('/admin/users/{id}', $admin([$adminManagementController, 'userUpdate'], 'users.manage'));
 $router->delete('/admin/users/{id}', $admin([$adminManagementController, 'userArchive'], 'users.manage'));
+$router->post('/admin/users/{id}/nfc-tags', $admin([$adminManagementController, 'userAssignTerminalTags'], 'users.manage'));
 $router->get('/admin/roles', $admin([$adminManagementController, 'roles'], 'roles.manage'));
 $router->get('/admin/roles/create', $admin([$adminManagementController, 'roleCreate'], 'roles.manage'));
 $router->get('/admin/roles/{id}/edit', $admin([$adminManagementController, 'roleEdit'], 'roles.manage'));
@@ -448,6 +459,7 @@ $router->get('/admin/terminals', $admin([$terminalAdminController, 'index'], 'te
 $router->post('/admin/terminals', $admin([$terminalAdminController, 'store'], 'terminals.manage'));
 $router->post('/admin/terminals/{id}', $admin([$terminalAdminController, 'update'], 'terminals.manage'));
 $router->post('/admin/terminals/{id}/archive', $admin([$terminalAdminController, 'archive'], 'terminals.manage'));
+$router->post('/admin/terminals/{id}/restore', $admin([$terminalAdminController, 'restore'], 'terminals.manage'));
 $router->post('/admin/terminals/{id}/token-reset', $admin([$terminalAdminController, 'resetToken'], 'terminals.manage'));
 $router->post('/admin/terminals/{id}/learn', $admin([$terminalAdminController, 'learn'], 'terminals.manage'));
 $router->post('/admin/terminals/tags/{id}', $admin([$terminalAdminController, 'updateTag'], 'terminals.manage'));

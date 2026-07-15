@@ -3017,6 +3017,7 @@
                 { label: 'Steuer', value: tax }
             ])
             + '</section>'
+            + nfcTagsProfileSection()
             + legalTextSection('AGB', company.agb_text)
             + legalTextSection('Datenschutz', company.datenschutz_text)
             + (showAppWidget('show_geo_section')
@@ -3028,6 +3029,37 @@
             + pushProfileSection()
             + installProfileSection()
         );
+    }
+
+    function nfcTagsProfileSection() {
+        const tagInformationAvailable = state.today && Array.isArray(state.today.nfc_tags);
+        const tags = tagInformationAvailable ? state.today.nfc_tags : [];
+        const rows = tags.map((tag) => {
+            const label = String(tag.label || '').trim() || 'NFC-Tag';
+            const uid = String(tag.uid_masked || '').trim() || '-';
+
+            return {
+                label: label,
+                value: uid + ' · ' + nfcTagStatusLabel(tag.status)
+            };
+        });
+
+        return '<section class="app-card app-grid">'
+            + '<div><p class="muted">NFC-Tags</p><h2>Ihre zugeordneten Tags</h2><p>Diese Tags sind Ihrem Benutzerkonto zugeordnet. Änderungen nimmt die Verwaltung vor.</p></div>'
+            + (!tagInformationAvailable
+                ? '<div class="app-empty">NFC-Tag-Informationen sind aktuell nicht verfügbar.</div>'
+                : rows.length > 0
+                ? appInfoRows(rows)
+                : '<div class="app-empty">Ihrem Benutzerkonto sind aktuell keine NFC-Tags zugeordnet.</div>')
+            + '</section>';
+    }
+
+    function nfcTagStatusLabel(status) {
+        return {
+            active: 'Aktiv',
+            disabled: 'Gesperrt',
+            pending: 'Konfiguration erforderlich'
+        }[status] || 'Unbekannt';
     }
 
     function pushProfileSection() {

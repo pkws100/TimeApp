@@ -142,8 +142,10 @@ final class MobileAppServiceTest extends TestCase
         self::assertSame($payload['app_ui_settings'], $payload['user']['app_ui_settings']);
         self::assertArrayHasKey('personnel_events', $payload);
         self::assertArrayHasKey('personnel_labels', $payload);
+        self::assertArrayHasKey('nfc_tags', $payload);
         self::assertSame([], $payload['personnel_events']);
         self::assertSame([], $payload['personnel_labels']);
+        self::assertSame([], $payload['nfc_tags']);
     }
 
     public function testDayContextDefaultsAppUiSettingsWhenUserHasNone(): void

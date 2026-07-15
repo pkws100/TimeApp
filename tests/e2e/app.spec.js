@@ -1750,6 +1750,10 @@ test('mobile profile shows company, legal texts and geo policy', async ({ page }
         data: {
           today: '2026-05-15',
           projects: [],
+          nfc_tags: [
+            { uid_masked: '04:AA:...:99', label: 'Buerotag Max', status: 'active' },
+            { uid_masked: '04:BB:...:77', label: '', status: 'pending' }
+          ],
           attachments: [],
           today_state: {
             status: 'not_started',
@@ -1828,6 +1832,10 @@ test('mobile profile shows company, legal texts and geo policy', async ({ page }
   await page.goto('/app/profil');
 
   await expect(page.getByRole('heading', { name: 'Einstellungen und Firma' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Ihre zugeordneten Tags' })).toBeVisible();
+  await expect(page.getByText('Buerotag Max')).toBeVisible();
+  await expect(page.getByText('04:AA:...:99 · Aktiv')).toBeVisible();
+  await expect(page.getByText('04:BB:...:77 · Konfiguration erforderlich')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Muster Bau GmbH' })).toBeVisible();
   await expect(page.locator('.app-info-list').first()).toContainText('Musterstrasse 12');
   await expect(page.locator('.app-info-list').first()).toContainText('info@example.test');
@@ -2342,6 +2350,62 @@ test('admin table module supports opt-in row selection and double-click editing'
 
   await rows.first().dblclick();
   await expect(page).toHaveURL(/#edit-1$/);
+});
+
+test('dashboard attendance chart renders locally and retains a fallback without Chart.js', async ({ page }) => {
+  const markup = '<div class="card chart-card"><div class="attendance-status-chart"><canvas id="attendanceStatusChart"></canvas></div></div>'
+    + '<p id="attendanceStatusChartFallback">Das Kreisdiagramm wird mit JavaScript geladen.</p>'
+    + '<script id="attendanceStatusChartData" type="application/json">{"labels":["Noch da","Krank"],"data":[3,1]}</script>';
+  let legacyDashboardChartRequests = 0;
+
+  await page.route('**/api/v1/dashboard/charts', async (route) => {
+    legacyDashboardChartRequests++;
+    await route.abort();
+  });
+
+  await page.setContent(markup);
+  await page.addStyleTag({ path: path.join(__dirname, '../../public/assets/css/admin.css') });
+  await page.addScriptTag({ path: path.join(__dirname, '../../public/assets/js/admin-dashboard.js') });
+  await page.addScriptTag({ path: path.join(__dirname, '../../public/assets/vendor/chart.umd.js') });
+  await page.addScriptTag({ path: path.join(__dirname, '../../public/assets/js/admin-attendance.js') });
+
+  await expect(page.locator('#attendanceStatusChart')).toBeVisible();
+  await expect(page.locator('#attendanceStatusChartFallback')).toBeHidden();
+  expect(legacyDashboardChartRequests).toBe(0);
+
+  const chartHeight = await page.locator('.attendance-status-chart').evaluate((element) => element.getBoundingClientRect().height);
+  const initialDocumentHeight = await page.evaluate(() => document.documentElement.scrollHeight);
+  await page.waitForTimeout(800);
+
+  expect(await page.locator('.attendance-status-chart').evaluate((element) => element.getBoundingClientRect().height)).toBe(chartHeight);
+  expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBe(initialDocumentHeight);
+
+  await page.setContent(markup);
+  await page.addStyleTag({ path: path.join(__dirname, '../../public/assets/css/admin.css') });
+  await page.evaluate(() => { delete window.Chart; });
+  await page.addScriptTag({ path: path.join(__dirname, '../../public/assets/js/admin-attendance.js') });
+
+  await expect(page.locator('.attendance-status-chart')).toBeHidden();
+  await expect(page.locator('#attendanceStatusChart')).toBeHidden();
+  await expect(page.locator('#attendanceStatusChartFallback')).toHaveText('Chart.js konnte nicht lokal geladen werden.');
+});
+
+test('dashboard attendance action is separated from the status copy', async ({ page }) => {
+  await page.setContent(
+    '<article class="card status-card">'
+      + '<p id="dashboardAttendanceCopy">Krank, Urlaub, Feiertag oder fehlt. Bereits ausgecheckte Mitarbeiter sind als eigener Status im Diagramm enthalten.</p>'
+      + '<div class="status-card__actions"><a class="button button-secondary" href="/admin/attendance">Anwesenheit öffnen</a></div>'
+      + '</article>'
+  );
+  await page.addStyleTag({ path: path.join(__dirname, '../../public/assets/css/admin.css') });
+
+  const copyBox = await page.locator('#dashboardAttendanceCopy').boundingBox();
+  const actionsBox = await page.locator('.status-card__actions').boundingBox();
+
+  expect(copyBox).not.toBeNull();
+  expect(actionsBox).not.toBeNull();
+  expect(actionsBox.y).toBeGreaterThanOrEqual(copyBox.y + copyBox.height + 16);
+  await expect(page.locator('.status-card__actions .button')).toBeVisible();
 });
 
 test('admin projects table can be searched and sorted', async ({ page }) => {

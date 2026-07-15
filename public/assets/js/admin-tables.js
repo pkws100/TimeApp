@@ -184,7 +184,7 @@
         var next = createElement('button', 'admin-table-page-button', 'Weiter');
 
         searchInput.type = 'search';
-        searchInput.placeholder = 'Nummer, Name, Kunde, Status, Ort';
+        searchInput.placeholder = table.dataset.tableSearchPlaceholder || 'Nummer, Name, Kunde, Status, Ort';
         searchInput.autocomplete = 'off';
         summary.setAttribute('aria-live', 'polite');
 

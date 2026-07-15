@@ -138,6 +138,38 @@ final class TerminalService
         );
     }
 
+    public function restore(int $id): bool
+    {
+        if ($id <= 0 || !$this->connection->tableExists('terminals')) {
+            return false;
+        }
+
+        return $this->connection->transaction(function () use ($id): bool {
+            $terminal = $this->connection->fetchOne(
+                'SELECT id
+                 FROM terminals
+                 WHERE id = :id
+                   AND COALESCE(is_deleted, 0) = 1
+                 FOR UPDATE',
+                ['id' => $id]
+            );
+
+            if ($terminal === null) {
+                return false;
+            }
+
+            $this->connection->execute(
+                'UPDATE terminals
+                 SET is_deleted = 0, deleted_at = NULL, deleted_by_user_id = NULL, updated_at = NOW()
+                 WHERE id = :id
+                   AND COALESCE(is_deleted, 0) = 1',
+                ['id' => $id]
+            );
+
+            return true;
+        });
+    }
+
     public function resetToken(int $id): string
     {
         $this->assertStorageReady();

@@ -63,6 +63,75 @@ final class TerminalImplementationTest extends TestCase
         self::assertStringContainsString('/admin/terminals', $source);
     }
 
+    public function testArchivedTerminalsCanBeRestoredThroughDedicatedLifecycleRoute(): void
+    {
+        $service = (string) file_get_contents(base_path('src/Domain/Terminals/TerminalService.php'));
+        $controller = (string) file_get_contents(base_path('src/Http/Controllers/TerminalAdminController.php'));
+        $routes = (string) file_get_contents(base_path('bootstrap/app.php'));
+
+        self::assertStringContainsString('function restore(int $id): bool', $service);
+        self::assertStringContainsString('SET is_deleted = 0, deleted_at = NULL, deleted_by_user_id = NULL', $service);
+        self::assertStringContainsString('FOR UPDATE', $service);
+        self::assertStringContainsString('function restore(Request $request, array $params): Response', $controller);
+        self::assertStringContainsString('Archivierte Terminals anzeigen', $controller);
+        self::assertStringContainsString('Wiederherstellen', $controller);
+        self::assertStringContainsString('/admin/terminals/{id}/restore', $routes);
+    }
+
+    public function testTerminalTagUiUsesCurrentScopeTableAndDedicatedModalScript(): void
+    {
+        $controller = (string) file_get_contents(base_path('src/Http/Controllers/TerminalAdminController.php'));
+        $script = (string) file_get_contents(base_path('public/assets/js/admin-terminals.js'));
+
+        self::assertStringContainsString('$tagScope = $this->tagScope($request);', $controller);
+        self::assertStringContainsString('$this->nfcTagService->list($tagScope)', $controller);
+        self::assertStringContainsString('data-admin-table="terminal-tags"', $controller);
+        self::assertStringContainsString('Konfiguration erforderlich', $controller);
+        self::assertStringContainsString('scope=archived', $controller);
+        self::assertStringContainsString('data-terminal-tag-modal', $controller);
+        self::assertStringContainsString('data-terminal-tag-archive-form', $controller);
+        self::assertStringContainsString('Tag archivieren', $controller);
+        self::assertStringContainsString('data-terminal-tag-modal-relearn-warning', $controller);
+        self::assertStringContainsString('aria-describedby="terminalTagModalReuseWarning"', $controller);
+        self::assertStringContainsString('data-terminal-tag-row', $script);
+        self::assertStringContainsString('archiveForm.hidden = Boolean(tag.is_deleted)', $script);
+        self::assertStringContainsString('relearnWarning.hidden = !tag.relearned_from_archive_at', $script);
+        self::assertStringContainsString("dialog.setAttribute('aria-describedby', 'terminalTagModalReuseWarning')", $script);
+        self::assertStringContainsString("event.key === 'Escape'", $script);
+    }
+
+    public function testRelearningAnArchivedTagRestoresItAsPendingWithoutPriorAssignment(): void
+    {
+        $service = (string) file_get_contents(base_path('src/Domain/Terminals/NfcTagService.php'));
+        $punchService = (string) file_get_contents(base_path('src/Domain/Terminals/TerminalPunchService.php'));
+
+        self::assertStringContainsString('FOR UPDATE', $service);
+        self::assertStringContainsString('label = NULL', $service);
+        self::assertStringContainsString('user_id = NULL', $service);
+        self::assertStringContainsString('project_id = NULL', $service);
+        self::assertStringContainsString('status = "pending"', $service);
+        self::assertStringContainsString('is_deleted = 0', $service);
+        self::assertStringContainsString('relearned_from_archive_at = NOW()', $service);
+        self::assertStringContainsString('Bereits verwendeter NFC-Tag erneut erfasst', $punchService);
+    }
+
+    public function testPendingTagAssignmentIsTransactionalAndDoesNotActivateTags(): void
+    {
+        $service = (string) file_get_contents(base_path('src/Domain/Terminals/NfcTagService.php'));
+        $management = (string) file_get_contents(base_path('src/Http/Controllers/AdminManagementController.php'));
+        $routes = (string) file_get_contents(base_path('bootstrap/app.php'));
+
+        self::assertStringContainsString('function listForUser', $service);
+        self::assertStringContainsString('function listFreePending', $service);
+        self::assertStringContainsString('function assignPendingTagsToUser', $service);
+        self::assertStringContainsString('FOR UPDATE', $service);
+        self::assertStringContainsString('AND status = "pending"', $service);
+        self::assertStringContainsString('SET user_id = :user_id, updated_at = NOW()', $service);
+        self::assertStringContainsString('renderUserTerminalTagsSection', $management);
+        self::assertStringContainsString('userAssignTerminalTags', $management);
+        self::assertStringContainsString('/admin/users/{id}/nfc-tags', $routes);
+    }
+
     public function testTransportDiagnosticsAreOptionalAndTrustBundleIsPublicOnly(): void
     {
         $service = (string) file_get_contents(base_path('src/Domain/Terminals/TerminalService.php'));

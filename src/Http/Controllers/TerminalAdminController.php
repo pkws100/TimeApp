@@ -35,8 +35,11 @@ final class TerminalAdminController
         }
 
         $csrfToken = $this->e($this->csrfService->token());
-        $terminals = $this->terminalService->list('active');
-        $tags = $this->nfcTagService->list('all');
+        $terminalScope = $this->terminalScope($request);
+        $terminals = $this->terminalService->list($terminalScope);
+        $tagScope = $this->tagScope($request);
+        $tags = $this->nfcTagService->list($tagScope);
+        $pendingTagCount = count(array_filter($this->nfcTagService->list('pending'), static fn (array $tag): bool => (int) ($tag['is_deleted'] ?? 0) === 0));
         $projects = $this->projectService->list('active');
         $users = $this->userService->list('active');
         $notice = $this->notice($request);
@@ -77,25 +80,34 @@ final class TerminalAdminController
 <section class="card stack">
     <div class="section-toolbar">
         <div>
-            <h2>Terminals</h2>
+            <h2>{$this->terminalHeading($terminalScope)}</h2>
             <p class="muted">Terminal-Projekt hat Vorrang vor dem NFC-Tag-Projekt.</p>
         </div>
+        <div class="scope-switch" aria-label="Terminal-Ansicht">
+            <a class="button button-secondary{$this->scopeClass($terminalScope, 'active')}" href="/admin/terminals">Aktuelle Terminals</a>
+            <a class="button button-secondary{$this->scopeClass($terminalScope, 'archived')}" href="/admin/terminals?terminal_scope=archived">Archivierte Terminals anzeigen</a>
+        </div>
     </div>
-    {$this->terminalTable($terminals, $projects, $csrfToken)}
+    {$this->terminalTable($terminals, $projects, $csrfToken, $terminalScope)}
 </section>
 
 <section class="card stack">
     <div class="section-toolbar">
         <div>
-            <h2>NFC-Tags</h2>
-            <p class="muted">UIDs werden gehasht gespeichert; sichtbar bleibt nur eine maskierte Darstellung.</p>
+            <h2>NFC-Tags{$this->pendingTagHeading($pendingTagCount)}</h2>
+            <p class="muted">UIDs werden gehasht gespeichert; sichtbar bleibt nur eine maskierte Darstellung. Offene Tags sind noch nicht terminaltauglich.</p>
+        </div>
+        <div class="scope-switch" aria-label="NFC-Tag-Ansicht">
+            <a class="button button-secondary{$this->scopeClass($tagScope, 'active')}" href="/admin/terminals">Aktuelle Tags</a>
+            <a class="button button-secondary{$this->scopeClass($tagScope, 'archived')}" href="/admin/terminals?scope=archived">Archivierte Tags anzeigen</a>
         </div>
     </div>
-    {$this->tagTable($tags, $users, $projects, $csrfToken)}
+    {$this->tagTable($tags, $users, $projects, $csrfToken, $tagScope)}
+    {$this->tagModal($tags, $users, $projects, $csrfToken, $tagScope, $request)}
 </section>
 HTML;
 
-        return Response::html($this->view->render('Terminals', $content));
+        return Response::html($this->view->render('Terminals', $content, '<script src="/assets/js/admin-terminals.js"></script>'));
     }
 
     public function store(Request $request): Response
@@ -149,7 +161,24 @@ HTML;
 
         $this->terminalService->archive((int) ($params['id'] ?? 0), $this->currentUserId());
 
-        return Response::redirect('/admin/terminals?notice=archived');
+        return Response::redirect('/admin/terminals?terminal_scope=archived&notice=archived');
+    }
+
+    public function restore(Request $request, array $params): Response
+    {
+        if (!$this->featureEnabled()) {
+            return $this->disabledRedirect();
+        }
+
+        if (!$this->validCsrf($request)) {
+            return $this->redirectError('Die Aktion konnte nicht bestaetigt werden. Bitte Seite neu laden.');
+        }
+
+        if (!$this->terminalService->restore((int) ($params['id'] ?? 0))) {
+            return $this->redirectError('Das Terminal ist nicht archiviert oder nicht mehr vorhanden.');
+        }
+
+        return Response::redirect('/admin/terminals?notice=restored');
     }
 
     public function resetToken(Request $request, array $params): Response
@@ -203,7 +232,7 @@ HTML;
         try {
             $this->nfcTagService->updateAssignment((int) ($params['id'] ?? 0), $request->input());
 
-            return Response::redirect('/admin/terminals?notice=tag-updated');
+            return Response::redirect($this->tagRedirect('tag-updated', $this->tagScopeFromInput($request)));
         } catch (\Throwable $exception) {
             return $this->redirectError($exception->getMessage());
         }
@@ -219,21 +248,29 @@ HTML;
             return $this->redirectError('Die Aktion konnte nicht bestaetigt werden. Bitte Seite neu laden.');
         }
 
-        $this->nfcTagService->archive((int) ($params['id'] ?? 0), $this->currentUserId());
+        if (!$this->nfcTagService->archive((int) ($params['id'] ?? 0), $this->currentUserId())) {
+            return $this->redirectError('Der NFC-Tag ist nicht mehr aktiv oder nicht vorhanden.');
+        }
 
-        return Response::redirect('/admin/terminals?notice=tag-archived');
+        return Response::redirect($this->tagRedirect('tag-archived', $this->tagScopeFromInput($request)));
     }
 
-    private function terminalTable(array $terminals, array $projects, string $csrfToken): string
+    private function terminalTable(array $terminals, array $projects, string $csrfToken, string $scope): string
     {
+        $archived = $scope === 'archived';
         if ($terminals === []) {
-            return '<p class="table-empty">Noch keine aktiven Terminals angelegt.</p>';
+            return '<p class="table-empty">' . ($archived ? 'Keine archivierten Terminals vorhanden.' : 'Noch keine aktuellen Terminals angelegt.') . '</p>';
         }
 
         $rows = '';
 
         foreach ($terminals as $terminal) {
             $id = (int) ($terminal['id'] ?? 0);
+            if ($archived) {
+                $terminalLabel = trim((string) ($terminal['terminal_identifier'] ?? '') . ' ' . (string) ($terminal['name'] ?? ''));
+                $rows .= '<tr><td><strong>' . $this->e((string) ($terminal['terminal_identifier'] ?? '')) . '</strong><br><span class="muted">' . $this->e((string) ($terminal['name'] ?? '')) . '</span><p class="muted">Archiviert am: ' . $this->e((string) ($terminal['deleted_at'] ?? 'unbekannt')) . '</p><div class="table-actions"><form method="post" action="/admin/terminals/' . $id . '/restore"><input type="hidden" name="csrf_token" value="' . $csrfToken . '"><button class="button" type="submit" aria-label="' . $this->e('Terminal ' . $terminalLabel . ' wiederherstellen') . '">Wiederherstellen</button></form></div></td></tr>';
+                continue;
+            }
             $rows .= '<tr><td>'
                 . '<form method="post" action="/admin/terminals/' . $id . '" class="terminal-row-form">'
                 . '<input type="hidden" name="csrf_token" value="' . $csrfToken . '">'
@@ -260,37 +297,169 @@ HTML;
         return '<div class="table-scroll"><table><thead><tr><th>Terminal</th></tr></thead><tbody>' . $rows . '</tbody></table></div>';
     }
 
-    private function tagTable(array $tags, array $users, array $projects, string $csrfToken): string
+    private function tagTable(array $tags, array $users, array $projects, string $csrfToken, string $scope): string
     {
-        if ($tags === []) {
-            return '<p class="table-empty">Noch keine NFC-Tags erfasst.</p>';
-        }
-
         $rows = '';
+        $archived = $scope === 'archived';
 
         foreach ($tags as $tag) {
             $id = (int) ($tag['id'] ?? 0);
-            $deleted = (int) ($tag['is_deleted'] ?? 0) === 1;
-            $rows .= '<tr>'
-                . '<td>' . $this->e((string) ($tag['uid_masked'] ?? '')) . '<br><span class="muted">' . $this->e((string) ($tag['learned_terminal_name'] ?? '')) . '</span></td>'
-                . '<td><form method="post" action="/admin/terminals/tags/' . $id . '" class="stack">'
-                . '<input type="hidden" name="csrf_token" value="' . $csrfToken . '">'
-                . '<label><span>Label</span><input name="label" value="' . $this->e((string) ($tag['label'] ?? '')) . '" placeholder="Buerotag Max"></label>'
-                . '<label><span>User</span>' . $this->userSelect('user_id', isset($tag['user_id']) ? (int) $tag['user_id'] : null, $users) . '</label>'
-                . '<label><span>Projekt</span>' . $this->projectSelect('project_id', isset($tag['project_id']) ? (int) $tag['project_id'] : null, $projects, true) . '</label>'
-                . '<label><span>Status</span><select name="status">' . $this->statusOptions((string) ($tag['status'] ?? 'pending')) . '</select></label>'
-                . '<button class="button" type="submit">Speichern</button></form><div class="table-actions">'
-                . ($deleted ? '<span class="badge warn">Archiviert</span>' : '<form method="post" action="/admin/terminals/tags/' . $id . '/archive"><input type="hidden" name="csrf_token" value="' . $csrfToken . '"><button class="button button-danger" type="submit">Archivieren</button></form>')
-                . '</div></td>'
+            $pending = (string) ($tag['status'] ?? '') === 'pending';
+            $rowData = $this->tagRowData($tag);
+            $editUrl = '/admin/terminals?' . http_build_query(['scope' => $scope, 'tag_id' => $id, 'modal' => 'edit']);
+            $status = $archived
+                ? '<span class="badge warn">Archiviert</span>'
+                : $this->tagStatusBadge((string) ($tag['status'] ?? 'pending'));
+            $reuseHint = !$archived && trim((string) ($tag['relearned_from_archive_at'] ?? '')) !== ''
+                ? '<br><span class="badge warn">Bereits verwendet</span>'
+                : '';
+            $userLabel = trim((string) ($tag['employee_number'] ?? '') . ' ' . (string) ($tag['user_name'] ?? ''));
+            $projectLabel = trim((string) ($tag['project_number'] ?? '') . ' ' . (string) ($tag['project_name'] ?? ''));
+            $learnedAt = (string) ($tag['learned_at'] ?? '');
+            $rowClasses = 'terminal-tag-row' . ($pending && !$archived ? ' has-terminal-tag-issue' : '');
+            $actions = $archived
+                ? '<span class="badge warn">Archiviert</span>'
+                : '<a class="button button-secondary" data-terminal-tag-open aria-haspopup="dialog" href="' . $this->e($editUrl) . '">Bearbeiten</a>';
+            $openable = $archived ? '' : ' data-terminal-tag-openable="1" tabindex="0"';
+
+            $rows .= '<tr class="' . $rowClasses . '"' . ($archived ? '' : ' data-terminal-tag-row data-terminal-tag="' . $this->dataJson($rowData) . '"') . $openable . '>'
+                . '<td><strong>' . $this->e((string) ($tag['uid_masked'] ?? '')) . '</strong></td>'
+                . '<td>' . ($this->e((string) ($tag['label'] ?? '')) ?: '<span class="muted">Nicht benannt</span>') . '</td>'
+                . '<td>' . $status . $reuseHint . '</td>'
+                . '<td>' . ($this->e($userLabel) ?: '<span class="muted">Nicht zugeordnet</span>') . '</td>'
+                . '<td>' . ($this->e($projectLabel) ?: '<span class="muted">Kein Projekt</span>') . '</td>'
+                . '<td>' . ($this->e((string) ($tag['learned_terminal_name'] ?? 'Unbekannt')) . ($learnedAt !== '' ? '<br><span class="muted">' . $this->e($learnedAt) . '</span>' : '')) . '</td>'
+                . '<td class="table-actions" data-search="false" data-sort="false">' . $actions . '</td>'
                 . '</tr>';
         }
 
-        return '<div class="table-scroll"><table><thead><tr><th>Tag</th><th>Zuordnung</th></tr></thead><tbody>' . $rows . '</tbody></table></div>';
+        $empty = $archived ? 'Keine archivierten NFC-Tags vorhanden.' : 'Noch keine aktuellen NFC-Tags erfasst.';
+        $body = $rows !== '' ? $rows : '<tr><td colspan="7" class="table-empty">' . $empty . '</td></tr>';
+
+        return '<div class="table-scroll"><table class="terminal-tag-table" data-admin-table="terminal-tags" data-table-label="NFC-Tags" data-table-search-placeholder="UID, Label, Mitarbeiter, Projekt, Status"><thead><tr><th>Tag</th><th>Label</th><th>Status</th><th>Mitarbeiter</th><th>Projekt</th><th>Angelernt</th><th data-search="false" data-sort="false">Aktionen</th></tr></thead><tbody>' . $body . '</tbody></table></div>';
     }
 
-    private function userSelect(string $name, ?int $selectedId, array $users): string
+    private function tagModal(array $tags, array $users, array $projects, string $csrfToken, string $scope, Request $request): string
     {
-        $html = '<select name="' . $this->e($name) . '"><option value="">User waehlen</option>';
+        if ($scope === 'archived') {
+            return '';
+        }
+
+        $selectedId = (int) $request->query('tag_id', 0);
+        $selected = null;
+
+        if ($selectedId > 0 && (string) $request->query('modal', '') === 'edit') {
+            foreach ($tags as $tag) {
+                if ((int) ($tag['id'] ?? 0) === $selectedId) {
+                    $selected = $tag;
+                    break;
+                }
+            }
+        }
+
+        $hidden = $selected === null ? ' hidden' : '';
+        $ariaHidden = $selected === null ? 'true' : 'false';
+        $id = (int) ($selected['id'] ?? 0);
+        $uid = $this->e((string) ($selected['uid_masked'] ?? '-'));
+        $terminal = $this->e((string) ($selected['learned_terminal_name'] ?? 'Unbekannt'));
+        $learnedAt = $this->e((string) ($selected['learned_at'] ?? 'Nicht bekannt'));
+        $status = $this->tagStatusBadge((string) ($selected['status'] ?? 'pending'));
+        $relearnedAt = trim((string) ($selected['relearned_from_archive_at'] ?? ''));
+        $relearnWarning = '<p id="terminalTagModalReuseWarning" class="notice warn" role="status" data-terminal-tag-modal-relearn-warning' . ($relearnedAt === '' ? ' hidden' : '') . '>Dieser NFC-Tag war bereits archiviert und wurde am <strong data-terminal-tag-modal-relearned-at>' . $this->e($relearnedAt !== '' ? $relearnedAt : '-') . '</strong> erneut angelernt. Zuordnung, Projekt und Status bitte bewusst prüfen.</p>';
+        $relearnDescribedBy = $relearnedAt !== '' ? ' aria-describedby="terminalTagModalReuseWarning"' : '';
+        $disabled = '';
+        $save = '<button class="button" type="submit">Speichern</button>';
+        $archiveAction = $id > 0 ? '/admin/terminals/tags/' . $id . '/archive' : '';
+        $archiveHidden = $id > 0 ? '' : ' hidden';
+        $archive = '<div class="admin-modal__divider" data-terminal-tag-archive-section' . $archiveHidden . '></div><form method="post" action="' . $archiveAction . '" data-terminal-tag-archive-form class="admin-modal__danger-actions"' . $archiveHidden . '><input type="hidden" name="csrf_token" value="' . $csrfToken . '"><input type="hidden" name="scope" value="' . $this->e($scope) . '"><p class="muted">Archivierte Tags werden aus der Standardansicht ausgeblendet und sind nicht mehr terminaltauglich.</p><button class="button button-danger" type="submit" data-terminal-tag-archive-button onclick="return confirm(\'NFC-Tag wirklich archivieren?\')">Tag archivieren</button></form>';
+
+        return '<div class="admin-modal" data-terminal-tag-modal' . $hidden . ' aria-hidden="' . $ariaHidden . '">'
+            . '<div class="admin-modal__overlay" data-terminal-tag-modal-close></div>'
+            . '<div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="terminalTagModalTitle"' . $relearnDescribedBy . '>'
+            . '<div class="admin-modal__header"><div><p class="eyebrow">NFC-Tag</p><h2 id="terminalTagModalTitle">Tag bearbeiten</h2><p class="muted" data-terminal-tag-modal-status>' . $status . '</p></div><a href="/admin/terminals" class="button button-secondary admin-modal__close" data-terminal-tag-modal-close>Schliessen</a></div>'
+            . '<div class="admin-modal__summary"><div class="admin-modal__summary-card"><span class="muted">Maskierte UID</span><strong data-terminal-tag-modal-uid>' . $uid . '</strong></div><div class="admin-modal__summary-card"><span class="muted">Angelernt am Terminal</span><strong data-terminal-tag-modal-terminal>' . $terminal . '</strong><span class="muted" data-terminal-tag-modal-learned-at>' . $learnedAt . '</span></div></div>'
+            . $relearnWarning
+            . '<form method="post" action="' . ($id > 0 ? '/admin/terminals/tags/' . $id : '') . '" data-terminal-tag-update-form class="stack"><input type="hidden" name="csrf_token" value="' . $csrfToken . '"><input type="hidden" name="scope" value="' . $this->e($scope) . '"><div class="form-grid"><label><span>Label</span><input name="label" value="' . $this->e((string) ($selected['label'] ?? '')) . '" placeholder="Buerotag Max"' . $disabled . '></label><label><span>User</span>' . $this->userSelect('user_id', isset($selected['user_id']) ? (int) $selected['user_id'] : null, $users) . '</label><label><span>Projekt</span>' . $this->projectSelect('project_id', isset($selected['project_id']) ? (int) $selected['project_id'] : null, $projects, true) . '</label><label><span>Status</span><select name="status"' . $disabled . '>' . $this->statusOptions((string) ($selected['status'] ?? 'pending')) . '</select></label></div><div class="table-actions">' . $save . '</div></form>' . $archive
+            . '</div></div>';
+    }
+
+    private function tagRowData(array $tag): array
+    {
+        return [
+            'id' => (int) ($tag['id'] ?? 0),
+            'uid_masked' => (string) ($tag['uid_masked'] ?? ''),
+            'label' => (string) ($tag['label'] ?? ''),
+            'user_id' => $tag['user_id'] ?? null,
+            'project_id' => $tag['project_id'] ?? null,
+            'status' => (string) ($tag['status'] ?? 'pending'),
+            'learned_terminal_name' => (string) ($tag['learned_terminal_name'] ?? ''),
+            'learned_at' => (string) ($tag['learned_at'] ?? ''),
+            'relearned_from_archive_at' => (string) ($tag['relearned_from_archive_at'] ?? ''),
+            'is_deleted' => (int) ($tag['is_deleted'] ?? 0),
+        ];
+    }
+
+    private function tagStatusBadge(string $status): string
+    {
+        return match ($status) {
+            'active' => '<span class="badge ok">Aktiv</span>',
+            'disabled' => '<span class="badge warn">Gesperrt</span>',
+            default => '<span class="badge warn">Konfiguration erforderlich</span>',
+        };
+    }
+
+    private function tagScope(Request $request): string
+    {
+        return (string) $request->query('scope', '') === 'archived' ? 'archived' : 'active';
+    }
+
+    private function terminalScope(Request $request): string
+    {
+        return (string) $request->query('terminal_scope', '') === 'archived' ? 'archived' : 'active';
+    }
+
+    private function terminalHeading(string $scope): string
+    {
+        return $scope === 'archived' ? 'Archivierte Terminals' : 'Terminals';
+    }
+
+    private function tagScopeFromInput(Request $request): string
+    {
+        return (string) $request->input('scope', '') === 'archived' ? 'archived' : 'active';
+    }
+
+    private function tagRedirect(string $notice, string $scope): string
+    {
+        $query = ['notice' => $notice];
+        if ($scope === 'archived') {
+            $query['scope'] = 'archived';
+        }
+
+        return '/admin/terminals?' . http_build_query($query);
+    }
+
+    private function pendingTagHeading(int $count): string
+    {
+        if ($count <= 0) {
+            return '';
+        }
+
+        return ' <span class="badge warn">' . $count . ' offen</span>';
+    }
+
+    private function scopeClass(string $scope, string $expected): string
+    {
+        return $scope === $expected ? ' is-active' : '';
+    }
+
+    private function dataJson(array $data): string
+    {
+        return $this->e((string) json_encode($data, JSON_THROW_ON_ERROR));
+    }
+
+    private function userSelect(string $name, ?int $selectedId, array $users, bool $disabled = false): string
+    {
+        $html = '<select name="' . $this->e($name) . '"' . ($disabled ? ' disabled' : '') . '><option value="">User waehlen</option>';
 
         foreach ($users as $user) {
             $label = trim((string) ($user['employee_number'] ?? '') . ' ' . (string) ($user['first_name'] ?? '') . ' ' . (string) ($user['last_name'] ?? ''));
@@ -300,9 +469,9 @@ HTML;
         return $html . '</select>';
     }
 
-    private function projectSelect(string $name, ?int $selectedId, array $projects, bool $allowEmpty): string
+    private function projectSelect(string $name, ?int $selectedId, array $projects, bool $allowEmpty, bool $disabled = false): string
     {
-        $html = '<select name="' . $this->e($name) . '">';
+        $html = '<select name="' . $this->e($name) . '"' . ($disabled ? ' disabled' : '') . '>';
 
         if ($allowEmpty) {
             $html .= '<option value="">Kein Projekt</option>';
@@ -352,6 +521,7 @@ HTML;
             'created' => '<p class="notice success">Terminal wurde angelegt.</p>',
             'updated' => '<p class="notice success">Terminal wurde gespeichert.</p>',
             'archived' => '<p class="notice success">Terminal wurde archiviert.</p>',
+            'restored' => '<p class="notice success">Terminal wurde wiederhergestellt.</p>',
             'token-reset' => '<p class="notice success">Token wurde erneuert.</p>',
             'learn-started' => '<p class="notice success">Anlernmodus ist fuer 2 Minuten aktiv. Bitte NFC-Tag am Terminal vorhalten.</p>',
             'tag-updated' => '<p class="notice success">NFC-Tag wurde gespeichert.</p>',

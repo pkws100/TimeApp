@@ -171,20 +171,27 @@ final class TerminalPunchService
 
     private function learningResponse(array $tag): array
     {
+        $wasRelearned = trim((string) ($tag['relearned_from_archive_at'] ?? '')) !== '';
+
         return [
             'ok' => true,
             'action' => 'learn',
-            'message' => 'NFC-Tag erfasst.',
+            'message' => $wasRelearned
+                ? 'Bereits verwendeter NFC-Tag erneut erfasst. Im Admin konfigurieren.'
+                : 'NFC-Tag erfasst.',
             'display' => [
-                'lines' => $this->lcdLines(['Tag erfasst', (string) ($tag['uid_masked'] ?? ''), 'Im Admin', 'zuordnen']),
+                'lines' => $this->lcdLines($wasRelearned
+                    ? ['Tag reaktiviert', 'Bisher verwendet', 'Im Admin', 'pruefen']
+                    : ['Tag erfasst', (string) ($tag['uid_masked'] ?? ''), 'Im Admin', 'zuordnen']),
                 'hold_ms' => 15000,
             ],
-            'signal' => ['led' => 'green', 'beep' => 'success'],
+            'signal' => ['led' => $wasRelearned ? 'yellow' : 'green', 'beep' => 'success'],
             'server_time' => $this->serverTime(),
             'tag' => [
                 'id' => (int) ($tag['id'] ?? 0),
                 'uid_masked' => (string) ($tag['uid_masked'] ?? ''),
                 'status' => (string) ($tag['status'] ?? 'pending'),
+                'relearned_from_archive' => $wasRelearned,
             ],
         ];
     }

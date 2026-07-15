@@ -79,8 +79,8 @@ Core-Extensions bereits mit, darunter `dom`, `SimpleXML`, `xml`, `xmlreader`,
 erneut im Dockerfile kompilieren, weil das bei XML/DOM zu Build-Fehlern wie
 `fatal error: ext/dom/dom_ce.h: No such file or directory` fuehren kann.
 
-Das Dockerfile baut aktuell nur die fehlenden Extensions `gd`, `pdo_mysql` und
-`zip`.
+Das Dockerfile baut aktuell nur die fehlenden Extensions `gd` (inklusive JPEG-,
+PNG- und WebP-Unterstuetzung), `pdo_mysql` und `zip`.
 
 ## Start
 

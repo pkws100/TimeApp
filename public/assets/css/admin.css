@@ -662,6 +662,24 @@ th {
     outline-offset: -2px;
 }
 
+.terminal-tag-row[data-terminal-tag-openable="1"] {
+    cursor: pointer;
+}
+
+.terminal-tag-row[data-terminal-tag-openable="1"]:hover td,
+.terminal-tag-row[data-terminal-tag-openable="1"]:focus-visible td {
+    background: var(--page-surface-soft);
+}
+
+.terminal-tag-row[data-terminal-tag-openable="1"]:focus-visible {
+    outline: 2px solid var(--page-accent);
+    outline-offset: -2px;
+}
+
+.terminal-tag-row.has-terminal-tag-issue td:first-child {
+    box-shadow: inset 4px 0 0 var(--page-warn);
+}
+
 th.is-sorted-asc .admin-table-sort__indicator::before {
     content: "^";
 }
@@ -847,6 +865,20 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
 
 .status-card p {
     margin: 0.3rem 0;
+}
+
+.status-card__actions {
+    display: flex;
+    align-items: center;
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--page-line);
+}
+
+.status-card__actions .button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .status-value {
@@ -1584,6 +1616,23 @@ html[data-theme="dark"] .booking-card.has-booking-issue {
     min-height: 220px;
     background: var(--canvas-bg);
     border-radius: 1rem;
+}
+
+/* Chart.js needs a bounded parent when it manages a responsive canvas. */
+.attendance-status-chart {
+    position: relative;
+    height: clamp(220px, 32vw, 320px);
+}
+
+.attendance-status-chart canvas {
+    display: block;
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 0;
+}
+
+.attendance-status-chart canvas[hidden] {
+    display: none !important;
 }
 
 .calendar-shell {

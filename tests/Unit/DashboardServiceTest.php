@@ -100,6 +100,7 @@ final class DashboardServiceTest extends TestCase
         self::assertSame(0, $overview['metrics']['abwesend']);
         self::assertSame([], $overview['allocations']);
         self::assertSame([], $overview['absences']);
+        self::assertSame([], $overview['attendance_chart']);
         self::assertSame([], $overview['contacts']);
         self::assertSame(0, $overview['periods']['day']['entries']);
         self::assertSame(0.0, $overview['periods']['day']['hours']);

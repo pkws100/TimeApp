@@ -32,3 +32,9 @@ und werden nicht mit der Produktionsanwendung ausgeliefert.
 Leaflet 1.9.4 liegt unter `public/assets/vendor/leaflet/` als vendored Browser-
 Asset im Repository. Die lokale Lizenznotiz befindet sich unter
 `public/assets/vendor/leaflet/LICENSE`.
+
+Chart.js 4.4.7 liegt als lokales Browser-Asset unter
+`public/assets/vendor/chart.umd.js`. Die vollständigen MIT-Lizenztexte für
+Chart.js und dessen ausgelieferte Abhängigkeit `@kurkle/color` befinden sich
+unter `public/assets/vendor/chart.js-LICENSE` bzw.
+`public/assets/vendor/kurkle-color-LICENSE`.

@@ -10,6 +10,7 @@ use App\Domain\Personnel\PersonnelEventService;
 use App\Domain\Personnel\PersonnelLabelService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Settings\CompanySettingsService;
+use App\Domain\Terminals\NfcTagService;
 use App\Domain\Timesheets\TimesheetGeoLocationService;
 use App\Domain\Timesheets\TimesheetSignatureService;
 use App\Domain\Timesheets\WorkdayStateCalculator;
@@ -28,7 +29,8 @@ final class MobileAppService
         private ?CalendarPolicyService $calendarPolicyService = null,
         private ?TimesheetSignatureService $signatureService = null,
         private ?PersonnelEventService $personnelEventService = null,
-        private ?PersonnelLabelService $personnelLabelService = null
+        private ?PersonnelLabelService $personnelLabelService = null,
+        private ?NfcTagService $nfcTagService = null
     ) {
     }
 
@@ -111,7 +113,22 @@ final class MobileAppService
             ],
             'personnel_events' => $showPersonnelOverview ? $this->personnelEventsForUser((int) ($user['id'] ?? 0)) : [],
             'personnel_labels' => $showPersonnelOverview ? $this->personnelLabelsForUser((int) ($user['id'] ?? 0)) : [],
+            'nfc_tags' => $this->nfcTagsForUser((int) ($user['id'] ?? 0)),
         ];
+    }
+
+    /** @return list<array{uid_masked: string, label: string, status: string}> */
+    private function nfcTagsForUser(int $userId): array
+    {
+        if (!$this->nfcTagService instanceof NfcTagService || $userId <= 0) {
+            return [];
+        }
+
+        return array_map(static fn (array $tag): array => [
+            'uid_masked' => (string) ($tag['uid_masked'] ?? ''),
+            'label' => (string) ($tag['label'] ?? ''),
+            'status' => (string) ($tag['status'] ?? 'pending'),
+        ], $this->nfcTagService->listForUser($userId));
     }
 
     private function personnelEventsForUser(int $userId): array

@@ -43,6 +43,7 @@ final class AttendanceService
                     users.first_name,
                     users.last_name,
                     users.email,
+                    users.employment_status,
                     users.is_deleted AS user_is_deleted,
                     projects.name AS project_name,
                     COALESCE(projects.is_deleted, 0) AS project_is_deleted
@@ -65,48 +66,111 @@ final class AttendanceService
 
     public function presentCount(?string $today = null): int
     {
-        return (int) $this->todaySummary($today)['present_count'];
+        return (int) $this->todaySummary($today)['currently_present_count'];
     }
 
     public function summarizeRows(array $rows, string $today, array $activeUsers = []): array
     {
-        $present = [];
+        $currentlyPresent = [];
+        $legacyPresent = [];
+        $completed = [];
         $statuses = [];
-        $seenUsers = [];
+        $workRowsByUser = [];
+        $latestAbsenceRows = [];
+        $archivedUsers = [];
+        $legacySeenUsers = [];
         $usersWithStatus = [];
+        $activeUserIds = [];
+
+        foreach ($activeUsers as $activeUser) {
+            $activeUserId = (int) ($activeUser['id'] ?? 0);
+            if ($activeUserId > 0) {
+                $activeUserIds[$activeUserId] = true;
+            }
+        }
 
         foreach ($rows as $row) {
             $userId = (int) ($row['user_id'] ?? 0);
 
-            if ($userId <= 0 || isset($seenUsers[$userId])) {
+            if ($userId <= 0 || isset($archivedUsers[$userId])) {
                 continue;
             }
 
             if ((int) ($row['user_is_deleted'] ?? 0) === 1) {
-                $seenUsers[$userId] = true;
+                $archivedUsers[$userId] = true;
+                unset($workRowsByUser[$userId], $latestAbsenceRows[$userId], $legacySeenUsers[$userId], $legacyPresent[$userId]);
 
                 continue;
             }
 
-            $seenUsers[$userId] = true;
-            $usersWithStatus[$userId] = true;
             $entryType = $this->semanticEntryType($row);
-            $mapped = $this->mapRow($row);
+
+            // The legacy V1 fields intentionally retain their former meaning,
+            // including historical rows of users who have since become inactive.
+            if (!isset($legacySeenUsers[$userId])) {
+                $legacySeenUsers[$userId] = true;
+
+                if ($entryType === 'work') {
+                    $legacyPresent[$userId] = $this->mapRow($row);
+                }
+            }
+
+            if ($activeUserIds !== [] && !isset($activeUserIds[$userId])) {
+                continue;
+            }
+
+            if (array_key_exists('employment_status', $row) && (string) $row['employment_status'] !== 'active') {
+                continue;
+            }
+
+            $usersWithStatus[$userId] = true;
 
             if ($entryType === 'work') {
-                $present[] = $mapped;
+                $workRowsByUser[$userId][] = $row;
 
                 continue;
             }
 
-            if (in_array($entryType, self::ABSENCE_TYPES, true)) {
-                $statuses[] = [
-                    ...$mapped,
+            if (in_array($entryType, self::ABSENCE_TYPES, true) && !isset($latestAbsenceRows[$userId])) {
+                $latestAbsenceRows[$userId] = [
+                    'row' => $row,
                     'entry_type' => $entryType,
-                    'is_derived' => false,
-                    'status_source' => 'stored',
                 ];
             }
+        }
+
+        foreach ($workRowsByUser as $userId => $workRows) {
+            $openWorkRows = array_values(array_filter(
+                $workRows,
+                fn (array $workRow): bool => $this->hasStartTime($workRow) && !$this->hasEndTime($workRow)
+            ));
+            $completedWorkRows = array_values(array_filter(
+                $workRows,
+                fn (array $workRow): bool => $this->hasStartTime($workRow) && $this->hasEndTime($workRow)
+            ));
+
+            if ($openWorkRows !== []) {
+                $currentlyPresent[] = $this->mapRow($openWorkRows[0]);
+
+                continue;
+            }
+
+            if ($completedWorkRows !== []) {
+                $completed[] = $this->completedWorkday($completedWorkRows);
+            }
+        }
+
+        foreach ($latestAbsenceRows as $userId => $absence) {
+            if (isset($workRowsByUser[$userId])) {
+                continue;
+            }
+
+            $statuses[] = [
+                ...$this->mapRow($absence['row']),
+                'entry_type' => $absence['entry_type'],
+                'is_derived' => false,
+                'status_source' => 'stored',
+            ];
         }
 
         foreach ($this->derivedMissingStatuses($activeUsers, $usersWithStatus, $today) as $missingStatus) {
@@ -117,15 +181,22 @@ final class AttendanceService
             $statuses,
             static fn (array $status): bool => (string) ($status['status_source'] ?? '') === 'derived_missing'
         ));
+        $statusCounts = $this->statusCounts($statuses);
 
         return [
             'today' => $today,
             'calendar_policy' => $this->dayPolicy($today),
-            'present_count' => count($present),
-            'present' => $present,
-            'status_counts' => $this->statusCounts($statuses),
+            // Keep the original API fields stable for existing integrations.
+            'present_count' => count($legacyPresent),
+            'present' => array_values($legacyPresent),
+            'currently_present_count' => count($currentlyPresent),
+            'currently_present' => $currentlyPresent,
+            'completed_count' => count($completed),
+            'completed' => $completed,
+            'status_counts' => $statusCounts,
             'derived_missing_count' => $derivedMissingCount,
             'statuses' => $statuses,
+            'chart' => $this->chartSummary($currentlyPresent, $completed, $statuses, $activeUsers, $statusCounts),
         ];
     }
 
@@ -142,7 +213,7 @@ final class AttendanceService
 
     private function fallbackSummary(string $today): array
     {
-        $present = [
+        $completed = [
             [
                 'user_id' => 1,
                 'employee_number' => 'MA-0001',
@@ -174,14 +245,21 @@ final class AttendanceService
             ],
         ];
 
+        $statusCounts = $this->statusCounts($statuses);
+
         return [
             'today' => $today,
             'calendar_policy' => $this->dayPolicy($today),
-            'present_count' => count($present),
-            'present' => $present,
-            'status_counts' => $this->statusCounts($statuses),
+            'present_count' => count($completed),
+            'present' => $completed,
+            'currently_present_count' => 0,
+            'currently_present' => [],
+            'completed_count' => count($completed),
+            'completed' => $completed,
+            'status_counts' => $statusCounts,
             'derived_missing_count' => 0,
             'statuses' => $statuses,
+            'chart' => $this->chartSummary([], $completed, $statuses, [], $statusCounts),
         ];
     }
 
@@ -297,6 +375,60 @@ final class AttendanceService
         ];
     }
 
+    private function completedWorkday(array $workRows): array
+    {
+        $latestRow = $workRows[0];
+        $firstStart = null;
+        $lastEnd = null;
+        $netMinutes = 0;
+
+        foreach ($workRows as $workRow) {
+            $startTime = $this->nullableTrimmed($workRow['start_time'] ?? null);
+            $endTime = $this->nullableTrimmed($workRow['end_time'] ?? null);
+
+            if ($startTime !== null && ($firstStart === null || $startTime < $firstStart)) {
+                $firstStart = $startTime;
+            }
+
+            if ($endTime !== null && ($lastEnd === null || $endTime > $lastEnd || ($endTime === $lastEnd && $this->isLaterUpdatedRow($workRow, $latestRow)))) {
+                $lastEnd = $endTime;
+                $latestRow = $workRow;
+            }
+
+            $netMinutes += max(0, (int) ($workRow['net_minutes'] ?? 0));
+        }
+
+        return [
+            ...$this->mapRow($latestRow),
+            'start_time' => $firstStart,
+            'end_time' => $lastEnd,
+            'net_minutes' => $netMinutes,
+            'work_entry_count' => count($workRows),
+        ];
+    }
+
+    private function hasEndTime(array $row): bool
+    {
+        return $this->nullableTrimmed($row['end_time'] ?? null) !== null;
+    }
+
+    private function hasStartTime(array $row): bool
+    {
+        return $this->nullableTrimmed($row['start_time'] ?? null) !== null;
+    }
+
+    private function isLaterUpdatedRow(array $candidate, array $current): bool
+    {
+        $candidateUpdatedAt = (string) ($candidate['updated_at'] ?? '');
+        $currentUpdatedAt = (string) ($current['updated_at'] ?? '');
+
+        if ($candidateUpdatedAt !== $currentUpdatedAt) {
+            return $candidateUpdatedAt > $currentUpdatedAt;
+        }
+
+        return (int) ($candidate['id'] ?? 0) > (int) ($current['id'] ?? 0);
+    }
+
     private function statusCounts(array $statuses): array
     {
         $counts = [
@@ -315,6 +447,39 @@ final class AttendanceService
         }
 
         return $counts;
+    }
+
+    private function chartSummary(array $currentlyPresent, array $completed, array $statuses, array $activeUsers, array $statusCounts): array
+    {
+        $knownUsers = [];
+
+        foreach ([$currentlyPresent, $completed, $statuses] as $group) {
+            foreach ($group as $person) {
+                $userId = (int) ($person['user_id'] ?? 0);
+                if ($userId > 0) {
+                    $knownUsers[$userId] = true;
+                }
+            }
+        }
+
+        $workforceCount = $activeUsers === [] ? count($knownUsers) : count($activeUsers);
+        $unreportedCount = max(0, $workforceCount - count($knownUsers));
+        $preventedCount = array_sum($statusCounts);
+        $currentlyPresentCount = count($currentlyPresent);
+
+        return [
+            'workforce_count' => $workforceCount,
+            'currently_present_count' => $currentlyPresentCount,
+            'completed_count' => count($completed),
+            'sick_count' => (int) ($statusCounts['sick'] ?? 0),
+            'vacation_count' => (int) ($statusCounts['vacation'] ?? 0),
+            'holiday_count' => (int) ($statusCounts['holiday'] ?? 0),
+            'absent_count' => (int) ($statusCounts['absent'] ?? 0),
+            'unreported_count' => $unreportedCount,
+            'prevented_count' => $preventedCount,
+            'readiness_percent' => $workforceCount > 0 ? round(($currentlyPresentCount / $workforceCount) * 100, 1) : null,
+            'prevented_percent' => $workforceCount > 0 ? round(($preventedCount / $workforceCount) * 100, 1) : null,
+        ];
     }
 
     private function userName(array $row): string

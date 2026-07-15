@@ -24,6 +24,20 @@ final class AdminController
     {
         $overview = $this->dashboardService->overview();
         $messageClass = $overview['status'] === 'database' ? 'info' : 'warn';
+        $attendanceChart = is_array($overview['attendance_chart'] ?? null) ? $overview['attendance_chart'] : [];
+        $attendanceChartRows = $this->attendanceChartRows($attendanceChart);
+        $attendanceChartPayload = $this->attendanceChartPayload($attendanceChartRows);
+        $attendanceChartStatusRows = '';
+
+        foreach ($attendanceChartRows as $attendanceChartRow) {
+            $attendanceChartStatusRows .= '<li>' . $this->escape($attendanceChartRow['label']) . ': <strong>'
+                . $this->escape((string) $attendanceChartRow['value']) . '</strong></li>';
+        }
+
+        $workforceCount = (int) ($attendanceChart['workforce_count'] ?? 0);
+        $currentlyPresentCount = (int) ($attendanceChart['currently_present_count'] ?? 0);
+        $readinessPercent = $this->percentLabel($attendanceChart['readiness_percent'] ?? null);
+        $preventedPercent = $this->percentLabel($attendanceChart['prevented_percent'] ?? null);
         $cards = '';
 
         foreach ($overview['metrics'] as $label => $value) {
@@ -87,17 +101,38 @@ final class AdminController
     </article>
 </section>
 
+<section class="grid split">
+    <article class="card chart-card">
+        <h2>Belegschaft heute</h2>
+        <div class="attendance-status-chart"><canvas id="attendanceStatusChart" aria-label="Kreisdiagramm zum heutigen Belegschaftsstatus" aria-describedby="attendanceStatusChartDescription" role="img"></canvas></div>
+        <p id="attendanceStatusChartFallback" class="muted">Das Kreisdiagramm wird mit JavaScript geladen. Die vollständige Statusübersicht steht unten.</p>
+        <noscript><p class="notice info">Das Kreisdiagramm benötigt JavaScript. Die vollständige Statusübersicht ist unten aufgeführt.</p></noscript>
+        <h3>Statusverteilung</h3>
+        <ul id="attendanceStatusChartDescription" class="list attendance-chart-summary">{$attendanceChartStatusRows}</ul>
+    </article>
+    <article class="card status-card">
+        <h2>Einsatzbereitschaft</h2>
+        <p class="status-value">{$this->escape($readinessPercent)}</p>
+        <p>aktuell eingecheckt: {$this->escape((string) $currentlyPresentCount)} von {$this->escape((string) $workforceCount)} aktiven Mitarbeitern</p>
+        <h3>Verhindert</h3>
+        <p class="status-value">{$this->escape($preventedPercent)}</p>
+        <p>Krank, Urlaub, Feiertag oder fehlt. Bereits ausgecheckte Mitarbeiter sind als eigener Status im Diagramm enthalten.</p>
+        <div class="status-card__actions"><a class="button button-secondary" href="/admin/attendance">Anwesenheit öffnen</a></div>
+    </article>
+</section>
+
+<script id="attendanceStatusChartData" type="application/json">{$attendanceChartPayload}</script>
+
 <section class="grid cards">
     {$periods}
-    <article class="card chart-card">
-        <h2>Live-Daten Grafik</h2>
-        <canvas id="headcountChart" aria-label="Anwesenheitschart"></canvas>
-        <p class="muted">Die Grafik nutzt <code>/api/v1/dashboard/charts</code> als Live-Datenquelle. Ohne lokal eingebundenes Chart.js zeigt der Fallback den aktuellen Datenstatus an.</p>
-    </article>
 </section>
 HTML;
 
-        return Response::html($this->view->render('Dashboard', $content));
+        return Response::html($this->view->render(
+            'Dashboard',
+            $content,
+            '<script src="/assets/vendor/chart.umd.js"></script><script src="/assets/js/admin-attendance.js"></script>'
+        ));
     }
 
     public function databaseSettings(Request $request): Response
@@ -201,5 +236,41 @@ HTML;
     private function escape(string $value): string
     {
         return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+    }
+
+    /**
+     * @return list<array{label: string, value: int}>
+     */
+    private function attendanceChartRows(array $chart): array
+    {
+        return [
+            ['label' => 'Noch da', 'value' => (int) ($chart['currently_present_count'] ?? 0)],
+            ['label' => 'Heute gegangen', 'value' => (int) ($chart['completed_count'] ?? 0)],
+            ['label' => 'Krank', 'value' => (int) ($chart['sick_count'] ?? 0)],
+            ['label' => 'Urlaub', 'value' => (int) ($chart['vacation_count'] ?? 0)],
+            ['label' => 'Feiertag', 'value' => (int) ($chart['holiday_count'] ?? 0)],
+            ['label' => 'Fehlt', 'value' => (int) ($chart['absent_count'] ?? 0)],
+            ['label' => 'Ohne Tagesstatus', 'value' => (int) ($chart['unreported_count'] ?? 0)],
+        ];
+    }
+
+    /**
+     * @param list<array{label: string, value: int}> $chartRows
+     */
+    private function attendanceChartPayload(array $chartRows): string
+    {
+        return json_encode([
+            'labels' => array_column($chartRows, 'label'),
+            'data' => array_column($chartRows, 'value'),
+        ], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_THROW_ON_ERROR);
+    }
+
+    private function percentLabel(mixed $value): string
+    {
+        if (!is_numeric($value)) {
+            return '–';
+        }
+
+        return number_format((float) $value, 1, ',', '.') . ' %';
     }
 }

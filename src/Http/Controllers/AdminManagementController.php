@@ -13,6 +13,8 @@ use App\Domain\Files\FileAttachmentService;
 use App\Domain\Personnel\PersonnelEventService;
 use App\Domain\Personnel\PersonnelLabelService;
 use App\Domain\Projects\ProjectService;
+use App\Domain\Terminals\NfcTagService;
+use App\Domain\Terminals\TerminalService;
 use App\Domain\Timesheets\AdminBookingService;
 use App\Domain\Timesheets\TimesheetSignatureService;
 use App\Domain\Users\RoleService;
@@ -41,7 +43,9 @@ final class AdminManagementController
         private CsrfService $csrfService,
         private ?TimesheetSignatureService $timesheetSignatureService = null,
         private ?PersonnelLabelService $personnelLabelService = null,
-        private ?PersonnelEventService $personnelEventService = null
+        private ?PersonnelEventService $personnelEventService = null,
+        private ?NfcTagService $nfcTagService = null,
+        private ?TerminalService $terminalService = null
     ) {
     }
 
@@ -496,12 +500,36 @@ final class AdminManagementController
         $selectedLabels = $canViewPersonnel ? ($this->personnelLabelService?->labelsForUser((int) $user['id']) ?? []) : [];
         $events = $canViewPersonnel ? ($this->personnelEventService?->events(['user_id' => (int) $user['id'], 'scope' => 'active']) ?? []) : [];
         $eventTypes = $canManagePersonnel ? ($this->personnelEventService?->eventTypes('active') ?? []) : [];
+        $terminalTags = $this->terminalTagsForUser((int) $user['id']);
+        $freeTerminalTags = $this->freeTerminalTags();
 
         return Response::html($this->view->render(
             'User bearbeiten',
             $this->renderUserForm('/admin/users/' . (int) $user['id'], 'User bearbeiten', $user, $roles, $labels, array_column($selectedLabels, 'id'))
+            . $this->renderUserTerminalTagsSection($user, $terminalTags, $freeTerminalTags)
             . ($canViewPersonnel ? $this->renderUserPersonnelEventsSection($user, $events, $eventTypes, $canManagePersonnel) : '')
         ));
+    }
+
+    public function userAssignTerminalTags(Request $request, array $params): Response
+    {
+        $userId = (int) ($params['id'] ?? 0);
+
+        if (!$this->canManageTerminalTags()) {
+            return Response::html($this->notFoundMarkup('NFC-Tag-Zuordnung'), 403);
+        }
+
+        if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+            return Response::redirect('/admin/users/' . $userId . '/edit?error=' . rawurlencode('csrf'));
+        }
+
+        try {
+            $count = $this->nfcTagService?->assignPendingTagsToUser((array) $request->input('tag_ids', []), $userId) ?? 0;
+
+            return Response::redirect('/admin/users/' . $userId . '/edit?notice=terminal-tags-assigned&count=' . $count);
+        } catch (RuntimeException $exception) {
+            return Response::redirect('/admin/users/' . $userId . '/edit?error=terminal-tags');
+        }
     }
 
     public function userStore(Request $request): Response
@@ -953,6 +981,73 @@ HTML;
 HTML;
     }
 
+    /** @param list<array<string, mixed>> $tags */
+    /** @param list<array<string, mixed>> $freeTags */
+    private function renderUserTerminalTagsSection(array $user, array $tags, array $freeTags): string
+    {
+        if (!$this->canManageTerminalTags()) {
+            return '';
+        }
+
+        $userId = (int) ($user['id'] ?? 0);
+        $rows = '';
+        foreach ($tags as $tag) {
+            $project = trim((string) ($tag['project_number'] ?? '') . ' ' . (string) ($tag['project_name'] ?? ''));
+            $terminal = trim((string) ($tag['learned_terminal_name'] ?? ''));
+            $status = match ((string) ($tag['status'] ?? 'pending')) {
+                'active' => '<span class="badge ok">Aktiv</span>',
+                'disabled' => '<span class="badge warn">Gesperrt</span>',
+                default => '<span class="badge warn">Konfiguration erforderlich</span>',
+            };
+            $rows .= '<tr>'
+                . '<td><strong>' . $this->e((string) ($tag['uid_masked'] ?? '')) . '</strong></td>'
+                . '<td>' . ($this->e((string) ($tag['label'] ?? '')) ?: '<span class="muted">Nicht benannt</span>') . '</td>'
+                . '<td>' . $status . '</td>'
+                . '<td>' . ($this->e($project) ?: '<span class="muted">Kein Projekt</span>') . '</td>'
+                . '<td>' . ($this->e($terminal) ?: '<span class="muted">Unbekannt</span>') . '</td>'
+                . '</tr>';
+        }
+
+        $tagTable = '<div class="table-scroll"><table><thead><tr><th>Tag</th><th>Label</th><th>Status</th><th>Projekt</th><th>Angelernt</th></tr></thead><tbody>'
+            . ($rows !== '' ? $rows : '<tr><td colspan="5" class="table-empty">Diesem User sind noch keine aktuellen NFC-Tags zugeordnet.</td></tr>')
+            . '</tbody></table></div>';
+        $assignableUser = (int) ($user['is_deleted'] ?? 0) === 0 && (string) ($user['employment_status'] ?? 'active') === 'active';
+        $freeOptions = '';
+        foreach ($freeTags as $tag) {
+            $label = trim((string) ($tag['uid_masked'] ?? '') . ' ' . (string) ($tag['label'] ?? '') . ' · ' . (string) ($tag['learned_terminal_name'] ?? 'Unbekanntes Terminal'));
+            $freeOptions .= '<label class="checkbox-item"><input type="checkbox" name="tag_ids[]" value="' . (int) ($tag['id'] ?? 0) . '"> <span>' . $this->e($label) . '</span></label>';
+        }
+        $assignment = !$assignableUser
+            ? '<p class="muted">Freie Tags koennen nur aktiven, nicht archivierten Usern zugeordnet werden.</p>'
+            : ($freeOptions === ''
+            ? '<p class="muted">Keine freien, offenen NFC-Tags vorhanden.</p>'
+            : '<form method="post" action="/admin/users/' . $userId . '/nfc-tags" class="stack"><input type="hidden" name="csrf_token" value="' . $this->e($this->csrfService->token()) . '"><div class="checkbox-grid">' . $freeOptions . '</div><p class="muted">Die Zuordnung aktiviert die Tags nicht. Sie bleiben offen, bis sie in der Terminalverwaltung bewusst konfiguriert und aktiviert werden.</p><div class="table-actions"><button class="button" type="submit">Ausgewählte Tags zuordnen</button></div></form>');
+
+        return '<section class="card stack"><div class="section-toolbar"><div><h2>NFC-Tags</h2><p class="muted">Zugeordnete Tags und freie, noch zu konfigurierende Tags.</p></div><a class="button button-secondary" href="/admin/terminals">Terminalverwaltung</a></div>'
+            . $tagTable
+            . '<div class="admin-modal__divider"></div><div class="stack"><h3>Freie Tags zuordnen</h3>' . $assignment . '</div></section>';
+    }
+
+    /** @return list<array<string, mixed>> */
+    private function terminalTagsForUser(int $userId): array
+    {
+        return $this->canManageTerminalTags() ? ($this->nfcTagService?->listForUser($userId) ?? []) : [];
+    }
+
+    /** @return list<array<string, mixed>> */
+    private function freeTerminalTags(): array
+    {
+        return $this->canManageTerminalTags() ? ($this->nfcTagService?->listFreePending() ?? []) : [];
+    }
+
+    private function canManageTerminalTags(): bool
+    {
+        return $this->nfcTagService instanceof NfcTagService
+            && $this->terminalService instanceof TerminalService
+            && $this->terminalService->featureEnabled()
+            && $this->authService->hasPermission('terminals.manage');
+    }
+
     private function userCreateFailureResponse(array $payload, array $errors): Response
     {
         $roles = $this->roleService->list('active');
@@ -1001,6 +1096,7 @@ HTML;
                     $errors,
                     'Benutzer konnte nicht gespeichert werden.'
                 )
+                . $this->renderUserTerminalTagsSection($existingUser, $this->terminalTagsForUser($userId), $this->freeTerminalTags())
                 . ($canViewPersonnel ? $this->renderUserPersonnelEventsSection($existingUser, $events, $eventTypes, $canManagePersonnel) : '')
             ),
             422
@@ -1690,6 +1786,7 @@ HTML;
                 'validation' => 'Bitte pruefen Sie die Eingaben im Formular.',
                 'booking-validation' => 'Die Buchung konnte nicht nacherfasst werden. Bitte Mitarbeiter, Datum, Zeiten und Begruendung pruefen.',
                 'csrf' => 'Die Sicherheitspruefung ist abgelaufen. Bitte erneut versuchen.',
+                'terminal-tags' => 'Die NFC-Tags konnten nicht zugeordnet werden. Bitte Auswahl und Benutzerstatus pruefen.',
                 default => 'Beim Vorgang ist ein Fehler aufgetreten.',
             };
             $detail = $error === 'file-upload' ? trim((string) $request->query('error_detail', '')) : '';
@@ -1710,6 +1807,7 @@ HTML;
             'booking-created' => 'Buchung erfolgreich nacherfasst.',
             'file-uploaded' => 'Datei erfolgreich zugewiesen.',
             'file-archived' => 'Datei erfolgreich archiviert.',
+            'terminal-tags-assigned' => max(0, (int) $request->query('count', 0)) . ' NFC-Tag(s) wurden offen zugeordnet.',
             default => 'Vorgang erfolgreich ausgefuehrt.',
         };
 

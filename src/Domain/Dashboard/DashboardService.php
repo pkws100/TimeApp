@@ -28,8 +28,10 @@ final class DashboardService
         if ($hasTimesheets && $hasUsers) {
             $attendance = $this->attendanceService->todaySummary($today);
             $allocations = [];
+            $currentlyPresent = $attendance['currently_present'] ?? $attendance['present'];
+            $currentlyPresentCount = (int) ($attendance['currently_present_count'] ?? $attendance['present_count']);
 
-            foreach ($attendance['present'] as $person) {
+            foreach ($currentlyPresent as $person) {
                 $location = (string) ($person['location'] ?? 'Nicht zugeordnet');
 
                 if (!isset($allocations[$location])) {
@@ -43,7 +45,7 @@ final class DashboardService
             }
 
             $periods = $this->periodOverviews();
-            $hasLiveData = (int) $attendance['present_count'] > 0
+            $hasLiveData = $currentlyPresentCount > 0
                 || array_sum($attendance['status_counts']) > 0
                 || array_sum(array_map(static fn (array $period): int => (int) ($period['entries'] ?? 0), $periods)) > 0;
 
@@ -54,7 +56,7 @@ final class DashboardService
                     : 'Es liegen aktuell noch keine belastbaren Buchungen fuer das Dashboard vor.',
                 'today' => $today,
                 'metrics' => [
-                    'anwesend' => (int) $attendance['present_count'],
+                    'anwesend' => $currentlyPresentCount,
                     'abwesend' => array_sum($attendance['status_counts']),
                     'storage' => $storage['human'],
                     'db_status' => $hasDatabase ? 'verbunden' : 'nicht verbunden',
@@ -69,6 +71,7 @@ final class DashboardService
                     ],
                     $attendance['statuses']
                 ),
+                'attendance_chart' => is_array($attendance['chart'] ?? null) ? $attendance['chart'] : [],
                 'contacts' => [],
                 'periods' => $periods,
             ];
@@ -88,6 +91,7 @@ final class DashboardService
             ],
             'allocations' => [],
             'absences' => [],
+            'attendance_chart' => [],
             'contacts' => [],
             'periods' => $this->periodOverviews(),
         ];

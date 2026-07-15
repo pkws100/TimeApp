@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace App\Domain\Terminals;
 
 use App\Infrastructure\Database\DatabaseConnection;
-use DateTimeImmutable;
 use RuntimeException;
 
 final class NfcTagService
@@ -57,6 +56,126 @@ final class NfcTagService
             'SELECT * FROM nfc_tags WHERE id = :id LIMIT 1',
             ['id' => $id]
         );
+    }
+
+    /** @return list<array<string, mixed>> */
+    public function listForUser(int $userId): array
+    {
+        if ($userId <= 0 || !$this->connection->tableExists('nfc_tags')) {
+            return [];
+        }
+
+        return $this->connection->fetchAll(
+            'SELECT
+                nfc_tags.*,
+                projects.project_number,
+                projects.name AS project_name,
+                terminals.name AS learned_terminal_name
+             FROM nfc_tags
+             LEFT JOIN projects ON projects.id = nfc_tags.project_id
+             LEFT JOIN terminals ON terminals.id = nfc_tags.learned_terminal_id
+             WHERE nfc_tags.user_id = :user_id
+               AND COALESCE(nfc_tags.is_deleted, 0) = 0
+             ORDER BY FIELD(nfc_tags.status, "pending", "active", "disabled"), nfc_tags.updated_at DESC, nfc_tags.id DESC',
+            ['user_id' => $userId]
+        );
+    }
+
+    /** @return list<array<string, mixed>> */
+    public function listFreePending(): array
+    {
+        if (!$this->connection->tableExists('nfc_tags')) {
+            return [];
+        }
+
+        return $this->connection->fetchAll(
+            'SELECT
+                nfc_tags.*,
+                terminals.name AS learned_terminal_name
+             FROM nfc_tags
+             LEFT JOIN terminals ON terminals.id = nfc_tags.learned_terminal_id
+             WHERE nfc_tags.user_id IS NULL
+               AND COALESCE(nfc_tags.is_deleted, 0) = 0
+               AND nfc_tags.status = "pending"
+             ORDER BY nfc_tags.learned_at DESC, nfc_tags.id DESC'
+        );
+    }
+
+    /** @param list<int|string> $tagIds */
+    public function assignPendingTagsToUser(array $tagIds, int $userId): int
+    {
+        if (!$this->connection->tableExists('nfc_tags')) {
+            throw new RuntimeException('Die NFC-Tag-Tabelle ist noch nicht verfuegbar.');
+        }
+
+        $normalizedIds = [];
+        foreach ($tagIds as $tagId) {
+            if (is_int($tagId)) {
+                $normalizedId = $tagId;
+            } elseif (is_string($tagId) && ctype_digit($tagId)) {
+                $normalizedId = (int) $tagId;
+            } else {
+                throw new RuntimeException('Die NFC-Tag-Auswahl ist ungueltig.');
+            }
+
+            if ($normalizedId <= 0) {
+                throw new RuntimeException('Die NFC-Tag-Auswahl ist ungueltig.');
+            }
+
+            $normalizedIds[] = $normalizedId;
+        }
+        $normalizedIds = array_values(array_unique($normalizedIds));
+
+        if ($normalizedIds === []) {
+            throw new RuntimeException('Bitte mindestens einen freien NFC-Tag auswaehlen.');
+        }
+
+        return $this->connection->transaction(function () use ($normalizedIds, $userId): int {
+            $user = $this->connection->fetchOne(
+                'SELECT id
+                 FROM users
+                 WHERE id = :id
+                   AND COALESCE(is_deleted, 0) = 0
+                   AND employment_status = "active"
+                 FOR UPDATE',
+                ['id' => $userId]
+            );
+
+            if ($user === null) {
+                throw new RuntimeException('Der NFC-Tag kann nur einem aktiven User zugeordnet werden.');
+            }
+
+            foreach ($normalizedIds as $tagId) {
+                $tag = $this->connection->fetchOne(
+                    'SELECT id
+                     FROM nfc_tags
+                     WHERE id = :id
+                       AND user_id IS NULL
+                       AND COALESCE(is_deleted, 0) = 0
+                       AND status = "pending"
+                     FOR UPDATE',
+                    ['id' => $tagId]
+                );
+
+                if ($tag === null) {
+                    throw new RuntimeException('Ein ausgewaehlter NFC-Tag ist nicht mehr frei oder kann nicht zugeordnet werden.');
+                }
+            }
+
+            foreach ($normalizedIds as $tagId) {
+                $this->connection->execute(
+                    'UPDATE nfc_tags
+                     SET user_id = :user_id, updated_at = NOW()
+                     WHERE id = :id
+                       AND user_id IS NULL
+                       AND COALESCE(is_deleted, 0) = 0
+                       AND status = "pending"',
+                    ['id' => $tagId, 'user_id' => $userId]
+                );
+            }
+
+            return count($normalizedIds);
+        });
     }
 
     public function findActiveByUid(string $uid): ?array
@@ -124,21 +243,39 @@ final class NfcTagService
         return $this->find($id) ?? [];
     }
 
-    public function archive(int $id, ?int $deletedByUserId): void
+    public function archive(int $id, ?int $deletedByUserId): bool
     {
         if ($id <= 0 || !$this->connection->tableExists('nfc_tags')) {
-            return;
+            return false;
         }
 
-        $this->connection->execute(
-            'UPDATE nfc_tags
-             SET is_deleted = 1, deleted_at = NOW(), deleted_by_user_id = :deleted_by_user_id, updated_at = NOW()
-             WHERE id = :id',
-            [
-                'id' => $id,
-                'deleted_by_user_id' => $deletedByUserId,
-            ]
-        );
+        return $this->connection->transaction(function () use ($id, $deletedByUserId): bool {
+            $tag = $this->connection->fetchOne(
+                'SELECT id
+                 FROM nfc_tags
+                 WHERE id = :id
+                   AND COALESCE(is_deleted, 0) = 0
+                 FOR UPDATE',
+                ['id' => $id]
+            );
+
+            if ($tag === null) {
+                return false;
+            }
+
+            $this->connection->execute(
+                'UPDATE nfc_tags
+                 SET is_deleted = 1, deleted_at = NOW(), deleted_by_user_id = :deleted_by_user_id, updated_at = NOW()
+                 WHERE id = :id
+                   AND COALESCE(is_deleted, 0) = 0',
+                [
+                    'id' => $id,
+                    'deleted_by_user_id' => $deletedByUserId,
+                ]
+            );
+
+            return true;
+        });
     }
 
     public function startLearnSession(int $terminalId, ?int $adminUserId, int $minutes = 2): array
@@ -155,15 +292,15 @@ final class NfcTagService
             ['terminal_id' => $terminalId]
         );
 
-        $expiresAt = (new DateTimeImmutable('+' . max(1, $minutes) . ' minutes'))->format('Y-m-d H:i:s');
+        $durationMinutes = max(1, $minutes);
 
         $this->connection->execute(
             'INSERT INTO terminal_learn_sessions (terminal_id, admin_user_id, status, expires_at, created_at)
-             VALUES (:terminal_id, :admin_user_id, "pending", :expires_at, NOW())',
+             VALUES (:terminal_id, :admin_user_id, "pending", DATE_ADD(NOW(), INTERVAL :duration_minutes MINUTE), NOW())',
             [
                 'terminal_id' => $terminalId,
                 'admin_user_id' => $adminUserId,
-                'expires_at' => $expiresAt,
+                'duration_minutes' => $durationMinutes,
             ]
         );
 
@@ -179,53 +316,113 @@ final class NfcTagService
             return null;
         }
 
-        $session = $this->connection->fetchOne(
-            'SELECT *
-             FROM terminal_learn_sessions
-             WHERE terminal_id = :terminal_id
-               AND status = "pending"
-               AND expires_at >= NOW()
-             ORDER BY id DESC
-             LIMIT 1',
-            ['terminal_id' => (int) ($terminal['id'] ?? 0)]
-        );
+        $terminalId = (int) ($terminal['id'] ?? 0);
+        $uidHash = $this->hashUid($uid);
+        $uidMasked = $this->maskUid($uid);
 
-        if ($session === null) {
-            return null;
-        }
+        return $this->connection->transaction(function () use ($terminalId, $uidHash, $uidMasked): ?array {
+            $session = $this->connection->fetchOne(
+                'SELECT *
+                 FROM terminal_learn_sessions
+                 WHERE terminal_id = :terminal_id
+                   AND status = "pending"
+                   AND expires_at >= NOW()
+                 ORDER BY id DESC
+                 LIMIT 1
+                 FOR UPDATE',
+                ['terminal_id' => $terminalId]
+            );
 
-        $this->connection->execute(
-            'INSERT INTO nfc_tags (
-                uid_hash, uid_masked, status, learned_terminal_id, learned_by_user_id, learned_at, created_at, updated_at
-             ) VALUES (
-                :uid_hash, :uid_masked, "pending", :terminal_id, :admin_user_id, NOW(), NOW(), NOW()
-             )
-             ON DUPLICATE KEY UPDATE
-                id = LAST_INSERT_ID(id),
-                learned_terminal_id = VALUES(learned_terminal_id),
-                learned_by_user_id = VALUES(learned_by_user_id),
-                learned_at = NOW(),
-                updated_at = NOW()',
-            [
-                'uid_hash' => $this->hashUid($uid),
-                'uid_masked' => $this->maskUid($uid),
-                'terminal_id' => (int) ($terminal['id'] ?? 0),
-                'admin_user_id' => $session['admin_user_id'] ?? null,
-            ]
-        );
-        $tagId = $this->connection->lastInsertId();
+            if ($session === null) {
+                return null;
+            }
 
-        $this->connection->execute(
-            'UPDATE terminal_learn_sessions
-             SET status = "captured", nfc_tag_id = :nfc_tag_id, completed_at = NOW()
-             WHERE id = :id',
-            [
-                'id' => (int) $session['id'],
-                'nfc_tag_id' => $tagId,
-            ]
-        );
+            $tag = $this->connection->fetchOne(
+                'SELECT id, is_deleted
+                 FROM nfc_tags
+                 WHERE uid_hash = :uid_hash
+                 LIMIT 1
+                 FOR UPDATE',
+                ['uid_hash' => $uidHash]
+            );
 
-        return $this->find($tagId);
+            if ($tag === null) {
+                $this->connection->execute(
+                    'INSERT INTO nfc_tags (
+                        uid_hash, uid_masked, status, learned_terminal_id, learned_by_user_id, learned_at, created_at, updated_at
+                     ) VALUES (
+                        :uid_hash, :uid_masked, "pending", :terminal_id, :admin_user_id, NOW(), NOW(), NOW()
+                     )',
+                    [
+                        'uid_hash' => $uidHash,
+                        'uid_masked' => $uidMasked,
+                        'terminal_id' => $terminalId,
+                        'admin_user_id' => $session['admin_user_id'] ?? null,
+                    ]
+                );
+                $tagId = $this->connection->lastInsertId();
+            } else {
+                $tagId = (int) $tag['id'];
+                $wasArchived = (int) ($tag['is_deleted'] ?? 0) === 1;
+
+                if ($wasArchived) {
+                    // A re-learned tag must never silently retain its previous access rights.
+                    $this->connection->execute(
+                        'UPDATE nfc_tags
+                         SET uid_masked = :uid_masked,
+                             label = NULL,
+                             user_id = NULL,
+                             project_id = NULL,
+                             status = "pending",
+                             learned_terminal_id = :terminal_id,
+                             learned_by_user_id = :admin_user_id,
+                             learned_at = NOW(),
+                             is_deleted = 0,
+                             deleted_at = NULL,
+                             deleted_by_user_id = NULL,
+                             relearned_from_archive_at = NOW(),
+                             updated_at = NOW()
+                         WHERE id = :id
+                           AND COALESCE(is_deleted, 0) = 1',
+                        [
+                            'id' => $tagId,
+                            'uid_masked' => $uidMasked,
+                            'terminal_id' => $terminalId,
+                            'admin_user_id' => $session['admin_user_id'] ?? null,
+                        ]
+                    );
+                } else {
+                    $this->connection->execute(
+                        'UPDATE nfc_tags
+                         SET uid_masked = :uid_masked,
+                             learned_terminal_id = :terminal_id,
+                             learned_by_user_id = :admin_user_id,
+                             learned_at = NOW(),
+                             updated_at = NOW()
+                         WHERE id = :id',
+                        [
+                            'id' => $tagId,
+                            'uid_masked' => $uidMasked,
+                            'terminal_id' => $terminalId,
+                            'admin_user_id' => $session['admin_user_id'] ?? null,
+                        ]
+                    );
+                }
+            }
+
+            $this->connection->execute(
+                'UPDATE terminal_learn_sessions
+                 SET status = "captured", nfc_tag_id = :nfc_tag_id, completed_at = NOW()
+                 WHERE id = :id
+                   AND status = "pending"',
+                [
+                    'id' => (int) $session['id'],
+                    'nfc_tag_id' => $tagId,
+                ]
+            );
+
+            return $this->find($tagId);
+        });
     }
 
     public function normalizeUid(string $uid): string
