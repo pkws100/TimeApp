@@ -40,6 +40,20 @@ jobs:
     name: PHP, PHPUnit and Node checks
     runs-on: ubuntu-latest
 
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: ci-test-root-password
+          MARIADB_DATABASE: timeapp_ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,6 +84,17 @@ jobs:
           APP_DEBUG: 'true'
           APP_SECRET: ci-test-secret
           SETTINGS_ENCRYPTION_KEY: ci-test-settings-key
+          DB_HOST: 127.0.0.1
+          DB_PORT: '3306'
+          DB_DATABASE: timeapp_ci
+          DB_USERNAME: root
+          DB_PASSWORD: ci-test-root-password
+          DB_SOCKET: ''
+          DB_OVERRIDE_FILE: /tmp/timeapp-ci-database.override.php
+          TIMEAPP_TEST_DB_HOST: 127.0.0.1
+          TIMEAPP_TEST_DB_PORT: '3306'
+          TIMEAPP_TEST_DB_USERNAME: root
+          TIMEAPP_TEST_DB_PASSWORD: ci-test-root-password
         run: COMPOSER_ALLOW_SUPERUSER=1 composer test
 
       - name: Setup Node.js
