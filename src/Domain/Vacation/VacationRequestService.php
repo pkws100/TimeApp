@@ -59,6 +59,7 @@ final class VacationRequestService
         $bindings = [];
         $status = trim((string) ($filters['status'] ?? ''));
         $userId = (int) ($filters['user_id'] ?? 0);
+        $year = (int) ($filters['year'] ?? 0);
 
         if (in_array($status, self::STATUSES, true)) {
             $where[] = 'vacation_requests.status = :status';
@@ -68,6 +69,13 @@ final class VacationRequestService
         if ($userId > 0) {
             $where[] = 'vacation_requests.user_id = :user_id';
             $bindings['user_id'] = $userId;
+        }
+
+        if ($year >= 2000 && $year <= 2100) {
+            $where[] = 'vacation_requests.date_from <= :year_end';
+            $where[] = 'vacation_requests.date_to >= :year_start';
+            $bindings['year_start'] = sprintf('%04d-01-01', $year);
+            $bindings['year_end'] = sprintf('%04d-12-31', $year);
         }
 
         return array_map(

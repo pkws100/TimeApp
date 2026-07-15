@@ -114,6 +114,7 @@ Bereits umgesetzt:
 - kumulierter Zeitkontostand ab finalisiertem Stichtag, aktuelle Monatsberechnung nur bis Standdatum und neutrale Anzeige von positivem/negativem Zeitkontostand
 - Stichtagsgenerationen ueber `cutover_id` in Zeit- und Urlaubskonto-Journalen; aktive Berechnungen lesen nur die aktive finale Generation, revidierte Generationen bleiben historisch erhalten
 - vollstaendige Admin-Stichtagshistorie mit finalen und revidierten Generationen, generationsbezogenen read-only Journalen und eindeutig gekennzeichneten revidierten PDF-Protokollen
+- jahresbezogene Admin-Urlaubskontenansicht unter `/admin/vacation-requests` mit eingebuchtem Urlaub, vergangenem und zukuenftig genehmigtem Verbrauch, offenen Antraegen, Resturlaub und verfuegbarem Urlaub
 - interne Stichtagssperren in `accounting_closures` mit `source_type = employee_account_cutover`, wirksam fuer Timesheet-Schreibschutz, aber ausgeblendet in normalen Abschlusslisten und Exporten
 
 Noch nicht final umgesetzt:

@@ -4,6 +4,7 @@
 declare(strict_types=1);
 
 use App\Infrastructure\Database\DatabaseConnection;
+use App\Domain\Calendar\CalendarPolicyService;
 use Tests\Support\MariaDbScratchConfig;
 
 require_once __DIR__ . '/../bootstrap/autoload.php';
@@ -26,6 +27,8 @@ while ((int) $restoreDateValue->format('N') !== 1) {
     $restoreDateValue = $restoreDateValue->modify('+1 day');
 }
 $restoreDate = $restoreDateValue->format('Y-m-d');
+$vacationDate = null;
+$vacationYear = null;
 
 $removeTree = static function (string $path) use (&$removeTree): void {
     if (!is_dir($path)) {
@@ -131,6 +134,24 @@ try {
     $adminId = $userIds['ui-admin@example.test'];
     $employeeId = $userIds['ui-employee@example.test'];
     $paginationUserId = $userIds['ui-pagination@example.test'];
+    $calendarPolicy = new CalendarPolicyService($connection);
+    $vacationDateValue = new DateTimeImmutable('+14 days');
+    while ((int) $vacationDateValue->format('N') > 5
+        || !(bool) ($calendarPolicy->dayPolicy($vacationDateValue->format('Y-m-d'))['time_tracking_required'] ?? false)) {
+        $vacationDateValue = $vacationDateValue->modify('+1 day');
+    }
+    $vacationDate = $vacationDateValue->format('Y-m-d');
+    $vacationYear = (int) $vacationDateValue->format('Y');
+    $connection->execute(
+        'INSERT INTO vacation_requests (
+            user_id, date_from, date_to, day_count, status, employee_note,
+            requested_at, created_at, updated_at, is_deleted
+         ) VALUES (
+            :user_id, :date_from, :date_to, 1, "pending", "Playwright Resturlaub",
+            NOW(), NOW(), NOW(), 0
+         )',
+        ['user_id' => $employeeId, 'date_from' => $vacationDate, 'date_to' => $vacationDate]
+    );
     $connection->execute(
         'INSERT INTO employee_account_cutovers (
             user_id, active_final_user_id, effective_from, opening_time_balance_minutes, leave_year,
@@ -261,6 +282,8 @@ try {
         'UI_TEST_PAGINATION_USER_ID' => (string) $paginationUserId,
         'UI_TEST_RESTORE_BOOKING_ID' => (string) $restoreBookingId,
         'UI_TEST_ACCOUNT_YEAR' => (string) $accountYear,
+        'UI_TEST_VACATION_DATE' => (string) $vacationDate,
+        'UI_TEST_VACATION_YEAR' => (string) $vacationYear,
         'UI_TEST_CLOSURE_YEAR' => (string) $closureYear,
         'UI_TEST_CLOSURE_DATE_FROM' => $closureDateFrom,
         'UI_TEST_CLOSURE_DATE_TO' => $closureDateTo,

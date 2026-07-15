@@ -94,6 +94,52 @@ final class TimeAccountServiceTest extends TestCase
         self::assertSame(['Ada A', 'Ben B'], array_column($overview['rows'], 'user'));
     }
 
+    public function testAdminVacationOverviewDistinguishesAccountSourcesAndInactiveRows(): void
+    {
+        $pdo = new TimeAccountPdoDouble();
+        $pdo->users[1] = $pdo->user([
+            'id' => 1,
+            'employee_number' => 'MA-001',
+            'vacation_days_year' => '31.00',
+            'vacation_carryover_days' => '1.00',
+        ]);
+        $pdo->users[2] = $pdo->user(['id' => 2, 'first_name' => 'Ohne', 'last_name' => 'Stichtag']);
+        $pdo->cutovers[] = [
+            'id' => 11,
+            'user_id' => 1,
+            'effective_from' => '2026-04-01',
+            'leave_year' => 2026,
+            'annual_leave_entitlement_days' => '30.00',
+            'leave_carryover_days' => '2.00',
+            'opening_remaining_leave_days' => '27.00',
+            'status' => 'final',
+            'active_final_user_id' => 1,
+        ];
+        $pdo->vacationEntries[] = ['user_id' => 1, 'cutover_id' => 11, 'leave_year' => 2027, 'entry_type' => 'annual_entitlement', 'days' => '31.00'];
+        $pdo->vacationEntries[] = ['user_id' => 1, 'cutover_id' => 11, 'leave_year' => 2027, 'entry_type' => 'carryover', 'days' => '1.00'];
+        $service = $this->service($pdo);
+
+        $cutoverYear = $service->adminVacationOverview(2026);
+        self::assertSame('active', $cutoverYear['rows'][0]['account_status']);
+        self::assertSame('cutover_snapshot', $cutoverYear['rows'][0]['source']);
+        self::assertSame(27.0, $cutoverYear['rows'][0]['vacation']['total_days']);
+        self::assertSame('missing', $cutoverYear['rows'][1]['account_status']);
+        self::assertNull($cutoverYear['rows'][1]['vacation']);
+
+        $beforeCutover = $service->adminVacationOverview(2025, 1);
+        self::assertSame('not_active_in_year', $beforeCutover['rows'][0]['account_status']);
+        self::assertNull($beforeCutover['rows'][0]['vacation']);
+
+        $journalYear = $service->adminVacationOverview(2027, 1);
+        self::assertCount(1, $journalYear['rows']);
+        self::assertSame('journal', $journalYear['rows'][0]['source']);
+        self::assertSame(32.0, $journalYear['rows'][0]['vacation']['total_days']);
+
+        $proposalYear = $service->adminVacationOverview(2028, 1);
+        self::assertSame('user_defaults', $proposalYear['rows'][0]['source']);
+        self::assertSame(32.0, $proposalYear['rows'][0]['vacation']['total_days']);
+    }
+
     public function testAdminOverviewSupportsSearchSortingAndPaging(): void
     {
         $pdo = new TimeAccountPdoDouble();
@@ -173,18 +219,23 @@ final class TimeAccountPdoDouble extends PDO
         'vacation_requests' => true,
         'company_settings' => true,
         'company_closures' => true,
+        'employee_account_cutovers' => true,
+        'vacation_account_entries' => true,
     ];
 
     public array $columns = [
         'users' => ['id', 'first_name', 'last_name', 'email', 'employment_status', 'is_deleted', 'target_hours_month', 'target_hours_mode', 'target_hours_week', 'workdays_mask', 'vacation_days_year', 'vacation_carryover_days'],
         'timesheets' => ['id', 'user_id', 'work_date', 'entry_type', 'net_minutes', 'is_deleted'],
         'company_settings' => ['holiday_region'],
+        'vacation_account_entries' => ['cutover_id'],
     ];
 
     public array $users = [];
     public array $timesheets = [];
     public array $vacationRequests = [];
     public array $closures = [];
+    public array $cutovers = [];
+    public array $vacationEntries = [];
     public string $holidayRegion = '';
 
     public function __construct()
@@ -200,6 +251,7 @@ final class TimeAccountPdoDouble extends PDO
     {
         return $overrides + [
             'id' => 1,
+            'employee_number' => 'MA-001',
             'first_name' => 'Mia',
             'last_name' => 'Muster',
             'email' => 'mia@example.test',
@@ -257,6 +309,26 @@ final class TimeAccountPdoDouble extends PDO
             return $user === null ? [] : [$user];
         }
 
+        if (str_contains($sql, 'FROM employee_account_cutovers AS cutovers')) {
+            $userId = (int) ($params['user_id'] ?? 0);
+            $rows = array_values(array_filter($this->cutovers, static fn (array $cutover): bool => (int) ($cutover['user_id'] ?? 0) === $userId
+                && (string) ($cutover['status'] ?? '') === 'final'
+                && (int) ($cutover['active_final_user_id'] ?? 0) === $userId));
+
+            if ($rows === []) {
+                return [];
+            }
+
+            $user = $this->users[$userId] ?? [];
+
+            return [$rows[0] + [
+                'employee_number' => $user['employee_number'] ?? '',
+                'first_name' => $user['first_name'] ?? '',
+                'last_name' => $user['last_name'] ?? '',
+                'email' => $user['email'] ?? '',
+            ]];
+        }
+
         if (str_contains($sql, 'FROM users') && str_contains($sql, 'employment_status = "active"')) {
             return array_values(array_filter($this->users, static fn (array $user): bool => (int) ($user['is_deleted'] ?? 0) === 0 && ($user['employment_status'] ?? 'active') === 'active'));
         }
@@ -296,6 +368,32 @@ final class TimeAccountPdoDouble extends PDO
                 && (int) ($request['is_deleted'] ?? 0) === 0
                 && $request['date_from'] <= $params['date_to']
                 && $request['date_to'] >= $params['date_from']));
+        }
+
+        if (str_contains($sql, 'FROM vacation_account_entries')) {
+            $rows = array_values(array_filter($this->vacationEntries, static function (array $entry) use ($params, $sql): bool {
+                if ((int) ($entry['user_id'] ?? 0) !== (int) ($params['user_id'] ?? 0)
+                    || (int) ($entry['leave_year'] ?? 0) !== (int) ($params['leave_year'] ?? 0)
+                    || (isset($params['cutover_id']) && (int) ($entry['cutover_id'] ?? 0) !== (int) $params['cutover_id'])) {
+                    return false;
+                }
+
+                if (isset($params['entry_type'])) {
+                    return (string) ($entry['entry_type'] ?? '') === (string) $params['entry_type'];
+                }
+
+                if (str_contains($sql, 'entry_type IN')) {
+                    return in_array((string) ($entry['entry_type'] ?? ''), ['manual_adjustment', 'expiry', 'reversal'], true);
+                }
+
+                return true;
+            }));
+
+            if (str_contains($sql, 'COUNT(*)')) {
+                return [['COUNT(*)' => count($rows)]];
+            }
+
+            return [['SUM(days)' => array_sum(array_map(static fn (array $entry): float => (float) ($entry['days'] ?? 0), $rows))]];
         }
 
         return [];

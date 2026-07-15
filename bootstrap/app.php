@@ -305,7 +305,7 @@ $adminBookingController = new AdminBookingController(
     $timesheetSignatureService
 );
 $adminTimeAccountController = new AdminTimeAccountController($adminView, $timeAccountService, $timeAccountExportService, $userService, $employeeAccountCutoverService, $authService, $csrfService, $companySettingsService);
-$adminVacationRequestController = new AdminVacationRequestController($adminView, $vacationRequestService, $userService, $authService, $csrfService);
+$adminVacationRequestController = new AdminVacationRequestController($adminView, $vacationRequestService, $timeAccountService, $userService, $authService, $csrfService);
 $adminCalendarController = new AdminCalendarController(
     $adminView,
     $adminCalendarService,

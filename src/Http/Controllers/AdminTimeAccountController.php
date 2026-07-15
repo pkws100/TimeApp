@@ -423,7 +423,7 @@ final class AdminTimeAccountController
         $exportButtons = '<a class="button" href="' . $this->e($exportBase . $separator . 'format=csv') . '">CSV</a>'
             . '<a class="button" href="' . $this->e($exportBase . $separator . 'format=xlsx') . '">Excel</a>'
             . '<a class="button" href="' . $this->e($exportBase . $separator . 'format=pdf') . '">PDF</a>';
-        $cutoverForm = $canManage ? $this->cutoverForm($users, $csrf, $cutoverPreview) : '';
+        $cutoverForm = $canManage ? $this->cutoverForm($users, $csrf, $cutoverPreview, (int) ($filters['user_id'] ?? 0)) : '';
         $adjustmentForms = $canManage ? $this->adjustmentForms($users, $csrf) : '';
 
         return <<<HTML
@@ -595,9 +595,9 @@ HTML;
             . '</form>';
     }
 
-    private function cutoverForm(array $users, string $csrfToken, ?array $preview): string
+    private function cutoverForm(array $users, string $csrfToken, ?array $preview, int $selectedUserId = 0): string
     {
-        $userOptions = $this->userOptions($users, (int) ($preview['user_id'] ?? 0));
+        $userOptions = $this->userOptions($users, (int) ($preview['user_id'] ?? $selectedUserId));
         $today = date('Y-m-d');
         $year = date('Y');
         $values = [
@@ -615,6 +615,16 @@ HTML;
         if ($preview !== null) {
             $warnings = array_map(fn (string $warning): string => '<li>' . $this->e($warning) . '</li>', $preview['warnings'] ?? []);
             $warningMarkup = $warnings === [] ? '<p class="badge ok">Keine auffaelligen Warnungen.</p>' : '<ul class="notice warn">' . implode('', $warnings) . '</ul>';
+            $effectiveFrom = $this->dateLabel((string) ($preview['effective_from'] ?? ''));
+            $lockedUntil = $this->dateLabel((string) ($preview['locked_until'] ?? ''));
+            $entitlement = $this->number($preview['annual_leave_entitlement_days'] ?? 0);
+            $carryover = $this->number($preview['leave_carryover_days'] ?? 0);
+            $adjustment = (float) ($preview['opening_adjustment_days'] ?? 0);
+            $adjustmentFormula = ($adjustment < 0 ? '- ' : '+ ') . $this->number(abs($adjustment));
+            $openingRemaining = $this->number($preview['opening_remaining_leave_days'] ?? 0);
+            $timesheetHint = (int) ($preview['timesheets_after_cutover'] ?? 0) > 0
+                ? '<p class="muted">Bereits vorhandene Buchungen ab dem Stichtag bleiben erhalten. Bereits gebuchte bezahlte Urlaubstage im gewaehlten Urlaubsjahr werden nach der Finalisierung bei der Berechnung des aktuellen Resturlaubs beruecksichtigt.</p>'
+                : '';
             $hidden = '';
 
             foreach ($values as $name => $value) {
@@ -625,8 +635,11 @@ HTML;
             $previewMarkup = <<<HTML
 <div class="notice">
     <h3>Stichtag-Vorschau</h3>
-    <p><strong>{$this->e((string) $preview['employee_name'])}</strong>: Berechnung ab {$this->e((string) $preview['effective_from'])}, uebernommener Zeitkontostand {$this->e((string) $preview['opening_time_balance_label'])}, Resturlaub {$this->number($preview['opening_remaining_leave_days'] ?? 0)} Tage.</p>
-    <p>Altzeitraum bis {$this->e((string) $preview['locked_until'])} wird bei Finalisierung festgeschrieben. Urlaubseroeffnungsanpassung: {$this->number($preview['opening_adjustment_days'] ?? 0)} Tage.</p>
+    <p><strong>{$this->e((string) $preview['employee_name'])}</strong>: Startsaldo nach Finalisierung: {$openingRemaining} Tage Resturlaub zum {$effectiveFrom} (Stand: Ende {$lockedUntil}). Uebernommener Zeitkontostand: {$this->e((string) $preview['opening_time_balance_label'])}.</p>
+    <p>{$entitlement} Tage Jahresanspruch + {$carryover} Tage Uebertrag {$adjustmentFormula} Tage technische Anpassung = {$openingRemaining} Tage Startsaldo.</p>
+    <p class="muted">Die technische Anpassung ist keine zusaetzliche Urlaubsnahme. Sie stellt sicher, dass Jahresanspruch, Uebertrag und Anpassung zusammen dem eingegebenen Resturlaub entsprechen.</p>
+    <p>Der Altzeitraum bis {$lockedUntil} wird bei Finalisierung festgeschrieben.</p>
+    {$timesheetHint}
     {$warningMarkup}
     <form method="post" action="/admin/time-accounts/cutovers/finalize" class="inline-form">
         <input type="hidden" name="csrf_token" value="{$csrfToken}">
@@ -838,6 +851,15 @@ HTML;
     private function number(mixed $value): string
     {
         return $this->e(number_format((float) $value, 2, ',', '.'));
+    }
+
+    private function dateLabel(string $value): string
+    {
+        $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+
+        return $date instanceof \DateTimeImmutable && $date->format('Y-m-d') === $value
+            ? $this->e($date->format('d.m.Y'))
+            : $this->e($value);
     }
 
     private function timeLabel(int $minutes): string

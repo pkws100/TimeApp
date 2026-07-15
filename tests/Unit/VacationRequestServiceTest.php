@@ -85,6 +85,20 @@ final class VacationRequestServiceTest extends TestCase
         $service->cancelOwnPending(2, 1);
     }
 
+    public function testAdminListFiltersRequestsByYearOverlap(): void
+    {
+        $pdo = new VacationPdoDouble();
+        $pdo->users[1] = $pdo->user();
+        $pdo->vacationRequests[] = $pdo->request(['id' => 1, 'date_from' => '2025-12-20', 'date_to' => '2025-12-23']);
+        $pdo->vacationRequests[] = $pdo->request(['id' => 2, 'date_from' => '2025-12-31', 'date_to' => '2026-01-02']);
+        $pdo->vacationRequests[] = $pdo->request(['id' => 3, 'date_from' => '2026-08-10', 'date_to' => '2026-08-12']);
+        $pdo->vacationRequests[] = $pdo->request(['id' => 4, 'date_from' => '2027-01-04', 'date_to' => '2027-01-05']);
+
+        $requests = $this->service($pdo)->listForAdmin(['year' => 2026]);
+
+        self::assertSame([2, 3], array_column($requests, 'id'));
+    }
+
     public function testApproveChecksAccountingLocksBeforeWritingTimesheets(): void
     {
         $pdo = new VacationPdoDouble();
@@ -280,6 +294,15 @@ final class VacationPdoDouble extends PDO
 
             if (isset($params['user_id']) && !isset($params['id'])) {
                 $rows = array_values(array_filter($rows, static fn (array $row): bool => (int) $row['user_id'] === (int) $params['user_id']));
+            }
+
+            if (isset($params['status'])) {
+                $rows = array_values(array_filter($rows, static fn (array $row): bool => (string) ($row['status'] ?? '') === (string) $params['status']));
+            }
+
+            if (isset($params['year_start'], $params['year_end'])) {
+                $rows = array_values(array_filter($rows, static fn (array $row): bool => (string) ($row['date_from'] ?? '') <= (string) $params['year_end']
+                    && (string) ($row['date_to'] ?? '') >= (string) $params['year_start']));
             }
 
             return array_map(function (array $row): array {

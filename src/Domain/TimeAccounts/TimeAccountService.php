@@ -78,7 +78,7 @@ final class TimeAccountService
         }
 
         $saldoMinutes = $periodDelta;
-        $vacation = $this->vacationYear($userId, $year, $user);
+        $vacation = $this->vacationYearForCutover($userId, $year, $user, $cutover);
 
         return [
             'user_id' => $userId,
@@ -131,6 +131,12 @@ final class TimeAccountService
     {
         $user ??= $this->user($userId);
         $cutover = $this->cutoverService?->activeCutover($userId);
+
+        return $this->vacationYearForCutover($userId, $year, $user ?? [], $cutover);
+    }
+
+    private function vacationYearForCutover(int $userId, int $year, array $user, ?array $cutover): array
+    {
         $cutoverDate = $cutover !== null ? (string) $cutover['effective_from'] : null;
         $cutoverId = $cutover !== null ? (int) $cutover['id'] : null;
         $isCutoverYear = $cutover !== null && (int) ($cutover['leave_year'] ?? 0) === $year;
@@ -158,7 +164,7 @@ final class TimeAccountService
         $taken = $this->takenVacationDays($userId, $year, $cutoverDate);
         $takenPast = $this->takenVacationDays($userId, $year, $cutoverDate, null, $this->normalizeAsOfDate(null));
         $futureApproved = $this->futureApprovedVacationDays($userId, $year, $cutoverDate, $this->normalizeAsOfDate(null));
-        $pending = $this->pendingVacationDays($userId, $year, $user ?? []);
+        $pending = $this->pendingVacationDays($userId, $year, $user);
         $remaining = $total - $taken;
         $available = $remaining - $pending;
 
@@ -177,6 +183,24 @@ final class TimeAccountService
             'remaining_days' => $remaining,
             'available_days' => $available,
             'source' => $source,
+        ];
+    }
+
+    public function adminVacationOverview(int $year, int $userId = 0): array
+    {
+        $year = max(2000, min(2100, $year));
+        $users = $this->activeUsers();
+
+        if ($userId > 0) {
+            $users = array_values(array_filter(
+                $users,
+                static fn (array $user): bool => (int) ($user['id'] ?? 0) === $userId
+            ));
+        }
+
+        return [
+            'year' => $year,
+            'rows' => array_map(fn (array $user): array => $this->adminVacationRow($user, $year), $users),
         ];
     }
 
@@ -509,7 +533,7 @@ final class TimeAccountService
     {
         $stats = $this->timesheetStats($userId, $start->format('Y-m-d'), $end->format('Y-m-d'));
         $monthTargetStats = $this->dailyTargetService?->stats($user, $start->format('Y-m-d'), $end->format('Y-m-d')) ?? $this->calendarTargetFallback($user, $start, $end);
-        $vacation = $this->vacationYear($userId, $year, $user);
+        $vacation = $this->vacationYearForCutover($userId, $year, $user, $cutover);
 
         return [
             'user_id' => $userId,
@@ -1106,12 +1130,53 @@ final class TimeAccountService
         }
 
         return $this->connection->fetchAll(
-            'SELECT id, first_name, last_name, email
+            'SELECT id, employee_number, first_name, last_name, email,
+                    workdays_mask, vacation_days_year, vacation_carryover_days
              FROM users
              WHERE COALESCE(is_deleted, 0) = 0
                AND employment_status = "active"
              ORDER BY last_name ASC, first_name ASC, id ASC'
         );
+    }
+
+    private function adminVacationRow(array $user, int $year): array
+    {
+        $userId = (int) ($user['id'] ?? 0);
+        $cutover = $this->cutoverService?->activeCutover($userId);
+        $row = [
+            'user_id' => $userId,
+            'user' => $this->userLabel($user),
+            'employee_number' => (string) ($user['employee_number'] ?? ''),
+            'year' => $year,
+            'account_status' => 'missing',
+            'cutover_id' => null,
+            'cutover_date' => null,
+            'leave_year' => null,
+            'source' => null,
+            'vacation' => null,
+        ];
+
+        if ($cutover === null) {
+            return $row;
+        }
+
+        $leaveYear = (int) ($cutover['leave_year'] ?? 0);
+        $row['cutover_id'] = (int) ($cutover['id'] ?? 0);
+        $row['cutover_date'] = (string) ($cutover['effective_from'] ?? '');
+        $row['leave_year'] = $leaveYear;
+
+        if ($year < $leaveYear) {
+            $row['account_status'] = 'not_active_in_year';
+
+            return $row;
+        }
+
+        $vacation = $this->vacationYearForCutover($userId, $year, $user, $cutover);
+        $row['account_status'] = 'active';
+        $row['source'] = (string) ($vacation['source'] ?? '');
+        $row['vacation'] = $vacation;
+
+        return $row;
     }
 
     private function columnOrLiteral(string $column, string $literal, string $alias): string

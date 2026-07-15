@@ -185,6 +185,7 @@ oder per HTTP-Smoke-Check geprueft werden.
 
 ## Revisionsfaehige Zeit- und Urlaubskonten
 - Zeitkonten koennen je Mitarbeiter mit einem Einfuehrungsstichtag finalisiert werden. Der Eroeffnungssaldo ist der uebernommene Stand am Ende des Vortages; ab dem Stichtag berechnet die App den kumulierten Stand selbst.
+- Unter `/admin/vacation-requests` zeigt die Urlaubskonten-Uebersicht je Urlaubsjahr alle aktiven Mitarbeiter mit eingebuchtem Urlaub, genommenen und zukuenftig genehmigten Tagen, offenen Antraegen, Resturlaub und der nach offenen Antraegen verfuegbaren Menge. Ohne finalisierten Stichtag wird kein verbindlicher Saldo angezeigt.
 - Finale Stichtage erzeugen unveraenderliche Journalbuchungen fuer Zeitkonto und Urlaubskonto sowie eine userbezogene Sperre des Altzeitraums ueber `accounting_closures`.
 - Journalbuchungen gehoeren ueber `cutover_id` zu genau einer Stichtagsgeneration. Aktive Berechnungen beruecksichtigen nur Journalzeilen der aktiven finalen Generation; revidierte Generationen bleiben historisch sichtbar, wirken aber nicht mehr in aktuelle Salden.
 - Die Admin-Stichtagshistorie zeigt Entwuerfe, finale und revidierte Generationen samt Akteuren, Zeitpunkten und Revidierungsgrund. Historische Journale sind read-only; revidierte PDF-Protokolle tragen einen deutlich sichtbaren Statushinweis.

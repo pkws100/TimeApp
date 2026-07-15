@@ -1010,6 +1010,84 @@ th.is-sorted-desc .admin-table-sort__indicator::before {
     min-width: max-content;
 }
 
+.vacation-account-overview {
+    gap: 0.85rem;
+}
+
+.vacation-account-desktop {
+    padding-top: 0.35rem;
+    padding-bottom: 0.35rem;
+}
+
+.vacation-account-desktop td strong,
+.vacation-account-card header strong {
+    display: block;
+}
+
+.vacation-account-desktop td small,
+.vacation-account-card header small {
+    display: block;
+    margin-top: 0.2rem;
+}
+
+.vacation-account-source {
+    display: grid;
+    justify-items: start;
+    gap: 0.25rem;
+}
+
+.vacation-account-mobile {
+    display: none;
+}
+
+.vacation-account-card {
+    display: grid;
+    gap: 1rem;
+    border-radius: 8px;
+}
+
+.vacation-account-card > header {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.vacation-account-values {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem;
+    margin: 0;
+}
+
+.vacation-account-values > div {
+    min-width: 0;
+    padding: 0.7rem;
+    border: 1px solid var(--page-line);
+    border-radius: 6px;
+    background: var(--page-surface-soft);
+}
+
+.vacation-account-values dt {
+    color: var(--page-muted);
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.vacation-account-values dd {
+    margin: 0.35rem 0 0;
+    color: var(--page-ink);
+    font-weight: 800;
+}
+
+.vacation-account-values .is-emphasized {
+    background: var(--page-surface-strong);
+}
+
+.vacation-account-card__action .button {
+    width: 100%;
+}
+
 .booking-table th,
 .booking-table td {
     vertical-align: top;
@@ -1982,6 +2060,15 @@ html[data-theme="dark"] .badge.error {
 }
 
 @media (max-width: 760px) {
+    .vacation-account-desktop {
+        display: none;
+    }
+
+    .vacation-account-mobile {
+        display: grid;
+        gap: 0.75rem;
+    }
+
     .calendar-main,
     .calendar-detail,
     .calendar-create-panel,

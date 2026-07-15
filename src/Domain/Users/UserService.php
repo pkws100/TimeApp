@@ -10,6 +10,8 @@ use InvalidArgumentException;
 
 final class UserService
 {
+    public const TIME_MODEL_CHANGE_BLOCKED_MESSAGE = 'Das Arbeitszeitmodell ist Bestandteil eines aktiven Zeitkontos. Rueckwirkende Aenderungen benoetigen ein zeitlich gueltiges Arbeitszeitmodell oder eine dokumentierte Kontokorrektur.';
+
     public function __construct(private DatabaseConnection $connection)
     {
     }
@@ -528,13 +530,18 @@ final class UserService
             return;
         }
 
-        $changed = $this->normalizeTargetHoursMode($existing['target_hours_mode'] ?? 'month') !== $this->normalizeTargetHoursMode($record['target_hours_mode'] ?? 'month')
-            || $this->nullableNumericChanged($existing['target_hours_week'] ?? null, $record['target_hours_week'] ?? null)
-            || abs((float) ($existing['target_hours_month'] ?? 0) - (float) ($record['target_hours_month'] ?? 0)) > 0.0001
+        $existingMode = $this->normalizeTargetHoursMode($existing['target_hours_mode'] ?? 'month');
+        $updatedMode = $this->normalizeTargetHoursMode($record['target_hours_mode'] ?? 'month');
+        $targetChanged = $existingMode === $updatedMode
+            ? ($updatedMode === 'week'
+                ? $this->nullableNumericChanged($existing['target_hours_week'] ?? null, $record['target_hours_week'] ?? null)
+                : abs((float) ($existing['target_hours_month'] ?? 0) - (float) ($record['target_hours_month'] ?? 0)) > 0.0001)
+            : true;
+        $changed = $targetChanged
             || $this->normalizeWorkdaysMask($existing['workdays_mask'] ?? null) !== $this->normalizeWorkdaysMask($record['workdays_mask'] ?? null);
 
         if ($changed && $this->hasActiveTimeAccountMovements($userId)) {
-            throw new InvalidArgumentException('Das Arbeitszeitmodell ist Bestandteil eines aktiven Zeitkontos. Rueckwirkende Aenderungen benoetigen ein zeitlich gueltiges Arbeitszeitmodell oder eine dokumentierte Kontokorrektur.');
+            throw new InvalidArgumentException(self::TIME_MODEL_CHANGE_BLOCKED_MESSAGE);
         }
     }
 

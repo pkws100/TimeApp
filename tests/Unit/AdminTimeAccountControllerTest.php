@@ -92,6 +92,60 @@ final class AdminTimeAccountControllerTest extends TestCase
         self::assertStringNotContainsString('<form', $html);
     }
 
+    public function testCutoverPreviewExplainsTheOpeningVacationCalculation(): void
+    {
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'cutoverForm');
+        $method->setAccessible(true);
+
+        $html = (string) $method->invoke($controller, [
+            ['id' => 7, 'first_name' => 'Codex', 'last_name' => 'Agent', 'employment_status' => 'active'],
+        ], 'csrf', [
+            'user_id' => 7,
+            'employee_name' => 'MA-0003 Codex Agent',
+            'effective_from' => '2026-07-01',
+            'locked_until' => '2026-06-30',
+            'opening_time_balance_label' => '+00:00',
+            'leave_year' => 2026,
+            'annual_leave_entitlement_days' => 27,
+            'leave_carryover_days' => 1,
+            'opening_remaining_leave_days' => 15,
+            'opening_adjustment_days' => -13,
+            'timesheets_after_cutover' => 1,
+            'warnings' => ['Es existieren bereits Buchungen ab dem gewuenschten Stichtag.'],
+        ], 7);
+
+        self::assertStringContainsString('Startsaldo nach Finalisierung: 15,00 Tage Resturlaub zum 01.07.2026 (Stand: Ende 30.06.2026).', $html);
+        self::assertStringContainsString('27,00 Tage Jahresanspruch + 1,00 Tage Uebertrag - 13,00 Tage technische Anpassung = 15,00 Tage Startsaldo.', $html);
+        self::assertStringContainsString('Die technische Anpassung ist keine zusaetzliche Urlaubsnahme.', $html);
+        self::assertStringContainsString('Bereits vorhandene Buchungen ab dem Stichtag bleiben erhalten.', $html);
+    }
+
+    public function testCutoverPreviewUsesTheCorrectPositiveSignAndHidesTheBookingHintWithoutBookings(): void
+    {
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'cutoverForm');
+        $method->setAccessible(true);
+
+        $html = (string) $method->invoke($controller, [], 'csrf', [
+            'user_id' => 7,
+            'employee_name' => 'MA-0003 Codex Agent',
+            'effective_from' => '2026-07-01',
+            'locked_until' => '2026-06-30',
+            'opening_time_balance_label' => '+00:00',
+            'leave_year' => 2026,
+            'annual_leave_entitlement_days' => 27,
+            'leave_carryover_days' => 1,
+            'opening_remaining_leave_days' => 30,
+            'opening_adjustment_days' => 2,
+            'timesheets_after_cutover' => 0,
+            'warnings' => [],
+        ]);
+
+        self::assertStringContainsString('27,00 Tage Jahresanspruch + 1,00 Tage Uebertrag + 2,00 Tage technische Anpassung = 30,00 Tage Startsaldo.', $html);
+        self::assertStringNotContainsString('Bereits vorhandene Buchungen ab dem Stichtag bleiben erhalten.', $html);
+    }
+
     private function controller(): AdminTimeAccountController
     {
         $connection = new DatabaseConnection([]);

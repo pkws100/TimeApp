@@ -1208,6 +1208,10 @@ HTML;
         $message = $exception->getMessage();
         error_log('User update failed: ' . $message);
 
+        if ($exception instanceof \InvalidArgumentException && $message === UserService::TIME_MODEL_CHANGE_BLOCKED_MESSAGE) {
+            return $message;
+        }
+
         if (stripos($message, 'email') !== false || stripos($message, 'employee_number') !== false || stripos($message, 'Duplicate') !== false) {
             return 'Der Benutzer konnte nicht gespeichert werden. Bitte pruefen Sie E-Mail-Adresse und Mitarbeiternummer auf doppelte Werte.';
         }

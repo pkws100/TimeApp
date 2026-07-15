@@ -32,11 +32,49 @@ test.describe('real revisable account workflow', () => {
     await page.getByRole('button', { name: 'Stichtag verbindlich finalisieren' }).click();
     await expect(page.getByText('Stichtag wurde finalisiert.')).toBeVisible();
 
+    await page.goto('/admin/users/' + employeeId + '/edit');
+    await page.locator('input[name="phone"]').fill('+49 123 456');
+    await page.locator('input[name="target_hours_week"]').fill('0');
+    await page.getByRole('button', { name: 'Speichern' }).click();
+    await expect(page).toHaveURL(/\/admin\/users\/\d+\/edit\?notice=updated$/);
+    await expect(page.locator('input[name="phone"]')).toHaveValue('+49 123 456');
+    await page.goto('/admin/time-accounts');
+
     const protocolLink = page.getByRole('link', { name: 'Protokoll' }).first();
     const protocolResponse = await page.context().request.get(await protocolLink.getAttribute('href'));
     expect(protocolResponse.ok()).toBeTruthy();
     expect(protocolResponse.headers()['content-type']).toContain('application/pdf');
     expect(protocolResponse.headers()['x-time-account-cutover-status']).toBe('final');
+
+    const vacationYear = Number(process.env.UI_TEST_VACATION_YEAR);
+    const vacationDate = process.env.UI_TEST_VACATION_DATE;
+    expect(vacationYear).toBeGreaterThanOrEqual(accountYear);
+    expect(vacationDate).toBeTruthy();
+    await page.goto('/admin/vacation-requests?year=' + vacationYear + '&status=pending&user_id=' + employeeId);
+    const vacationAccountRow = page.locator('.vacation-account-desktop tbody tr').filter({ hasText: 'UI Mitarbeiter' });
+    await expect(page.getByRole('heading', { name: 'Urlaubskonten und Urlaubsantraege' })).toBeVisible();
+    await expect(vacationAccountRow.locator('td').nth(6)).toContainText('30,00 Tage');
+    await expect(vacationAccountRow.locator('td').nth(7)).toContainText('29,00 Tage');
+    await expect(page.locator('tr').filter({ hasText: vacationDate }).getByRole('button', { name: 'Genehmigen' })).toBeVisible();
+    await page.locator('tr').filter({ hasText: vacationDate }).getByRole('button', { name: 'Genehmigen' }).click();
+    await expect(page.getByText('Urlaubsantrag genehmigt.')).toBeVisible();
+    await expect(vacationAccountRow.locator('td').nth(4)).toContainText('1,00 Tage');
+    await expect(vacationAccountRow.locator('td').nth(5)).toContainText('0,00 Tage');
+    await expect(vacationAccountRow.locator('td').nth(6)).toContainText('29,00 Tage');
+    await expect(vacationAccountRow.locator('td').nth(7)).toContainText('29,00 Tage');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => localStorage.setItem('app.theme', 'dark'));
+    await page.reload();
+    const vacationAccountCard = page.locator('.vacation-account-card').filter({ hasText: 'UI Mitarbeiter' });
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    await expect(vacationAccountCard).toBeVisible();
+    await expect(vacationAccountCard.locator('.is-emphasized').filter({ hasText: 'Resturlaub' })).toContainText('29,00 Tage');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
+    await page.evaluate(() => localStorage.setItem('app.theme', 'light'));
+    await page.reload();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/admin/time-accounts');
 
     const timeForm = page.locator('form[action="/admin/time-accounts/entries/time"]');
     await timeForm.locator('select[name="user_id"]').selectOption(employeeId);
@@ -166,6 +204,9 @@ test.describe('real revisable account workflow', () => {
   });
 
   test('employee sees the own active account on mobile', async ({ browser }) => {
+    const expectedRestVacation = Number(process.env.UI_TEST_VACATION_YEAR) === Number(process.env.UI_TEST_ACCOUNT_YEAR)
+      ? '29,00 Tage'
+      : '30,00 Tage';
     const context = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme: 'light' });
     const page = await context.newPage();
     await page.goto('/app/login');
@@ -177,7 +218,7 @@ test.describe('real revisable account workflow', () => {
     await page.waitForURL('**/app/heute');
     await page.goto('/app/urlaub');
     await expect(page.getByText('+15:00').first()).toBeVisible();
-    await expect(page.locator('.app-info-row').filter({ hasText: 'Resturlaub' }).getByText('30,00 Tage', { exact: true })).toBeVisible();
+    await expect(page.locator('.app-info-row').filter({ hasText: 'Resturlaub' }).getByText(expectedRestVacation, { exact: true })).toBeVisible();
     await page.route('**/api/v1/app/time-account/entries?limit=10', async (route) => {
       await route.fulfill({
         contentType: 'application/json',
@@ -192,7 +233,7 @@ test.describe('real revisable account workflow', () => {
       });
     });
     await page.reload();
-    await expect(page.locator('.app-info-row').filter({ hasText: 'Resturlaub' }).getByText('30,00 Tage', { exact: true })).toBeVisible();
+    await expect(page.locator('.app-info-row').filter({ hasText: 'Resturlaub' }).getByText(expectedRestVacation, { exact: true })).toBeVisible();
     await expect(page.getByText('Fremde Stichtagsgeneration')).toHaveCount(0);
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
@@ -200,7 +241,7 @@ test.describe('real revisable account workflow', () => {
     await page.evaluate(() => localStorage.setItem('app.theme', 'light'));
     await page.reload();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-    await expect(page.locator('.app-info-row').filter({ hasText: 'Resturlaub' }).getByText('30,00 Tage', { exact: true })).toBeVisible();
+    await expect(page.locator('.app-info-row').filter({ hasText: 'Resturlaub' }).getByText(expectedRestVacation, { exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
     await context.close();
   });

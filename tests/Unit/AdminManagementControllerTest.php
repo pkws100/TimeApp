@@ -460,6 +460,16 @@ final class AdminManagementControllerTest extends TestCase
         self::assertSame('/admin/users/' . $ids['target'] . '/edit?notice=updated', $response->headers()['Location'] ?? null);
     }
 
+    public function testUserUpdateExplainsProtectedTimeModelChanges(): void
+    {
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'userUpdateStorageErrorMessage');
+        $method->setAccessible(true);
+        $message = 'Das Arbeitszeitmodell ist Bestandteil eines aktiven Zeitkontos. Rueckwirkende Aenderungen benoetigen ein zeitlich gueltiges Arbeitszeitmodell oder eine dokumentierte Kontokorrektur.';
+
+        self::assertSame($message, $method->invoke($controller, new \InvalidArgumentException($message)));
+    }
+
     public function testUserUpdateRendersDuplicateEmailValidationError(): void
     {
         [$connection, $ids] = $this->userEditFixtureConnection();

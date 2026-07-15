@@ -74,6 +74,22 @@ final class VacationCutoverSnapshotDatabaseTest extends MariaDbTestCase
         self::assertSame(25.0, $vacation['total_days']);
     }
 
+    public function testCutoverOpeningBalanceMatchesTheRequestedRemainingLeave(): void
+    {
+        $adminId = $this->createUser(['employee_number' => 'ADMIN-S4', 'email' => 'admin-s4@example.test']);
+        $userId = $this->createUser();
+        [$cutovers, , $accounts] = $this->services();
+        $cutovers->finalize($this->payload($userId, 2026, 27, 1, 15), $adminId);
+
+        $vacation = $accounts->vacationYear($userId, 2026);
+
+        self::assertSame(27.0, $vacation['entitlement_days']);
+        self::assertSame(1.0, $vacation['carryover_days']);
+        self::assertSame(-13.0, $vacation['opening_adjustment_days']);
+        self::assertSame(15.0, $vacation['opening_balance_days']);
+        self::assertSame(15.0, $vacation['remaining_days']);
+    }
+
     public function testNewGenerationUsesOnlyItsOwnSnapshot(): void
     {
         $adminId = $this->createUser(['employee_number' => 'ADMIN-S3', 'email' => 'admin-s3@example.test']);
