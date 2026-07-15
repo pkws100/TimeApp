@@ -236,7 +236,7 @@ $terminalTrustBundleService = new TerminalTrustBundleService(
     (string) env('TERMINAL_TRUST_BUNDLE_FILE', storage_path('app/terminal-trust-bundle.json')),
     (string) env('TERMINAL_TRUST_PUBLIC_KEY_FILE', '')
 );
-$terminalPunchService = new TerminalPunchService($connection, $terminalService, $nfcTagService, $appTimesheetSyncService, $terminalTrustBundleService);
+$terminalPunchService = new TerminalPunchService($connection, $terminalService, $nfcTagService, $appTimesheetSyncService, $terminalTrustBundleService, $timeAccountService);
 $appDisplayName = trim((string) ($companySettingsService->current()['app_display_name'] ?? '')) ?: (string) $config->get('app.name');
 
 $adminContextService = new AdminContextService(

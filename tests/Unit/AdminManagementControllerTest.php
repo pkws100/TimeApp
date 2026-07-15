@@ -69,6 +69,20 @@ final class AdminManagementControllerTest extends TestCase
         self::assertStringContainsString('Projektfreigaben erfolgreich gespeichert.', $html);
     }
 
+    public function testProjectBookingValidationNoticeShowsAndConsumesTheDomainReason(): void
+    {
+        $_SESSION['project_booking_error_detail'] = 'Am gewaehlten Datum besteht bereits eine ganztaegige Abwesenheit.';
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'notice');
+        $method->setAccessible(true);
+
+        $html = (string) $method->invoke($controller, new Request('GET', '/admin/projects/5/edit', ['error' => 'booking-validation'], [], [], [], []));
+
+        self::assertStringContainsString('Die Buchung konnte nicht nacherfasst werden.', $html);
+        self::assertStringContainsString('Ursache: Am gewaehlten Datum besteht bereits eine ganztaegige Abwesenheit.', $html);
+        self::assertArrayNotHasKey('project_booking_error_detail', $_SESSION);
+    }
+
     public function testProjectMembershipSectionRendersActiveUsersWithRolesAndSelection(): void
     {
         $controller = $this->controller();
@@ -340,6 +354,32 @@ final class AdminManagementControllerTest extends TestCase
         self::assertStringContainsString('name="app_ui_settings[show_today_total_minutes]" value="1" >', $html);
         self::assertStringContainsString('name="role_ids[]" value="1" checked', $html);
         self::assertStringContainsString('aria-invalid="true"', $html);
+    }
+
+    public function testUserStoreRequiresAPositiveWeeklyTargetForWeeklyMode(): void
+    {
+        $_SESSION['_csrf_token'] = 'valid-token';
+
+        $response = $this->controllerWithRoles()->userStore(new Request('POST', '/admin/users', [], [
+            'csrf_token' => 'valid-token',
+            'employee_number' => 'M-44',
+            'first_name' => 'Woche',
+            'last_name' => 'Ohne Soll',
+            'email' => 'woche-ohne-soll@example.test',
+            'password' => 'secret123',
+            'employment_status' => 'active',
+            'target_hours_mode' => 'week',
+            'target_hours_month' => '160',
+            'target_hours_week' => '0',
+            'workdays_mask' => ['1', '2', '3', '4', '5'],
+            'role_ids' => ['1'],
+        ], [], [], []));
+
+        $html = $this->responseContent($response);
+
+        self::assertSame(422, $response->status());
+        self::assertStringContainsString('Bei Wochensoll muessen Sollstunden pro Woche groesser als 0 sein.', $html);
+        self::assertStringContainsString('name="target_hours_week" type="number" step="0.01" value="0" aria-invalid="true"', $html);
     }
 
     public function testUserStoreKeepsDataButClearsPasswordOnCsrfError(): void

@@ -220,7 +220,9 @@ final class AdminManagementController
             $this->bookingService->createManual($request->input(), (int) ($this->currentUserId() ?? 0), $projectId);
 
             return Response::redirect($returnTo . '?notice=booking-created');
-        } catch (InvalidArgumentException) {
+        } catch (InvalidArgumentException $exception) {
+            $_SESSION['project_booking_error_detail'] = $this->bookingErrorDetail($exception->getMessage());
+
             return Response::redirect($returnTo . '?error=booking-validation');
         }
     }
@@ -949,7 +951,7 @@ HTML;
     <div{$this->fieldWrapperClass($formErrors, 'employment_status')}><label for="employment_status">Status</label>{$this->select('employment_status', ['active' => 'Aktiv', 'inactive' => 'Inaktiv', 'terminated' => 'Ausgeschieden'], (string) ($user['employment_status'] ?? 'active'), $this->fieldInvalidAttribute($formErrors, 'employment_status'))}{$this->fieldErrorMarkup($formErrors, 'employment_status')}</div>
     <div{$this->fieldWrapperClass($formErrors, 'target_hours_mode')}><label for="target_hours_mode">Arbeitszeitmodell</label>{$this->select('target_hours_mode', ['month' => 'Monatssoll', 'week' => 'Wochensoll'], $targetHoursMode, $this->fieldInvalidAttribute($formErrors, 'target_hours_mode'))}{$this->fieldErrorMarkup($formErrors, 'target_hours_mode')}</div>
     <div{$this->fieldWrapperClass($formErrors, 'target_hours_month')}><label for="target_hours_month">Sollstunden / Monat</label><input id="target_hours_month" name="target_hours_month" type="number" step="0.01" value="{$this->field($user, 'target_hours_month')}"{$this->fieldInvalidAttribute($formErrors, 'target_hours_month')}>{$this->fieldErrorMarkup($formErrors, 'target_hours_month')}</div>
-    <div{$this->fieldWrapperClass($formErrors, 'target_hours_week')}><label for="target_hours_week">Sollstunden / Woche</label><input id="target_hours_week" name="target_hours_week" type="number" step="0.01" value="{$this->field($user, 'target_hours_week')}"{$this->fieldInvalidAttribute($formErrors, 'target_hours_week')}>{$this->fieldErrorMarkup($formErrors, 'target_hours_week')}</div>
+    <div{$this->fieldWrapperClass($formErrors, 'target_hours_week')}><label for="target_hours_week">Sollstunden / Woche</label><input id="target_hours_week" name="target_hours_week" type="number" step="0.01" value="{$this->field($user, 'target_hours_week')}"{$this->fieldInvalidAttribute($formErrors, 'target_hours_week')}><p class="muted">Bei Wochensoll ist ein Wert groesser als 0 erforderlich. Fuer die Zeitkontoberechnung wird dann das Wochensoll verwendet; das Monatssoll bleibt als gueltiger Stammdatenwert gespeichert.</p>{$this->fieldErrorMarkup($formErrors, 'target_hours_week')}</div>
     <div{$this->fieldWrapperClass($formErrors, 'vacation_days_year')}><label for="vacation_days_year">Jahresurlaub</label><input id="vacation_days_year" name="vacation_days_year" type="number" step="0.5" value="{$this->field($user, 'vacation_days_year')}"{$this->fieldInvalidAttribute($formErrors, 'vacation_days_year')}>{$this->fieldErrorMarkup($formErrors, 'vacation_days_year')}</div>
     <div{$this->fieldWrapperClass($formErrors, 'vacation_carryover_days')}><label for="vacation_carryover_days">Urlaubsuebertrag</label><input id="vacation_carryover_days" name="vacation_carryover_days" type="number" step="0.5" value="{$this->field($user, 'vacation_carryover_days')}"{$this->fieldInvalidAttribute($formErrors, 'vacation_carryover_days')}>{$this->fieldErrorMarkup($formErrors, 'vacation_carryover_days')}</div>
     <div class="full-span field-group{$this->fieldGroupErrorClass($formErrors, 'workdays_mask')}" role="group" aria-labelledby="workdays_mask_label"{$this->fieldInvalidAttribute($formErrors, 'workdays_mask')}>
@@ -1164,6 +1166,8 @@ HTML;
 
         if ($targetHoursWeek !== '' && (!is_numeric($targetHoursWeek) || (float) $targetHoursWeek < 0)) {
             $errors['target_hours_week'][] = 'Wochensollstunden muessen eine Zahl groesser oder gleich 0 sein.';
+        } elseif ($targetHoursMode === 'week' && ($targetHoursWeek === '' || (float) $targetHoursWeek <= 0)) {
+            $errors['target_hours_week'][] = 'Bei Wochensoll muessen Sollstunden pro Woche groesser als 0 sein.';
         }
 
         if ($vacationDaysYear !== '' && (!is_numeric($vacationDaysYear) || (float) $vacationDaysYear < 0)) {
@@ -1793,9 +1797,15 @@ HTML;
                 'terminal-tags' => 'Die NFC-Tags konnten nicht zugeordnet werden. Bitte Auswahl und Benutzerstatus pruefen.',
                 default => 'Beim Vorgang ist ein Fehler aufgetreten.',
             };
-            $detail = $error === 'file-upload' ? trim((string) $request->query('error_detail', '')) : '';
+            $detail = match ($error) {
+                'file-upload' => trim((string) $request->query('error_detail', '')),
+                'booking-validation' => $this->consumeProjectBookingErrorDetail(),
+                default => '',
+            };
 
-            return '<p class="notice error">' . $this->e($message . ($detail !== '' ? ' ' . $detail : '')) . '</p>';
+            $detailPrefix = $error === 'booking-validation' ? ' Ursache: ' : ' ';
+
+            return '<p class="notice error">' . $this->e($message . ($detail !== '' ? $detailPrefix . $detail : '')) . '</p>';
         }
 
         if ($notice === '') {
@@ -2043,6 +2053,21 @@ HTML;
     private function e(string $value): string
     {
         return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+    }
+
+    private function bookingErrorDetail(?string $detail): string
+    {
+        $detail = preg_replace('/[\x00-\x1F\x7F]+/u', ' ', trim((string) $detail)) ?? '';
+
+        return mb_substr(trim($detail), 0, 500);
+    }
+
+    private function consumeProjectBookingErrorDetail(): string
+    {
+        $detail = $this->bookingErrorDetail($_SESSION['project_booking_error_detail'] ?? null);
+        unset($_SESSION['project_booking_error_detail']);
+
+        return $detail;
     }
 
     private function required(bool $required): string

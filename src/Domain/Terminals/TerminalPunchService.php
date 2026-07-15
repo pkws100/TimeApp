@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Domain\Terminals;
 
+use App\Domain\Calendar\CalendarPolicyService;
+use App\Domain\TimeAccounts\TimeAccountService;
 use App\Domain\Timesheets\AppTimesheetSyncService;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
@@ -16,8 +18,10 @@ final class TerminalPunchService
         private TerminalService $terminalService,
         private NfcTagService $nfcTagService,
         private AppTimesheetSyncService $syncService,
-        private TerminalTrustBundleService $trustBundleService
+        private TerminalTrustBundleService $trustBundleService,
+        private ?TimeAccountService $timeAccountService = null
     ) {
+        $this->timeAccountService ??= new TimeAccountService($connection, new CalendarPolicyService($connection));
     }
 
     public function config(array $terminal): array
@@ -343,36 +347,30 @@ final class TerminalPunchService
 
     private function monthlySummary(int $userId, string $workDate): array
     {
-        $user = $this->activeUser($userId) ?? [];
-        $monthStart = (new DateTimeImmutable($workDate))->modify('first day of this month')->format('Y-m-d');
-        $monthEnd = (new DateTimeImmutable($workDate))->modify('last day of this month')->format('Y-m-d');
-        $tracked = 0;
-
-        if ($this->connection->tableExists('timesheets')) {
-            $tracked = (int) ($this->connection->fetchColumn(
-                'SELECT COALESCE(SUM(net_minutes), 0)
-                 FROM timesheets
-                 WHERE user_id = :user_id
-                   AND work_date BETWEEN :month_start AND :month_end
-                   AND entry_type = "work"
-                   AND COALESCE(is_deleted, 0) = 0',
-                [
-                    'user_id' => $userId,
-                    'month_start' => $monthStart,
-                    'month_end' => $monthEnd,
-                ]
-            ) ?? 0);
-        }
-
-        $targetMinutes = (int) round(((float) ($user['target_hours_month'] ?? 0)) * 60);
+        $date = new DateTimeImmutable($workDate);
+        $monthly = $this->timeAccountService?->monthlyAccount(
+            $userId,
+            (int) $date->format('Y'),
+            (int) $date->format('m'),
+            $workDate
+        ) ?? [];
+        $targetMinutes = (int) ($monthly['target_minutes'] ?? 0);
+        $tracked = (int) ($monthly['actual_minutes'] ?? 0);
+        $creditedMinutes = (int) ($monthly['credited_absence_minutes'] ?? 0);
+        $manualAdjustmentMinutes = (int) ($monthly['manual_adjustment_minutes'] ?? 0);
+        $balanceMinutes = (int) ($monthly['period_delta_minutes'] ?? 0);
 
         return [
             'target_minutes' => $targetMinutes,
             'tracked_minutes' => $tracked,
-            'balance_minutes' => $tracked - $targetMinutes,
+            'credited_minutes' => $creditedMinutes,
+            'manual_adjustment_minutes' => $manualAdjustmentMinutes,
+            'balance_minutes' => $balanceMinutes,
             'target_label' => $this->minutesToHours($targetMinutes),
             'tracked_label' => $this->minutesToHours($tracked),
-            'balance_label' => $this->signedMinutesToHours($tracked - $targetMinutes),
+            'credited_label' => $this->minutesToHours($creditedMinutes),
+            'manual_adjustment_label' => $this->signedMinutesToHours($manualAdjustmentMinutes),
+            'balance_label' => $this->signedMinutesToHours($balanceMinutes),
         ];
     }
 

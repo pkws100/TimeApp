@@ -76,8 +76,8 @@ final class AdminBookingController
             $this->bookingService->createManual($request->input(), $userId);
 
             return Response::redirect($this->withNotice($returnTo, 'created'));
-        } catch (InvalidArgumentException) {
-            return Response::redirect($this->withError($returnTo, 'validation'));
+        } catch (InvalidArgumentException $exception) {
+            return Response::redirect($this->withError($returnTo, 'validation', $exception->getMessage()));
         }
     }
 
@@ -101,7 +101,7 @@ final class AdminBookingController
 
             return Response::redirect($this->withNotice($returnTo, 'updated'));
         } catch (InvalidArgumentException $exception) {
-            return Response::redirect($this->withBookingContext($this->withError($returnTo, 'validation'), $bookingId));
+            return Response::redirect($this->withBookingContext($this->withError($returnTo, 'validation', $exception->getMessage()), $bookingId));
         }
     }
 
@@ -127,8 +127,8 @@ final class AdminBookingController
             );
 
             return Response::redirect($this->withNotice($returnTo, $updated > 0 ? 'reassigned' : 'selection-missing'));
-        } catch (InvalidArgumentException) {
-            return Response::redirect($this->withError($returnTo, 'bulk'));
+        } catch (InvalidArgumentException $exception) {
+            return Response::redirect($this->withError($returnTo, 'bulk', $exception->getMessage()));
         }
     }
 
@@ -146,8 +146,8 @@ final class AdminBookingController
             $this->bookingService->archive($bookingId, $userId, (string) $request->input('change_reason', ''));
 
             return Response::redirect($this->withNotice($returnTo, 'archived'));
-        } catch (InvalidArgumentException) {
-            return Response::redirect($this->withBookingContext($this->withError($returnTo, 'archive'), $bookingId));
+        } catch (InvalidArgumentException $exception) {
+            return Response::redirect($this->withBookingContext($this->withError($returnTo, 'archive', $exception->getMessage()), $bookingId));
         }
     }
 
@@ -165,8 +165,8 @@ final class AdminBookingController
             $this->bookingService->restore($bookingId, $userId, (string) $request->input('change_reason', ''));
 
             return Response::redirect($this->withNotice($returnTo, 'restored'));
-        } catch (InvalidArgumentException) {
-            return Response::redirect($this->withBookingContext($this->withError($returnTo, 'restore'), $bookingId));
+        } catch (InvalidArgumentException $exception) {
+            return Response::redirect($this->withBookingContext($this->withError($returnTo, 'restore', $exception->getMessage()), $bookingId));
         }
     }
 
@@ -498,9 +498,18 @@ HTML;
         return $this->withQueryValue($location, 'notice', $notice);
     }
 
-    private function withError(string $location, string $error): string
+    private function withError(string $location, string $error, ?string $detail = null): string
     {
-        return $this->withQueryValue($location, 'error', $error);
+        $location = $this->withQueryValue($location, 'error', $error);
+        $detail = $this->errorDetail($detail);
+
+        if ($detail === '') {
+            unset($_SESSION['admin_booking_error_detail']);
+        } else {
+            $_SESSION['admin_booking_error_detail'] = $detail;
+        }
+
+        return $location;
     }
 
     private function withBookingContext(string $location, int $bookingId): string
@@ -519,7 +528,7 @@ HTML;
         $path = parse_url($location, PHP_URL_PATH) ?: $fallback;
         $queryString = (string) parse_url($location, PHP_URL_QUERY);
         parse_str($queryString, $query);
-        unset($query['notice'], $query['error'], $query['booking_id'], $query['modal']);
+        unset($query['notice'], $query['error'], $query['error_detail'], $query['booking_id'], $query['modal']);
 
         $query = array_filter(
             $query,
@@ -596,6 +605,9 @@ HTML;
         $error = (string) $request->query('error', '');
 
         if ($error !== '') {
+            $detail = in_array($error, ['validation', 'bulk', 'archive', 'restore'], true)
+                ? $this->consumeErrorDetail()
+                : '';
             $message = match ($error) {
                 'validation' => 'Die Buchung konnte nicht gespeichert werden. Bitte Datum, Zeiten und Begruendung pruefen.',
                 'bulk' => 'Die Sammelzuordnung konnte nicht ausgefuehrt werden. Bitte Auswahl und Begruendung pruefen.',
@@ -608,6 +620,10 @@ HTML;
                 'csrf' => 'Die Buchungsaktion konnte nicht bestaetigt werden. Bitte die Seite neu laden und erneut versuchen.',
                 default => 'Beim Vorgang ist ein Fehler aufgetreten.',
             };
+
+            if ($detail !== '') {
+                $message .= ' Ursache: ' . $detail;
+            }
 
             return '<p class="notice error">' . $this->e($message) . '</p>';
         }
@@ -639,5 +655,20 @@ HTML;
     private function e(string $value): string
     {
         return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+    }
+
+    private function errorDetail(?string $detail): string
+    {
+        $detail = preg_replace('/[\x00-\x1F\x7F]+/u', ' ', trim((string) $detail)) ?? '';
+
+        return mb_substr(trim($detail), 0, 500);
+    }
+
+    private function consumeErrorDetail(): string
+    {
+        $detail = $this->errorDetail($_SESSION['admin_booking_error_detail'] ?? null);
+        unset($_SESSION['admin_booking_error_detail']);
+
+        return $detail;
     }
 }

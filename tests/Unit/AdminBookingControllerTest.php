@@ -104,6 +104,50 @@ final class AdminBookingControllerTest extends TestCase
         self::assertStringNotContainsString('per_page=', $query);
     }
 
+    public function testValidationNoticeShowsTheEscapedDomainReason(): void
+    {
+        $_SESSION['admin_booking_error_detail'] = 'Am gewaehlten Datum besteht bereits eine ganztaegige Abwesenheit. <script>alert(1)</script>';
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'notice');
+        $method->setAccessible(true);
+
+        $html = (string) $method->invoke($controller, new Request('GET', '/admin/bookings', [
+            'error' => 'validation',
+        ], [], [], [], []));
+
+        self::assertStringContainsString('Die Buchung konnte nicht gespeichert werden.', $html);
+        self::assertStringContainsString('Am gewaehlten Datum besteht bereits eine ganztaegige Abwesenheit.', $html);
+        self::assertStringContainsString('&lt;script&gt;alert(1)&lt;/script&gt;', $html);
+        self::assertStringNotContainsString('<script>alert(1)</script>', $html);
+        self::assertArrayNotHasKey('admin_booking_error_detail', $_SESSION);
+    }
+
+    public function testValidationErrorRedirectCarriesTheDomainReason(): void
+    {
+        $_SESSION = [];
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'withError');
+        $method->setAccessible(true);
+
+        $location = (string) $method->invoke($controller, '/admin/bookings?scope=active', 'validation', 'Doppelte ganztägige Abwesenheit');
+
+        self::assertSame('/admin/bookings?scope=active&error=validation', $location);
+        self::assertSame('Doppelte ganztägige Abwesenheit', $_SESSION['admin_booking_error_detail'] ?? null);
+    }
+
+    public function testUnrelatedErrorDoesNotConsumeABookingValidationReason(): void
+    {
+        $_SESSION['admin_booking_error_detail'] = 'Ganztaegige Abwesenheit besteht bereits.';
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'notice');
+        $method->setAccessible(true);
+
+        $html = (string) $method->invoke($controller, new Request('GET', '/admin/bookings', ['error' => 'csrf'], [], [], [], []));
+
+        self::assertStringNotContainsString('Ursache:', $html);
+        self::assertSame('Ganztaegige Abwesenheit besteht bereits.', $_SESSION['admin_booking_error_detail'] ?? null);
+    }
+
     private function controller(): AdminBookingController
     {
         $connection = new DatabaseConnection([]);

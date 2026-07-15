@@ -53,6 +53,18 @@ final class TerminalImplementationTest extends TestCase
         self::assertStringContainsString('\'project_id\' => $action === \'check_in\' ? $projectId : null', $source);
     }
 
+    public function testTerminalMonthlyStatusUsesTheTimeAccountCalculation(): void
+    {
+        $source = (string) file_get_contents(base_path('src/Domain/Terminals/TerminalPunchService.php'));
+        $bootstrap = (string) file_get_contents(base_path('bootstrap/app.php'));
+
+        self::assertStringContainsString('use App\\Domain\\TimeAccounts\\TimeAccountService;', $source);
+        self::assertStringContainsString('$this->timeAccountService?->monthlyAccount(', $source);
+        self::assertStringContainsString("'credited_minutes' => \$creditedMinutes", $source);
+        self::assertStringContainsString("'manual_adjustment_minutes' => \$manualAdjustmentMinutes", $source);
+        self::assertStringContainsString('$terminalTrustBundleService, $timeAccountService', $bootstrap);
+    }
+
     public function testTerminalApiExposesConfigAndScanRoutes(): void
     {
         $source = (string) file_get_contents(base_path('bootstrap/app.php'));
