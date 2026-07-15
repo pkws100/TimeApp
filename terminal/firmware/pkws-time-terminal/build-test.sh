@@ -9,8 +9,11 @@ dist="$root/dist-test"
 
 rm -rf "$dist"
 mkdir -p "$dist"
+
+PIO_CMD="$pio_cmd" sh "$root/prepare-1.0-build.sh"
 (cd "$root/1.0" && "$pio_cmd" run)
 (cd "$root/1.1" && "$pio_cmd" run -e esp32doit-devkit-v1-test)
+(cd "$root/1.1" && "$pio_cmd" test -e native)
 cp "$root/1.0/.pio/build/esp32doit-devkit-v1/firmware.bin" "$dist/pkws-time-terminal-1.0.bin"
 cp "$root/1.1/.pio/build/esp32doit-devkit-v1-test/firmware.bin" "$dist/pkws-time-terminal-1.1-test.bin"
 (cd "$dist" && sha256sum pkws-time-terminal-1.0.bin pkws-time-terminal-1.1-test.bin > SHA256SUMS)
