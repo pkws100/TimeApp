@@ -75,6 +75,7 @@ static const uint16_t HTTP_TIMEOUT_MS = 5000;
 static const unsigned long DOWNLOAD_TOTAL_TIMEOUT_MS = 15000;
 static const unsigned long DOWNLOAD_IDLE_TIMEOUT_MS = 3000;
 static const unsigned long TIME_SYNC_TIMEOUT_MS = 30000;
+static const uint32_t READY_CLOCK_CHECK_INTERVAL_MS = 1000;
 static const unsigned long TRUST_WARNING_BUFFER_SECONDS = 90UL * 24UL * 60UL * 60UL;
 static const size_t MAX_TRUST_BUNDLE_BYTES = 24576;
 static const size_t MAX_CONFIG_RESPONSE_BYTES = 16384;
@@ -192,7 +193,8 @@ unsigned long nextApiRetryAt = 0;
 unsigned long nextQueueSyncCycleAt = 0;
 unsigned long lastRetryAfterMs = 0;
 String savedDisplayLines[4] = {"PK-WS TimeApp", "Tag vorhalten", "Bereit", ""};
-String lastRenderedReadyClockLine;
+char lastRenderedReadyClockLine[24] = "";
+uint32_t lastReadyClockCheckAt = 0;
 bool temporaryDisplayActive = false;
 unsigned long temporaryDisplayUntil = 0;
 DeviceState temporaryDisplayState = DeviceState::BOOT;
@@ -265,7 +267,6 @@ const char *blockedMaintenanceMessage()
 QueueSyncOutcome syncOneQueuedScan();
 void enterState(DeviceState next);
 String isoDeviceTimeOrNull();
-String localClockLine();
 void startTimeSynchronization();
 void renderReadyDisplay(bool force = false);
 void refreshReadyClockIfNeeded();
@@ -447,7 +448,7 @@ bool clearQueueSyncBlock()
 
 bool isTimeValid()
 {
-    return time(nullptr) > 1704067200;
+    return terminalTimeValid(time(nullptr));
 }
 
 String normalizePem(String value)
@@ -2607,21 +2608,13 @@ bool fetchApiConfig()
 
 String isoDeviceTimeOrNull()
 {
-    if (!isTimeValid()) {
+    const time_t epoch = time(nullptr);
+    if (!terminalTimeValid(epoch)) {
         return "";
     }
 
     char buffer[32];
-    time_t epoch = time(nullptr);
     return formatTerminalUtcTimestamp(epoch, true, buffer, sizeof(buffer)) ? String(buffer) : String("");
-}
-
-String localClockLine()
-{
-    char buffer[24];
-    time_t epoch = time(nullptr);
-    formatTerminalBerlinClock(epoch, isTimeValid(), buffer, sizeof(buffer));
-    return String(buffer);
 }
 
 void startTimeSynchronization()
@@ -2640,19 +2633,28 @@ bool readyClockBusy()
 void renderReadyDisplay(bool force)
 {
     const bool readyOrIdleNfcState = state == DeviceState::READY || state == DeviceState::NFC_SCAN;
-    String clockLine = localClockLine();
-    if (!force && !readyClockRefreshRequired(readyOrIdleNfcState, temporaryDisplayActive, readyClockBusy(),
-        lastRenderedReadyClockLine.c_str(), clockLine.c_str())) {
-        return;
-    }
-    if (!readyOrIdleNfcState || temporaryDisplayActive || readyClockBusy()) {
+    const bool busy = readyClockBusy();
+    if (!readyOrIdleNfcState || temporaryDisplayActive || busy) {
         return;
     }
 
-    welcomeLines[3] = clockLine;
+    const uint32_t now = static_cast<uint32_t>(millis());
+    if (!readyClockCheckDue(now, lastReadyClockCheckAt, READY_CLOCK_CHECK_INTERVAL_MS, force)) {
+        return;
+    }
+    lastReadyClockCheckAt = now;
+
+    char currentClockLine[24];
+    const time_t epoch = time(nullptr);
+    formatTerminalBerlinClock(epoch, terminalTimeValid(epoch), currentClockLine, sizeof(currentClockLine));
+    if (!force && !readyClockRefreshRequired(true, false, false, lastRenderedReadyClockLine, currentClockLine)) {
+        return;
+    }
+
+    welcomeLines[3] = currentClockLine;
     rememberDisplay(welcomeLines);
     lcdShowLines(welcomeLines);
-    lastRenderedReadyClockLine = clockLine;
+    std::snprintf(lastRenderedReadyClockLine, sizeof(lastRenderedReadyClockLine), "%s", currentClockLine);
 }
 
 void refreshReadyClockIfNeeded()

@@ -8,6 +8,12 @@
 
 static constexpr const char *TERMINAL_BERLIN_POSIX_TZ = "CET-1CEST,M3.5.0/2,M10.5.0/3";
 static constexpr const char *TERMINAL_CLOCK_PLACEHOLDER = "--.--.---- --:--";
+static constexpr time_t TERMINAL_VALID_TIME_AFTER_EPOCH = 1704067200;
+
+inline bool terminalTimeValid(time_t epoch)
+{
+    return epoch > TERMINAL_VALID_TIME_AFTER_EPOCH;
+}
 
 enum class QueueFailureAction {
     RETRY_TEMPORARY,
@@ -158,4 +164,9 @@ inline bool readyClockRefreshRequired(
 ) {
     if (!readyOrIdleNfcState || temporaryDisplayActive || busy || currentLine == nullptr) return false;
     return previousLine == nullptr || std::strcmp(previousLine, currentLine) != 0;
+}
+
+inline bool readyClockCheckDue(uint32_t now, uint32_t lastCheck, uint32_t interval, bool force)
+{
+    return force || static_cast<uint32_t>(now - lastCheck) >= interval;
 }

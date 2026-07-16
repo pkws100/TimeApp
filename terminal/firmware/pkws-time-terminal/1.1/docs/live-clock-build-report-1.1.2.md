@@ -16,6 +16,22 @@ NTP-Synchronisierung zeigt sie `--.--.---- --:--`.
 nutzbar; HTTPS behält die bestehende `TIME_SYNC`-Pflicht vor der TLS-Verifikation.
 Der Serverendpoint und seine Payload wurden nicht geändert.
 
+## Leerlaufdrosselung
+
+Im dauerhaften `NFC_SCAN`-Leerlauf wird die lokale Uhr höchstens einmal pro
+Sekunde geprüft. Die Intervallentscheidung verwendet eine vor
+`millis()`-Überlauf geschützte unsigned Differenz; erzwungene Darstellungen beim
+Eintritt in `READY` und nach temporären Anzeigen umgehen das Intervall sofort.
+
+Formatierung und Vergleich erfolgen in festen `char`-Puffern. Solange sich die
+sichtbare Minutenzeile beziehungsweise der Gültigkeitszustand nicht ändert,
+entsteht kein temporärer Arduino-`String` und das LCD wird nicht beschrieben.
+Nur bei sichtbarer Änderung oder erzwungener Wiederherstellung wird
+`welcomeLines[3]` aktualisiert. Die Uhrprüfung führt keinen Netzwerkaufruf aus
+und startet NTP nicht erneut. Bei HTTP wechselt der Platzhalter spätestens mit
+der nächsten Sekundenprüfung ohne Neustart oder Config-Aufruf zur gültigen
+Berliner Zeit.
+
 ## Reproduzierbarer Testbuild
 
 Ausgeführt am 2026-07-16 mit:
@@ -27,20 +43,22 @@ PIO_CMD=/tmp/platformio-venv/bin/pio sh terminal/firmware/pkws-time-terminal/bui
 | Firmware | Ergebnis | PlatformIO / Plattform / Core | Board | RAM | Flash |
 | --- | --- | --- | --- | --- | --- |
 | 1.0 | SUCCESS | Core 6.1.19 / `espressif32@7.0.1` / `framework-arduinoespressif32@3.20017.241212` | DOIT ESP32 DEVKIT V1, 4 MB | 49.088 / 327.680 B (15,0 %) | 1.046.597 / 1.310.720 B (79,8 %) |
-| 1.1 Test | SUCCESS | Core 6.1.19 / `espressif32@7.0.1` / `framework-arduinoespressif32@3.20017.241212` | DOIT ESP32 DEVKIT V1, 4 MB | 49.596 / 327.680 B (15,1 %) | 1.152.901 / 1.310.720 B (88,0 %) |
+| 1.1 Test | SUCCESS | Core 6.1.19 / `espressif32@7.0.1` / `framework-arduinoespressif32@3.20017.241212` | DOIT ESP32 DEVKIT V1, 4 MB | 49.604 / 327.680 B (15,1 %) | 1.152.725 / 1.310.720 B (87,9 %) |
 
-Gegenüber dem historischen 1.1.1-Testbuild: **+16 B RAM**, **+420 B Flash**.
-Die App-Partition hat weiterhin 157.819 B Reserve.
+Gegenüber dem vorherigen PR-Head `be50b54`: **+8 B RAM**, **−176 B Flash**.
+Gegenüber dem historischen 1.1.1-Testbuild: **+24 B RAM**, **+244 B Flash**.
+Die App-Partition hat weiterhin 157.995 B Reserve.
 
 ```text
-26ba12e5dc6318cec4a3c650e4048ba909d3068ea9774edd8b38d0cc81839264  pkws-time-terminal-1.1-test.bin
+54153f8e787aaadf70f8f50b0671eef6581b1734ca6f87db7b408f2eabd3d4b3  pkws-time-terminal-1.1-test.bin
 ```
 
-Die native Firmwaretest-Suite bestand mit acht Testfällen, darunter
+Die native Firmwaretest-Suite bestand mit neun Testfällen, darunter
 Platzhalter, CET/CEST, UTC-`device_time`, Minuten-/Datumswechsel sowie die
 Sperre bei temporären und nicht-idlen Anzeigen. Zusätzlich beweist ein Test,
 dass UTC-Trust-Zeitwerte trotz Berlin-TZ unverändert in Epochzeit überführt
-werden. Der vollständige
+werden. Die neue Intervallprüfung deckt 1.000-ms-Grenze, Force und simulierten
+`millis()`-Überlauf ab. Der vollständige
 `COMPOSER_ALLOW_SUPERUSER=1 composer test`-Lauf wurde ebenfalls ausgeführt.
 
 ## Schutz und Produktionsstatus
@@ -54,7 +72,9 @@ werden. Der vollständige
 `git diff -- terminal/firmware/pkws-time-terminal/1.0` ist leer. Firmware 1.0,
 der Serverendpoint, API-Routen, Payloads, Terminal-ID, Bearer-Token,
 Trust-/Recovery- und Queue-Logik wurden nicht verändert; eine Migration ist
-nicht erforderlich.
+nicht erforderlich. Insbesondere blieb die Dead-Letter-Logik einschließlich
+des bekannten, nicht zu diesem Auftrag gehörenden Stromausfallrandfalls
+unangetastet.
 
 Ein Produktionsbuild wurde nicht ausgeführt: Die ignorierten lokalen Dateien
 `TrustConfig.local.h` und `ProvisioningConfig.local.h` fehlen. Testschlüssel

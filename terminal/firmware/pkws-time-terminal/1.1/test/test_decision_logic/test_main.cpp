@@ -50,6 +50,8 @@ void testRetryAfterSeconds()
 void testClockUsesPlaceholderUntilTimeIsValid()
 {
     char line[24];
+    TEST_ASSERT_FALSE(terminalTimeValid(TERMINAL_VALID_TIME_AFTER_EPOCH));
+    TEST_ASSERT_TRUE(terminalTimeValid(TERMINAL_VALID_TIME_AFTER_EPOCH + 1));
     TEST_ASSERT_FALSE(formatTerminalBerlinClock(SUMMER_UTC, false, line, sizeof(line)));
     TEST_ASSERT_EQUAL_STRING("--.--.---- --:--", line);
 }
@@ -93,9 +95,20 @@ void testReadyClockRefreshOnlyRendersChangesInAllowedIdleState()
     TEST_ASSERT_FALSE(readyClockRefreshRequired(true, false, false, "16.07.2026 14:34", "16.07.2026 14:34"));
     TEST_ASSERT_TRUE(readyClockRefreshRequired(true, false, false, "16.07.2026 14:34", "16.07.2026 14:35"));
     TEST_ASSERT_TRUE(readyClockRefreshRequired(true, false, false, "16.07.2026 23:59", "17.07.2026 00:00"));
+    TEST_ASSERT_TRUE(readyClockRefreshRequired(true, false, false, "--.--.---- --:--", "16.07.2026 14:35"));
+    TEST_ASSERT_TRUE(readyClockRefreshRequired(true, false, false, "16.07.2026 14:35", "--.--.---- --:--"));
     TEST_ASSERT_FALSE(readyClockRefreshRequired(false, false, false, "16.07.2026 14:34", "16.07.2026 14:35"));
     TEST_ASSERT_FALSE(readyClockRefreshRequired(true, true, false, "16.07.2026 14:34", "16.07.2026 14:35"));
     TEST_ASSERT_FALSE(readyClockRefreshRequired(true, false, true, "16.07.2026 14:34", "16.07.2026 14:35"));
+}
+
+void testReadyClockCheckIntervalAndMillisOverflow()
+{
+    TEST_ASSERT_FALSE(readyClockCheckDue(1999, 1000, 1000, false));
+    TEST_ASSERT_TRUE(readyClockCheckDue(2000, 1000, 1000, false));
+    TEST_ASSERT_TRUE(readyClockCheckDue(1001, 1000, 1000, true));
+    TEST_ASSERT_FALSE(readyClockCheckDue(498, UINT32_MAX - 500, 1000, false));
+    TEST_ASSERT_TRUE(readyClockCheckDue(499, UINT32_MAX - 500, 1000, false));
 }
 
 int main(int, char **)
@@ -109,5 +122,6 @@ int main(int, char **)
     RUN_TEST(testDeviceTimeRemainsUtc);
     RUN_TEST(testUtcCalendarConversionIsIndependentOfBerlinTimezone);
     RUN_TEST(testReadyClockRefreshOnlyRendersChangesInAllowedIdleState);
+    RUN_TEST(testReadyClockCheckIntervalAndMillisOverflow);
     return UNITY_END();
 }
