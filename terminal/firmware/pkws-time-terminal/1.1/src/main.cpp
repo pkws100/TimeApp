@@ -48,7 +48,7 @@ static_assert(sizeof(PKWS_PORTAL_ADMIN_PASSWORD) >= 13, "PKWS_PORTAL_ADMIN_PASSW
 #endif
 static_assert(sizeof(PKWS_PROVISIONING_ID) >= 13, "PKWS_PROVISIONING_ID muss mindestens 12 Zeichen haben.");
 
-static const char *FIRMWARE_VERSION = "pkws-time-terminal-v1.1.1";
+static const char *FIRMWARE_VERSION = "pkws-time-terminal-v1.1.2";
 static const char *NVS_NAMESPACE = "pkws-time";
 static const char *SETUP_AP_PASSWORD = PKWS_SETUP_AP_PASSWORD;
 static const char *PORTAL_ADMIN_PASSWORD = PKWS_PORTAL_ADMIN_PASSWORD;
@@ -192,6 +192,7 @@ unsigned long nextApiRetryAt = 0;
 unsigned long nextQueueSyncCycleAt = 0;
 unsigned long lastRetryAfterMs = 0;
 String savedDisplayLines[4] = {"PK-WS TimeApp", "Tag vorhalten", "Bereit", ""};
+String lastRenderedReadyClockLine;
 bool temporaryDisplayActive = false;
 unsigned long temporaryDisplayUntil = 0;
 DeviceState temporaryDisplayState = DeviceState::BOOT;
@@ -264,6 +265,10 @@ const char *blockedMaintenanceMessage()
 QueueSyncOutcome syncOneQueuedScan();
 void enterState(DeviceState next);
 String isoDeviceTimeOrNull();
+String localClockLine();
+void startTimeSynchronization();
+void renderReadyDisplay(bool force = false);
+void refreshReadyClockIfNeeded();
 
 String macSuffix()
 {
@@ -597,7 +602,7 @@ time_t trustDateToEpoch(const String &value)
 {
     struct tm parsed = {};
     if (value.length() == 0 || strptime(value.c_str(), "%Y-%m-%dT%H:%M:%SZ", &parsed) == nullptr) return 0;
-    return mktime(&parsed);
+    return terminalUtcTmToEpoch(parsed);
 }
 
 String trustEpochToDate(time_t value)
@@ -1139,8 +1144,12 @@ void rememberDisplay(const String lines[4])
 
 void restoreSavedDisplay()
 {
-    lcdShowLines(savedDisplayLines);
     temporaryDisplayActive = false;
+    if (state == DeviceState::READY || state == DeviceState::NFC_SCAN) {
+        renderReadyDisplay(true);
+        return;
+    }
+    lcdShowLines(savedDisplayLines);
 }
 
 void setAllLeds(bool red, bool yellow, bool green)
@@ -2310,17 +2319,14 @@ void enterState(DeviceState next)
         wifiAttemptStartedAt = 0;
         setAllLeds(false, true, false);
     } else if (next == DeviceState::TIME_SYNC) {
-        timeSyncStarted = true;
-        timeSyncStartedAt = millis();
-        configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+        startTimeSynchronization();
         lcdShow("Zeit synchronisieren", "HTTPS benötigt NTP", "bitte warten", "");
     } else if (next == DeviceState::API_CONFIG) {
         lcdShow("API pruefen", "Terminal config", "bitte warten", "");
         setAllLeds(false, true, false);
     } else if (next == DeviceState::READY) {
         if (currentUid.length() == 0 && currentRequestId.length() == 0) resumeScanAfterWifiReconnect = false;
-        lcdShowLines(welcomeLines);
-        rememberDisplay(welcomeLines);
+        renderReadyDisplay(true);
         setAllLeds(false, false, true);
     } else if (next == DeviceState::NFC_SCAN) {
         setAllLeds(false, false, true);
@@ -2568,7 +2574,7 @@ bool fetchApiConfig()
     bool ok = doc["ok"] | false;
     if (status >= 200 && status < 300 && ok) {
         if (queueSyncBlocked) clearQueueSyncBlock();
-        for (uint8_t i = 0; i < 4; i++) {
+        for (uint8_t i = 0; i < 3; i++) {
             welcomeLines[i] = doc["display"]["lines"][i] | welcomeLines[i];
         }
         uint32_t advertisedVersion = (uint32_t) (doc["trust_bundle"]["latest_version"] | 0);
@@ -2605,14 +2611,53 @@ String isoDeviceTimeOrNull()
         return "";
     }
 
-    struct tm timeInfo;
-    if (!getLocalTime(&timeInfo, 10)) {
-        return "";
+    char buffer[32];
+    time_t epoch = time(nullptr);
+    return formatTerminalUtcTimestamp(epoch, true, buffer, sizeof(buffer)) ? String(buffer) : String("");
+}
+
+String localClockLine()
+{
+    char buffer[24];
+    time_t epoch = time(nullptr);
+    formatTerminalBerlinClock(epoch, isTimeValid(), buffer, sizeof(buffer));
+    return String(buffer);
+}
+
+void startTimeSynchronization()
+{
+    timeSyncStarted = true;
+    timeSyncStartedAt = millis();
+    configTzTime(TERMINAL_BERLIN_POSIX_TZ, "pool.ntp.org", "time.nist.gov");
+}
+
+bool readyClockBusy()
+{
+    return currentUid.length() > 0 || currentRequestId.length() > 0
+        || scanLifecycle != ScanLifecycle::NONE || queueSync.active || nfcTestActive;
+}
+
+void renderReadyDisplay(bool force)
+{
+    const bool readyOrIdleNfcState = state == DeviceState::READY || state == DeviceState::NFC_SCAN;
+    String clockLine = localClockLine();
+    if (!force && !readyClockRefreshRequired(readyOrIdleNfcState, temporaryDisplayActive, readyClockBusy(),
+        lastRenderedReadyClockLine.c_str(), clockLine.c_str())) {
+        return;
+    }
+    if (!readyOrIdleNfcState || temporaryDisplayActive || readyClockBusy()) {
+        return;
     }
 
-    char buffer[32];
-    strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &timeInfo);
-    return String(buffer);
+    welcomeLines[3] = clockLine;
+    rememberDisplay(welcomeLines);
+    lcdShowLines(welcomeLines);
+    lastRenderedReadyClockLine = clockLine;
+}
+
+void refreshReadyClockIfNeeded()
+{
+    renderReadyDisplay(false);
 }
 
 String generateRequestId()
@@ -2913,6 +2958,10 @@ void handleWifiConnect()
         lcdShow("WLAN verbunden", WiFi.localIP().toString(), "API wird geprueft", "");
         setAllLeds(false, false, true);
         startWebPortal();
+        if (!isHttpsTransport()) {
+            // HTTP remains immediately usable; SNTP updates the local ready clock in parallel.
+            startTimeSynchronization();
+        }
         enterState(isHttpsTransport() ? DeviceState::TIME_SYNC : DeviceState::API_CONFIG);
         return;
     }
@@ -3161,8 +3210,6 @@ void handleBoot()
 void setup()
 {
     Serial.begin(115200);
-    setenv("TZ", "UTC0", 1);
-    tzset();
     pinMode(PIN_LED_GREEN, OUTPUT);
     pinMode(PIN_LED_RED, OUTPUT);
     pinMode(PIN_LED_YELLOW, OUTPUT);
@@ -3320,6 +3367,7 @@ void loop()
                 enterState(DeviceState::QUEUE_SYNC);
                 break;
             }
+            refreshReadyClockIfNeeded();
             handleNfcScan();
             break;
 

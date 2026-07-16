@@ -1,6 +1,18 @@
 #include <unity.h>
 
+#include <cstdlib>
+#include <ctime>
+
 #include "TerminalDecisionLogic.h"
+
+static const time_t WINTER_UTC = 1768480440; // 2026-01-15 12:34:00 UTC
+static const time_t SUMMER_UTC = 1784205240; // 2026-07-16 12:34:00 UTC
+
+void useBerlinTimezone()
+{
+    setenv("TZ", TERMINAL_BERLIN_POSIX_TZ, 1);
+    tzset();
+}
 
 void testQueueFailureClassification()
 {
@@ -35,11 +47,67 @@ void testRetryAfterSeconds()
     TEST_ASSERT_EQUAL_UINT32(0, retryAfterMilliseconds("Wed, 21 Oct 2026 07:28:00 GMT"));
 }
 
+void testClockUsesPlaceholderUntilTimeIsValid()
+{
+    char line[24];
+    TEST_ASSERT_FALSE(formatTerminalBerlinClock(SUMMER_UTC, false, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("--.--.---- --:--", line);
+}
+
+void testClockUsesBerlinWinterAndSummerTime()
+{
+    useBerlinTimezone();
+    char line[24];
+
+    TEST_ASSERT_TRUE(formatTerminalBerlinClock(WINTER_UTC, true, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("15.01.2026 13:34", line);
+
+    TEST_ASSERT_TRUE(formatTerminalBerlinClock(SUMMER_UTC, true, line, sizeof(line)));
+    TEST_ASSERT_EQUAL_STRING("16.07.2026 14:34", line);
+}
+
+void testDeviceTimeRemainsUtc()
+{
+    useBerlinTimezone();
+    char timestamp[32];
+
+    TEST_ASSERT_TRUE(formatTerminalUtcTimestamp(SUMMER_UTC, true, timestamp, sizeof(timestamp)));
+    TEST_ASSERT_EQUAL_STRING("2026-07-16T12:34:00Z", timestamp);
+}
+
+void testUtcCalendarConversionIsIndependentOfBerlinTimezone()
+{
+    useBerlinTimezone();
+    struct tm utc = {};
+    utc.tm_year = 2026 - 1900;
+    utc.tm_mon = 6;
+    utc.tm_mday = 16;
+    utc.tm_hour = 12;
+    utc.tm_min = 34;
+
+    TEST_ASSERT_EQUAL_INT64(SUMMER_UTC, terminalUtcTmToEpoch(utc));
+}
+
+void testReadyClockRefreshOnlyRendersChangesInAllowedIdleState()
+{
+    TEST_ASSERT_FALSE(readyClockRefreshRequired(true, false, false, "16.07.2026 14:34", "16.07.2026 14:34"));
+    TEST_ASSERT_TRUE(readyClockRefreshRequired(true, false, false, "16.07.2026 14:34", "16.07.2026 14:35"));
+    TEST_ASSERT_TRUE(readyClockRefreshRequired(true, false, false, "16.07.2026 23:59", "17.07.2026 00:00"));
+    TEST_ASSERT_FALSE(readyClockRefreshRequired(false, false, false, "16.07.2026 14:34", "16.07.2026 14:35"));
+    TEST_ASSERT_FALSE(readyClockRefreshRequired(true, true, false, "16.07.2026 14:34", "16.07.2026 14:35"));
+    TEST_ASSERT_FALSE(readyClockRefreshRequired(true, false, true, "16.07.2026 14:34", "16.07.2026 14:35"));
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
     RUN_TEST(testQueueFailureClassification);
     RUN_TEST(testTrustRecoveryDecisions);
     RUN_TEST(testRetryAfterSeconds);
+    RUN_TEST(testClockUsesPlaceholderUntilTimeIsValid);
+    RUN_TEST(testClockUsesBerlinWinterAndSummerTime);
+    RUN_TEST(testDeviceTimeRemainsUtc);
+    RUN_TEST(testUtcCalendarConversionIsIndependentOfBerlinTimezone);
+    RUN_TEST(testReadyClockRefreshOnlyRendersChangesInAllowedIdleState);
     return UNITY_END();
 }
