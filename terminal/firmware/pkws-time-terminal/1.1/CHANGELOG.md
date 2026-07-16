@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.2 — 2026-07-16
+
+- Fixed the frozen fourth ready-screen line: it is now rendered locally as a live Europe/Berlin clock instead of retaining the config response timestamp.
+- Kept the server contract unchanged: the first three ready-screen lines remain server-controlled, while `device_time` is independently formatted as UTC with `Z`.
+- HTTP starts NTP in parallel without blocking config or scans; verified HTTPS still waits for valid time before TLS.
+
 ## 1.1.1 — 2026-07-14
 
 - Restored the complete Firmware 1.0 functional baseline before integrating transport changes.

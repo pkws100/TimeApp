@@ -1,4 +1,4 @@
-# Firmware 1.1.1 mit Arduino IDE flashen
+# Firmware 1.1.2 mit Arduino IDE flashen
 
 Diese Anleitung verwendet ausschließlich die Arduino IDE 2.x. PlatformIO wird
 nicht benötigt. Sie gilt für das ESP32-Terminal mit `DOIT ESP32 DEVKIT V1`
@@ -92,7 +92,7 @@ Der öffentliche Schlüssel im Terminal und der Server müssen zusammenpassen:
 
 ## Nach dem Flash
 
-- Das LCD muss `pkws-time-terminal-v1.1.1` anzeigen.
+- Das LCD muss `pkws-time-terminal-v1.1.2` anzeigen. Im Bereitschaftsbild zeigt die vierte Zeile nach NTP die lokale Europe/Berlin-Zeit; vor NTP steht dort `--.--.---- --:--`.
 - Ohne gespeicherte Konfiguration erscheint der Setup-Access-Point
   `PKWS-TimeApp-Setup-<MAC-Endung>`; das Portal ist unter
   `http://192.168.4.1` erreichbar.

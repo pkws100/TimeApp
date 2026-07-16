@@ -1,7 +1,19 @@
 #pragma once
 
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <ctime>
+
+static constexpr const char *TERMINAL_BERLIN_POSIX_TZ = "CET-1CEST,M3.5.0/2,M10.5.0/3";
+static constexpr const char *TERMINAL_CLOCK_PLACEHOLDER = "--.--.---- --:--";
+static constexpr time_t TERMINAL_VALID_TIME_AFTER_EPOCH = 1704067200;
+
+inline bool terminalTimeValid(time_t epoch)
+{
+    return epoch > TERMINAL_VALID_TIME_AFTER_EPOCH;
+}
 
 enum class QueueFailureAction {
     RETRY_TEMPORARY,
@@ -81,4 +93,80 @@ inline TrustRecoveryAction trustRecoveryActionFor(
     if (previousSafe) return TrustRecoveryAction::RESTORE_PREVIOUS;
     if (oldPendingSafe) return TrustRecoveryAction::RESTORE_OLD_PENDING;
     return TrustRecoveryAction::USE_FACTORY;
+}
+
+inline bool formatTerminalBerlinClock(time_t epoch, bool timeValid, char *buffer, size_t bufferSize)
+{
+    if (buffer == nullptr || bufferSize == 0) return false;
+    if (!timeValid) {
+        std::snprintf(buffer, bufferSize, "%s", TERMINAL_CLOCK_PLACEHOLDER);
+        return false;
+    }
+
+    struct tm localTime = {};
+    if (localtime_r(&epoch, &localTime) == nullptr) {
+        std::snprintf(buffer, bufferSize, "%s", TERMINAL_CLOCK_PLACEHOLDER);
+        return false;
+    }
+
+    return std::strftime(buffer, bufferSize, "%d.%m.%Y %H:%M", &localTime) > 0;
+}
+
+inline bool formatTerminalUtcTimestamp(time_t epoch, bool timeValid, char *buffer, size_t bufferSize)
+{
+    if (buffer == nullptr || bufferSize == 0) return false;
+    if (!timeValid) {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    struct tm utcTime = {};
+    if (gmtime_r(&epoch, &utcTime) == nullptr) {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    return std::strftime(buffer, bufferSize, "%Y-%m-%dT%H:%M:%SZ", &utcTime) > 0;
+}
+
+inline int64_t terminalDaysFromCivil(int year, unsigned month, unsigned day)
+{
+    year -= month <= 2;
+    const int era = (year >= 0 ? year : year - 399) / 400;
+    const unsigned yearOfEra = static_cast<unsigned>(year - era * 400);
+    const int shiftedMonth = static_cast<int>(month) + (month > 2 ? -3 : 9);
+    const unsigned dayOfYear = static_cast<unsigned>((153 * shiftedMonth + 2) / 5) + day - 1;
+    const unsigned dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear;
+    return era * 146097 + static_cast<int>(dayOfEra) - 719468;
+}
+
+inline time_t terminalUtcTmToEpoch(const struct tm &utc)
+{
+    const int year = utc.tm_year + 1900;
+    const unsigned month = static_cast<unsigned>(utc.tm_mon + 1);
+    const unsigned day = static_cast<unsigned>(utc.tm_mday);
+    if (month < 1 || month > 12 || day < 1 || day > 31
+        || utc.tm_hour < 0 || utc.tm_hour > 23 || utc.tm_min < 0 || utc.tm_min > 59
+        || utc.tm_sec < 0 || utc.tm_sec > 60) {
+        return 0;
+    }
+    const int64_t seconds = terminalDaysFromCivil(year, month, day) * 86400
+        + utc.tm_hour * 3600 + utc.tm_min * 60 + utc.tm_sec;
+    return static_cast<time_t>(seconds);
+}
+
+inline bool readyClockRefreshRequired(
+    bool readyOrIdleNfcState,
+    bool temporaryDisplayActive,
+    bool busy,
+    const char *previousLine,
+    const char *currentLine
+) {
+    if (!readyOrIdleNfcState || temporaryDisplayActive || busy || currentLine == nullptr) return false;
+    return previousLine == nullptr || std::strcmp(previousLine, currentLine) != 0;
+}
+
+inline bool readyClockCheckDue(uint32_t now, uint32_t lastCheck, uint32_t interval, bool force)
+{
+    return force || static_cast<uint32_t>(now - lastCheck) >= interval;
 }
