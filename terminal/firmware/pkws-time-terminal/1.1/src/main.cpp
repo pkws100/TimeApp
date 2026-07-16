@@ -76,6 +76,7 @@ static const unsigned long DOWNLOAD_TOTAL_TIMEOUT_MS = 15000;
 static const unsigned long DOWNLOAD_IDLE_TIMEOUT_MS = 3000;
 static const unsigned long TIME_SYNC_TIMEOUT_MS = 30000;
 static const uint32_t READY_CLOCK_CHECK_INTERVAL_MS = 1000;
+static const uint32_t SCAN_FEEDBACK_BEFORE_SEND_MS = 100;
 static const unsigned long TRUST_WARNING_BUFFER_SECONDS = 90UL * 24UL * 60UL * 60UL;
 static const size_t MAX_TRUST_BUNDLE_BYTES = 24576;
 static const size_t MAX_CONFIG_RESPONSE_BYTES = 16384;
@@ -185,6 +186,8 @@ String currentUid;
 String lastUid;
 String currentRequestId;
 String currentDeviceTime;
+bool lastScanResponseJsonParsed = false;
+bool lastScanResponseOk = false;
 uint8_t currentScanAttempt = 0;
 unsigned long nextScanAttemptAt = 0;
 unsigned long lastUidAt = 0;
@@ -1175,6 +1178,8 @@ void applyLedSignal(const String &signal)
 
 void startBeepPattern(const uint16_t *durations, uint8_t count)
 {
+    beepActive = false;
+    digitalWrite(PIN_BUZZER, LOW);
     beepCount = count > 8 ? 8 : count;
     for (uint8_t i = 0; i < beepCount; i++) {
         beepDurations[i] = durations[i];
@@ -1186,6 +1191,15 @@ void startBeepPattern(const uint16_t *durations, uint8_t count)
         digitalWrite(PIN_BUZZER, HIGH);
         beepStepUntil = millis() + beepDurations[0];
     }
+}
+
+void stopBuzzer()
+{
+    beepActive = false;
+    beepCount = 0;
+    beepIndex = 0;
+    beepStepUntil = 0;
+    digitalWrite(PIN_BUZZER, LOW);
 }
 
 void triggerBeep(const String &signal)
@@ -1204,6 +1218,23 @@ void triggerBeep(const String &signal)
     } else if (signal == "wait") {
         startBeepPattern(waitPattern, 1);
     }
+}
+
+void applyScanFeedback(ScanFeedbackState feedback)
+{
+    if (scanFeedbackUsesGreen(feedback)) {
+        applyLedSignal("green");
+        if (scanFeedbackUsesSuccessBeep(feedback)) {
+            triggerBeep("success");
+        }
+        return;
+    }
+    if (feedback == ScanFeedbackState::SERVER_REJECTED) {
+        applyLedSignal("red");
+        triggerBeep("error");
+        return;
+    }
+    applyLedSignal("yellow");
 }
 
 void updateBuzzer()
@@ -2691,6 +2722,8 @@ String normalizeUid(MFRC522::Uid *uid)
 
 bool sendScanRequest()
 {
+    lastScanResponseJsonParsed = false;
+    lastScanResponseOk = false;
     if (WiFi.status() != WL_CONNECTED) {
         apiStatus = "wifi_disconnected";
         return false;
@@ -2751,6 +2784,9 @@ bool sendScanRequest()
         return false;
     }
 
+    lastScanResponseJsonParsed = true;
+    bool responseOk = doc["ok"] | false;
+    lastScanResponseOk = responseOk;
     String code = doc["code"] | "";
     lastServerCode = code;
     lastServerMessage = doc["message"] | "";
@@ -2769,7 +2805,7 @@ bool sendScanRequest()
         }
         String fallbackRejected[4] = {"Scan abgelehnt", "Bitte Admin", "informieren", ""};
         applyDisplayFromJson(doc.as<JsonVariantConst>(), fallbackRejected);
-        applySignalFromJson(doc.as<JsonVariantConst>(), "red", "error");
+        applyScanFeedback(ScanFeedbackState::SERVER_REJECTED);
         scanLifecycle = ScanLifecycle::REJECTED;
         currentUid = "";
         currentRequestId = "";
@@ -2780,9 +2816,23 @@ bool sendScanRequest()
         return true;
     }
 
+    if (!serverResponseConfirmsBooking(status, true, responseOk)) {
+        String fallbackRejected[4] = {"Scan nicht", "bestaetigt", "Bitte Admin", "informieren"};
+        applyDisplayFromJson(doc.as<JsonVariantConst>(), fallbackRejected);
+        applyScanFeedback(ScanFeedbackState::SERVER_REJECTED);
+        resultUntil = millis() + holdMsFromJson(doc.as<JsonVariantConst>());
+        apiStatus = "scan_not_confirmed";
+        scanLifecycle = ScanLifecycle::REJECTED;
+        currentUid = "";
+        currentRequestId = "";
+        currentDeviceTime = "";
+        enterState(DeviceState::SHOW_RESULT);
+        return true;
+    }
+
     String fallback[4] = {"Scan Antwort", "empfangen", "", ""};
     applyDisplayFromJson(doc.as<JsonVariantConst>(), fallback);
-    applySignalFromJson(doc.as<JsonVariantConst>(), status >= 200 && status < 300 ? "green" : "red", status >= 200 && status < 300 ? "success" : "error");
+    applyScanFeedback(ScanFeedbackState::SERVER_CONFIRMED);
     resultUntil = millis() + holdMsFromJson(doc.as<JsonVariantConst>());
     apiStatus = "scan_ok";
     scanLifecycle = ScanLifecycle::SENT_CONFIRMED;
@@ -2847,7 +2897,12 @@ QueueSyncOutcome syncOneQueuedScan()
         return QueueSyncOutcome::CONFIRMED;
     }
     if (scanLifecycle == ScanLifecycle::REJECTED) {
-        QueueFailureAction action = queueFailureActionFor(lastHttpStatus, lastServerCode.c_str());
+        QueueFailureAction action = queueFailureActionForScanResponse(
+            lastHttpStatus,
+            lastScanResponseJsonParsed,
+            lastScanResponseOk,
+            lastServerCode.c_str()
+        );
         if (action == QueueFailureAction::BLOCK_GLOBAL_KEEP_ACTIVE) {
             bool blockPersisted = persistQueueSyncBlock(lastHttpStatus, lastServerCode);
             currentUid = "";
@@ -3123,19 +3178,21 @@ void handleNfcScan()
     currentDeviceTime = isoDeviceTimeOrNull();
     scanLifecycle = ScanLifecycle::VOLATILE;
     currentScanAttempt = 0;
-    nextScanAttemptAt = now;
+    nextScanAttemptAt = now + SCAN_FEEDBACK_BEFORE_SEND_MS;
 
     lcdShow("Tag erkannt", "Anfrage laeuft", "bitte warten", "");
-    applyLedSignal("yellow");
+    applyScanFeedback(ScanFeedbackState::WAITING_SERVER);
     triggerBeep("wait");
     enterState(DeviceState::SEND_SCAN);
 }
 
 void handleSendScan()
 {
-    if (millis() < nextScanAttemptAt) {
+    if (!scanSendDue(millis(), nextScanAttemptAt)) {
         return;
     }
+
+    stopBuzzer();
 
     currentScanAttempt++;
     if (sendScanRequest()) {
@@ -3173,8 +3230,7 @@ void handleSendScan()
     }
     if (persistCurrentScan("network_failed")) {
         lcdShow("Scan gespeichert", "wird später", "synchronisiert", "");
-        applyLedSignal("yellow");
-        triggerBeep("wait");
+        applyScanFeedback(ScanFeedbackState::STORED_OFFLINE);
         resultUntil = millis() + 8000;
         enterState(DeviceState::SHOW_RESULT);
     } else retainOpenScanForPersistenceRetry();
@@ -3378,7 +3434,7 @@ void loop()
             break;
 
         case DeviceState::SHOW_RESULT:
-            if (millis() >= resultUntil) {
+            if (terminalDeadlineReached(millis(), resultUntil)) {
                 scanLifecycle = ScanLifecycle::NONE;
                 enterState(queueDepth() > 0 ? DeviceState::QUEUE_SYNC : DeviceState::READY);
             }

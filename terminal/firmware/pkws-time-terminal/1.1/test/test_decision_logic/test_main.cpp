@@ -47,6 +47,63 @@ void testRetryAfterSeconds()
     TEST_ASSERT_EQUAL_UINT32(0, retryAfterMilliseconds("Wed, 21 Oct 2026 07:28:00 GMT"));
 }
 
+void testScanSendDelayAndMillisOverflow()
+{
+    TEST_ASSERT_FALSE(scanSendDue(100, 200));
+    TEST_ASSERT_TRUE(scanSendDue(200, 200));
+    TEST_ASSERT_TRUE(scanSendDue(201, 200));
+    TEST_ASSERT_FALSE(scanSendDue(UINT32_MAX - 25, 50));
+    TEST_ASSERT_FALSE(scanSendDue(49, 50));
+    TEST_ASSERT_TRUE(scanSendDue(50, 50));
+}
+
+void testResultHoldDeadlineHandlesMillisOverflow()
+{
+    TEST_ASSERT_FALSE(terminalDeadlineReached(UINT32_MAX - 25, 50));
+    TEST_ASSERT_FALSE(terminalDeadlineReached(49, 50));
+    TEST_ASSERT_TRUE(terminalDeadlineReached(50, 50));
+}
+
+void testServerResponseConfirmationRequiresExplicitOk()
+{
+    TEST_ASSERT_TRUE(serverResponseConfirmsBooking(200, true, true));
+    TEST_ASSERT_TRUE(serverResponseConfirmsBooking(201, true, true));
+    TEST_ASSERT_FALSE(serverResponseConfirmsBooking(200, true, false));
+    TEST_ASSERT_FALSE(serverResponseConfirmsBooking(200, false, false));
+    TEST_ASSERT_FALSE(serverResponseConfirmsBooking(204, false, false));
+    TEST_ASSERT_FALSE(serverResponseConfirmsBooking(400, true, true));
+    TEST_ASSERT_FALSE(serverResponseConfirmsBooking(401, true, true));
+    TEST_ASSERT_FALSE(serverResponseConfirmsBooking(422, true, true));
+    TEST_ASSERT_FALSE(serverResponseConfirmsBooking(500, true, true));
+    TEST_ASSERT_FALSE(serverResponseConfirmsBooking(-1, false, false));
+}
+
+void testUnconfirmed2xxQueuedResponseUsesDeadLetter()
+{
+    TEST_ASSERT_EQUAL_INT((int) QueueFailureAction::CONFIRMED,
+        (int) queueFailureActionForScanResponse(201, true, true, ""));
+    TEST_ASSERT_EQUAL_INT((int) QueueFailureAction::DEAD_LETTER_RECORD,
+        (int) queueFailureActionForScanResponse(200, true, false, ""));
+    TEST_ASSERT_EQUAL_INT((int) QueueFailureAction::DEAD_LETTER_RECORD,
+        (int) queueFailureActionForScanResponse(204, false, false, ""));
+    TEST_ASSERT_EQUAL_INT((int) QueueFailureAction::RETRY_TEMPORARY,
+        (int) queueFailureActionForScanResponse(500, true, true, ""));
+    TEST_ASSERT_EQUAL_INT((int) QueueFailureAction::BLOCK_GLOBAL_KEEP_ACTIVE,
+        (int) queueFailureActionForScanResponse(401, true, true, ""));
+}
+
+void testOnlyConfirmedServerResponseAllowsGreenAndSuccessBeep()
+{
+    TEST_ASSERT_FALSE(scanFeedbackUsesGreen(ScanFeedbackState::WAITING_SERVER));
+    TEST_ASSERT_FALSE(scanFeedbackUsesSuccessBeep(ScanFeedbackState::WAITING_SERVER));
+    TEST_ASSERT_TRUE(scanFeedbackUsesGreen(ScanFeedbackState::SERVER_CONFIRMED));
+    TEST_ASSERT_TRUE(scanFeedbackUsesSuccessBeep(ScanFeedbackState::SERVER_CONFIRMED));
+    TEST_ASSERT_FALSE(scanFeedbackUsesGreen(ScanFeedbackState::SERVER_REJECTED));
+    TEST_ASSERT_FALSE(scanFeedbackUsesSuccessBeep(ScanFeedbackState::SERVER_REJECTED));
+    TEST_ASSERT_FALSE(scanFeedbackUsesGreen(ScanFeedbackState::STORED_OFFLINE));
+    TEST_ASSERT_FALSE(scanFeedbackUsesSuccessBeep(ScanFeedbackState::STORED_OFFLINE));
+}
+
 void testClockUsesPlaceholderUntilTimeIsValid()
 {
     char line[24];
@@ -117,6 +174,11 @@ int main(int, char **)
     RUN_TEST(testQueueFailureClassification);
     RUN_TEST(testTrustRecoveryDecisions);
     RUN_TEST(testRetryAfterSeconds);
+    RUN_TEST(testScanSendDelayAndMillisOverflow);
+    RUN_TEST(testResultHoldDeadlineHandlesMillisOverflow);
+    RUN_TEST(testServerResponseConfirmationRequiresExplicitOk);
+    RUN_TEST(testUnconfirmed2xxQueuedResponseUsesDeadLetter);
+    RUN_TEST(testOnlyConfirmedServerResponseAllowsGreenAndSuccessBeep);
     RUN_TEST(testClockUsesPlaceholderUntilTimeIsValid);
     RUN_TEST(testClockUsesBerlinWinterAndSummerTime);
     RUN_TEST(testDeviceTimeRemainsUtc);

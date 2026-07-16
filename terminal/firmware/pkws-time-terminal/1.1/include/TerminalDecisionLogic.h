@@ -22,6 +22,38 @@ enum class QueueFailureAction {
     CONFIRMED
 };
 
+enum class ScanFeedbackState {
+    WAITING_SERVER,
+    SERVER_CONFIRMED,
+    SERVER_REJECTED,
+    STORED_OFFLINE
+};
+
+inline bool terminalDeadlineReached(uint32_t now, uint32_t deadline)
+{
+    return static_cast<int32_t>(now - deadline) >= 0;
+}
+
+inline bool scanSendDue(uint32_t now, uint32_t sendAt)
+{
+    return terminalDeadlineReached(now, sendAt);
+}
+
+inline bool serverResponseConfirmsBooking(int httpStatus, bool jsonParsed, bool responseOk)
+{
+    return httpStatus >= 200 && httpStatus < 300 && jsonParsed && responseOk;
+}
+
+inline bool scanFeedbackUsesGreen(ScanFeedbackState state)
+{
+    return state == ScanFeedbackState::SERVER_CONFIRMED;
+}
+
+inline bool scanFeedbackUsesSuccessBeep(ScanFeedbackState state)
+{
+    return state == ScanFeedbackState::SERVER_CONFIRMED;
+}
+
 inline bool terminalCodeEquals(const char *actual, const char *expected)
 {
     return actual != nullptr && std::strcmp(actual, expected) == 0;
@@ -64,6 +96,19 @@ inline QueueFailureAction queueFailureActionFor(int status, const char *code)
         return QueueFailureAction::DEAD_LETTER_RECORD;
     }
     return QueueFailureAction::BLOCK_GLOBAL_KEEP_ACTIVE;
+}
+
+inline QueueFailureAction queueFailureActionForScanResponse(
+    int status,
+    bool jsonParsed,
+    bool responseOk,
+    const char *code
+) {
+    if (status >= 200 && status < 300
+        && !serverResponseConfirmsBooking(status, jsonParsed, responseOk)) {
+        return QueueFailureAction::DEAD_LETTER_RECORD;
+    }
+    return queueFailureActionFor(status, code);
 }
 
 enum class TrustRecoveryAction {

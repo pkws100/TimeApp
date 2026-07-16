@@ -48,6 +48,17 @@ Up to 64 scans are stored as individual atomically created records. Every record
 
 HTTP 408, 425, 429 and 5xx responses are temporary. A numeric `Retry-After` value on HTTP 429 is honored between 1 and 900 seconds; HTTP-date values are deliberately not interpreted. Global terminal failures (`401`, `403`, `terminal_auth_required`, `terminal_auth_failed`, `terminal_disabled`, `terminal_unknown`, `terminal_ip_denied`, `terminal_storage_missing`, `feature_disabled`) keep the current record active and persistently block all automatic queue work. Only a successful authenticated config request with the current terminal identity can clear that block. Data-specific codes (`nfc_tag_invalid`, `nfc_tag_not_found`, `employee_mapping_invalid`, `nfc_uid_missing`, `invalid_uid`, `unknown_tag`, `unassigned_tag`) are moved to a reread-and-verified dead-letter record before the active file is removed. Unknown permanent failures conservatively block the queue.
 
+## Scan feedback
+
+- **Yellow:** The NFC tag was read locally; server confirmation is still pending.
+- **Green:** The TimeApp confirmed the concrete booking. This requires a 2xx HTTP status, a fully read and valid JSON response, and explicit `ok: true`.
+- **Red:** The booking was rejected or reached a final error state.
+
+After a tag read, the short wait beep is allowed to finish non-blockingly before
+the synchronous network request starts. The buzzer remains silent while that
+request is in progress. A locally stored offline scan, an incomplete response,
+`ok: false`, or a non-2xx response never produces green or the success pattern.
+
 Config, scan, recovery and portal API-test responses use bounded reads with content-length, total-time and idle-time limits. Trust and storage mutations return HTTP 409 while a live scan, queue synchronization or TLS recovery owns the state.
 
 ## Signed payload protocol

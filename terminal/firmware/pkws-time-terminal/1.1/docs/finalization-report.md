@@ -66,6 +66,14 @@ Die endgültigen Messwerte und Binärprüfsummen stehen in [build-report.md](bui
 
 ## Hardware und Freigabe
 
-Es war kein ESP32 angeschlossen. Sämtliche realen HTTP-/HTTPS-, Trust-, Stromausfall-, Queue-, Speicher-, Portal-, NFC-, Signal- und Rückflashprüfungen sind **Nicht ausgeführt – reale Hardware erforderlich** und in [hardware-acceptance.md](hardware-acceptance.md) einzeln markiert.
+Zum Zeitpunkt dieses 1.1.1-Werkbankberichts war kein ESP32 angeschlossen. Die
+damals noch offenen realen HTTP-/HTTPS-, Trust-, Stromausfall-, Queue-,
+Speicher-, Portal-, NFC-, Signal- und Rückflashprüfungen waren deshalb als
+**Nicht ausgeführt – reale Hardware erforderlich** markiert.
+
+Nachfolgende, tatsächlich am 16.07.2026 auf Firmware 1.1.2 ausgeführte
+Hardwarebefunde sowie die weiterhin offenen Nachtests stehen ausschließlich in
+[hardware-acceptance.md](hardware-acceptance.md). Dieser historische
+1.1.1-Bericht ist keine Aussage über deren späteren Status.
 
 Bewertung: **Werkbanktest möglich, noch kein Pilotbetrieb.** Die Pilotfreigabe darf erst nach vollständig dokumentiertem Werkbanktest mit Produktions-Trust-Key, signiertem Produktionsbundle, individuellen Portalzugängen, echten HTTP-/HTTPS-Endpunkten und allen Negativ-/Stromausfalltests erfolgen.
