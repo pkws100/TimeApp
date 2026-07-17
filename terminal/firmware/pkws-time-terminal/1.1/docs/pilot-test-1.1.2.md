@@ -28,6 +28,12 @@ Mitarbeiternamen eintragen.
 - LittleFS im geschützten Portal formatiert und wieder eingebunden.
 - NFC-Tag angelernt sowie Arbeitsbeginn und Arbeitsende erfolgreich gebucht.
 - Positive Serverantwort führte zu Grün, Ergebnisanzeige und korrekter Rückkehr in das Bereitschaftsbild.
+- Am 17.07.2026 wurden die je Terminal konfigurierten Bereitschafts-, Arbeitsbeginn- und Feierabendtexte nach Neustart geprüft; die lokale Uhr erschien weiterhin in Zeile vier.
+- Arbeitsbeginn und Feierabend wurden mit Wartepiep, gelber Serverwartephase und Grün/Erfolgston erst nach bestätigter Serverbuchung vom Betreiber als erledigt bestätigt.
+- Test 5 bestanden: Während der konfigurierten Ergebnisanzeige wurde kein weiterer Tag verarbeitet; anschließend war das Terminal wieder buchungsbereit.
+- Test 6 bestanden: Ein unbekannter oder deaktivierter Tag erzeugte Rot und Fehlerton, aber kein Grün und keinen Erfolgston.
+- Test 7 bestanden: Das NFC-Anlernen zeigte einen eindeutigen Lernstatus ohne Buchungs-Erfolgssignal.
+- Test 9 bestanden: Einstellungen, Bereitschaftstexte und lokale Uhr blieben nach Stromausfall beziehungsweise Neustart erhalten.
 
 ## Beobachtete und bearbeitete Abweichung
 
@@ -35,16 +41,15 @@ Der ungefähr 60-ms-Wartepiep blieb beim vorherigen Stand hörbar, weil der
 unmittelbar folgende synchrone HTTPS-Aufruf den Hauptloop blockierte. Die
 Firmware enthält jetzt einen 160-ms-Wartepiep und eine nicht blockierende Vorlaufzeit von 180 ms. Gelb
 bleibt bis zur Serverentscheidung aktiv; Grün ist nur bei einer bestätigten
-Serverbuchung erlaubt. Der reale Nachtest nach erneutem Flash ist noch offen.
+Serverbuchung erlaubt. Die positiven Funktionsnachtests der oben dokumentierten
+Punkte 1 bis 7 sowie 9 wurden am 17.07.2026 vom Betreiber als erledigt bestätigt.
+Test 8 mit WLAN-Abbruch, Offline-Speicherung und Queue-Nachsynchronisierung sowie
+die vollständigen HTTPS-Negativ-, Recovery- und Langzeittests bleiben offen.
 
 ## Vor dem 14-Tage-Lauf noch prüfen
 
-- Wartepiep endet vor dem HTTPS-Aufruf; der Buzzer bleibt während HTTPS still.
-- Gelb bleibt während des vollständigen HTTPS-Vorgangs aktiv.
-- Grün erst nach erfolgreicher Serverbestätigung; `ok: false` erzeugt niemals Grün.
-- Fehlerantworten erzeugen Rot beziehungsweise die bestehende Fehlerbehandlung.
-- Offline-Speicherung erzeugt niemals Grün oder einen Erfolgston.
-- Ergebnisanzeige bleibt für das vollständige `hold_ms` sichtbar; danach erscheint die aktuelle Uhr.
+- Offline-Speicherung erzeugt niemals Grün oder einen Erfolgston; Queue-Nachsynchronisierung erzeugt keine fehlende oder doppelte Buchung.
+- Fehlendes `ok`, weitere Nicht-2xx-Antworten sowie Netzwerk-/TLS-Fehler erzeugen niemals Grün oder einen Erfolgston.
 
 ## Während der 14 Tage erfassen
 
