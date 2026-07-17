@@ -9,6 +9,33 @@ use PHPUnit\Framework\TestCase;
 
 final class TimesheetCalculatorTest extends TestCase
 {
+    public function testLegalBreakThresholdBoundariesRemainUnchanged(): void
+    {
+        $calculator = new TimesheetCalculator();
+        $cases = [
+            ['08:00', '14:00', 0],
+            ['08:00', '14:01', 30],
+            ['08:00', '17:00', 30],
+            ['08:00', '17:01', 45],
+        ];
+
+        foreach ($cases as [$startTime, $endTime, $expectedBreakMinutes]) {
+            $result = $calculator->calculate('2026-06-01', $startTime, $endTime, 0, 'work');
+
+            self::assertSame($expectedBreakMinutes, $result['break_minutes']);
+        }
+    }
+
+    public function testManualBreakAboveLegalMinimumIsKept(): void
+    {
+        $calculator = new TimesheetCalculator();
+        $result = $calculator->calculate('2026-06-01', '08:00', '16:00', 45, 'work');
+
+        self::assertSame(480, $result['gross_minutes']);
+        self::assertSame(45, $result['break_minutes']);
+        self::assertSame(435, $result['net_minutes']);
+    }
+
     public function testItAppliesThirtyMinuteBreakAfterSixHours(): void
     {
         $calculator = new TimesheetCalculator();

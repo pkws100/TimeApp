@@ -781,9 +781,7 @@ final class MobileAppService
             $key = $this->projectSummaryKey($projectId);
             $breaks = $this->findBreaksForTimesheet((int) ($entry['id'] ?? 0));
             $currentBreak = $this->workdayStateCalculator->currentBreak($breaks);
-            $completedBreakMinutes = $breaks !== []
-                ? $this->workdayStateCalculator->completedBreakMinutes($breaks)
-                : (int) ($entry['break_minutes'] ?? 0);
+            $completedBreakMinutes = $this->workdayStateCalculator->effectiveBreakMinutes($entry, $breaks);
             $trackedMinutesLiveBasis = $this->workdayStateCalculator->trackedMinutesLiveBasis($workDate, $entry, $breaks);
             $attachments = $this->fileAttachmentService->listForTimesheet((int) ($entry['id'] ?? 0));
             $normalizedEntry = [

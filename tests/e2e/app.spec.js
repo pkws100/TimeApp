@@ -1175,8 +1175,8 @@ test('mobile today totals keep manual pause and offline checkout duration', asyn
               status: 'working',
               start_time: '09:00:00',
               end_time: null,
-              total_break_minutes: 0,
-              total_net_minutes: 0,
+              total_break_minutes: workEntry.break_minutes,
+              total_net_minutes: workEntry.net_minutes,
               current_break: null,
               tracked_minutes_live_basis: liveBasis,
               work_entry: workEntry,
@@ -1220,19 +1220,43 @@ test('mobile today totals keep manual pause and offline checkout duration', asyn
   await page.evaluate(() => window.dispatchEvent(new Event('offline')));
 
   await page.getByRole('button', { name: 'Pause buchen' }).click();
-  await page.getByRole('button', { name: '30 Minuten' }).click();
+  await page.getByRole('button', { name: '45 Minuten' }).click();
 
-  await expect(page.locator('main [data-live-work-duration]')).toHaveText('00:30');
-  await expect(page.locator('main [data-live-today-duration]')).toHaveText('00:30');
-  await expect(page.locator('main [data-live-project-today-duration]')).toHaveText('00:30');
-  await expect(page.locator('main [data-live-today-break-total]')).toHaveText('00:30');
+  const queuedPausePayload = await page.evaluate(async () => new Promise((resolve, reject) => {
+    const request = indexedDB.open('zeiterfassung-app', 1);
+
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const transaction = database.transaction('queue', 'readonly');
+      const getAll = transaction.objectStore('queue').getAll();
+
+      getAll.onerror = () => reject(getAll.error);
+      getAll.onsuccess = () => {
+        const pauseEntry = getAll.result.find((entry) => entry.payload && entry.payload.action === 'pause');
+
+        database.close();
+        resolve(pauseEntry ? pauseEntry.payload : null);
+      };
+    };
+  }));
+
+  expect(queuedPausePayload).toMatchObject({
+    action: 'pause',
+    manual_break_minutes: 45
+  });
+
+  await expect(page.locator('main [data-live-work-duration]')).toHaveText('00:15');
+  await expect(page.locator('main [data-live-today-duration]')).toHaveText('00:15');
+  await expect(page.locator('main [data-live-project-today-duration]')).toHaveText('00:15');
+  await expect(page.locator('main [data-live-today-break-total]')).toHaveText('00:45');
 
   await page.getByRole('button', { name: 'Check-out' }).click();
 
   await expect(page.locator('main [data-live-end-time]')).toHaveText('10:00');
-  await expect(page.locator('main [data-live-work-duration]')).toHaveText('00:30');
-  await expect(page.locator('main [data-live-today-duration]')).toHaveText('00:30');
-  await expect(page.locator('main [data-live-project-today-duration]')).toHaveText('00:30');
+  await expect(page.locator('main [data-live-work-duration]')).toHaveText('00:15');
+  await expect(page.locator('main [data-live-today-duration]')).toHaveText('00:15');
+  await expect(page.locator('main [data-live-project-today-duration]')).toHaveText('00:15');
 
   await page.evaluate(() => {
     window.history.pushState({}, '', '/app/zeiten');
@@ -1246,6 +1270,36 @@ test('mobile today totals keep manual pause and offline checkout duration', asyn
   await expect(page.locator('main [data-live-work-duration]').first()).toHaveText('00:00');
   await expect(page.locator('main [data-live-today-duration]')).toHaveText('00:00');
   await expect(page.locator('main [data-live-project-today-duration]')).toHaveText('00:00');
+
+  await page.evaluate(async () => new Promise((resolve, reject) => {
+    const request = indexedDB.open('zeiterfassung-app', 1);
+
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const transaction = database.transaction('queue', 'readwrite');
+
+      transaction.objectStore('queue').clear();
+      transaction.oncomplete = () => {
+        database.close();
+        resolve();
+      };
+      transaction.onerror = () => reject(transaction.error);
+    };
+  }));
+
+  workEntry.start_time = '09:00:00';
+  workEntry.end_time = null;
+  workEntry.break_minutes = 45;
+  workEntry.net_minutes = 0;
+  liveBasis.completed_break_minutes = 45;
+  await context.setOffline(false);
+  await page.goto('/app/heute');
+
+  await expect(page.locator('main [data-live-work-duration]')).toHaveText('00:15');
+  await expect(page.locator('main [data-live-today-duration]')).toHaveText('00:15');
+  await expect(page.locator('main [data-live-project-today-duration]')).toHaveText('00:15');
+  await expect(page.locator('main [data-live-today-break-total]')).toHaveText('00:45');
 });
 
 test('mobile app does not send geo when geo section is hidden', async ({ page }) => {

@@ -32,6 +32,17 @@ final class WorkdayStateCalculator
         return $minutes;
     }
 
+    public function effectiveBreakMinutes(?array $workEntry, array $breaks): int
+    {
+        foreach ($breaks as $break) {
+            if (($break['break_ended_at'] ?? null) !== null && ($break['break_ended_at'] ?? '') !== '') {
+                return $this->completedBreakMinutes($breaks);
+            }
+        }
+
+        return max(0, (int) ($workEntry['break_minutes'] ?? 0));
+    }
+
     public function breakDurationMinutes(array $break): int
     {
         $startedAt = $this->parseDateTime($break['break_started_at'] ?? null);
@@ -76,7 +87,7 @@ final class WorkdayStateCalculator
                 $workEntry['end_time'] ?? null,
                 $workEntry['start_time'] ?? null
             ),
-            'completed_break_minutes' => $this->completedBreakMinutes($breaks),
+            'completed_break_minutes' => $this->effectiveBreakMinutes($workEntry, $breaks),
             'current_break_started_at' => $currentBreak['break_started_at'] ?? null,
             'is_running' => $workEntry !== null
                 && ($workEntry['start_time'] ?? null) !== null
