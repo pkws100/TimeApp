@@ -27,6 +27,7 @@ final class TerminalPunchService
     public function config(array $terminal): array
     {
         $this->terminalService->assertFeatureEnabled();
+        $displaySettings = $this->displaySettings($terminal);
 
         $response = [
             'ok' => true,
@@ -38,15 +39,10 @@ final class TerminalPunchService
                 'settings' => $this->settings((string) ($terminal['settings_json'] ?? '')),
             ],
             'display' => [
-                'lines' => $this->lcdLines([
-                    (string) ($terminal['welcome_text'] ?? 'Willkommen'),
-                    'Tag vorhalten',
-                    'Bereit',
-                    $this->clockLine(),
-                ]),
+                'lines' => $this->lcdLines([...$displaySettings['ready_lines'], $this->clockLine()]),
                 'hold_ms' => 3000,
             ],
-            'signal' => ['led' => 'green', 'beep' => 'ready'],
+            'signal' => ['led' => 'yellow', 'beep' => 'ready'],
             'server_time' => $this->serverTime(),
         ];
 
@@ -93,7 +89,7 @@ final class TerminalPunchService
         }
 
         if ($learnedTag !== null) {
-            $response = $this->learningResponse($learnedTag);
+            $response = $this->learningResponse($terminal, $learnedTag);
             $this->recordEvent($terminal, $learnedTag, null, null, null, 'learned', $response['message'], $requestId, $payload, $response);
 
             return $response;
@@ -173,9 +169,10 @@ final class TerminalPunchService
         return is_array($decoded) ? $decoded : null;
     }
 
-    private function learningResponse(array $tag): array
+    private function learningResponse(array $terminal, array $tag): array
     {
         $wasRelearned = trim((string) ($tag['relearned_from_archive_at'] ?? '')) !== '';
+        $displaySettings = $this->displaySettings($terminal);
 
         return [
             'ok' => true,
@@ -187,9 +184,11 @@ final class TerminalPunchService
                 'lines' => $this->lcdLines($wasRelearned
                     ? ['Tag reaktiviert', 'Bisher verwendet', 'Im Admin', 'pruefen']
                     : ['Tag erfasst', (string) ($tag['uid_masked'] ?? ''), 'Im Admin', 'zuordnen']),
-                'hold_ms' => 15000,
+                'hold_ms' => $displaySettings['hold_ms']['learning'],
             ],
-            'signal' => ['led' => $wasRelearned ? 'yellow' : 'green', 'beep' => 'success'],
+            // NFC-Anlernen ist keine bestätigte Arbeitsbuchung: Grün und der
+            // Erfolgston bleiben ausschließlich der erfolgreichen Buchung vorbehalten.
+            'signal' => ['led' => 'yellow', 'beep' => 'ready'],
             'server_time' => $this->serverTime(),
             'tag' => [
                 'id' => (int) ($tag['id'] ?? 0),
@@ -204,20 +203,21 @@ final class TerminalPunchService
     {
         $firstName = trim((string) ($user['first_name'] ?? ''));
         $time = (new DateTimeImmutable())->format('H:i:s');
-        $actionLabel = $action === 'check_out' ? 'Feierabend' : 'Arbeitsbeginn';
+        $displaySettings = $this->displaySettings($terminal);
+        $templates = $action === 'check_out' ? $displaySettings['check_out_lines'] : $displaySettings['check_in_lines'];
+        $lines = TerminalDisplaySettings::renderLines($templates, [
+            '{vorname}' => $firstName,
+            '{zeit}' => $time,
+            '{sollzeit}' => $this->minutesToHours((int) $monthly['target_minutes']),
+        ]);
 
         return [
             'ok' => true,
             'action' => $action,
             'message' => ($action === 'check_out' ? 'Auf Wiedersehen ' : 'Willkommen ') . $firstName,
             'display' => [
-                'lines' => $this->lcdLines([
-                    'Hallo ' . $firstName,
-                    $actionLabel,
-                    $time,
-                    'Soll ' . $this->minutesToHours((int) $monthly['target_minutes']),
-                ]),
-                'hold_ms' => 15000,
+                'lines' => $this->lcdLines($lines),
+                'hold_ms' => $displaySettings['hold_ms']['success'],
             ],
             'signal' => ['led' => 'green', 'beep' => 'success'],
             'server_time' => $this->serverTime(),
@@ -241,6 +241,7 @@ final class TerminalPunchService
         ?string $action,
         array $payload
     ): array {
+        $displaySettings = $this->displaySettings($terminal);
         $response = [
             'ok' => false,
             'code' => $code,
@@ -248,7 +249,7 @@ final class TerminalPunchService
             'message' => $message,
             'display' => [
                 'lines' => $this->lcdLines(['Fehler', $message, 'Bitte Admin', 'informieren']),
-                'hold_ms' => 15000,
+                'hold_ms' => $displaySettings['hold_ms']['error'],
             ],
             'signal' => ['led' => 'red', 'beep' => 'error'],
             'server_time' => $this->serverTime(),
@@ -427,6 +428,12 @@ final class TerminalPunchService
         $decoded = json_decode($json, true);
 
         return is_array($decoded) ? $decoded : [];
+    }
+
+    /** @return array{ready_lines:list<string>, check_in_lines:list<string>, check_out_lines:list<string>, hold_ms:array{success:int,error:int,learning:int}} */
+    private function displaySettings(array $terminal): array
+    {
+        return TerminalDisplaySettings::forTerminal($terminal);
     }
 
     private function trustBundleMetadata(): ?array

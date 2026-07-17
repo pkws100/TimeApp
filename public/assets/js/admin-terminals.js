@@ -195,3 +195,127 @@
         });
     });
 }());
+
+(function () {
+    function settingsData(button) {
+        try {
+            return JSON.parse(button.dataset.terminalSettings || '{}');
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function setField(form, name, value) {
+        var field = form.querySelector('[name="' + name + '"]');
+        if (field) {
+            field.value = value == null ? '' : String(value);
+        }
+    }
+
+    function setLines(form, prefix, lines) {
+        for (var index = 0; index < lines.length; index++) {
+            setField(form, prefix + (index + 1), lines[index]);
+        }
+    }
+
+    function focusable(modal) {
+        return Array.prototype.slice.call(modal.querySelectorAll('a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])')).filter(function (node) {
+            return !node.hidden && node.offsetParent !== null;
+        });
+    }
+
+    function openModal(modal, trigger) {
+        var settings = settingsData(trigger);
+        var form = modal.querySelector('[data-terminal-settings-form]');
+        if (!settings || !form || !settings.id) {
+            return;
+        }
+
+        form.action = '/admin/terminals/' + settings.id + '/settings';
+        setLines(form, 'ready_line_', settings.ready_lines || []);
+        setLines(form, 'check_in_line_', settings.check_in_lines || []);
+        setLines(form, 'check_out_line_', settings.check_out_lines || []);
+        setField(form, 'hold_success_ms', settings.hold_ms && settings.hold_ms.success);
+        setField(form, 'hold_error_ms', settings.hold_ms && settings.hold_ms.error);
+        setField(form, 'hold_learning_ms', settings.hold_ms && settings.hold_ms.learning);
+
+        var name = modal.querySelector('[data-terminal-settings-name]');
+        if (name) {
+            name.textContent = settings.name || 'Terminal';
+        }
+
+        modal.hidden = false;
+        modal.setAttribute('aria-hidden', 'false');
+        modal.__lastTrigger = trigger;
+        trigger.setAttribute('aria-expanded', 'true');
+        document.body.classList.add('modal-open');
+        window.setTimeout(function () {
+            var first = modal.querySelector('[name="ready_line_1"]');
+            if (!modal.hidden && first) {
+                first.focus();
+            }
+        }, 0);
+    }
+
+    function closeModal(modal) {
+        if (modal.hidden) {
+            return;
+        }
+
+        modal.hidden = true;
+        modal.setAttribute('aria-hidden', 'true');
+        document.body.classList.remove('modal-open');
+        if (modal.__lastTrigger && typeof modal.__lastTrigger.focus === 'function') {
+            modal.__lastTrigger.setAttribute('aria-expanded', 'false');
+            modal.__lastTrigger.focus();
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+        var modal = document.querySelector('[data-terminal-settings-modal]');
+        if (!modal) {
+            return;
+        }
+
+        document.addEventListener('click', function (event) {
+            var opener = event.target.closest('[data-terminal-settings-open]');
+            if (opener) {
+                event.preventDefault();
+                openModal(modal, opener);
+                return;
+            }
+            if (event.target.closest('[data-terminal-settings-modal-close]')) {
+                event.preventDefault();
+                closeModal(modal);
+            }
+        });
+
+        document.addEventListener('keydown', function (event) {
+            if (modal.hidden) {
+                return;
+            }
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                closeModal(modal);
+                return;
+            }
+            if (event.key !== 'Tab') {
+                return;
+            }
+
+            var nodes = focusable(modal);
+            if (nodes.length === 0) {
+                return;
+            }
+            var first = nodes[0];
+            var last = nodes[nodes.length - 1];
+            if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+            }
+        });
+    });
+}());

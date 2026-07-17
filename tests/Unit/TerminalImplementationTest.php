@@ -73,6 +73,34 @@ final class TerminalImplementationTest extends TestCase
         self::assertStringContainsString('/api/v1/terminal/scan', $source);
         self::assertStringContainsString('/api/v1/terminal/trust-bundle', $source);
         self::assertStringContainsString('/admin/terminals', $source);
+        self::assertStringContainsString('/admin/terminals/{id}/settings', $source);
+    }
+
+    public function testTerminalAdminOffersValidatedDisplaySettingsModal(): void
+    {
+        $controller = (string) file_get_contents(base_path('src/Http/Controllers/TerminalAdminController.php'));
+        $script = (string) file_get_contents(base_path('public/assets/js/admin-terminals.js'));
+        $service = (string) file_get_contents(base_path('src/Domain/Terminals/TerminalService.php'));
+
+        self::assertStringContainsString('data-terminal-settings-open', $controller);
+        self::assertStringContainsString('data-terminal-settings-modal', $controller);
+        self::assertStringContainsString('updateDisplaySettings', $controller);
+        self::assertStringContainsString('function updateDisplaySettings', $service);
+        self::assertStringContainsString('data-terminal-settings-form', $script);
+        self::assertStringContainsString('event.key === \'Escape\'', $script);
+    }
+
+    public function testTerminalDisplayResponsesKeepTheFixedSignalSemantics(): void
+    {
+        $source = (string) file_get_contents(base_path('src/Domain/Terminals/TerminalPunchService.php'));
+
+        self::assertStringContainsString("'signal' => ['led' => 'green', 'beep' => 'success']", $source);
+        self::assertStringContainsString("'signal' => ['led' => 'red', 'beep' => 'error']", $source);
+        self::assertStringContainsString("'signal' => ['led' => 'yellow', 'beep' => 'ready']", $source);
+        self::assertStringContainsString("'hold_ms' => \$displaySettings['hold_ms']['success']", $source);
+        self::assertStringContainsString("'hold_ms' => \$displaySettings['hold_ms']['error']", $source);
+        self::assertStringContainsString("'hold_ms' => \$displaySettings['hold_ms']['learning']", $source);
+        self::assertStringContainsString('TerminalDisplaySettings::renderLines', $source);
     }
 
     public function testArchivedTerminalsCanBeRestoredThroughDedicatedLifecycleRoute(): void

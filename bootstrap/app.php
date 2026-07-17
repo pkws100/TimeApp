@@ -458,6 +458,7 @@ $router->post('/admin/asset-files/{id}/status', $admin([$adminManagementControll
 $router->get('/admin/terminals', $admin([$terminalAdminController, 'index'], 'terminals.manage'));
 $router->post('/admin/terminals', $admin([$terminalAdminController, 'store'], 'terminals.manage'));
 $router->post('/admin/terminals/{id}', $admin([$terminalAdminController, 'update'], 'terminals.manage'));
+$router->post('/admin/terminals/{id}/settings', $admin([$terminalAdminController, 'saveSettings'], 'terminals.manage'));
 $router->post('/admin/terminals/{id}/archive', $admin([$terminalAdminController, 'archive'], 'terminals.manage'));
 $router->post('/admin/terminals/{id}/restore', $admin([$terminalAdminController, 'restore'], 'terminals.manage'));
 $router->post('/admin/terminals/{id}/token-reset', $admin([$terminalAdminController, 'resetToken'], 'terminals.manage'));

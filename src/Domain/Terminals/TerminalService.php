@@ -102,7 +102,17 @@ final class TerminalService
     public function update(int $id, array $payload): array
     {
         $this->assertStorageReady();
+        $existing = $this->find($id);
+        if ($existing === null || (int) ($existing['is_deleted'] ?? 0) === 1) {
+            throw new RuntimeException('Das Terminal ist nicht mehr aktiv oder nicht vorhanden.');
+        }
         $record = $this->normalize($payload);
+        if (!array_key_exists('welcome_text', $payload)) {
+            $record['welcome_text'] = (string) ($existing['welcome_text'] ?? 'Willkommen');
+        }
+        if (!array_key_exists('settings_json', $payload)) {
+            $record['settings_json'] = $existing['settings_json'] ?? null;
+        }
 
         $this->connection->execute(
             'UPDATE terminals
@@ -116,6 +126,33 @@ final class TerminalService
                  updated_at = NOW()
              WHERE id = :id',
             ['id' => $id, ...$record]
+        );
+
+        return $this->find($id) ?? [];
+    }
+
+    /** @return array{ready_lines:list<string>, check_in_lines:list<string>, check_out_lines:list<string>, hold_ms:array{success:int,error:int,learning:int}} */
+    public function displaySettings(array $terminal): array
+    {
+        return TerminalDisplaySettings::forTerminal($terminal);
+    }
+
+    public function updateDisplaySettings(int $id, array $payload): array
+    {
+        $this->assertStorageReady();
+        $terminal = $this->find($id);
+        if ($terminal === null || (int) ($terminal['is_deleted'] ?? 0) === 1 || (int) ($terminal['is_active'] ?? 1) !== 1) {
+            throw new RuntimeException('Das Terminal ist nicht mehr aktiv oder nicht vorhanden.');
+        }
+
+        $settings = TerminalDisplaySettings::mergeInput($terminal, $payload);
+        $this->connection->execute(
+            'UPDATE terminals
+             SET welcome_text = :welcome_text,
+                 settings_json = :settings_json,
+                 updated_at = NOW()
+             WHERE id = :id',
+            ['id' => $id, ...$settings]
         );
 
         return $this->find($id) ?? [];

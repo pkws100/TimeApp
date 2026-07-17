@@ -57,7 +57,7 @@ final class TerminalAdminController
 {$notice}
 {$tokenNotice}
 
-<section class="card stack">
+    <section class="card stack">
     <div class="section-toolbar">
         <div>
             <h2>Terminal anlegen</h2>
@@ -72,7 +72,6 @@ final class TerminalAdminController
         <label><span>Willkommenstext</span><input name="welcome_text" value="Willkommen"></label>
         <label><span>Projekt</span>{$this->projectSelect('default_project_id', null, $projects, true)}</label>
         <label><span>Aktiv</span><select name="is_active"><option value="1">Aktiv</option><option value="0">Inaktiv</option></select></label>
-        <label class="full-span"><span>Settings JSON</span><textarea name="settings_json" rows="4" placeholder='{"lcd_hold_ms":15000}'></textarea></label>
         <div class="toolbar-actions full-span"><button class="button" type="submit">Terminal anlegen</button></div>
     </form>
 </section>
@@ -88,8 +87,10 @@ final class TerminalAdminController
             <a class="button button-secondary{$this->scopeClass($terminalScope, 'archived')}" href="/admin/terminals?terminal_scope=archived">Archivierte Terminals anzeigen</a>
         </div>
     </div>
-    {$this->terminalTable($terminals, $projects, $csrfToken, $terminalScope)}
-</section>
+        {$this->terminalTable($terminals, $projects, $csrfToken, $terminalScope)}
+    </section>
+
+    {$this->terminalSettingsModal($csrfToken)}
 
 <section class="card stack">
     <div class="section-toolbar">
@@ -144,6 +145,25 @@ HTML;
             $this->terminalService->update((int) ($params['id'] ?? 0), $request->input());
 
             return Response::redirect('/admin/terminals?notice=updated');
+        } catch (\Throwable $exception) {
+            return $this->redirectError($exception->getMessage());
+        }
+    }
+
+    public function saveSettings(Request $request, array $params): Response
+    {
+        if (!$this->featureEnabled()) {
+            return $this->disabledRedirect();
+        }
+
+        if (!$this->validCsrf($request)) {
+            return $this->redirectError('Die Aktion konnte nicht bestaetigt werden. Bitte Seite neu laden.');
+        }
+
+        try {
+            $this->terminalService->updateDisplaySettings((int) ($params['id'] ?? 0), $request->input());
+
+            return Response::redirect('/admin/terminals?notice=settings-updated');
         } catch (\Throwable $exception) {
             return $this->redirectError($exception->getMessage());
         }
@@ -271,6 +291,7 @@ HTML;
                 $rows .= '<tr><td><strong>' . $this->e((string) ($terminal['terminal_identifier'] ?? '')) . '</strong><br><span class="muted">' . $this->e((string) ($terminal['name'] ?? '')) . '</span><p class="muted">Archiviert am: ' . $this->e((string) ($terminal['deleted_at'] ?? 'unbekannt')) . '</p><div class="table-actions"><form method="post" action="/admin/terminals/' . $id . '/restore"><input type="hidden" name="csrf_token" value="' . $csrfToken . '"><button class="button" type="submit" aria-label="' . $this->e('Terminal ' . $terminalLabel . ' wiederherstellen') . '">Wiederherstellen</button></form></div></td></tr>';
                 continue;
             }
+            $settingsData = $this->terminalSettingsData($terminal);
             $rows .= '<tr><td>'
                 . '<form method="post" action="/admin/terminals/' . $id . '" class="terminal-row-form">'
                 . '<input type="hidden" name="csrf_token" value="' . $csrfToken . '">'
@@ -278,15 +299,16 @@ HTML;
                 . '<label><span>ID</span><input name="terminal_identifier" value="' . $this->e((string) ($terminal['terminal_identifier'] ?? '')) . '" required></label>'
                 . '<label><span>Name</span><input name="name" value="' . $this->e((string) ($terminal['name'] ?? '')) . '" required></label>'
                 . '<label><span>IP-Allowlist</span><input name="ip_allowlist" value="' . $this->e((string) ($terminal['ip_allowlist'] ?? '')) . '"></label>'
-                . '<label><span>Willkommen</span><input name="welcome_text" value="' . $this->e((string) ($terminal['welcome_text'] ?? 'Willkommen')) . '"></label>'
                 . '<label><span>Projekt</span>' . $this->projectSelect('default_project_id', isset($terminal['default_project_id']) ? (int) $terminal['default_project_id'] : null, $projects, true) . '</label>'
                 . '<label><span>Status</span><select name="is_active">' . $this->option('1', 'Aktiv', (int) ($terminal['is_active'] ?? 1) === 1) . $this->option('0', 'Inaktiv', (int) ($terminal['is_active'] ?? 1) !== 1) . '</select></label>'
-                . '<label class="full-span"><span>Settings JSON</span><textarea name="settings_json" rows="3">' . $this->e((string) ($terminal['settings_json'] ?? '')) . '</textarea></label>'
                 . '</div>'
                 . '<p class="muted">Letzter Kontakt: ' . $this->e((string) ($terminal['last_seen_at'] ?? 'nie')) . ' ' . $this->e((string) ($terminal['last_seen_ip'] ?? '')) . '<br>Firmware/Transport: ' . $this->e((string) ($terminal['last_firmware_version'] ?? '-')) . ' / ' . $this->e((string) ($terminal['last_transport'] ?? '-')) . '<br>TLS/Trust: ' . $this->e((string) ($terminal['last_tls_state'] ?? '-')) . ' / v' . $this->e((string) ($terminal['active_trust_bundle_version'] ?? '0')) . ' (' . $this->e((string) ($terminal['trust_warning_state'] ?? '-')) . '), geprüft: ' . $this->e((string) ($terminal['last_trust_checked_at'] ?? 'nie')) . '<br>Offline-Queue: ' . $this->e((string) ($terminal['offline_queue_depth'] ?? '-')) . '; HTTPS zuletzt: ' . $this->e((string) ($terminal['last_https_success_at'] ?? 'nie')) . '; Recovery: ' . $this->e((string) ($terminal['last_recovery_status'] ?? '-')) . '</p>'
                 . '<button class="button" type="submit">Speichern</button>'
                 . '</form>'
                 . '<div class="table-actions">'
+                . ((int) ($terminal['is_active'] ?? 1) === 1
+                    ? '<button class="button button-secondary" type="button" data-terminal-settings-open data-terminal-settings="' . $this->dataJson($settingsData) . '" aria-haspopup="dialog" aria-controls="terminalSettingsModal" aria-expanded="false">Terminal-Einstellungen</button>'
+                    : '')
                 . '<form method="post" action="/admin/terminals/' . $id . '/learn"><input type="hidden" name="csrf_token" value="' . $csrfToken . '"><button class="button button-secondary" type="submit">Tag anlernen</button></form>'
                 . '<form method="post" action="/admin/terminals/' . $id . '/token-reset"><input type="hidden" name="csrf_token" value="' . $csrfToken . '"><button class="button button-secondary" type="submit">Token resetten</button></form>'
                 . '<form method="post" action="/admin/terminals/' . $id . '/archive"><input type="hidden" name="csrf_token" value="' . $csrfToken . '"><button class="button button-danger" type="submit">Archivieren</button></form>'
@@ -295,6 +317,52 @@ HTML;
         }
 
         return '<div class="table-scroll"><table><thead><tr><th>Terminal</th></tr></thead><tbody>' . $rows . '</tbody></table></div>';
+    }
+
+    private function terminalSettingsModal(string $csrfToken): string
+    {
+        return '<div id="terminalSettingsModal" class="admin-modal" data-terminal-settings-modal hidden aria-hidden="true">'
+            . '<div class="admin-modal__overlay" data-terminal-settings-modal-close></div>'
+            . '<div class="admin-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="terminalSettingsModalTitle" aria-describedby="terminalSettingsModalHelp">'
+            . '<div class="admin-modal__header"><div><p class="eyebrow">Terminal</p><h2 id="terminalSettingsModalTitle">Terminal-Einstellungen</h2><p class="muted" data-terminal-settings-name></p></div><button type="button" class="button button-secondary admin-modal__close" data-terminal-settings-modal-close>Schliessen</button></div>'
+            . '<form method="post" action="" data-terminal-settings-form class="stack">'
+            . '<input type="hidden" name="csrf_token" value="' . $csrfToken . '">'
+            . '<p id="terminalSettingsModalHelp" class="muted">Jede LCD-Zeile zeigt maximal 20 Zeichen. In Arbeitsbeginn und Feierabend sind {vorname}, {zeit} und {sollzeit} erlaubt.</p>'
+            . '<fieldset class="stack"><legend>Bereitschaftsbild</legend><div class="form-grid">'
+            . $this->terminalLineInputs('ready_line_', 3)
+            . '</div><p class="muted">Die vierte Zeile ist immer die lokale Uhr. Gelb bedeutet: Tag gelesen, Serverbestätigung ausstehend.</p></fieldset>'
+            . '<fieldset class="stack"><legend>Arbeitsbeginn</legend><div class="form-grid">'
+            . $this->terminalLineInputs('check_in_line_', 4)
+            . '</div></fieldset>'
+            . '<fieldset class="stack"><legend>Feierabend</legend><div class="form-grid">'
+            . $this->terminalLineInputs('check_out_line_', 4)
+            . '</div></fieldset>'
+            . '<fieldset class="stack"><legend>Anzeigedauern</legend><div class="form-grid">'
+            . '<label><span>Bestätigte Buchung (ms)</span><input type="number" min="1000" max="60000" step="100" name="hold_success_ms" required></label>'
+            . '<label><span>Fehler oder Ablehnung (ms)</span><input type="number" min="1000" max="60000" step="100" name="hold_error_ms" required></label>'
+            . '<label><span>NFC-Anlernen (ms)</span><input type="number" min="1000" max="60000" step="100" name="hold_learning_ms" required></label>'
+            . '</div><p class="muted">Grün = Buchung bestätigt. Rot = abgelehnt oder endgültiger Fehler. Diese Ampelsemantik ist fest und nicht frei vertauschbar.</p></fieldset>'
+            . '<div class="table-actions"><button class="button" type="submit">Einstellungen speichern</button></div>'
+            . '</form></div></div>';
+    }
+
+    private function terminalLineInputs(string $prefix, int $count): string
+    {
+        $html = '';
+        for ($index = 1; $index <= $count; $index++) {
+            $html .= '<label><span>LCD-Zeile ' . $index . '</span><input name="' . $prefix . $index . '" maxlength="20"></label>';
+        }
+
+        return $html;
+    }
+
+    private function terminalSettingsData(array $terminal): array
+    {
+        return [
+            'id' => (int) ($terminal['id'] ?? 0),
+            'name' => (string) ($terminal['name'] ?? $terminal['terminal_identifier'] ?? ''),
+            ...$this->terminalService->displaySettings($terminal),
+        ];
     }
 
     private function tagTable(array $tags, array $users, array $projects, string $csrfToken, string $scope): string
@@ -520,6 +588,7 @@ HTML;
         return match ((string) $request->query('notice', '')) {
             'created' => '<p class="notice success">Terminal wurde angelegt.</p>',
             'updated' => '<p class="notice success">Terminal wurde gespeichert.</p>',
+            'settings-updated' => '<p class="notice success">Terminal-Einstellungen wurden gespeichert.</p>',
             'archived' => '<p class="notice success">Terminal wurde archiviert.</p>',
             'restored' => '<p class="notice success">Terminal wurde wiederhergestellt.</p>',
             'token-reset' => '<p class="notice success">Token wurde erneuert.</p>',

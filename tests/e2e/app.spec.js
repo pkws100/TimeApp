@@ -2224,6 +2224,57 @@ test('dark drawer keeps active navigation link readable after login', async ({ p
   expect(backgroundImage).toContain('linear-gradient');
 });
 
+test('terminal settings modal fills, saves and restores focus', async ({ page }) => {
+  await page.setContent(
+    '<button type="button" data-terminal-settings-open aria-expanded="false" data-terminal-settings=\'{"id":7,"name":"Terminal Nord","ready_lines":["Willkommen Nord","Tag vorhalten","Bereit"],"check_in_lines":["Hallo {vorname}","Arbeitsbeginn","{zeit}","Soll {sollzeit}"],"check_out_lines":["Hallo {vorname}","Feierabend","{zeit}","Soll {sollzeit}"],"hold_ms":{"success":5000,"error":7000,"learning":9000}}\'>Terminal-Einstellungen</button>'
+      + '<div class="admin-modal" data-terminal-settings-modal hidden aria-hidden="true">'
+      + '<button type="button" data-terminal-settings-modal-close>Schliessen</button><button type="button" data-terminal-settings-modal-close>Overlay schliessen</button>'
+      + '<p data-terminal-settings-name></p>'
+      + '<form method="post" action="" data-terminal-settings-form>'
+      + '<input name="ready_line_1"><input name="ready_line_2"><input name="ready_line_3">'
+      + '<input name="check_in_line_1"><input name="check_in_line_2"><input name="check_in_line_3"><input name="check_in_line_4">'
+      + '<input name="check_out_line_1"><input name="check_out_line_2"><input name="check_out_line_3"><input name="check_out_line_4">'
+      + '<input name="hold_success_ms"><input name="hold_error_ms"><input name="hold_learning_ms">'
+      + '<button type="submit">Einstellungen speichern</button>'
+      + '</form></div>'
+  );
+  await page.addScriptTag({ path: path.join(__dirname, '../../public/assets/js/admin-terminals.js') });
+  await page.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
+
+  await page.getByRole('button', { name: 'Terminal-Einstellungen' }).click();
+  const modal = page.locator('[data-terminal-settings-modal]');
+  const form = modal.locator('[data-terminal-settings-form]');
+
+  await expect(modal).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Terminal-Einstellungen' })).toHaveAttribute('aria-expanded', 'true');
+  await expect(modal.locator('[data-terminal-settings-name]')).toHaveText('Terminal Nord');
+  await expect(form).toHaveAttribute('action', '/admin/terminals/7/settings');
+  await expect(form.locator('[name="ready_line_1"]')).toHaveValue('Willkommen Nord');
+  await expect(form.locator('[name="check_in_line_1"]')).toHaveValue('Hallo {vorname}');
+  await expect(form.locator('[name="check_out_line_2"]')).toHaveValue('Feierabend');
+  await expect(form.locator('[name="hold_success_ms"]')).toHaveValue('5000');
+  await expect(form.locator('[name="hold_error_ms"]')).toHaveValue('7000');
+  await expect(form.locator('[name="hold_learning_ms"]')).toHaveValue('9000');
+
+  await form.locator('[name="hold_success_ms"]').fill('6000');
+  await page.evaluate(() => {
+    const form = document.querySelector('[data-terminal-settings-form]');
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      window.__terminalSettingsSaved = Object.fromEntries(new FormData(form));
+    }, { once: true });
+  });
+  await form.getByRole('button', { name: 'Einstellungen speichern' }).click();
+  await expect.poll(() => page.evaluate(() => window.__terminalSettingsSaved.hold_success_ms)).toBe('6000');
+
+  await page.keyboard.press('Escape');
+  await expect(modal).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Terminal-Einstellungen' })).toBeFocused();
+  await expect(page.getByRole('button', { name: 'Terminal-Einstellungen' })).toHaveAttribute('aria-expanded', 'false');
+  await page.getByRole('button', { name: 'Terminal-Einstellungen' }).click();
+  await expect(form.locator('[name="ready_line_1"]')).toHaveValue('Willkommen Nord');
+});
+
 test('admin table module supports search, sorting, pagination and empty states', async ({ page }) => {
   const rows = Array.from({ length: 30 }, (_, index) => {
     const number = index + 1;
