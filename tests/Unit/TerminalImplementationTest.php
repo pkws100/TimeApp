@@ -90,6 +90,23 @@ final class TerminalImplementationTest extends TestCase
         self::assertStringContainsString('event.key === \'Escape\'', $script);
     }
 
+    public function testTerminalActionsUseTheRequestedButtonOrder(): void
+    {
+        $controller = (string) file_get_contents(base_path('src/Http/Controllers/TerminalAdminController.php'));
+        $learn = strpos($controller, '>Tag anlernen</button>');
+        $tokenReset = strpos($controller, '>Token resetten</button>');
+        $settings = strpos($controller, '>Terminal-Einstellungen</button>');
+        $archive = strpos($controller, '>Archivieren</button>');
+
+        self::assertIsInt($learn);
+        self::assertIsInt($tokenReset);
+        self::assertIsInt($settings);
+        self::assertIsInt($archive);
+        self::assertLessThan($tokenReset, $learn);
+        self::assertLessThan($settings, $tokenReset);
+        self::assertLessThan($archive, $settings);
+    }
+
     public function testTerminalDisplayResponsesKeepTheFixedSignalSemantics(): void
     {
         $source = (string) file_get_contents(base_path('src/Domain/Terminals/TerminalPunchService.php'));

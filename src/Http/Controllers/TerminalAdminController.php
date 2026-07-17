@@ -306,11 +306,11 @@ HTML;
                 . '<button class="button" type="submit">Speichern</button>'
                 . '</form>'
                 . '<div class="table-actions">'
+                . '<form method="post" action="/admin/terminals/' . $id . '/learn"><input type="hidden" name="csrf_token" value="' . $csrfToken . '"><button class="button button-secondary" type="submit">Tag anlernen</button></form>'
+                . '<form method="post" action="/admin/terminals/' . $id . '/token-reset"><input type="hidden" name="csrf_token" value="' . $csrfToken . '"><button class="button button-secondary" type="submit">Token resetten</button></form>'
                 . ((int) ($terminal['is_active'] ?? 1) === 1
                     ? '<button class="button button-secondary" type="button" data-terminal-settings-open data-terminal-settings="' . $this->dataJson($settingsData) . '" aria-haspopup="dialog" aria-controls="terminalSettingsModal" aria-expanded="false">Terminal-Einstellungen</button>'
                     : '')
-                . '<form method="post" action="/admin/terminals/' . $id . '/learn"><input type="hidden" name="csrf_token" value="' . $csrfToken . '"><button class="button button-secondary" type="submit">Tag anlernen</button></form>'
-                . '<form method="post" action="/admin/terminals/' . $id . '/token-reset"><input type="hidden" name="csrf_token" value="' . $csrfToken . '"><button class="button button-secondary" type="submit">Token resetten</button></form>'
                 . '<form method="post" action="/admin/terminals/' . $id . '/archive"><input type="hidden" name="csrf_token" value="' . $csrfToken . '"><button class="button button-danger" type="submit">Archivieren</button></form>'
                 . '</div>'
                 . '</td></tr>';
