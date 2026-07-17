@@ -148,9 +148,7 @@ final class AppTimesheetSyncService
         $this->handlePauseAction($action, $timesheetId, $userId, $payload, $currentBreak);
 
         $breaks = $this->findBreaksForTimesheet($timesheetId);
-        $effectiveBreakMinutes = $action === 'pause' && array_key_exists('manual_break_minutes', $payload)
-            ? $this->normalizeBreakMinutes($payload['manual_break_minutes'])
-            : $this->workdayStateCalculator->completedBreakMinutes($breaks);
+        $effectiveBreakMinutes = $this->effectiveBreakMinutes($action, $payload, $breaks, $manualBreakMinutes);
 
         $recalculated = $this->calculatedValues($workDate, $startTime, $endTime, $effectiveBreakMinutes);
         $this->refreshTimesheetDurations($timesheetId, $projectId, $startTime, $endTime, $note, $source, $recalculated);
@@ -856,6 +854,18 @@ final class AppTimesheetSyncService
     private function normalizeBreakMinutes(mixed $value): int
     {
         return max(0, (int) $value);
+    }
+
+    private function effectiveBreakMinutes(string $action, array $payload, array $breaks, int $storedBreakMinutes): int
+    {
+        if ($action === 'pause' && array_key_exists('manual_break_minutes', $payload)) {
+            return $this->normalizeBreakMinutes($payload['manual_break_minutes']);
+        }
+
+        return $this->workdayStateCalculator->effectiveBreakMinutes(
+            ['break_minutes' => $this->normalizeBreakMinutes($storedBreakMinutes)],
+            $breaks
+        );
     }
 
     private function normalizeTime(mixed $value): ?string

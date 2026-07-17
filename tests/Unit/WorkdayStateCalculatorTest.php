@@ -21,6 +21,34 @@ final class WorkdayStateCalculatorTest extends TestCase
         self::assertSame(25, $minutes);
     }
 
+    public function testEffectiveBreakMinutesFallsBackToStoredValueUntilStructuredBreakCompletes(): void
+    {
+        $calculator = new WorkdayStateCalculator();
+        $workEntry = ['break_minutes' => 45];
+
+        self::assertSame(45, $calculator->effectiveBreakMinutes($workEntry, []));
+        self::assertSame(45, $calculator->effectiveBreakMinutes($workEntry, [[
+            'break_started_at' => '2026-04-24T12:00:00+02:00',
+            'break_ended_at' => null,
+        ]]));
+        self::assertSame(15, $calculator->effectiveBreakMinutes($workEntry, [[
+            'break_started_at' => '2026-04-24T12:00:00+02:00',
+            'break_ended_at' => '2026-04-24T12:15:00+02:00',
+        ]]));
+    }
+
+    public function testTrackedMinutesLiveBasisIncludesStoredManualBreak(): void
+    {
+        $calculator = new WorkdayStateCalculator();
+        $basis = $calculator->trackedMinutesLiveBasis(
+            '2026-04-24',
+            ['start_time' => '08:00', 'end_time' => null, 'break_minutes' => 45],
+            []
+        );
+
+        self::assertSame(45, $basis['completed_break_minutes']);
+    }
+
     public function testStatusReturnsPausedForOpenBreak(): void
     {
         $calculator = new WorkdayStateCalculator();

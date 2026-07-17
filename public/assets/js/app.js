@@ -1461,7 +1461,11 @@
     }
 
     function completedBreakMinutesForEntry(entry, breaks) {
-        return Array.isArray(breaks) && breaks.length > 0
+        const hasCompletedBreak = Array.isArray(breaks) && breaks.some((item) => {
+            return item && item.break_ended_at !== null && item.break_ended_at !== '';
+        });
+
+        return hasCompletedBreak
             ? breakMinutesFromCollection(breaks)
             : Number(entry && entry.break_minutes ? entry.break_minutes : 0);
     }

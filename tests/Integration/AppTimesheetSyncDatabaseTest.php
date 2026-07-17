@@ -18,13 +18,342 @@ use PHPUnit\Framework\TestCase;
 
 final class AppTimesheetSyncDatabaseTest extends TestCase
 {
+    public function testManualFortyFiveMinuteBreakSurvivesCheckout(): void
+    {
+        $this->withScratchDatabase(function (DatabaseConnection $connection): void {
+            [$userId, $projectId, $suffix] = $this->seedAssignedUserAndProject($connection, 'manual-break');
+            $service = $this->createSyncService($connection);
+            $user = ['id' => $userId, 'permissions' => ['timesheets.create', 'timesheets.view_own']];
+            $workDate = '2026-06-03';
+
+            $service->sync($user, [
+                'client_request_id' => 'check-in-' . $suffix,
+                'action' => 'check_in',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'start_time' => '08:00',
+            ]);
+            $pauseResult = $service->sync($user, [
+                'client_request_id' => 'pause-' . $suffix,
+                'action' => 'pause',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'manual_break_minutes' => 45,
+            ]);
+
+            self::assertSame(45, $pauseResult['timesheet']['break_minutes'] ?? null);
+            self::assertSame(45, $pauseResult['tracked_minutes_live_basis']['completed_break_minutes'] ?? null);
+
+            $checkoutResult = $service->sync($user, [
+                'client_request_id' => 'check-out-' . $suffix,
+                'action' => 'check_out',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'end_time' => '16:00',
+            ]);
+
+            self::assertSame(480, $checkoutResult['timesheet']['gross_minutes'] ?? null);
+            self::assertSame(45, $checkoutResult['timesheet']['break_minutes'] ?? null);
+            self::assertSame(435, $checkoutResult['timesheet']['net_minutes'] ?? null);
+            self::assertSame(45, $checkoutResult['tracked_minutes_live_basis']['completed_break_minutes'] ?? null);
+            self::assertSame(0, (int) $connection->fetchColumn('SELECT COUNT(*) FROM timesheet_breaks'));
+        });
+    }
+
+    public function testManualBreakSurvivesUpsert(): void
+    {
+        $this->withScratchDatabase(function (DatabaseConnection $connection): void {
+            [$userId, $projectId, $suffix] = $this->seedAssignedUserAndProject($connection, 'manual-upsert');
+            $service = $this->createSyncService($connection);
+            $user = ['id' => $userId, 'permissions' => ['timesheets.create', 'timesheets.view_own']];
+            $workDate = '2026-06-04';
+
+            $service->sync($user, [
+                'client_request_id' => 'check-in-' . $suffix,
+                'action' => 'check_in',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'start_time' => '08:00',
+            ]);
+            $service->sync($user, [
+                'client_request_id' => 'pause-' . $suffix,
+                'action' => 'pause',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'manual_break_minutes' => 45,
+            ]);
+            $result = $service->sync($user, [
+                'client_request_id' => 'upsert-' . $suffix,
+                'action' => 'upsert',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'start_time' => '08:00',
+                'end_time' => '16:00',
+            ]);
+
+            self::assertSame(480, $result['timesheet']['gross_minutes'] ?? null);
+            self::assertSame(45, $result['timesheet']['break_minutes'] ?? null);
+            self::assertSame(435, $result['timesheet']['net_minutes'] ?? null);
+        });
+    }
+
+    public function testManualBreakSurvivesProjectSelectionAndNoteUpdate(): void
+    {
+        $this->withScratchDatabase(function (DatabaseConnection $connection): void {
+            [$userId, $projectId, $suffix] = $this->seedAssignedUserAndProject($connection, 'manual-project');
+            $service = $this->createSyncService($connection);
+            $user = ['id' => $userId, 'permissions' => ['timesheets.create', 'timesheets.view_own']];
+            $workDate = '2026-06-05';
+
+            $service->sync($user, [
+                'client_request_id' => 'check-in-' . $suffix,
+                'action' => 'check_in',
+                'project_id' => null,
+                'work_date' => $workDate,
+                'start_time' => '08:00',
+                'note' => 'Noch ohne Projekt',
+            ]);
+            $service->sync($user, [
+                'client_request_id' => 'pause-' . $suffix,
+                'action' => 'pause',
+                'project_id' => null,
+                'work_date' => $workDate,
+                'manual_break_minutes' => 45,
+            ]);
+            $projectResult = $service->sync($user, [
+                'client_request_id' => 'project-' . $suffix,
+                'action' => 'select_project',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+            ]);
+            $noteResult = $service->sync($user, [
+                'client_request_id' => 'note-' . $suffix,
+                'action' => 'upsert',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'note' => 'Projekt nachgetragen',
+            ]);
+
+            self::assertSame($projectId, $projectResult['timesheet']['project_id'] ?? null);
+            self::assertSame(45, $projectResult['timesheet']['break_minutes'] ?? null);
+            self::assertSame('Projekt nachgetragen', $noteResult['timesheet']['note'] ?? null);
+            self::assertSame(45, $noteResult['timesheet']['break_minutes'] ?? null);
+        });
+    }
+
+    public function testLegalMinimumOverridesLowerManualBreak(): void
+    {
+        $this->withScratchDatabase(function (DatabaseConnection $connection): void {
+            [$userId, $projectId, $suffix] = $this->seedAssignedUserAndProject($connection, 'manual-minimum');
+            $service = $this->createSyncService($connection);
+            $user = ['id' => $userId, 'permissions' => ['timesheets.create', 'timesheets.view_own']];
+            $workDate = '2026-06-08';
+
+            $service->sync($user, [
+                'client_request_id' => 'check-in-' . $suffix,
+                'action' => 'check_in',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'start_time' => '08:00',
+            ]);
+            $service->sync($user, [
+                'client_request_id' => 'pause-' . $suffix,
+                'action' => 'pause',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'manual_break_minutes' => 15,
+            ]);
+            $result = $service->sync($user, [
+                'client_request_id' => 'check-out-' . $suffix,
+                'action' => 'check_out',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'end_time' => '18:00',
+            ]);
+
+            self::assertSame(600, $result['timesheet']['gross_minutes'] ?? null);
+            self::assertSame(45, $result['timesheet']['break_minutes'] ?? null);
+            self::assertSame(555, $result['timesheet']['net_minutes'] ?? null);
+        });
+    }
+
+    public function testCompletedStructuredBreakSurvivesCheckout(): void
+    {
+        $this->withScratchDatabase(function (DatabaseConnection $connection): void {
+            [$userId, $projectId, $suffix] = $this->seedAssignedUserAndProject($connection, 'structured-break');
+            $service = $this->createSyncService($connection);
+            $user = ['id' => $userId, 'permissions' => ['timesheets.create', 'timesheets.view_own']];
+            $workDate = '2026-06-09';
+
+            $service->sync($user, [
+                'client_request_id' => 'check-in-' . $suffix,
+                'action' => 'check_in',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'start_time' => '08:00',
+            ]);
+            $service->sync($user, [
+                'client_request_id' => 'pause-start-' . $suffix,
+                'action' => 'pause_start',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'break_started_at' => '2026-06-09 12:00:00',
+            ]);
+            $service->sync($user, [
+                'client_request_id' => 'pause-end-' . $suffix,
+                'action' => 'pause_end',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'break_ended_at' => '2026-06-09 12:45:00',
+            ]);
+            $result = $service->sync($user, [
+                'client_request_id' => 'check-out-' . $suffix,
+                'action' => 'check_out',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'end_time' => '16:00',
+            ]);
+
+            self::assertSame(45, $result['timesheet']['break_minutes'] ?? null);
+            self::assertSame(435, $result['timesheet']['net_minutes'] ?? null);
+            self::assertSame(1, (int) $connection->fetchColumn('SELECT COUNT(*) FROM timesheet_breaks'));
+        });
+    }
+
+    public function testOpenStructuredBreakDoesNotDiscardStoredManualBreak(): void
+    {
+        $this->withScratchDatabase(function (DatabaseConnection $connection): void {
+            [$userId, $projectId, $suffix] = $this->seedAssignedUserAndProject($connection, 'mixed-break');
+            $service = $this->createSyncService($connection);
+            $user = ['id' => $userId, 'permissions' => ['timesheets.create', 'timesheets.view_own']];
+            $workDate = '2026-06-12';
+
+            $service->sync($user, [
+                'client_request_id' => 'check-in-' . $suffix,
+                'action' => 'check_in',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'start_time' => '08:00',
+            ]);
+            $service->sync($user, [
+                'client_request_id' => 'manual-pause-' . $suffix,
+                'action' => 'pause',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'manual_break_minutes' => 45,
+            ]);
+            $startedResult = $service->sync($user, [
+                'client_request_id' => 'pause-start-' . $suffix,
+                'action' => 'pause_start',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'break_started_at' => '2026-06-12 12:00:00',
+            ]);
+
+            self::assertSame(45, $startedResult['timesheet']['break_minutes'] ?? null);
+
+            $endedResult = $service->sync($user, [
+                'client_request_id' => 'pause-end-' . $suffix,
+                'action' => 'pause_end',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'break_ended_at' => '2026-06-12 12:15:00',
+            ]);
+
+            self::assertSame(15, $endedResult['timesheet']['break_minutes'] ?? null);
+            self::assertSame(1, (int) $connection->fetchColumn('SELECT COUNT(*) FROM timesheet_breaks'));
+        });
+    }
+
+    public function testMultipleStructuredBreaksAreAddedWithoutStoredBreakDoubleCounting(): void
+    {
+        $this->withScratchDatabase(function (DatabaseConnection $connection): void {
+            [$userId, $projectId, $suffix] = $this->seedAssignedUserAndProject($connection, 'multiple-breaks');
+            $service = $this->createSyncService($connection);
+            $user = ['id' => $userId, 'permissions' => ['timesheets.create', 'timesheets.view_own']];
+            $workDate = '2026-06-10';
+
+            $service->sync($user, [
+                'client_request_id' => 'check-in-' . $suffix,
+                'action' => 'check_in',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'start_time' => '08:00',
+            ]);
+
+            foreach ([
+                ['10:00:00', '10:15:00'],
+                ['12:00:00', '12:30:00'],
+            ] as $index => [$startedAt, $endedAt]) {
+                $service->sync($user, [
+                    'client_request_id' => 'pause-start-' . $index . '-' . $suffix,
+                    'action' => 'pause_start',
+                    'project_id' => $projectId,
+                    'work_date' => $workDate,
+                    'break_started_at' => $workDate . ' ' . $startedAt,
+                ]);
+                $service->sync($user, [
+                    'client_request_id' => 'pause-end-' . $index . '-' . $suffix,
+                    'action' => 'pause_end',
+                    'project_id' => $projectId,
+                    'work_date' => $workDate,
+                    'break_ended_at' => $workDate . ' ' . $endedAt,
+                ]);
+            }
+
+            $result = $service->sync($user, [
+                'client_request_id' => 'check-out-' . $suffix,
+                'action' => 'check_out',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'end_time' => '16:00',
+            ]);
+
+            self::assertSame(45, $result['timesheet']['break_minutes'] ?? null);
+            self::assertSame(435, $result['timesheet']['net_minutes'] ?? null);
+            self::assertSame(2, (int) $connection->fetchColumn('SELECT COUNT(*) FROM timesheet_breaks'));
+        });
+    }
+
+    public function testManualPauseRequestRemainsIdempotent(): void
+    {
+        $this->withScratchDatabase(function (DatabaseConnection $connection): void {
+            [$userId, $projectId, $suffix] = $this->seedAssignedUserAndProject($connection, 'manual-idempotent');
+            $service = $this->createSyncService($connection);
+            $user = ['id' => $userId, 'permissions' => ['timesheets.create', 'timesheets.view_own']];
+            $workDate = '2026-06-11';
+
+            $service->sync($user, [
+                'client_request_id' => 'check-in-' . $suffix,
+                'action' => 'check_in',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'start_time' => '08:00',
+            ]);
+            $payload = [
+                'client_request_id' => 'pause-' . $suffix,
+                'action' => 'pause',
+                'project_id' => $projectId,
+                'work_date' => $workDate,
+                'manual_break_minutes' => 45,
+            ];
+            $firstResult = $service->sync($user, $payload);
+            $replayedResult = $service->sync($user, $payload);
+
+            self::assertSame($firstResult, $replayedResult);
+            self::assertSame(45, $replayedResult['timesheet']['break_minutes'] ?? null);
+            self::assertSame(2, (int) $connection->fetchColumn('SELECT COUNT(*) FROM app_sync_operations'));
+            self::assertSame(0, (int) $connection->fetchColumn('SELECT COUNT(*) FROM timesheet_breaks'));
+        });
+    }
+
     public function testEmployeeCanBookAssignedProjectWithNativePdoPlaceholders(): void
     {
         $baseConfig = $this->databaseConfig();
         $baseConnection = new DatabaseConnection($baseConfig);
 
         if (!$baseConnection->isAvailable()) {
-            self::markTestSkipped('Keine Test-Datenbank verfuegbar.');
+            self::fail('Keine Test-Datenbank verfuegbar.');
         }
 
         $pdo = $baseConnection->pdo();
@@ -38,8 +367,8 @@ final class AppTimesheetSyncDatabaseTest extends TestCase
             try {
                 $pdo->exec('CREATE DATABASE ' . $quotedDatabaseName . ' CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
                 $databaseCreated = true;
-            } catch (PDOException) {
-                self::markTestSkipped('Datenbankbenutzer darf keine Scratch-Datenbank anlegen.');
+            } catch (PDOException $exception) {
+                self::fail('Datenbankbenutzer darf keine Scratch-Datenbank anlegen: ' . $exception->getMessage());
             }
 
             $config = $baseConfig;
@@ -177,7 +506,7 @@ final class AppTimesheetSyncDatabaseTest extends TestCase
         $baseConnection = new DatabaseConnection($baseConfig);
 
         if (!$baseConnection->isAvailable()) {
-            self::markTestSkipped('Keine Test-Datenbank verfuegbar.');
+            self::fail('Keine Test-Datenbank verfuegbar.');
         }
 
         $pdo = $baseConnection->pdo();
@@ -191,8 +520,8 @@ final class AppTimesheetSyncDatabaseTest extends TestCase
             try {
                 $pdo->exec('CREATE DATABASE ' . $quotedDatabaseName . ' CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
                 $databaseCreated = true;
-            } catch (PDOException) {
-                self::markTestSkipped('Datenbankbenutzer darf keine Scratch-Datenbank anlegen.');
+            } catch (PDOException $exception) {
+                self::fail('Datenbankbenutzer darf keine Scratch-Datenbank anlegen: ' . $exception->getMessage());
             }
 
             $config = $baseConfig;
@@ -253,6 +582,16 @@ final class AppTimesheetSyncDatabaseTest extends TestCase
         );
 
         return [$userId, $projectId, $suffix];
+    }
+
+    private function createSyncService(DatabaseConnection $connection): AppTimesheetSyncService
+    {
+        return new AppTimesheetSyncService(
+            $connection,
+            new TimesheetCalculator(),
+            new CompanySettingsService($connection, []),
+            new WorkdayStateCalculator()
+        );
     }
 
     private function createSchema(DatabaseConnection $connection): void
@@ -332,6 +671,20 @@ final class AppTimesheetSyncDatabaseTest extends TestCase
                 response_json TEXT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE KEY uniq_client_request_id (client_request_id)
+            )'
+        );
+
+        $connection->execute(
+            'CREATE TABLE timesheet_breaks (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                timesheet_id INT UNSIGNED NOT NULL,
+                user_id INT UNSIGNED NOT NULL,
+                break_started_at DATETIME NOT NULL,
+                break_ended_at DATETIME NULL,
+                source VARCHAR(40) DEFAULT "app",
+                note TEXT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )'
         );
 
