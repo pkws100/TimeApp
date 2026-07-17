@@ -33,7 +33,7 @@ Mitarbeiternamen eintragen.
 
 Der ungefähr 60-ms-Wartepiep blieb beim vorherigen Stand hörbar, weil der
 unmittelbar folgende synchrone HTTPS-Aufruf den Hauptloop blockierte. Die
-Firmware enthält jetzt eine nicht blockierende Vorlaufzeit von 100 ms. Gelb
+Firmware enthält jetzt einen 160-ms-Wartepiep und eine nicht blockierende Vorlaufzeit von 180 ms. Gelb
 bleibt bis zur Serverentscheidung aktiv; Grün ist nur bei einer bestätigten
 Serverbuchung erlaubt. Der reale Nachtest nach erneutem Flash ist noch offen.
 

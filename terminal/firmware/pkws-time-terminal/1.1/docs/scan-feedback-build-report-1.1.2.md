@@ -4,8 +4,8 @@ Ausgangscommit: `432999dc67c60ea85b3f67a0eb86b874fa648dcc`
 
 ## Korrektur
 
-Nach einer sicheren NFC-Erkennung wartet die Firmware 100 ms nicht blockierend,
-bevor sie den synchronen Netzwerkaufruf beginnt. Der 60-ms-Wartepiep kann in
+Nach einer sicheren NFC-Erkennung wartet die Firmware 180 ms nicht blockierend,
+bevor sie den synchronen Netzwerkaufruf beginnt. Der 160-ms-Wartepiep kann in
 dieser Zeit durch den Hauptloop sauber enden; unmittelbar vor dem Senden wird
 der Buzzer zusätzlich kontrolliert ausgeschaltet. Es gibt kein `delay()` und
 keine Warteschleife.
@@ -28,14 +28,14 @@ PIO_CMD=/tmp/platformio-venv/bin/pio sh terminal/firmware/pkws-time-terminal/bui
 | Firmware | Ergebnis | PlatformIO / Plattform / Core | Board | RAM | Flash |
 | --- | --- | --- | --- | --- | --- |
 | 1.0 | SUCCESS | Core 6.1.19 / `espressif32@7.0.1` / `framework-arduinoespressif32@3.20017.241212` | DOIT ESP32 DEVKIT V1, 4 MB | 49.088 / 327.680 B (15,0 %) | 1.046.597 / 1.310.720 B (79,8 %) |
-| 1.1 Test | SUCCESS | Core 6.1.19 / `espressif32@7.0.1` / `framework-arduinoespressif32@3.20017.241212` | DOIT ESP32 DEVKIT V1, 4 MB | 49.604 / 327.680 B (15,1 %) | 1.153.529 / 1.310.720 B (88,0 %) |
+| 1.1 Test | SUCCESS | Core 6.1.19 / `espressif32@7.0.1` / `framework-arduinoespressif32@3.20017.241212` | DOIT ESP32 DEVKIT V1, 4 MB | 49.604 / 327.680 B (15,1 %) | 1.153.533 / 1.310.720 B (88,0 %) |
 
-Gegenüber dem vorherigen PR-Head: **±0 B RAM**, **+804 B Flash**. Die
-App-Partition hat weiterhin **157.191 B Reserve**; der Unterschied entspricht
+Gegenüber dem vorherigen PR-Head: **±0 B RAM**, **+808 B Flash**. Die
+App-Partition hat weiterhin **157.187 B Reserve**; der Unterschied entspricht
 den zusätzlichen Entscheidungs- und Testhilfen und ist für die Korrektur klein.
 
 ```text
-4ce818484b1a75a4de3dffcc93fc8165c527bad8dc54c96eba79f8c3d8af3a00  pkws-time-terminal-1.1-test.bin
+189ae108674280e20a34582183a0fb661d6bab86b28630b75922f112ea2a2dde  pkws-time-terminal-1.1-test.bin
 f0cc5c8966c8bb5c91950321c56af1a2805e4c21d8af0674fd042f48486eaa35  pkws-time-terminal-1.0.bin
 ```
 

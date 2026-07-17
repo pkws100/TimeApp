@@ -76,7 +76,7 @@ static const unsigned long DOWNLOAD_TOTAL_TIMEOUT_MS = 15000;
 static const unsigned long DOWNLOAD_IDLE_TIMEOUT_MS = 3000;
 static const unsigned long TIME_SYNC_TIMEOUT_MS = 30000;
 static const uint32_t READY_CLOCK_CHECK_INTERVAL_MS = 1000;
-static const uint32_t SCAN_FEEDBACK_BEFORE_SEND_MS = 100;
+static const uint32_t SCAN_FEEDBACK_BEFORE_SEND_MS = 180;
 static const unsigned long TRUST_WARNING_BUFFER_SECONDS = 90UL * 24UL * 60UL * 60UL;
 static const size_t MAX_TRUST_BUNDLE_BYTES = 24576;
 static const size_t MAX_CONFIG_RESPONSE_BYTES = 16384;
@@ -1205,7 +1205,7 @@ void stopBuzzer()
 void triggerBeep(const String &signal)
 {
     static const uint16_t readyPattern[] = {80};
-    static const uint16_t waitPattern[] = {60};
+    static const uint16_t waitPattern[] = {160};
     static const uint16_t successPattern[] = {80, 80, 80};
     static const uint16_t errorPattern[] = {250, 120, 250, 120, 250};
 
