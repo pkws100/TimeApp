@@ -6,6 +6,7 @@ namespace App\Domain\Auth;
 
 use App\Domain\App\AppUiSettings;
 use App\Domain\Users\PermissionMatrix;
+use App\Domain\Users\UserWorkdayPolicy;
 use App\Infrastructure\Database\DatabaseConnection;
 
 final class AuthService
@@ -143,6 +144,7 @@ final class AuthService
     {
         if ($this->connection->tableExists('users')) {
             $timeTrackingSelect = $this->timeTrackingSelect();
+            $workdaysSelect = $this->workdaysSelect();
             $appUiSettingsSelect = $this->appUiSettingsSelect();
             $user = $this->connection->fetchOne(
                 'SELECT
@@ -154,6 +156,7 @@ final class AuthService
                     users.password_hash,
                     users.employment_status,
                     ' . $timeTrackingSelect . ' AS time_tracking_required,
+                    ' . $workdaysSelect . ' AS workdays_mask,
                     ' . $appUiSettingsSelect . ' AS app_ui_settings,
                     users.is_deleted
                  FROM users
@@ -179,6 +182,7 @@ final class AuthService
         }
 
         $timeTrackingSelect = $this->timeTrackingSelect();
+        $workdaysSelect = $this->workdaysSelect();
         $appUiSettingsSelect = $this->appUiSettingsSelect();
         $user = $this->connection->fetchOne(
             'SELECT
@@ -190,6 +194,7 @@ final class AuthService
                 users.password_hash,
                 users.employment_status,
                 ' . $timeTrackingSelect . ' AS time_tracking_required,
+                ' . $workdaysSelect . ' AS workdays_mask,
                 ' . $appUiSettingsSelect . ' AS app_ui_settings,
                 users.is_deleted
              FROM users
@@ -264,5 +269,14 @@ final class AuthService
         }
 
         return 'users.app_ui_settings';
+    }
+
+    private function workdaysSelect(): string
+    {
+        if (!$this->connection->columnExists('users', 'workdays_mask')) {
+            return '"' . UserWorkdayPolicy::DEFAULT_MASK . '"';
+        }
+
+        return 'COALESCE(NULLIF(TRIM(users.workdays_mask), ""), "' . UserWorkdayPolicy::DEFAULT_MASK . '")';
     }
 }

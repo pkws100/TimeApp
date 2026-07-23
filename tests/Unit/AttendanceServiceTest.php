@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Unit;
 
 use App\Domain\Attendance\AttendanceService;
+use App\Domain\Calendar\CalendarPolicyProvider;
 use App\Infrastructure\Database\DatabaseConnection;
 use PHPUnit\Framework\TestCase;
 
@@ -184,6 +185,94 @@ final class AttendanceServiceTest extends TestCase
         self::assertSame(0, $summary['status_counts']['absent']);
     }
 
+    public function testDerivedMissingUsesTheIndividualWorkdayMask(): void
+    {
+        $service = new AttendanceService(new DatabaseConnection([]));
+        $user = $this->activeUser(['workdays_mask' => '2,3,4']);
+
+        $monday = $service->summarizeRows([], '2026-05-11', [$user]);
+        $tuesday = $service->summarizeRows([], '2026-05-12', [$user]);
+        $friday = $service->summarizeRows([], '2026-05-15', [$user]);
+
+        self::assertSame(0, $monday['derived_missing_count']);
+        self::assertSame(1, $tuesday['derived_missing_count']);
+        self::assertSame('derived_missing', $tuesday['statuses'][0]['status_source']);
+        self::assertSame(0, $friday['derived_missing_count']);
+    }
+
+    public function testDerivedMissingSupportsConfiguredWeekendWorkdays(): void
+    {
+        $service = new AttendanceService(new DatabaseConnection([]));
+
+        $saturday = $service->summarizeRows([], '2026-05-16', [
+            $this->activeUser(['workdays_mask' => '6']),
+        ]);
+        $sunday = $service->summarizeRows([], '2026-05-17', [
+            $this->activeUser(['workdays_mask' => '7']),
+        ]);
+
+        self::assertSame(1, $saturday['derived_missing_count']);
+        self::assertSame(1, $sunday['derived_missing_count']);
+    }
+
+    public function testStoredWorkOrAbsenceSuppressesDerivedMissing(): void
+    {
+        $service = new AttendanceService(new DatabaseConnection([]));
+        $activeUsers = [
+            $this->activeUser(['id' => 10, 'workdays_mask' => '5']),
+            $this->activeUser(['id' => 11, 'workdays_mask' => '5']),
+        ];
+        $rows = [
+            $this->statusRow(['user_id' => 10, 'entry_type' => 'work', 'start_time' => '07:00', 'end_time' => '15:00']),
+            $this->statusRow(['id' => 2, 'user_id' => 11, 'entry_type' => 'sick']),
+        ];
+
+        $summary = $service->summarizeRows($rows, '2026-05-15', $activeUsers);
+
+        self::assertSame(0, $summary['derived_missing_count']);
+        self::assertSame(1, $summary['completed_count']);
+        self::assertSame(1, $summary['status_counts']['sick']);
+    }
+
+    public function testCalendarPolicyAndFutureDatesStillSuppressDerivedMissing(): void
+    {
+        $calendarPolicy = new class implements CalendarPolicyProvider {
+            public function requiresTimeTracking(string $date): bool
+            {
+                return false;
+            }
+
+            public function dayPolicy(string $date): array
+            {
+                return [
+                    'date' => $date,
+                    'is_public_holiday' => true,
+                    'holiday_name' => 'Test-Feiertag',
+                    'is_company_closure' => false,
+                    'closure_titles' => [],
+                    'time_tracking_required' => false,
+                ];
+            }
+        };
+        $service = new AttendanceService(new DatabaseConnection([]), $calendarPolicy);
+        $user = $this->activeUser(['workdays_mask' => '1,2,3,4,5,6,7']);
+        $futureDate = (new \DateTimeImmutable('today'))->modify('+1 day')->format('Y-m-d');
+
+        self::assertSame(0, $service->summarizeRows([], '2026-05-15', [$user])['derived_missing_count']);
+        self::assertSame(0, $service->summarizeRows([], $futureDate, [$user])['derived_missing_count']);
+    }
+
+    public function testUserCreatedAfterHistoricalDateIsNotDerivedAsMissing(): void
+    {
+        $service = new AttendanceService(new DatabaseConnection([]));
+        $user = $this->activeUser([
+            'workdays_mask' => '5',
+            'created_at' => '2026-05-16 00:00:00',
+        ]);
+
+        self::assertSame(0, $service->summarizeRows([], '2026-05-15', [$user])['derived_missing_count']);
+    }
+
     public function testSummarizeRowsDoesNotDeriveMissingForUsersWithoutTimeTrackingRequirement(): void
     {
         $service = new AttendanceService(new DatabaseConnection([]));
@@ -314,5 +403,41 @@ final class AttendanceServiceTest extends TestCase
         self::assertSame(1, $summary['chart']['workforce_count']);
         self::assertSame(1, $summary['chart']['absent_count']);
         self::assertSame(100.0, $summary['chart']['prevented_percent']);
+    }
+
+    private function activeUser(array $overrides = []): array
+    {
+        return [
+            'id' => 11,
+            'employee_number' => 'MA-0011',
+            'first_name' => 'Ben',
+            'last_name' => 'Kurz',
+            'email' => 'ben@example.test',
+            'time_tracking_required' => 1,
+            'workdays_mask' => '1,2,3,4,5',
+            'created_at' => '2026-01-01 00:00:00',
+            ...$overrides,
+        ];
+    }
+
+    private function statusRow(array $overrides = []): array
+    {
+        return [
+            'id' => 1,
+            'user_id' => 10,
+            'entry_type' => 'work',
+            'employee_number' => 'MA-0010',
+            'first_name' => 'Anna',
+            'last_name' => 'Berg',
+            'project_name' => 'Projekt Alpha',
+            'project_is_deleted' => 0,
+            'note' => '',
+            'updated_at' => '2026-05-15 15:00:00',
+            'user_is_deleted' => 0,
+            'start_time' => null,
+            'end_time' => null,
+            'net_minutes' => 0,
+            ...$overrides,
+        ];
     }
 }

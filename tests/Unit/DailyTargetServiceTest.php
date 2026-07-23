@@ -29,4 +29,18 @@ final class DailyTargetServiceTest extends TestCase
             'workdays_mask' => '1,2,3,4,5',
         ], '2026-06-01', '2026-06-30'));
     }
+
+    public function testIndividualWorkdaysControlDailyTarget(): void
+    {
+        $service = new DailyTargetService(new CalendarPolicyService(new DatabaseConnection([])));
+        $user = [
+            'id' => 8,
+            'target_hours_mode' => 'week',
+            'target_hours_week' => 24,
+            'workdays_mask' => '2,3,4',
+        ];
+
+        self::assertSame(0, $service->effectiveTargetForDate($user, '2026-05-11'));
+        self::assertSame(480, $service->effectiveTargetForDate($user, '2026-05-12'));
+    }
 }

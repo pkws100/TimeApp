@@ -4,18 +4,22 @@ declare(strict_types=1);
 
 namespace App\Domain\Attendance;
 
-use App\Domain\Calendar\CalendarPolicyService;
+use App\Domain\Calendar\CalendarPolicyProvider;
+use App\Domain\Users\UserWorkdayPolicy;
 use App\Infrastructure\Database\DatabaseConnection;
 
 final class AttendanceService
 {
     private const ABSENCE_TYPES = ['sick', 'vacation', 'holiday', 'absent'];
+    private UserWorkdayPolicy $userWorkdayPolicy;
 
     public function __construct(
         private DatabaseConnection $connection,
-        private ?CalendarPolicyService $calendarPolicyService = null
+        private ?CalendarPolicyProvider $calendarPolicyService = null,
+        ?UserWorkdayPolicy $userWorkdayPolicy = null
     )
     {
+        $this->userWorkdayPolicy = $userWorkdayPolicy ?? new UserWorkdayPolicy();
     }
 
     public function todaySummary(?string $today = null): array
@@ -272,9 +276,14 @@ final class AttendanceService
         $timeTrackingSelect = $this->connection->columnExists('users', 'time_tracking_required')
             ? 'COALESCE(time_tracking_required, 1)'
             : '1';
+        $workdaysSelect = $this->connection->columnExists('users', 'workdays_mask')
+            ? 'COALESCE(NULLIF(TRIM(workdays_mask), ""), "' . UserWorkdayPolicy::DEFAULT_MASK . '")'
+            : '"' . UserWorkdayPolicy::DEFAULT_MASK . '"';
 
         return $this->connection->fetchAll(
-            'SELECT id, employee_number, first_name, last_name, email, ' . $timeTrackingSelect . ' AS time_tracking_required
+            'SELECT id, employee_number, first_name, last_name, email, created_at,
+                    ' . $timeTrackingSelect . ' AS time_tracking_required,
+                    ' . $workdaysSelect . ' AS workdays_mask
              FROM users
              WHERE COALESCE(is_deleted, 0) = 0
                AND employment_status = "active"
@@ -301,6 +310,14 @@ final class AttendanceService
                 continue;
             }
 
+            if (!$this->userExistedOnDate($user, $today)) {
+                continue;
+            }
+
+            if (!$this->userWorkdayPolicy->isScheduledWorkday($user, $today)) {
+                continue;
+            }
+
             $statuses[] = [
                 'user_id' => $userId,
                 'employee_number' => $this->nullableTrimmed($user['employee_number'] ?? null),
@@ -323,25 +340,47 @@ final class AttendanceService
 
     private function shouldDeriveMissing(string $today): bool
     {
-        try {
-            $date = new \DateTimeImmutable($today);
-        } catch (\Exception) {
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $today) !== 1) {
+            return false;
+        }
+
+        $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $today);
+        $errors = \DateTimeImmutable::getLastErrors();
+
+        if (!$date instanceof \DateTimeImmutable
+            || $date->format('Y-m-d') !== $today
+            || ($errors !== false && ((int) $errors['warning_count'] > 0 || (int) $errors['error_count'] > 0))) {
             return false;
         }
 
         $currentDay = new \DateTimeImmutable('today');
 
-        if ((int) $date->format('N') > 5 || $date > $currentDay) {
+        if ($date > $currentDay) {
             return false;
         }
 
-        return !$this->calendarPolicyService instanceof CalendarPolicyService
+        return !$this->calendarPolicyService instanceof CalendarPolicyProvider
             || $this->calendarPolicyService->requiresTimeTracking($today);
+    }
+
+    private function userExistedOnDate(array $user, string $date): bool
+    {
+        $createdAt = trim((string) ($user['created_at'] ?? ''));
+
+        if ($createdAt === '') {
+            return true;
+        }
+
+        try {
+            return new \DateTimeImmutable($createdAt) <= new \DateTimeImmutable($date . ' 23:59:59');
+        } catch (\Exception) {
+            return false;
+        }
     }
 
     private function dayPolicy(string $today): array
     {
-        if (!$this->calendarPolicyService instanceof CalendarPolicyService) {
+        if (!$this->calendarPolicyService instanceof CalendarPolicyProvider) {
             return [
                 'date' => $today,
                 'is_public_holiday' => false,

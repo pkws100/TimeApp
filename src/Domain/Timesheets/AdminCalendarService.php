@@ -6,19 +6,23 @@ namespace App\Domain\Timesheets;
 
 use App\Domain\Calendar\CalendarPolicyProvider;
 use App\Domain\Personnel\PersonnelEventService;
+use App\Domain\Users\UserWorkdayPolicy;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
 
 final class AdminCalendarService
 {
     private ?array $activeUsers = null;
+    private UserWorkdayPolicy $userWorkdayPolicy;
 
     public function __construct(
         private DatabaseConnection $connection,
         private AdminBookingService $bookingService,
         private ?CalendarPolicyProvider $calendarPolicyService = null,
-        private ?PersonnelEventService $personnelEventService = null
+        private ?PersonnelEventService $personnelEventService = null,
+        ?UserWorkdayPolicy $userWorkdayPolicy = null
     ) {
+        $this->userWorkdayPolicy = $userWorkdayPolicy ?? new UserWorkdayPolicy();
     }
 
     public function month(string $monthInput = ''): array
@@ -406,7 +410,9 @@ final class AdminCalendarService
         foreach ($this->activeUserRows($date) as $user) {
             $userId = (int) ($user['id'] ?? 0);
 
-            if ($userId <= 0 || isset($bookedUserIds[$userId])) {
+            if ($userId <= 0
+                || isset($bookedUserIds[$userId])
+                || !$this->userWorkdayPolicy->isScheduledWorkday($user, $date)) {
                 continue;
             }
 
@@ -448,8 +454,13 @@ final class AdminCalendarService
                 $timeTrackingSelect = $this->connection->columnExists('users', 'time_tracking_required')
                     ? 'COALESCE(time_tracking_required, 1)'
                     : '1';
+                $workdaysSelect = $this->connection->columnExists('users', 'workdays_mask')
+                    ? 'COALESCE(NULLIF(TRIM(workdays_mask), ""), "' . UserWorkdayPolicy::DEFAULT_MASK . '")'
+                    : '"' . UserWorkdayPolicy::DEFAULT_MASK . '"';
                 $this->activeUsers = $this->connection->fetchAll(
-                    'SELECT id, employee_number, first_name, last_name, email, created_at, ' . $timeTrackingSelect . ' AS time_tracking_required
+                    'SELECT id, employee_number, first_name, last_name, email, created_at,
+                            ' . $timeTrackingSelect . ' AS time_tracking_required,
+                            ' . $workdaysSelect . ' AS workdays_mask
                      FROM users
                      WHERE COALESCE(is_deleted, 0) = 0
                        AND employment_status = "active"
@@ -514,15 +525,22 @@ final class AdminCalendarService
 
     private function shouldDeriveMissing(string $dateInput): bool
     {
-        try {
-            $date = new DateTimeImmutable($dateInput);
-        } catch (\Exception) {
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateInput) !== 1) {
+            return false;
+        }
+
+        $date = DateTimeImmutable::createFromFormat('!Y-m-d', $dateInput);
+        $errors = DateTimeImmutable::getLastErrors();
+
+        if (!$date instanceof DateTimeImmutable
+            || $date->format('Y-m-d') !== $dateInput
+            || ($errors !== false && ((int) $errors['warning_count'] > 0 || (int) $errors['error_count'] > 0))) {
             return false;
         }
 
         $today = new DateTimeImmutable('today');
 
-        return (int) $date->format('N') <= 5 && $date <= $today;
+        return $date <= $today;
     }
 
     private function monthLabel(DateTimeImmutable $date): string

@@ -10,6 +10,7 @@ use App\Domain\Push\PushReminderService;
 use App\Domain\Push\PushSettingsService;
 use App\Domain\Push\PushSubscriptionService;
 use App\Domain\Settings\DatabaseSettingsManager;
+use App\Domain\Users\UserWorkdayPolicy;
 use App\Infrastructure\Database\DatabaseConnection;
 
 require_once __DIR__ . '/../bootstrap/autoload.php';
@@ -34,7 +35,8 @@ $reminderService = new PushReminderService(
     $subscriptionService,
     $notificationService,
     (string) $config->get('app.timezone', 'Europe/Berlin'),
-    $calendarPolicyService
+    $calendarPolicyService,
+    new UserWorkdayPolicy()
 );
 
 $summary = $reminderService->sendDueReminders(null, $dryRun);
