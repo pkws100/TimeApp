@@ -12,7 +12,10 @@ use App\Domain\Files\DocumentStatusService;
 use App\Domain\Files\FileAttachmentService;
 use App\Domain\Personnel\PersonnelEventService;
 use App\Domain\Personnel\PersonnelLabelService;
+use App\Domain\Projects\ProjectAccessService;
 use App\Domain\Projects\ProjectService;
+use App\Domain\Projects\ProjectDispatchService;
+use App\Domain\Projects\ProjectMaterialService;
 use App\Domain\Terminals\NfcTagService;
 use App\Domain\Terminals\TerminalService;
 use App\Domain\Timesheets\AdminBookingService;
@@ -45,7 +48,10 @@ final class AdminManagementController
         private ?PersonnelLabelService $personnelLabelService = null,
         private ?PersonnelEventService $personnelEventService = null,
         private ?NfcTagService $nfcTagService = null,
-        private ?TerminalService $terminalService = null
+        private ?TerminalService $terminalService = null,
+        private ?ProjectMaterialService $projectMaterialService = null,
+        private ?ProjectDispatchService $projectDispatchService = null,
+        private ?ProjectAccessService $projectAccessService = null
     ) {
     }
 
@@ -106,12 +112,24 @@ final class AdminManagementController
             return Response::html($this->notFoundMarkup('Projekt'), 404);
         }
 
+        return $this->projectEditResponse($request, $project);
+    }
+
+    private function projectEditResponse(Request $request, array $project, array $formErrors = [], int $status = 200): Response
+    {
         $files = $this->fileAttachmentService->listForProject((int) $project['id'], 'all');
         $bookings = [];
         $allProjects = [];
         $activeUsers = $this->activeAssignableUsers();
         $bookingUsers = [];
         $membershipUserIds = $this->projectService->membershipUserIds((int) $project['id']);
+        $actor = $this->authService->currentUser() ?? [];
+        $dispatchRecipients = (int) ($project['is_deleted'] ?? 0) === 0
+            && (string) ($project['status'] ?? '') !== 'archived'
+            ? ($this->projectDispatchService?->recipientPreview($actor, (int) $project['id']) ?? [])
+            : [];
+        $dispatchHistory = $this->projectDispatchService?->history($actor, (int) $project['id']) ?? [];
+        $materials = $this->projectMaterialService?->list($actor, (int) $project['id'], 'all') ?? [];
 
         if ($this->authService->hasPermission('timesheets.view')) {
             $bookingFilters = $this->bookingService->normalizeFilters($request->query(), (int) $project['id']);
@@ -123,12 +141,14 @@ final class AdminManagementController
             }
         }
 
-        $content = $this->renderProjectForm('/admin/projects/' . (int) $project['id'], 'Projekt bearbeiten', $project)
+        $content = $this->renderProjectForm('/admin/projects/' . (int) $project['id'], 'Projekt bearbeiten', $project, $formErrors)
             . $this->renderProjectMembershipSection($project, $activeUsers, $membershipUserIds)
-            . $this->renderProjectBookingsSection($project, $bookings, $allProjects, $bookingUsers, $request)
-            . $this->renderAttachmentSection('Projektanhaenge', '/admin/projects/' . (int) $project['id'] . '/files', $files, 'project');
+            . $this->renderAttachmentSection('Auftragsunterlagen und Projektdateien', '/admin/projects/' . (int) $project['id'] . '/files', $files, 'project')
+            . $this->renderProjectDispatchSection($project, $dispatchRecipients, $dispatchHistory)
+            . $this->renderProjectMaterialSection($project, $materials)
+            . $this->renderProjectBookingsSection($project, $bookings, $allProjects, $bookingUsers, $request);
 
-        return Response::html($this->view->render('Projekt bearbeiten', $content));
+        return Response::html($this->view->render('Projekt bearbeiten', $content), $status);
     }
 
     public function projectStore(Request $request): Response
@@ -143,7 +163,7 @@ final class AdminManagementController
         }
 
         try {
-            $errors = $this->validateProjectCreatePayload($payload);
+            $errors = $this->validateProjectPayload($payload);
         } catch (RuntimeException|\InvalidArgumentException $exception) {
             return $this->projectCreateFailureResponse(
                 $payload,
@@ -156,7 +176,7 @@ final class AdminManagementController
         }
 
         try {
-            $project = $this->projectService->create($payload);
+            $project = $this->projectService->create($payload, $this->currentUserId());
         } catch (RuntimeException|\InvalidArgumentException $exception) {
             return $this->projectCreateFailureResponse(
                 $payload,
@@ -169,9 +189,39 @@ final class AdminManagementController
 
     public function projectUpdate(Request $request, array $params): Response
     {
-        $this->projectService->update((int) $params['id'], $request->input());
+        $projectId = (int) ($params['id'] ?? 0);
+        $existing = $this->projectService->find($projectId);
 
-        return Response::redirect('/admin/projects/' . (int) $params['id'] . '/edit?notice=updated');
+        if ($existing === null) {
+            return Response::html($this->notFoundMarkup('Projekt'), 404);
+        }
+
+        $payload = $request->input();
+        $errors = !$this->csrfService->isValid((string) $request->input('csrf_token', ''))
+            ? ['csrf_token' => ['Die Sicherheitspruefung ist abgelaufen. Bitte erneut versuchen.']]
+            : $this->validateProjectPayload($payload, $projectId);
+
+        if ($errors !== []) {
+            return $this->projectEditResponse(
+                $request,
+                [...$existing, ...$this->projectFormPayload($payload), 'id' => $projectId],
+                $errors,
+                422
+            );
+        }
+
+        try {
+            $this->projectService->update($projectId, $payload, $this->currentUserId());
+        } catch (RuntimeException|InvalidArgumentException $exception) {
+            return $this->projectEditResponse(
+                $request,
+                [...$existing, ...$this->projectFormPayload($payload), 'id' => $projectId],
+                ['_form' => [$this->projectCreateStorageErrorMessage($exception)]],
+                422
+            );
+        }
+
+        return Response::redirect('/admin/projects/' . $projectId . '/edit?notice=updated');
     }
 
     public function projectMembershipUpdate(Request $request, array $params): Response
@@ -195,6 +245,10 @@ final class AdminManagementController
 
     public function projectArchive(Request $request, array $params): Response
     {
+        if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+            return Response::redirect('/admin/projects?error=csrf');
+        }
+
         $this->projectService->archive((int) $params['id'], $this->currentUserId());
 
         return Response::redirect('/admin/projects?notice=archived');
@@ -202,6 +256,10 @@ final class AdminManagementController
 
     public function projectRestore(Request $request, array $params): Response
     {
+        if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+            return Response::redirect('/admin/projects?error=csrf');
+        }
+
         $this->projectService->restore((int) $params['id'], $this->currentUserId());
 
         return Response::redirect('/admin/projects?notice=restored');
@@ -229,22 +287,32 @@ final class AdminManagementController
 
     public function projectFileStore(Request $request, array $params): Response
     {
+        $projectId = (int) ($params['id'] ?? 0);
+
+        if (!$this->canAccessProject($projectId)) {
+            return Response::html($this->notFoundMarkup('Projekt'), 403);
+        }
+
+        if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+            return Response::redirect('/admin/projects/' . $projectId . '/edit?error=csrf');
+        }
+
         try {
             $file = $request->files()['file'] ?? null;
 
             if (!is_array($file)) {
                 if (UploadSizeGuard::exceedsPostMaxSize($request)) {
-                    return Response::redirect('/admin/projects/' . (int) $params['id'] . '/edit?error=file-upload&error_detail=' . rawurlencode(UploadSizeGuard::message()));
+                    return Response::redirect('/admin/projects/' . $projectId . '/edit?error=file-upload&error_detail=' . rawurlencode(UploadSizeGuard::message()));
                 }
 
-                return Response::redirect('/admin/projects/' . (int) $params['id'] . '/edit?error=no-file');
+                return Response::redirect('/admin/projects/' . $projectId . '/edit?error=no-file');
             }
 
-            $this->fileAttachmentService->storeProject($file, (int) $params['id']);
+            $this->fileAttachmentService->storeProject($file, $projectId);
 
-            return Response::redirect('/admin/projects/' . (int) $params['id'] . '/edit?notice=file-uploaded');
+            return Response::redirect('/admin/projects/' . $projectId . '/edit?notice=file-uploaded');
         } catch (RuntimeException $exception) {
-            return Response::redirect('/admin/projects/' . (int) $params['id'] . '/edit?error=file-upload&error_detail=' . rawurlencode($exception->getMessage()));
+            return Response::redirect('/admin/projects/' . $projectId . '/edit?error=file-upload&error_detail=' . rawurlencode($exception->getMessage()));
         }
     }
 
@@ -253,12 +321,70 @@ final class AdminManagementController
         $file = $this->fileAttachmentService->findProjectFile((int) $params['id']);
 
         if ($file !== null) {
-            $this->fileAttachmentService->archiveProjectFile((int) $params['id']);
+            if (!$this->canAccessProject((int) $file['project_id'])) {
+                return Response::html($this->notFoundMarkup('Projektdatei'), 403);
+            }
+
+            if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+                return Response::redirect('/admin/projects/' . (int) $file['project_id'] . '/edit?error=csrf');
+            }
+
+            $this->fileAttachmentService->archiveProjectFile((int) $params['id'], $this->currentUserId());
 
             return Response::redirect('/admin/projects/' . (int) $file['project_id'] . '/edit?notice=file-archived');
         }
 
         return Response::redirect('/admin/projects?error=file-not-found');
+    }
+
+    public function projectDispatch(Request $request, array $params): Response
+    {
+        $projectId = (int) ($params['id'] ?? 0);
+        $returnTo = '/admin/projects/' . $projectId . '/edit';
+
+        if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+            return Response::redirect($returnTo . '?error=csrf#project-dispatch');
+        }
+
+        if (!$this->projectDispatchService instanceof ProjectDispatchService) {
+            return Response::redirect($returnTo . '?error=dispatch-unavailable#project-dispatch');
+        }
+
+        try {
+            $result = $this->projectDispatchService->dispatch($this->authService->currentUser() ?? [], $projectId);
+            $_SESSION['project_dispatch_flash'][$projectId] = $result;
+
+            return Response::redirect($returnTo . '?notice=project-dispatched#project-dispatch');
+        } catch (RuntimeException|InvalidArgumentException $exception) {
+            error_log('Project dispatch failed: ' . $exception->getMessage());
+            $_SESSION['project_dispatch_error'][$projectId] = $exception->getMessage();
+
+            return Response::redirect($returnTo . '?error=project-dispatch#project-dispatch');
+        }
+    }
+
+    public function projectMaterialArchive(Request $request, array $params): Response
+    {
+        if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+            return Response::redirect('/admin/projects?error=csrf');
+        }
+
+        if (!$this->projectMaterialService instanceof ProjectMaterialService) {
+            return Response::redirect('/admin/projects?error=material-unavailable');
+        }
+
+        try {
+            $result = $this->projectMaterialService->archive(
+                $this->authService->currentUser() ?? [],
+                (int) ($params['id'] ?? 0)
+            );
+
+            return Response::redirect('/admin/projects/' . (int) $result['project_id'] . '/edit?notice=material-archived#project-materials');
+        } catch (RuntimeException|InvalidArgumentException $exception) {
+            error_log('Project material archive failed: ' . $exception->getMessage());
+
+            return Response::redirect('/admin/projects?error=material-archive');
+        }
     }
 
     public function projectFileStatus(Request $request, array $params): Response
@@ -267,6 +393,10 @@ final class AdminManagementController
 
         if ($file === null) {
             return Response::redirect('/admin/projects?error=file-not-found');
+        }
+
+        if (!$this->canAccessProject((int) $file['project_id'])) {
+            return Response::html($this->notFoundMarkup('Projektdatei'), 403);
         }
 
         if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
@@ -719,7 +849,12 @@ HTML;
         $method = $isEdit ? '<input type="hidden" name="_method" value="PUT">' : '';
         $hint = $isEdit ? '' : '<p class="muted">Dateianhaenge koennen direkt nach dem ersten Speichern zugewiesen werden.</p>';
         $signatureRequiredChecked = (int) ($project['customer_signature_required'] ?? 0) === 1 ? 'checked' : '';
-        $errorSummary = $this->renderFormErrorSummary($formErrors, 'Projekt konnte nicht angelegt werden.');
+        $workInstructions = $this->e((string) ($project['work_instructions'] ?? ''));
+        $workInstructionClass = ($formErrors['work_instructions'] ?? []) !== [] ? 'form-field full-span is-invalid' : 'form-field full-span';
+        $errorSummary = $this->renderFormErrorSummary(
+            $formErrors,
+            $isEdit ? 'Projekt konnte nicht gespeichert werden.' : 'Projekt konnte nicht angelegt werden.'
+        );
         $csrfToken = $this->e($this->csrfService->token());
 
         return <<<HTML
@@ -733,7 +868,7 @@ HTML;
 </header>
 {$this->noticeFromCurrentQuery()}
 {$errorSummary}
-<form method="post" action="{$this->e($action)}" class="card form-grid">
+<form method="post" action="{$this->e($action)}" class="card form-grid" data-project-master-form>
     {$method}
     <input type="hidden" name="csrf_token" value="{$csrfToken}">
     <div{$this->fieldWrapperClass($formErrors, 'project_number')}><label for="project_number">Projektnummer</label><input id="project_number" name="project_number" value="{$this->field($project, 'project_number')}" required{$this->fieldInvalidAttribute($formErrors, 'project_number')}>{$this->fieldErrorMarkup($formErrors, 'project_number')}</div>
@@ -747,6 +882,12 @@ HTML;
     <div class="form-field"><label for="city">Ort</label><input id="city" name="city" value="{$this->field($project, 'city')}"></div>
     <div{$this->fieldWrapperClass($formErrors, 'starts_on')}><label for="starts_on">Start</label><input id="starts_on" type="date" name="starts_on" value="{$this->field($project, 'starts_on')}"{$this->fieldInvalidAttribute($formErrors, 'starts_on')}>{$this->fieldErrorMarkup($formErrors, 'starts_on')}</div>
     <div{$this->fieldWrapperClass($formErrors, 'ends_on')}><label for="ends_on">Ende</label><input id="ends_on" type="date" name="ends_on" value="{$this->field($project, 'ends_on')}"{$this->fieldInvalidAttribute($formErrors, 'ends_on')}>{$this->fieldErrorMarkup($formErrors, 'ends_on')}</div>
+    <div class="{$workInstructionClass}">
+        <label for="work_instructions">Arbeitsauftrag / Arbeitsanweisung</label>
+        <textarea id="work_instructions" name="work_instructions" rows="10" maxlength="20000" data-character-count="work-instructions-count"{$this->fieldInvalidAttribute($formErrors, 'work_instructions')}>{$workInstructions}</textarea>
+        <small class="muted"><span id="work-instructions-count">0</span> / 20.000 Zeichen · Klartext, Zeilenumbrueche bleiben erhalten.</small>
+        {$this->fieldErrorMarkup($formErrors, 'work_instructions')}
+    </div>
     <button class="button" type="submit">Speichern</button>
 </form>
 HTML;
@@ -763,7 +904,7 @@ HTML;
         );
     }
 
-    private function validateProjectCreatePayload(array $payload): array
+    private function validateProjectPayload(array $payload, ?int $excludeProjectId = null): array
     {
         $errors = [];
         $projectNumber = trim((string) ($payload['project_number'] ?? ''));
@@ -774,7 +915,7 @@ HTML;
 
         if ($projectNumber === '') {
             $errors['project_number'][] = 'Bitte geben Sie eine Projektnummer ein.';
-        } elseif ($this->projectService->projectNumberExists($projectNumber)) {
+        } elseif ($this->projectService->projectNumberExists($projectNumber, $excludeProjectId)) {
             $errors['project_number'][] = 'Diese Projektnummer ist bereits vergeben.';
         }
 
@@ -801,6 +942,12 @@ HTML;
             $errors['ends_on'][] = 'Das Enddatum darf nicht vor dem Startdatum liegen.';
         }
 
+        $workInstructions = str_replace(["\r\n", "\r"], "\n", trim((string) ($payload['work_instructions'] ?? '')));
+
+        if (mb_strlen($workInstructions) > 20000) {
+            $errors['work_instructions'][] = 'Die Arbeitsanweisung darf maximal 20.000 Zeichen enthalten.';
+        }
+
         return $errors;
     }
 
@@ -822,6 +969,7 @@ HTML;
             'project_number' => (string) ($payload['project_number'] ?? ''),
             'name' => (string) ($payload['name'] ?? ''),
             'customer_name' => (string) ($payload['customer_name'] ?? ''),
+            'work_instructions' => (string) ($payload['work_instructions'] ?? ''),
             'customer_signature_required' => in_array($payload['customer_signature_required'] ?? false, [true, 1, '1', 'on', 'yes'], true) ? 1 : 0,
             'customer_signature_name' => (string) ($payload['customer_signature_name'] ?? ''),
             'status' => (string) ($payload['status'] ?? 'planning'),
@@ -1644,6 +1792,7 @@ HTML;
         </div>
     </div>
     <form method="post" action="{$this->e($uploadAction)}" enctype="multipart/form-data" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{$this->e($csrfToken)}">
         <input type="file" name="file" required>
         <button class="button" type="submit">Datei hochladen</button>
     </form>
@@ -1653,6 +1802,161 @@ HTML;
     </table>
 </section>
 HTML;
+    }
+
+    private function renderProjectDispatchSection(array $project, array $recipients, array $history): string
+    {
+        $projectId = (int) ($project['id'] ?? 0);
+        $projectLabel = trim((string) ($project['project_number'] ?? '') . ' – ' . (string) ($project['name'] ?? ''));
+        $recipientRows = '';
+
+        foreach ($recipients as $recipient) {
+            $skipReason = trim((string) ($recipient['skip_reason'] ?? ''));
+            $status = $skipReason === ''
+                ? '<span class="badge ok">Versand moeglich</span>'
+                : '<span class="badge warn">' . $this->e($skipReason) . '</span>';
+            $recipientRows .= '<tr>'
+                . '<td>' . $this->e((string) ($recipient['display_name'] ?? '')) . '</td>'
+                . '<td>' . $this->e((string) ($recipient['email'] ?? '')) . '</td>'
+                . '<td>' . (int) ($recipient['active_subscription_count'] ?? 0) . '</td>'
+                . '<td>' . ((bool) ($recipient['has_push_permission'] ?? false) ? 'Ja' : 'Nein') . '</td>'
+                . '<td>' . $status . '</td>'
+                . '</tr>';
+        }
+
+        if ($recipientRows === '') {
+            $recipientRows = '<tr><td colspan="5" class="table-empty">Keine aktuell zugewiesenen aktiven Mitarbeiter.</td></tr>';
+        }
+
+        $historyRows = '';
+
+        foreach ($history as $dispatch) {
+            $sender = trim((string) ($dispatch['sender_first_name'] ?? '') . ' ' . (string) ($dispatch['sender_last_name'] ?? ''));
+            $historyRows .= '<tr>'
+                . '<td>' . $this->e((string) ($dispatch['created_at'] ?? '')) . '</td>'
+                . '<td>' . $this->e((string) ($dispatch['dispatch_kind'] ?? '') === 'new' ? 'Neuer Auftrag' : 'Aktualisierung') . '</td>'
+                . '<td>' . $this->e($sender !== '' ? $sender : 'Unbekannt') . '</td>'
+                . '<td>' . (int) ($dispatch['recipient_count'] ?? 0) . '</td>'
+                . '<td>' . (int) ($dispatch['delivered_count'] ?? 0) . '</td>'
+                . '<td>' . (int) ($dispatch['skipped_count'] ?? 0) . '</td>'
+                . '<td>' . (int) ($dispatch['error_count'] ?? 0) . '</td>'
+                . '<td>' . (int) ($dispatch['successful_device_count'] ?? 0) . '</td>'
+                . '<td>' . (int) ($dispatch['failed_device_count'] ?? 0) . '</td>'
+                . '</tr>';
+        }
+
+        if ($historyRows === '') {
+            $historyRows = '<tr><td colspan="9" class="table-empty">Dieser Auftrag wurde noch nicht versendet.</td></tr>';
+        }
+
+        $buttonLabel = $history === [] ? 'Auftrag an Mitarbeiter senden' : 'Auftragsaktualisierung senden';
+        $disabled = $recipients === [] ? ' disabled' : '';
+        $csrfToken = $this->e($this->csrfService->token());
+        $flash = $this->projectDispatchFlashMarkup($projectId);
+
+        return <<<HTML
+<section class="card stack" id="project-dispatch">
+    <div class="section-toolbar">
+        <div>
+            <h2>Auftrag an Mitarbeiter senden</h2>
+            <p class="muted">Der Versand erfolgt ausschliesslich bewusst ueber diese Schaltflaeche und verwendet den aktuell gespeicherten Projektstand.</p>
+        </div>
+    </div>
+    {$flash}
+    <div class="table-scroll">
+        <table>
+            <thead><tr><th>Mitarbeiter</th><th>E-Mail</th><th>Aktive Geraete</th><th>Push-Recht</th><th>Vorschau</th></tr></thead>
+            <tbody>{$recipientRows}</tbody>
+        </table>
+    </div>
+    <form method="post" action="/admin/projects/{$projectId}/dispatch" data-project-dispatch-form data-project-label="{$this->e($projectLabel)}" data-recipient-count="{$this->e((string) count($recipients))}">
+        <input type="hidden" name="csrf_token" value="{$csrfToken}">
+        <div class="notice warn" data-project-unsaved-notice hidden>Ungespeicherte Projektaenderungen erkannt. Bitte speichern Sie zuerst, bevor Sie den Auftrag versenden.</div>
+        <button class="button" type="submit" data-project-dispatch-button{$disabled}>{$this->e($buttonLabel)}</button>
+    </form>
+</section>
+<section class="card stack">
+    <div class="section-toolbar"><div><h2>Versandhistorie</h2><p class="muted">Jeder bewusste Versand bleibt mit seiner Zusammenfassung nachvollziehbar.</p></div></div>
+    <div class="table-scroll">
+        <table>
+            <thead><tr><th>Zeitpunkt</th><th>Art</th><th>Ausgeloest von</th><th>Empfaenger</th><th>Erreicht</th><th>Uebersprungen</th><th>Empfaengerfehler</th><th>Geraete erreicht</th><th>Geraetefehler</th></tr></thead>
+            <tbody>{$historyRows}</tbody>
+        </table>
+    </div>
+</section>
+HTML;
+    }
+
+    private function renderProjectMaterialSection(array $project, array $materials): string
+    {
+        $projectId = (int) ($project['id'] ?? 0);
+        $csrfToken = $this->e($this->csrfService->token());
+        $rows = '';
+
+        foreach ($materials as $material) {
+            $isDeleted = (bool) ($material['is_deleted'] ?? false);
+            $quantity = number_format((float) ($material['quantity'] ?? 0), 3, ',', '.');
+            $quantity = rtrim(rtrim($quantity, '0'), ',');
+            $archive = $isDeleted
+                ? '<span class="muted">Archiviert</span>'
+                : '<form method="post" action="/admin/project-materials/' . (int) ($material['id'] ?? 0) . '/archive" class="inline-form" onsubmit="return confirm(\'Materialeintrag wirklich archivieren?\')">'
+                    . '<input type="hidden" name="csrf_token" value="' . $csrfToken . '">'
+                    . '<button type="submit">Archivieren</button></form>';
+            $rows .= '<tr>'
+                . '<td>' . $this->e((string) ($material['work_date'] ?? '')) . '</td>'
+                . '<td>' . $this->e((string) ($material['description'] ?? '')) . '</td>'
+                . '<td>' . $this->e($quantity . ((string) ($material['unit'] ?? '') !== '' ? ' ' . (string) $material['unit'] : '')) . '</td>'
+                . '<td>' . $this->e((string) ($material['created_by_name'] ?? 'Unbekannt')) . '</td>'
+                . '<td>' . nl2br($this->e((string) ($material['note'] ?? ''))) . '</td>'
+                . '<td>' . ($isDeleted ? '<span class="badge warn">Archiviert</span>' : '<span class="badge ok">Aktiv</span>') . '</td>'
+                . '<td>' . $archive . '</td>'
+                . '</tr>';
+        }
+
+        if ($rows === '') {
+            $rows = '<tr><td colspan="7" class="table-empty">Noch keine Materialeintraege fuer dieses Projekt.</td></tr>';
+        }
+
+        return <<<HTML
+<section class="card stack" id="project-materials">
+    <div class="section-toolbar">
+        <div><h2>Materialeintraege</h2><p class="muted">Material wird in der Mitarbeiter-App dokumentiert. Archivieren ersetzt eine nachtraegliche Bearbeitung.</p></div>
+    </div>
+    <div class="table-scroll">
+        <table>
+            <thead><tr><th>Datum</th><th>Material</th><th>Menge</th><th>Erfasst von</th><th>Bemerkung</th><th>Status</th><th>Aktion</th></tr></thead>
+            <tbody>{$rows}</tbody>
+        </table>
+    </div>
+</section>
+HTML;
+    }
+
+    private function projectDispatchFlashMarkup(int $projectId): string
+    {
+        $result = $_SESSION['project_dispatch_flash'][$projectId] ?? null;
+        $error = $_SESSION['project_dispatch_error'][$projectId] ?? null;
+        unset($_SESSION['project_dispatch_flash'][$projectId], $_SESSION['project_dispatch_error'][$projectId]);
+
+        if (is_array($result)) {
+            $failedDevices = (int) ($result['failed_device_count'] ?? 0);
+            $tone = (int) ($result['error_count'] ?? 0) > 0 || $failedDevices > 0 ? 'warn' : 'success';
+
+            return '<div class="notice ' . $tone . '"><strong>Versand abgeschlossen.</strong> '
+                . (int) ($result['recipient_count'] ?? 0) . ' Mitarbeiter beruecksichtigt, '
+                . (int) ($result['delivered_count'] ?? 0) . ' erreicht, '
+                . (int) ($result['skipped_count'] ?? 0) . ' uebersprungen, '
+                . (int) ($result['error_count'] ?? 0) . ' Empfaengerfehler, '
+                . $failedDevices . ' Geraetefehler. '
+                . $this->e((string) ($result['message'] ?? ''))
+                . '</div>';
+        }
+
+        if (is_string($error) && trim($error) !== '') {
+            return '<div class="notice error">' . $this->e($error) . '</div>';
+        }
+
+        return '';
     }
 
     private function documentStatusOptions(): string
@@ -1821,6 +2125,8 @@ HTML;
             'booking-created' => 'Buchung erfolgreich nacherfasst.',
             'file-uploaded' => 'Datei erfolgreich zugewiesen.',
             'file-archived' => 'Datei erfolgreich archiviert.',
+            'project-dispatched' => 'Der bewusste Projektversand wurde verarbeitet.',
+            'material-archived' => 'Materialeintrag erfolgreich archiviert.',
             'terminal-tags-assigned' => max(0, (int) $request->query('count', 0)) . ' NFC-Tag(s) wurden offen zugeordnet.',
             default => 'Vorgang erfolgreich ausgefuehrt.',
         };
@@ -1894,6 +2200,7 @@ HTML;
         }
 
         return '<form method="post" action="' . $this->e($action) . '" class="inline-form">'
+            . '<input type="hidden" name="csrf_token" value="' . $this->e($this->csrfService->token()) . '">'
             . '<input type="hidden" name="_method" value="DELETE">'
             . '<button type="submit">Archivieren</button>'
             . '</form>';
@@ -1903,11 +2210,13 @@ HTML;
     {
         if ($alreadyArchived) {
             return '<form method="post" action="' . $this->e($restoreAction) . '" class="inline-form">'
+                . '<input type="hidden" name="csrf_token" value="' . $this->e($this->csrfService->token()) . '">'
                 . '<button type="submit" class="button button-secondary">Wiederherstellen</button>'
                 . '</form>';
         }
 
         return '<form method="post" action="' . $this->e($archiveAction) . '" class="inline-form" onsubmit="return confirm(\'Projekt wirklich archivieren?\')">'
+            . '<input type="hidden" name="csrf_token" value="' . $this->e($this->csrfService->token()) . '">'
             . '<input type="hidden" name="_method" value="DELETE">'
             . '<button type="submit">Archivieren</button>'
             . '</form>';
@@ -1918,6 +2227,15 @@ HTML;
         $userId = $this->authService->currentUser()['id'] ?? null;
 
         return is_numeric($userId) ? (int) $userId : null;
+    }
+
+    private function canAccessProject(int $projectId): bool
+    {
+        if (!$this->projectAccessService instanceof ProjectAccessService) {
+            return true;
+        }
+
+        return $this->projectAccessService->canAccess($this->authService->currentUser() ?? [], $projectId);
     }
 
     private function scope(Request $request): string

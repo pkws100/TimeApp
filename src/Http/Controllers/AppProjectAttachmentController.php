@@ -6,6 +6,7 @@ namespace App\Http\Controllers;
 
 use App\Domain\Auth\AuthService;
 use App\Domain\Files\FileAttachmentService;
+use App\Domain\Projects\ProjectAccessService;
 use App\Http\Request;
 use App\Http\Response;
 use App\Http\UploadSizeGuard;
@@ -15,7 +16,8 @@ final class AppProjectAttachmentController
 {
     public function __construct(
         private FileAttachmentService $fileAttachmentService,
-        private AuthService $authService
+        private AuthService $authService,
+        private ProjectAccessService $projectAccessService
     ) {
     }
 
@@ -24,7 +26,15 @@ final class AppProjectAttachmentController
         $user = $this->authService->currentUser();
         $projectId = (int) ($params['id'] ?? 0);
 
-        if ($user === null || !$this->canAccessProject($projectId, (int) $user['id'])) {
+        if ($user === null) {
+            return Response::json([
+                'ok' => false,
+                'error' => 'Nicht authentifiziert.',
+                'message' => 'Bitte erneut anmelden.',
+            ], 401);
+        }
+
+        if (!$this->canAccessProject($projectId)) {
             return Response::json([
                 'ok' => false,
                 'error' => 'Keine Berechtigung.',
@@ -75,7 +85,7 @@ final class AppProjectAttachmentController
 
             $projectId = (int) ($params['id'] ?? 0);
 
-            if (!$this->canAccessProject($projectId, (int) $user['id'])) {
+            if (!$this->canAccessProject($projectId)) {
                 return Response::json([
                     'ok' => false,
                     'error' => 'Keine Berechtigung.',
@@ -107,7 +117,7 @@ final class AppProjectAttachmentController
         $user = $this->authService->currentUser();
         $fileId = (int) ($params['id'] ?? 0);
 
-        if ($user === null || !$this->canAccessProjectFile($fileId, (int) $user['id'])) {
+        if ($user === null || !$this->canAccessProjectFile($fileId)) {
             return new Response('Datei nicht gefunden.', 404, ['Content-Type' => 'text/plain; charset=utf-8']);
         }
 
@@ -116,18 +126,22 @@ final class AppProjectAttachmentController
         return $this->downloadResponse($file);
     }
 
-    private function canAccessProject(int $projectId, int $userId): bool
+    private function canAccessProject(int $projectId): bool
     {
-        return $this->authService->hasPermission('projects.manage')
-            || $this->authService->hasPermission('files.manage')
-            || $this->fileAttachmentService->projectBelongsToUser($projectId, $userId);
+        $user = $this->authService->currentUser();
+
+        return $user !== null && $this->projectAccessService->canAccess($user, $projectId);
     }
 
-    private function canAccessProjectFile(int $fileId, int $userId): bool
+    private function canAccessProjectFile(int $fileId): bool
     {
-        return $this->authService->hasPermission('projects.manage')
-            || $this->authService->hasPermission('files.manage')
-            || $this->fileAttachmentService->projectFileBelongsToUserProject($fileId, $userId);
+        $user = $this->authService->currentUser();
+        $file = $this->fileAttachmentService->findProjectFile($fileId);
+
+        return $user !== null
+            && $file !== null
+            && (int) ($file['is_deleted'] ?? 0) === 0
+            && $this->projectAccessService->canAccess($user, (int) ($file['project_id'] ?? 0));
     }
 
     private function downloadResponse(?array $file): Response
@@ -143,7 +157,8 @@ final class AppProjectAttachmentController
         }
 
         $filename = preg_replace('/[^a-zA-Z0-9._-]/', '-', (string) $file['original_name']) ?: 'download.bin';
-        $disposition = ((bool) ($file['is_image'] ?? false) ? 'inline' : 'attachment') . '; filename="' . $filename . '"';
+        $isInline = (bool) ($file['is_image'] ?? false) || (string) ($file['mime_type'] ?? '') === 'application/pdf';
+        $disposition = ($isInline ? 'inline' : 'attachment') . '; filename="' . $filename . '"';
 
         return new Response($content, 200, [
             'Content-Type' => (string) $file['mime_type'],

@@ -27,6 +27,9 @@ use App\Domain\Personnel\PersonnelEventService;
 use App\Domain\Personnel\PersonnelLabelService;
 use App\Domain\Personnel\PersonnelReminderService;
 use App\Domain\Projects\ProjectService;
+use App\Domain\Projects\ProjectAccessService;
+use App\Domain\Projects\ProjectDispatchService;
+use App\Domain\Projects\ProjectMaterialService;
 use App\Domain\Push\PushNotificationService;
 use App\Domain\Push\PushSettingsService;
 use App\Domain\Push\PushSubscriptionService;
@@ -75,6 +78,7 @@ use App\Http\Controllers\AdminVacationRequestController;
 use App\Http\Controllers\AppApiController;
 use App\Http\Controllers\AppController;
 use App\Http\Controllers\AppProjectAttachmentController;
+use App\Http\Controllers\AppProjectMaterialController;
 use App\Http\Controllers\AppPushController;
 use App\Http\Controllers\AppTimeAccountController;
 use App\Http\Controllers\AppTimesheetAttachmentController;
@@ -185,7 +189,8 @@ $userService = new UserService($connection);
 $roleService = new RoleService($connection, $permissionMatrix);
 $personnelLabelService = new PersonnelLabelService($connection);
 $personnelEventService = new PersonnelEventService($connection);
-$projectService = new ProjectService($connection);
+$projectAccessService = new ProjectAccessService($connection);
+$projectService = new ProjectService($connection, $projectAccessService);
 $assetService = new AssetService($connection);
 $timesheetCalculator = new TimesheetCalculator();
 $workdayStateCalculator = new WorkdayStateCalculator();
@@ -199,6 +204,14 @@ $companySettingsService = new CompanySettingsService($connection, $config->get('
 $pushSettingsService = new PushSettingsService($connection, $config->get('push', []));
 $pushSubscriptionService = new PushSubscriptionService($connection);
 $pushNotificationService = new PushNotificationService($connection, $pushSettingsService, $pushSubscriptionService);
+$projectMaterialService = new ProjectMaterialService($connection, $projectAccessService);
+$projectDispatchService = new ProjectDispatchService(
+    $connection,
+    $projectAccessService,
+    $pushSettingsService,
+    $pushSubscriptionService,
+    $pushNotificationService
+);
 $smtpMailService = new SmtpMailService();
 $personnelReminderService = new PersonnelReminderService(
     $personnelEventService,
@@ -271,7 +284,8 @@ $appVacationRequestController = new AppVacationRequestController($vacationReques
 $appTimesheetController = new AppTimesheetController($appTimesheetSyncService, $authService);
 $appTimesheetAttachmentController = new AppTimesheetAttachmentController($fileService, $authService);
 $appTimesheetSignatureController = new AppTimesheetSignatureController($timesheetSignatureService, $authService);
-$appProjectAttachmentController = new AppProjectAttachmentController($fileService, $authService);
+$appProjectAttachmentController = new AppProjectAttachmentController($fileService, $authService, $projectAccessService);
+$appProjectMaterialController = new AppProjectMaterialController($projectMaterialService, $authService);
 $terminalApiController = new TerminalApiController($terminalService, $terminalPunchService, $terminalTrustBundleService);
 $adminTimesheetAttachmentController = new AdminTimesheetAttachmentController($fileService, $authService, $csrfService);
 $adminTimesheetSignatureController = new AdminTimesheetSignatureController($timesheetSignatureService, $authService, $csrfService);
@@ -291,7 +305,10 @@ $adminManagementController = new AdminManagementController(
     $personnelLabelService,
     $personnelEventService,
     $nfcTagService,
-    $terminalService
+    $terminalService,
+    $projectMaterialService,
+    $projectDispatchService,
+    $projectAccessService
 );
 $adminBookingController = new AdminBookingController(
     $adminView,
@@ -339,6 +356,8 @@ $personnelController = new PersonnelController($adminView, $personnelLabelServic
 $attendanceController = new AttendanceController($attendanceService, $attendanceReportService, $adminView);
 $accountingExportController = new AccountingExportController($accountingExportService);
 $backupController = new BackupController($backupService);
+$projectController = new ProjectController($projectService, $authService, $projectAccessService);
+$fileController = new FileController($fileService, $authService, $projectAccessService);
 
 $admin = static fn (callable $handler, ?string $permission = 'dashboard.view'): callable => $routeGuard->forAdmin($handler, $permission);
 $api = static fn (callable $handler, ?string $permission = null): callable => $routeGuard->forApi($handler, $permission);
@@ -435,6 +454,8 @@ $router->post('/admin/projects/{id}/bookings', $admin([$adminManagementControlle
 $router->post('/admin/projects/{id}/files', $admin([$adminManagementController, 'projectFileStore'], 'files.upload'));
 $router->delete('/admin/project-files/{id}', $admin([$adminManagementController, 'projectFileArchive'], 'files.manage'));
 $router->post('/admin/project-files/{id}/status', $admin([$adminManagementController, 'projectFileStatus'], 'files.manage'));
+$router->post('/admin/projects/{id}/dispatch', $admin([$adminManagementController, 'projectDispatch'], 'projects.manage'));
+$router->post('/admin/project-materials/{id}/archive', $admin([$adminManagementController, 'projectMaterialArchive'], 'projects.manage'));
 $router->get('/admin/users', $admin([$adminManagementController, 'users'], 'users.manage'));
 $router->get('/admin/users/create', $admin([$adminManagementController, 'userCreate'], 'users.manage'));
 $router->get('/admin/users/{id}/edit', $admin([$adminManagementController, 'userEdit'], 'users.manage'));
@@ -521,6 +542,9 @@ $router->post('/api/v1/app/timesheets/sync', $api([$appTimesheetController, 'syn
 $router->get('/api/v1/app/projects/{id}/files', $api([$appProjectAttachmentController, 'index'], 'files.view'));
 $router->post('/api/v1/app/projects/{id}/files', $api([$appProjectAttachmentController, 'upload'], 'files.upload'));
 $router->get('/api/v1/app/project-files/{id}/download', $api([$appProjectAttachmentController, 'download'], 'files.view'));
+$router->get('/api/v1/app/projects/{id}/materials', $api([$appProjectMaterialController, 'index']));
+$router->post('/api/v1/app/projects/{id}/materials', $api([$appProjectMaterialController, 'store']));
+$router->delete('/api/v1/app/project-materials/{id}', $api([$appProjectMaterialController, 'archive']));
 $router->get('/api/v1/app/timesheets/{id}/files', $api([$appTimesheetAttachmentController, 'index'], 'timesheets.view_own'));
 $router->post('/api/v1/app/timesheets/{id}/files', $api([$appTimesheetAttachmentController, 'upload'], 'timesheets.create'));
 $router->get('/api/v1/app/timesheet-files/{id}/download', $api([$appTimesheetAttachmentController, 'download'], 'timesheets.view_own'));
@@ -542,11 +566,11 @@ $router->post('/api/v1/roles', $api([new RoleController($roleService), 'store'],
 $router->put('/api/v1/roles/{id}', $api([new RoleController($roleService), 'update'], 'roles.manage'));
 $router->delete('/api/v1/roles/{id}', $api([new RoleController($roleService), 'archive'], 'roles.manage'));
 $router->get('/api/v1/roles', $api([new RoleController($roleService), 'index'], 'roles.manage'));
-$router->get('/api/v1/projects/{id}', $api([new ProjectController($projectService), 'show'], 'projects.view'));
-$router->get('/api/v1/projects', $api([new ProjectController($projectService), 'index'], 'projects.view'));
-$router->post('/api/v1/projects', $api([new ProjectController($projectService), 'store'], 'projects.manage'));
-$router->put('/api/v1/projects/{id}', $api([new ProjectController($projectService), 'update'], 'projects.manage'));
-$router->delete('/api/v1/projects/{id}', $api([new ProjectController($projectService), 'archive'], 'projects.manage'));
+$router->get('/api/v1/projects/{id}', $api([$projectController, 'show'], 'projects.view'));
+$router->get('/api/v1/projects', $api([$projectController, 'index'], 'projects.view'));
+$router->post('/api/v1/projects', $api([$projectController, 'store'], 'projects.manage'));
+$router->put('/api/v1/projects/{id}', $api([$projectController, 'update'], 'projects.manage'));
+$router->delete('/api/v1/projects/{id}', $api([$projectController, 'archive'], 'projects.manage'));
 $router->get('/api/v1/assets/{id}', $api([new AssetController($assetService), 'show'], 'assets.manage'));
 $router->post('/api/v1/assets', $api([new AssetController($assetService), 'store'], 'assets.manage'));
 $router->put('/api/v1/assets/{id}', $api([new AssetController($assetService), 'update'], 'assets.manage'));
@@ -554,12 +578,12 @@ $router->delete('/api/v1/assets/{id}', $api([new AssetController($assetService),
 $router->get('/api/v1/assets', $api([new AssetController($assetService), 'index'], 'assets.manage'));
 $router->get('/api/v1/timesheets', $api([new TimesheetController($timesheetService), 'index'], 'timesheets.manage'));
 $router->post('/api/v1/timesheets/calculate', $api([new TimesheetController($timesheetService), 'calculate'], 'timesheets.create'));
-$router->get('/api/v1/projects/{id}/files', $api([new FileController($fileService), 'listProjectFiles'], 'files.view'));
-$router->post('/api/v1/projects/{id}/files', $api([new FileController($fileService), 'uploadProject'], 'files.upload'));
-$router->delete('/api/v1/project-files/{id}', $api([new FileController($fileService), 'archiveProjectFile'], 'files.manage'));
-$router->get('/api/v1/assets/{id}/files', $api([new FileController($fileService), 'listAssetFiles'], 'assets.manage'));
-$router->post('/api/v1/assets/{id}/files', $api([new FileController($fileService), 'uploadAsset'], 'assets.manage'));
-$router->delete('/api/v1/asset-files/{id}', $api([new FileController($fileService), 'archiveAssetFile'], 'assets.manage'));
+$router->get('/api/v1/projects/{id}/files', $api([$fileController, 'listProjectFiles'], 'files.view'));
+$router->post('/api/v1/projects/{id}/files', $api([$fileController, 'uploadProject'], 'files.upload'));
+$router->delete('/api/v1/project-files/{id}', $api([$fileController, 'archiveProjectFile'], 'files.manage'));
+$router->get('/api/v1/assets/{id}/files', $api([$fileController, 'listAssetFiles'], 'assets.manage'));
+$router->post('/api/v1/assets/{id}/files', $api([$fileController, 'uploadAsset'], 'assets.manage'));
+$router->delete('/api/v1/asset-files/{id}', $api([$fileController, 'archiveAssetFile'], 'assets.manage'));
 $router->get('/api/v1/reports/export', $api([new ReportController($reportService), 'export'], 'reports.export'));
 $router->get('/api/v1/reports/accounting-export', $api([$accountingExportController, 'export'], 'reports.accounting.export'));
 $router->get('/api/v1/settings/company', [$companySettingsController, 'publicProfile']);

@@ -63,6 +63,7 @@ final class AdminView
     <script src="/assets/js/admin-dashboard.js"></script>
     <script src="/assets/js/admin-bookings.js"></script>
     <script src="/assets/js/admin-tables.js"></script>
+    <script src="/assets/js/admin-projects.js"></script>
     {$script}
 </body>
 </html>

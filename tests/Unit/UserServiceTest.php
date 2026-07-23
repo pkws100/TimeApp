@@ -57,6 +57,8 @@ final class UserServiceTest extends TestCase
         self::assertTrue($record['app_ui_settings']['show_today_total_minutes']);
         self::assertTrue($record['app_ui_settings']['show_project_today_minutes']);
         self::assertTrue($record['app_ui_settings']['show_history']);
+        self::assertTrue($record['app_ui_settings']['show_project_work_instructions']);
+        self::assertTrue($record['app_ui_settings']['show_project_materials']);
     }
 
     public function testNormalizeKeepsDisabledAppUiSettingFalse(): void
@@ -74,6 +76,8 @@ final class UserServiceTest extends TestCase
         self::assertFalse($record['app_ui_settings']['show_today_total_minutes']);
         self::assertTrue($record['app_ui_settings']['show_project_today_minutes']);
         self::assertTrue($record['app_ui_settings']['show_history']);
+        self::assertTrue($record['app_ui_settings']['show_project_work_instructions']);
+        self::assertTrue($record['app_ui_settings']['show_project_materials']);
     }
 
     public function testEmailExistsReturnsFalseWhenUserTableIsUnavailable(): void
