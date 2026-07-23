@@ -5,11 +5,17 @@ declare(strict_types=1);
 namespace App\Domain\Projects;
 
 use App\Infrastructure\Database\DatabaseConnection;
+use InvalidArgumentException;
 
 final class ProjectService
 {
-    public function __construct(private DatabaseConnection $connection)
-    {
+    private ProjectAccessService $projectAccessService;
+
+    public function __construct(
+        private DatabaseConnection $connection,
+        ?ProjectAccessService $projectAccessService = null
+    ) {
+        $this->projectAccessService = $projectAccessService ?? new ProjectAccessService($connection);
     }
 
     public function list(string $scope = 'active'): array
@@ -18,6 +24,7 @@ final class ProjectService
             $trackedSelect = '0 AS tracked_net_minutes';
             $trackedJoin = '';
             $signatureColumns = $this->signatureColumnsSelect();
+            $workInstructionColumns = $this->workInstructionColumnsSelect();
 
             if ($this->connection->tableExists('timesheets')) {
                 $trackedSelect = 'COALESCE(tracked.tracked_net_minutes, 0) AS tracked_net_minutes';
@@ -32,7 +39,7 @@ final class ProjectService
             }
 
             return $this->connection->fetchAll(
-                'SELECT projects.id, projects.project_number, projects.name, projects.customer_name, ' . $signatureColumns . ', projects.status, projects.address_line_1, projects.postal_code, projects.city, projects.starts_on, projects.ends_on, projects.is_deleted, projects.deleted_at, ' . $trackedSelect . '
+                'SELECT projects.id, projects.project_number, projects.name, projects.customer_name, ' . $workInstructionColumns . ', ' . $signatureColumns . ', projects.status, projects.address_line_1, projects.postal_code, projects.city, projects.starts_on, projects.ends_on, projects.is_deleted, projects.deleted_at, ' . $trackedSelect . '
                  FROM projects
                  ' . $trackedJoin . '
                  WHERE ' . $this->scopeWhereClause($scope) . '
@@ -46,6 +53,9 @@ final class ProjectService
                 'project_number' => '2026-001',
                 'name' => 'Neubau Kita Nord',
                 'customer_name' => 'Stadtwerke Nord',
+                'work_instructions' => null,
+                'work_instructions_updated_at' => null,
+                'work_instructions_updated_by_user_id' => null,
                 'customer_signature_required' => 0,
                 'customer_signature_name' => null,
                 'status' => 'active',
@@ -58,6 +68,9 @@ final class ProjectService
                 'project_number' => '2026-002',
                 'name' => 'Sanierung Rathaus',
                 'customer_name' => 'Gemeinde Mitte',
+                'work_instructions' => null,
+                'work_instructions_updated_at' => null,
+                'work_instructions_updated_by_user_id' => null,
                 'customer_signature_required' => 0,
                 'customer_signature_name' => null,
                 'status' => 'planning',
@@ -66,6 +79,20 @@ final class ProjectService
                 'tracked_net_minutes' => 0,
             ],
         ];
+    }
+
+    public function listForUser(array $user): array
+    {
+        $allowedIds = $this->projectAccessService->activeProjectIdsForUser($user);
+
+        if ($allowedIds === []) {
+            return [];
+        }
+
+        return array_values(array_filter(
+            $this->list('active'),
+            static fn (array $project): bool => in_array((int) ($project['id'] ?? 0), $allowedIds, true)
+        ));
     }
 
     public function summarizeTrackedNetMinutes(array $timesheets): array
@@ -175,7 +202,7 @@ final class ProjectService
         }
 
         return $this->connection->fetchOne(
-            'SELECT id, project_number, name, customer_name, ' . $this->signatureColumnsSelect() . ', status, address_line_1, postal_code, city, starts_on, ends_on, is_deleted, deleted_at
+            'SELECT id, project_number, name, customer_name, ' . $this->workInstructionColumnsSelect('projects') . ', ' . $this->signatureColumnsSelect() . ', status, address_line_1, postal_code, city, starts_on, ends_on, is_deleted, deleted_at
              FROM projects
              WHERE id = :id
              LIMIT 1',
@@ -183,13 +210,14 @@ final class ProjectService
         );
     }
 
-    public function create(array $payload): array
+    public function create(array $payload, ?int $actingUserId = null): array
     {
         $record = $this->normalize($payload);
 
         if ($this->connection->tableExists('projects')) {
             $hasSignatureRequired = $this->connection->columnExists('projects', 'customer_signature_required');
             $hasSignatureName = $this->connection->columnExists('projects', 'customer_signature_name');
+            $hasWorkInstructions = $this->connection->columnExists('projects', 'work_instructions');
             $columns = [
                 'project_number',
                 'name',
@@ -239,6 +267,21 @@ final class ProjectService
                 unset($bindings['customer_signature_name']);
             }
 
+            if ($hasWorkInstructions) {
+                $columns[] = 'work_instructions';
+                $columns[] = 'work_instructions_updated_at';
+                $columns[] = 'work_instructions_updated_by_user_id';
+                $values[] = ':work_instructions';
+                $values[] = $record['work_instructions'] !== null ? 'NOW()' : 'NULL';
+                $values[] = $record['work_instructions'] !== null ? ':work_instructions_updated_by_user_id' : 'NULL';
+
+                if ($record['work_instructions'] !== null) {
+                    $bindings['work_instructions_updated_by_user_id'] = $actingUserId;
+                }
+            } else {
+                unset($bindings['work_instructions']);
+            }
+
             $this->connection->execute(
                 'INSERT INTO projects (' . implode(', ', $columns) . ') VALUES (' . implode(', ', $values) . ')',
                 $bindings
@@ -272,9 +315,14 @@ final class ProjectService
         return (int) $this->connection->fetchColumn($sql, $bindings) > 0;
     }
 
-    public function update(int $id, array $payload): ?array
+    public function update(int $id, array $payload, ?int $actingUserId = null): ?array
     {
+        $updatesWorkInstructions = array_key_exists('work_instructions', $payload);
         $record = $this->normalize($payload);
+
+        if (!$updatesWorkInstructions) {
+            unset($record['work_instructions']);
+        }
 
         if (!$this->connection->tableExists('projects')) {
             $record['id'] = $id;
@@ -296,6 +344,7 @@ final class ProjectService
             'updated_at = NOW()',
         ];
         $bindings = $record;
+        $hasWorkInstructions = $this->connection->columnExists('projects', 'work_instructions');
 
         if ($this->connection->columnExists('projects', 'customer_signature_required')) {
             array_splice($set, 3, 0, 'customer_signature_required = :customer_signature_required');
@@ -308,6 +357,25 @@ final class ProjectService
             array_splice($set, $offset, 0, 'customer_signature_name = :customer_signature_name');
         } else {
             unset($bindings['customer_signature_name']);
+        }
+
+        if ($hasWorkInstructions && $updatesWorkInstructions) {
+            $existingInstructions = $this->connection->fetchColumn(
+                'SELECT work_instructions FROM projects WHERE id = :work_instruction_project_id',
+                ['work_instruction_project_id' => $id]
+            );
+            $existingInstructions = $this->normalizeWorkInstructions($existingInstructions);
+
+            if ($existingInstructions !== $record['work_instructions']) {
+                $set[] = 'work_instructions = :work_instructions';
+                $set[] = 'work_instructions_updated_at = NOW()';
+                $set[] = 'work_instructions_updated_by_user_id = :work_instructions_updated_by_user_id';
+                $bindings['work_instructions_updated_by_user_id'] = $actingUserId;
+            } else {
+                unset($bindings['work_instructions']);
+            }
+        } else {
+            unset($bindings['work_instructions']);
         }
 
         $this->connection->execute(
@@ -352,6 +420,7 @@ final class ProjectService
             'project_number' => trim((string) ($payload['project_number'] ?? '')),
             'name' => trim((string) ($payload['name'] ?? '')),
             'customer_name' => $this->nullableString($payload['customer_name'] ?? null),
+            'work_instructions' => $this->normalizeWorkInstructions($payload['work_instructions'] ?? null),
             'customer_signature_required' => $this->truthy($payload['customer_signature_required'] ?? false) ? 1 : 0,
             'customer_signature_name' => $this->nullableString($payload['customer_signature_name'] ?? null),
             'status' => trim((string) ($payload['status'] ?? 'planning')),
@@ -368,6 +437,22 @@ final class ProjectService
         $value = trim((string) ($value ?? ''));
 
         return $value === '' ? null : $value;
+    }
+
+    private function normalizeWorkInstructions(mixed $value): ?string
+    {
+        $value = str_replace(["\r\n", "\r"], "\n", (string) ($value ?? ''));
+        $value = trim($value);
+
+        if ($value === '') {
+            return null;
+        }
+
+        if (mb_strlen($value) > 20000) {
+            throw new InvalidArgumentException('Die Arbeitsanweisung darf maximal 20.000 Zeichen enthalten.');
+        }
+
+        return $value;
     }
 
     private function normalizeUserIds(mixed $userIds): array
@@ -432,6 +517,17 @@ final class ProjectService
             : 'NULL';
 
         return $required . ', ' . $name . ' AS customer_signature_name';
+    }
+
+    private function workInstructionColumnsSelect(string $table = 'projects'): string
+    {
+        if (!$this->connection->columnExists('projects', 'work_instructions')) {
+            return 'NULL AS work_instructions, NULL AS work_instructions_updated_at, NULL AS work_instructions_updated_by_user_id';
+        }
+
+        return $table . '.work_instructions, '
+            . $table . '.work_instructions_updated_at, '
+            . $table . '.work_instructions_updated_by_user_id';
     }
 
     private function scopeWhereClause(string $scope): string

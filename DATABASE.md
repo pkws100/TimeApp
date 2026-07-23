@@ -7,7 +7,8 @@
 
 ## Kernentitaeten
 - `permissions`, `roles`, `role_permissions`, `users`, `user_roles`
-- `projects`, `project_memberships`, `project_files`
+- `projects`, `project_memberships`, `project_files`, `project_material_entries`
+- `project_dispatches`, `project_dispatch_recipients`
 - `assets`, `asset_assignments`, `asset_files`
 - `company_settings`
 - `timesheets`, `timesheet_customer_signatures`
@@ -19,6 +20,9 @@
 - Projekt- und Geraetedateien werden mit Metadaten in der Datenbank und physisch ausserhalb des finalen Webroots gespeichert.
 - Kundenbestaetigungs-Unterschriften zu abgeschlossenen Arbeitsbuchungen werden als PNG ausserhalb von `public/` gespeichert; die Tabelle `timesheet_customer_signatures` haelt Name, Timesheet-/Projektbezug, Hash, Client-Metadaten und Archivierungsfelder.
 - Projekte koennen ueber `customer_signature_required` eine Kundenunterschrift beim Abschluss nahelegen und ueber `customer_signature_name` einen Standardnamen fuer die Vorbelegung liefern.
+- Projektauftraege speichern ihre Klartext-Arbeitsanweisung direkt in `projects.work_instructions`. `work_instructions_updated_at` und `work_instructions_updated_by_user_id` werden nur bei einer tatsaechlichen Inhaltsaenderung fortgeschrieben.
+- `project_material_entries` dokumentiert projektbezogen Mengen, Einheiten, Datum und Notizen. Eintraege werden mit Ersteller- und Archivierungsmetadaten nachvollziehbar gehalten und nicht physisch geloescht; daraus entstehen keine Lager- oder Rechnungsbewegungen.
+- Jeder bewusste manuelle Auftrags-Push erzeugt einen Snapshot in `project_dispatches`. `project_dispatch_recipients` haelt pro Empfaenger den Status und die aggregierten Geraeteergebnisse; erneute Sendungen sind eigene Dispatches.
 - `company_settings` haelt genau ein globales Firmenprofil fuer Reports, E-Mails, Rechtstexte und spaetere Frontend-Policies.
 - Firmenlogo sowie AGB-/Datenschutz-PDFs werden nur per Dateireferenz gespeichert und physisch geschuetzt abgelegt.
 - `timesheets` deckt `work`, `sick`, `vacation`, `holiday` und `absent` ab.
@@ -37,6 +41,7 @@
 - `users.vacation_days_year` und `users.vacation_carryover_days` bleiben als Vorschlagswerte fuer neue Stichtage bzw. Urlaubsjahre erhalten; sobald jahresbezogene Urlaubskonto-Journalbuchungen vorhanden sind, veraendern diese User-Felder historische Urlaubskonten nicht rueckwirkend. Jahreseroeffnungen werden je `user_id`, `leave_year` und `cutover_id` idempotent gebucht.
 - GoBD-konforme Archivierung wird ueber `is_deleted`, `deleted_at` und `deleted_by_user_id` auf den relevanten Stammdaten umgesetzt.
 - SMTP- und GEO-Vorbereitungsfelder liegen zentral im globalen Settings-Datensatz, damit Backend und spaeteres Frontend dieselbe Quelle nutzen.
+- Backup und Restore entdecken Anwendungstabellen dynamisch ueber `information_schema`. Die Projektmaterial- und Dispatch-Tabellen werden dadurch ohne separate Whitelist vollstaendig in neue Backups aufgenommen.
 
 ## Zeiterfassungslogik
 - Arbeitsbloecke speichern Brutto-, Pausen- und Netto-Minuten.

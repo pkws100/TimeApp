@@ -6,6 +6,7 @@ namespace Tests\Unit;
 
 use App\Domain\Projects\ProjectService;
 use App\Infrastructure\Database\DatabaseConnection;
+use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 
 final class ProjectServiceTest extends TestCase
@@ -41,6 +42,8 @@ final class ProjectServiceTest extends TestCase
             self::assertArrayHasKey('tracked_net_minutes', $project);
             self::assertArrayHasKey('customer_signature_required', $project);
             self::assertArrayHasKey('customer_signature_name', $project);
+            self::assertArrayHasKey('work_instructions', $project);
+            self::assertArrayHasKey('work_instructions_updated_at', $project);
             self::assertSame(0, $project['tracked_net_minutes']);
         }
     }
@@ -59,6 +62,42 @@ final class ProjectServiceTest extends TestCase
 
         self::assertSame(1, $project['customer_signature_required']);
         self::assertSame('Bauherr Mustermann', $project['customer_signature_name']);
+    }
+
+    public function testFallbackCreateNormalizesWorkInstructionLineEndingsAndWhitespace(): void
+    {
+        $service = new ProjectService(new DatabaseConnection([]));
+
+        $project = $service->create([
+            'project_number' => 'P-11',
+            'name' => 'Rathaus',
+            'work_instructions' => "  Zeile eins\r\nZeile zwei\rZeile drei  ",
+        ]);
+
+        self::assertSame("Zeile eins\nZeile zwei\nZeile drei", $project['work_instructions']);
+    }
+
+    public function testFallbackCreateStoresBlankWorkInstructionAsNull(): void
+    {
+        $project = (new ProjectService(new DatabaseConnection([])))->create([
+            'project_number' => 'P-12',
+            'name' => 'Rathaus',
+            'work_instructions' => " \r\n ",
+        ]);
+
+        self::assertNull($project['work_instructions']);
+    }
+
+    public function testWorkInstructionRejectsMoreThanTwentyThousandCharacters(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('maximal 20.000 Zeichen');
+
+        (new ProjectService(new DatabaseConnection([])))->create([
+            'project_number' => 'P-13',
+            'name' => 'Rathaus',
+            'work_instructions' => str_repeat('x', 20001),
+        ]);
     }
 
     public function testProjectNumberExistsReturnsFalseWhenProjectTableIsUnavailable(): void

@@ -9,7 +9,7 @@ use Minishlink\WebPush\Subscription;
 use Minishlink\WebPush\WebPush;
 use Throwable;
 
-final class PushNotificationService
+final class PushNotificationService implements PushSender
 {
     public function __construct(
         private DatabaseConnection $connection,

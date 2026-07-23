@@ -26,6 +26,108 @@ use ReflectionMethod;
 
 final class AdminManagementControllerTest extends TestCase
 {
+    public function testProjectFormRendersEscapedWorkInstructionsCounterAndCsrf(): void
+    {
+        $_SESSION['_csrf_token'] = 'project-csrf';
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'renderProjectForm');
+        $method->setAccessible(true);
+        $html = (string) $method->invoke($controller, '/admin/projects/5', 'Projekt bearbeiten', [
+            'id' => 5,
+            'project_number' => 'P-5',
+            'name' => 'Projekt',
+            'status' => 'active',
+            'work_instructions' => "<script>alert('x')</script>\nZweite Zeile",
+        ], []);
+
+        self::assertStringContainsString('data-project-master-form', $html);
+        self::assertStringContainsString('name="csrf_token" value="project-csrf"', $html);
+        self::assertStringContainsString('name="work_instructions"', $html);
+        self::assertStringContainsString('maxlength="20000"', $html);
+        self::assertStringContainsString('data-character-count="work-instructions-count"', $html);
+        self::assertStringContainsString('&lt;script&gt;alert(&#039;x&#039;)&lt;/script&gt;', $html);
+        self::assertStringNotContainsString("<script>alert('x')</script>", $html);
+    }
+
+    public function testProjectDispatchSectionContainsCsrfDirtyStateAndEscapesRecipientData(): void
+    {
+        $_SESSION['_csrf_token'] = 'dispatch-csrf';
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'renderProjectDispatchSection');
+        $method->setAccessible(true);
+        $html = (string) $method->invoke($controller, [
+            'id' => 5,
+            'project_number' => 'P-5',
+            'name' => 'Projekt <intern>',
+        ], [[
+            'display_name' => '<Admin>',
+            'email' => 'admin@example.test',
+            'active_subscription_count' => 1,
+            'has_push_permission' => true,
+            'skip_reason' => null,
+        ]], []);
+
+        self::assertStringContainsString('action="/admin/projects/5/dispatch"', $html);
+        self::assertStringContainsString('name="csrf_token" value="dispatch-csrf"', $html);
+        self::assertStringContainsString('data-project-dispatch-button', $html);
+        self::assertStringContainsString('data-project-unsaved-notice', $html);
+        self::assertStringContainsString('Auftrag an Mitarbeiter senden', $html);
+        self::assertStringContainsString('&lt;Admin&gt;', $html);
+        self::assertStringNotContainsString('<Admin>', $html);
+    }
+
+    public function testProjectMaterialSectionMarksArchivedRowsAndUsesCsrfForArchive(): void
+    {
+        $_SESSION['_csrf_token'] = 'material-csrf';
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'renderProjectMaterialSection');
+        $method->setAccessible(true);
+        $html = (string) $method->invoke($controller, ['id' => 5], [
+            [
+                'id' => 11,
+                'work_date' => '2026-07-22',
+                'description' => '<Rohr>',
+                'quantity' => '2.500',
+                'unit' => 'm',
+                'created_by_name' => 'Max Muster',
+                'note' => '<b>Notiz</b>',
+                'is_deleted' => false,
+            ],
+            [
+                'id' => 12,
+                'work_date' => '2026-07-21',
+                'description' => 'Archiv',
+                'quantity' => '1.000',
+                'is_deleted' => true,
+            ],
+        ]);
+
+        self::assertStringContainsString('action="/admin/project-materials/11/archive"', $html);
+        self::assertStringContainsString('name="csrf_token" value="material-csrf"', $html);
+        self::assertStringContainsString('&lt;Rohr&gt;', $html);
+        self::assertStringContainsString('&lt;b&gt;Notiz&lt;/b&gt;', $html);
+        self::assertStringContainsString('Archiviert', $html);
+    }
+
+    public function testProjectWriteActionsRejectExpiredCsrfTokens(): void
+    {
+        $_SESSION['_csrf_token'] = 'valid-token';
+        $controller = $this->controller();
+        $expiredRequest = new Request('POST', '/admin/projects/5', [], [
+            'csrf_token' => 'expired-token',
+        ], [], [], []);
+
+        $archive = $controller->projectArchive($expiredRequest, ['id' => '5']);
+        $restore = $controller->projectRestore($expiredRequest, ['id' => '5']);
+        $fileUpload = $controller->projectFileStore($expiredRequest, ['id' => '5']);
+        $dispatch = $controller->projectDispatch($expiredRequest, ['id' => '5']);
+
+        self::assertSame('/admin/projects?error=csrf', $archive->headers()['Location'] ?? null);
+        self::assertSame('/admin/projects?error=csrf', $restore->headers()['Location'] ?? null);
+        self::assertSame('/admin/projects/5/edit?error=csrf', $fileUpload->headers()['Location'] ?? null);
+        self::assertSame('/admin/projects/5/edit?error=csrf#project-dispatch', $dispatch->headers()['Location'] ?? null);
+    }
+
     public function testProjectLifecycleFormRendersArchiveConfirmationForActiveProjects(): void
     {
         $html = $this->invokeProjectLifecycleForm('/admin/projects/5', '/admin/projects/5/restore', false);

@@ -169,6 +169,8 @@ final class MobileAppServiceTest extends TestCase
         self::assertTrue($payload['app_ui_settings']['show_project_today_minutes']);
         self::assertTrue($payload['app_ui_settings']['show_history']);
         self::assertTrue($payload['app_ui_settings']['show_personnel_overview']);
+        self::assertTrue($payload['app_ui_settings']['show_project_work_instructions']);
+        self::assertTrue($payload['app_ui_settings']['show_project_materials']);
         self::assertContains('current_net_minutes', $payload['mandatory_app_widgets']);
         self::assertSame($payload['app_ui_settings'], $payload['user']['app_ui_settings']);
         self::assertArrayHasKey('personnel_events', $payload);
@@ -193,6 +195,8 @@ final class MobileAppServiceTest extends TestCase
         self::assertTrue($payload['app_ui_settings']['show_today_total_minutes']);
         self::assertTrue($payload['app_ui_settings']['show_project_today_minutes']);
         self::assertTrue($payload['app_ui_settings']['show_personnel_overview']);
+        self::assertTrue($payload['app_ui_settings']['show_project_work_instructions']);
+        self::assertTrue($payload['app_ui_settings']['show_project_materials']);
     }
 
     public function testDayContextSuppressesPersonnelPayloadWhenAppDisplayIsDisabled(): void

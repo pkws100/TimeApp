@@ -14,6 +14,8 @@
         'show_month_summary',
         'show_history',
         'show_project_files',
+        'show_project_work_instructions',
+        'show_project_materials',
         'show_timesheet_files',
         'show_geo_section',
         'show_customer_signature',
@@ -51,6 +53,14 @@
         projectSelectionId: undefined,
         projectFiles: {},
         projectFilesLoading: false,
+        projectOrders: {},
+        projectOrdersOffline: {},
+        projectOrdersUpdatedAt: {},
+        projectMaterials: {},
+        projectMaterialsLoading: false,
+        projectMaterialsOffline: false,
+        projectMaterialsUpdatedAt: {},
+        projectMaterialDrafts: {},
         timesheetList: [],
         timesheetDays: [],
         timesheetSummary: null,
@@ -82,6 +92,7 @@
     let feedbackTimer = null;
     let clientIdCounter = 0;
     let timesheetListRequestCounter = 0;
+    let projectMaterialRequestCounter = 0;
     let revalidateTimer = null;
     let deferredInstallPrompt = null;
 
@@ -273,11 +284,15 @@
     }
 
     function projectById(projectId) {
-        if (projectId === null || !state.today || !Array.isArray(state.today.projects)) {
+        if (projectId === null || !isCurrentAuthorizedProject(projectId)) {
             return null;
         }
 
-        return state.today.projects.find((project) => project.id === projectId) || null;
+        const projects = state.today && Array.isArray(state.today.projects) ? state.today.projects : [];
+
+        return projects.find((project) => project.id === projectId)
+            || state.projectOrders[String(projectId)]
+            || null;
     }
 
     function signatureDefaultNameForProject(projectId) {
@@ -324,7 +339,7 @@
     function projectFileContextId() {
         const explicitSelection = projectSelectionStateId();
 
-        if (typeof explicitSelection === 'number' && explicitSelection > 0) {
+        if (typeof explicitSelection === 'number' && explicitSelection > 0 && isCurrentAuthorizedProject(explicitSelection)) {
             return explicitSelection;
         }
 
@@ -334,13 +349,13 @@
 
         const entry = workEntry();
 
-        if (entry && typeof entry.project_id === 'number' && entry.project_id > 0) {
+        if (entry && typeof entry.project_id === 'number' && entry.project_id > 0 && isCurrentAuthorizedProject(entry.project_id)) {
             return entry.project_id;
         }
 
         const preferred = preferredProjectId();
 
-        if (preferred !== null) {
+        if (preferred !== null && isCurrentAuthorizedProject(preferred)) {
             return preferred;
         }
 
@@ -351,6 +366,14 @@
 
     function projectFilesCacheKey(projectId) {
         return 'project_files_user_' + currentSessionUserCachePart() + '_' + String(projectId);
+    }
+
+    function projectOrderCacheKey(projectId) {
+        return 'project_order_v1_user_' + currentSessionUserCachePart() + '_project_' + String(projectId);
+    }
+
+    function projectMaterialsCacheKey(projectId) {
+        return 'project_materials_v1_user_' + currentSessionUserCachePart() + '_project_' + String(projectId);
     }
 
     function currentSessionUserCachePart() {
@@ -391,6 +414,14 @@
         state.projects = [];
         state.projectFiles = {};
         state.projectFilesLoading = false;
+        state.projectOrders = {};
+        state.projectOrdersOffline = {};
+        state.projectOrdersUpdatedAt = {};
+        state.projectMaterials = {};
+        state.projectMaterialsLoading = false;
+        state.projectMaterialsOffline = false;
+        state.projectMaterialsUpdatedAt = {};
+        state.projectMaterialDrafts = {};
         state.timesheetList = [];
         state.timesheetDays = [];
         state.timesheetSummary = null;
@@ -662,7 +693,9 @@
         }
 
         if (!response.ok) {
-            throw new Error(payload.message || payload.error || 'Bitte erneut versuchen.');
+            const error = new Error(payload.message || payload.error || 'Bitte erneut versuchen.');
+            error.httpStatus = response.status;
+            throw error;
         }
 
         return payload;
@@ -736,6 +769,17 @@
             tx.objectStore('cache').delete(key);
             tx.oncomplete = resolve;
             tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    async function cacheKeys() {
+        const database = await db();
+
+        return new Promise((resolve, reject) => {
+            const tx = database.transaction('cache', 'readonly');
+            const request = tx.objectStore('cache').getAllKeys();
+            request.onsuccess = () => resolve(Array.isArray(request.result) ? request.result : []);
+            request.onerror = () => reject(request.error);
         });
     }
 
@@ -1239,8 +1283,19 @@
             : [];
 
         if (entry && entry.start_time && !entry.end_time) {
-            setProjectSelectionState(Object.prototype.hasOwnProperty.call(entry, 'project_id') ? entry.project_id : null);
+            const runningProjectId = Object.prototype.hasOwnProperty.call(entry, 'project_id') ? entry.project_id : null;
+            setProjectSelectionState(
+                runningProjectId === null || availableProjectIds.includes(runningProjectId)
+                    ? runningProjectId
+                    : null
+            );
             return;
+        }
+
+        const preferred = preferredProjectId();
+
+        if (preferred !== null && !availableProjectIds.includes(preferred)) {
+            storePreferredProjectId(null);
         }
 
         if (typeof explicitSelection === 'undefined') {
@@ -2065,7 +2120,7 @@
         const projectId = projectFileContextId();
 
         if (projectId === null) {
-            return '<section class="app-card app-grid"><div><p class="muted">Projektdateien</p><h2>Dateien</h2><p>Bitte zuerst ein Projekt auswaehlen.</p></div></section>';
+            return '<section class="app-card app-grid"><div><p class="muted">Auftragsunterlagen</p><h2>Projektdateien</h2><p>Bitte zuerst ein Projekt auswaehlen.</p></div></section>';
         }
 
         const project = projectById(projectId);
@@ -2075,7 +2130,7 @@
         const uploadDisabled = !state.online || !canUpload || isBusy('upload_project_attachment');
 
         return '<section class="app-card app-grid">'
-            + '<div><p class="muted">Projektdateien</p><h2>' + escapeHtml(project ? project.name : 'Dateien') + '</h2><p>Projektbezogene Fotos und Dateien werden geschuetzt gespeichert. Uploads sind nur online moeglich.</p></div>'
+            + '<div><p class="muted">Auftragsunterlagen</p><h2>' + escapeHtml(project ? project.name : 'Projektdateien') + '</h2><p>Projektbezogene Fotos und Dateien werden geschuetzt gespeichert. Uploads sind nur online moeglich.</p></div>'
             + '<div class="app-grid">'
             + '<label class="app-field"><span>Foto aufnehmen</span><input id="projectCameraInput" type="file" accept="image/*" capture="environment" ' + (uploadDisabled ? 'disabled' : '') + '></label>'
             + '<label class="app-field"><span>Datei auswaehlen</span><input id="projectAttachmentInput" type="file" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.heic,.heif" ' + (uploadDisabled ? 'disabled' : '') + '></label>'
@@ -2089,6 +2144,127 @@
                 emptyText: 'Noch keine Projektdateien vorhanden.'
             })
             + '</div>'
+            + '</section>';
+    }
+
+    function projectDetailsSectionMarkup() {
+        const projectId = projectFileContextId();
+        const project = projectById(projectId);
+
+        if (!project) {
+            return '<section class="app-card app-grid"><div><p class="muted">Projekt</p><h2>Keine Projektdetails</h2><p>Bitte zuerst ein Projekt auswaehlen.</p></div></section>';
+        }
+
+        const address = compactBlock([
+            project.address_line_1 || '',
+            compactBlock([project.postal_code || '', project.city || ''], ' ')
+        ], ', ');
+        const instructions = String(project.work_instructions || '').trim();
+        const instructionMarkup = instructions
+            ? '<div class="app-work-instructions">' + escapeHtml(instructions).replace(/\n/g, '<br>') + '</div>'
+            : '<div class="app-empty">Fuer dieses Projekt wurde noch keine Arbeitsanweisung hinterlegt.</div>';
+        const updated = project.work_instructions_updated_at
+            ? '<p class="muted">Zuletzt aktualisiert: ' + escapeHtml(formatDateTimeStamp(project.work_instructions_updated_at)) + '</p>'
+            : '';
+        const offline = state.projectOrdersOffline[String(projectId)]
+            ? '<div class="app-empty">Offline – zuletzt synchronisierter Stand'
+                + (state.projectOrdersUpdatedAt[String(projectId)]
+                    ? ' vom ' + escapeHtml(formatDateTimeStamp(state.projectOrdersUpdatedAt[String(projectId)]))
+                    : '')
+                + '.</div>'
+            : '';
+
+        return '<section class="app-card app-grid">'
+            + '<div><p class="muted">Projekt</p><h2>' + escapeHtml(project.project_number ? project.project_number + ' – ' + project.name : project.name) + '</h2></div>'
+            + offline
+            + appInfoRows([
+                { label: 'Kunde', value: project.customer_name || 'Nicht hinterlegt' },
+                { label: 'Einsatzort', value: address || 'Nicht hinterlegt' }
+            ])
+            + '</section>'
+            + (showAppWidget('show_project_work_instructions')
+                ? '<section class="app-card app-grid"><div><p class="muted">Arbeitsauftrag</p><h2>Arbeitsanweisung</h2></div>' + instructionMarkup + updated + '</section>'
+                : '');
+    }
+
+    function projectMaterialDraft(projectId) {
+        const key = String(projectId || '');
+
+        if (!state.projectMaterialDrafts[key]) {
+            state.projectMaterialDrafts[key] = {
+                description: '',
+                quantity: '1',
+                unit: '',
+                note: '',
+                work_date: state.today && state.today.today ? state.today.today : new Date().toLocaleDateString('sv-SE')
+            };
+        }
+
+        return state.projectMaterialDrafts[key];
+    }
+
+    function formatMaterialQuantity(value) {
+        const number = Number(String(value || '0').replace(',', '.'));
+
+        if (!Number.isFinite(number)) {
+            return String(value || '');
+        }
+
+        return number.toLocaleString('de-DE', { maximumFractionDigits: 3 });
+    }
+
+    function projectMaterialSectionMarkup() {
+        if (!showAppWidget('show_project_materials')) {
+            return '';
+        }
+
+        const projectId = projectFileContextId();
+
+        if (projectId === null) {
+            return '<section class="app-card app-grid"><div><p class="muted">Material</p><h2>Materialdokumentation</h2><p>Bitte zuerst ein Projekt auswaehlen.</p></div></section>';
+        }
+
+        const items = state.projectMaterials[String(projectId)] || [];
+        const draft = projectMaterialDraft(projectId);
+        const currentUserId = Number(state.session && state.session.user ? state.session.user.id || 0 : 0);
+        const canManage = hasPermission('projects.manage');
+        const loading = state.projectMaterialsLoading ? '<div class="app-empty">Materialeintraege werden geladen ...</div>' : '';
+        const offline = state.projectMaterialsOffline || !state.online
+            ? '<div class="app-empty">Offline – zuletzt synchronisierter Stand'
+                + (state.projectMaterialsUpdatedAt[String(projectId)]
+                    ? ' vom ' + escapeHtml(formatDateTimeStamp(state.projectMaterialsUpdatedAt[String(projectId)]))
+                    : '')
+                + '. Material kann erst mit aktiver Verbindung gespeichert werden.</div>'
+            : '';
+        const rows = items.length === 0
+            ? '<div class="app-empty">Noch keine Materialeintraege vorhanden.</div>'
+            : '<div class="app-info-list">' + items.map(function (item) {
+                const canArchive = canManage || Number(item.created_by_user_id || 0) === currentUserId;
+                const quantity = formatMaterialQuantity(item.quantity) + (item.unit ? ' ' + item.unit : '');
+
+                return '<article class="app-info-row app-material-row">'
+                    + '<div><strong>' + escapeHtml(item.description || 'Material') + '</strong>'
+                    + '<span>' + escapeHtml(quantity) + ' · ' + escapeHtml(formatDate(item.work_date) || item.work_date || '-') + '</span>'
+                    + '<small class="muted">Erfasst von ' + escapeHtml(item.created_by_name || 'Unbekannt') + '</small>'
+                    + (item.note ? '<p>' + escapeHtml(item.note) + '</p>' : '') + '</div>'
+                    + (canArchive ? '<button type="button" class="app-button-secondary" data-archive-project-material="' + item.id + '">Archivieren</button>' : '')
+                    + '</article>';
+            }).join('') + '</div>';
+
+        return '<section class="app-card app-grid">'
+            + '<div><p class="muted">Material</p><h2>Materialdokumentation</h2><p>Verwendetes oder benoetigtes Material wird getrennt von der Buchungsnotiz dokumentiert.</p></div>'
+            + offline
+            + loading
+            + rows
+            + '<form id="projectMaterialForm" class="app-grid">'
+            + '<label class="app-field"><span>Material / Artikel</span><input id="projectMaterialDescription" name="description" maxlength="255" required value="' + escapeHtml(draft.description) + '"></label>'
+            + '<label class="app-field"><span>Menge</span><input id="projectMaterialQuantity" name="quantity" inputmode="decimal" required value="' + escapeHtml(draft.quantity) + '"></label>'
+            + '<label class="app-field"><span>Einheit</span><input id="projectMaterialUnit" name="unit" maxlength="40" list="projectMaterialUnits" value="' + escapeHtml(draft.unit) + '"></label>'
+            + '<datalist id="projectMaterialUnits"><option value="Stueck"></option><option value="m"></option><option value="m²"></option><option value="kg"></option><option value="g"></option><option value="l"></option><option value="ml"></option><option value="Rolle"></option><option value="Packung"></option><option value="Satz"></option></datalist>'
+            + '<label class="app-field"><span>Bemerkung</span><textarea id="projectMaterialNote" name="note" maxlength="2000" rows="3">' + escapeHtml(draft.note) + '</textarea></label>'
+            + '<label class="app-field"><span>Datum</span><input id="projectMaterialDate" name="work_date" type="date" max="' + escapeHtml(state.today && state.today.today ? state.today.today : '') + '" required value="' + escapeHtml(draft.work_date) + '"></label>'
+            + '<button type="submit" ' + (isBusy('project_material') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('project_material', 'Material speichern')) + '</button>'
+            + '</form>'
             + '</section>';
     }
 
@@ -2858,7 +3034,9 @@
                     ? ''
                     : '<div class="app-empty"><strong>Nicht zugeordnet:</strong> Diese Buchung kann spaeter im Buero einem Projekt zugeordnet werden.</div>'))
             + '</section>'
+            + projectDetailsSectionMarkup()
             + (showAppWidget('show_project_files') ? projectAttachmentSectionMarkup() : '')
+            + projectMaterialSectionMarkup()
         );
     }
 
@@ -3509,12 +3687,36 @@
         if (projectSelect) {
             projectSelect.addEventListener('change', function () {
                 setProjectSelectionState(selectedProjectId());
+                state.projectFilesLoading = false;
+                state.projectMaterialsLoading = false;
+                state.projectMaterialsOffline = !state.online;
                 render();
                 if (routeName() === '/projektwahl') {
-                    loadProjectFiles(projectFileContextId(), false);
+                    loadProjectContext(projectFileContextId(), false);
                 }
             });
         }
+
+        const projectMaterialForm = document.getElementById('projectMaterialForm');
+
+        if (projectMaterialForm) {
+            projectMaterialForm.addEventListener('input', captureProjectMaterialDraft);
+            projectMaterialForm.addEventListener('change', captureProjectMaterialDraft);
+            projectMaterialForm.addEventListener('submit', async function (event) {
+                event.preventDefault();
+                await submitProjectMaterial();
+            });
+        }
+
+        document.querySelectorAll('[data-archive-project-material]').forEach((button) => {
+            button.addEventListener('click', async function () {
+                const materialId = Number(button.getAttribute('data-archive-project-material') || '0');
+
+                if (materialId > 0 && window.confirm('Diesen Materialeintrag archivieren?')) {
+                    await archiveProjectMaterial(materialId);
+                }
+            });
+        });
 
         document.querySelectorAll('[data-timesheet-scope]').forEach((button) => {
             button.addEventListener('click', function () {
@@ -3808,7 +4010,9 @@
         if (cachedToday) {
             state.today = cachedToday;
             syncTodayStateStatus();
+            normalizeProjectSelectionAgainstToday();
             normalizeTimesheetFilterAgainstToday();
+            await cacheProjectOrders(activeProjects(), true);
         }
 
         if (cachedCompany) {
@@ -3816,6 +4020,11 @@
         }
 
         if (routeName() !== '/historie' || !showAppWidget('show_history')) {
+            if (routeName() === '/projektwahl') {
+                await handleProjectDeepLink();
+                await loadProjectContext(projectFileContextId(), false);
+            }
+
             if (routeName() === '/urlaub') {
                 const cachedVacation = await readVacationCache();
 
@@ -3860,8 +4069,9 @@
             if (routeName() === '/urlaub') {
                 await loadVacationData(force);
             }
-            if (routeName() === '/projektwahl' && showAppWidget('show_project_files')) {
-                await loadProjectFiles(projectFileContextId(), force);
+            if (routeName() === '/projektwahl') {
+                await handleProjectDeepLink();
+                await loadProjectContext(projectFileContextId(), force);
             }
             render();
             return;
@@ -3885,6 +4095,8 @@
                 syncTodayStateStatus();
                 normalizeProjectSelectionAgainstToday();
                 normalizeTimesheetFilterAgainstToday();
+                await pruneUnauthorizedProjectState();
+                await cacheProjectOrders(activeProjects(), false);
 
                 try {
                     await cacheSet(todayCacheKey(), state.today);
@@ -3899,6 +4111,7 @@
                     syncTodayStateStatus();
                     normalizeProjectSelectionAgainstToday();
                     normalizeTimesheetFilterAgainstToday();
+                    await cacheProjectOrders(activeProjects(), true);
                 } else {
                     state.today = null;
                 }
@@ -3926,8 +4139,9 @@
                 await loadVacationData(force);
             }
 
-            if (routeName() === '/projektwahl' && showAppWidget('show_project_files')) {
-                await loadProjectFiles(projectFileContextId(), force);
+            if (routeName() === '/projektwahl') {
+                await handleProjectDeepLink();
+                await loadProjectContext(projectFileContextId(), force);
             }
 
             if (failures.length > 0) {
@@ -4286,7 +4500,7 @@
     }
 
     async function loadProjectFiles(projectId, force) {
-        if (!state.session.authenticated || projectId === null) {
+        if (!state.session.authenticated || projectId === null || !isCurrentAuthorizedProject(projectId)) {
             return;
         }
 
@@ -4318,6 +4532,12 @@
                 return;
             }
 
+            if (error.httpStatus === 403 || error.httpStatus === 404) {
+                state.projectFiles[String(projectId)] = [];
+                await cacheDelete(cacheKey);
+                return;
+            }
+
             const cached = await cacheGet(cacheKey);
             state.projectFiles[String(projectId)] = cached && Array.isArray(cached.items) ? cached.items : [];
 
@@ -4326,6 +4546,338 @@
             }
         } finally {
             state.projectFilesLoading = false;
+            render();
+        }
+    }
+
+    async function cacheProjectOrders(projects, offline) {
+        if (!Array.isArray(projects)) {
+            return;
+        }
+
+        const cachedAt = new Date().toISOString();
+
+        await Promise.all(projects.map(async function (project) {
+            const projectId = Number(project && project.id ? project.id : 0);
+
+            if (projectId <= 0) {
+                return;
+            }
+
+            state.projectOrders[String(projectId)] = project;
+            state.projectOrdersOffline[String(projectId)] = offline === true;
+            state.projectOrdersUpdatedAt[String(projectId)] = cachedAt;
+
+            if (!offline) {
+                try {
+                    await cacheSet(projectOrderCacheKey(projectId), {
+                        item: project,
+                        cached_at: cachedAt
+                    });
+                } catch (error) {
+                    console.warn('Projektauftrags-Cache konnte nicht geschrieben werden.', error);
+                }
+            }
+        }));
+    }
+
+    async function loadCachedProjectOrder(projectId) {
+        if (!isCurrentAuthorizedProject(projectId)) {
+            return false;
+        }
+
+        const cached = await cacheGet(projectOrderCacheKey(projectId));
+
+        if (!cached || !cached.item) {
+            return false;
+        }
+
+        state.projectOrders[String(projectId)] = cached.item;
+        state.projectOrdersOffline[String(projectId)] = true;
+        state.projectOrdersUpdatedAt[String(projectId)] = cached.cached_at || null;
+
+        return true;
+    }
+
+    async function loadProjectMaterials(projectId, force) {
+        if (
+            !state.session.authenticated
+            || projectId === null
+            || !isCurrentAuthorizedProject(projectId)
+            || !showAppWidget('show_project_materials')
+        ) {
+            return;
+        }
+
+        const requestId = ++projectMaterialRequestCounter;
+        const cacheKey = projectMaterialsCacheKey(projectId);
+
+        if (!navigator.onLine) {
+            const cached = await cacheGet(cacheKey);
+
+            if (requestId !== projectMaterialRequestCounter || projectId !== projectFileContextId()) {
+                return;
+            }
+
+            state.projectMaterials[String(projectId)] = cached && Array.isArray(cached.items) ? cached.items : [];
+            state.projectMaterialsUpdatedAt[String(projectId)] = cached ? cached.cached_at || null : null;
+            state.projectMaterialsOffline = true;
+            state.projectMaterialsLoading = false;
+            render();
+            return;
+        }
+
+        state.projectMaterialsLoading = true;
+        state.projectMaterialsOffline = false;
+        render();
+
+        try {
+            const payload = await apiJson('/api/v1/app/projects/' + projectId + '/materials');
+            const items = Array.isArray(payload.data) ? payload.data : [];
+            const cachedAt = new Date().toISOString();
+
+            if (requestId !== projectMaterialRequestCounter || projectId !== projectFileContextId()) {
+                return;
+            }
+
+            state.projectMaterials[String(projectId)] = items;
+            state.projectMaterialsUpdatedAt[String(projectId)] = cachedAt;
+            state.projectMaterialsOffline = false;
+            await cacheSet(cacheKey, {
+                items: items,
+                cached_at: cachedAt
+            });
+        } catch (error) {
+            if (isSessionExpiredError(error)) {
+                return;
+            }
+
+            if (error.httpStatus === 403 || error.httpStatus === 404) {
+                state.projectMaterials[String(projectId)] = [];
+                state.projectMaterialsUpdatedAt[String(projectId)] = null;
+                state.projectMaterialsOffline = false;
+                await cacheDelete(cacheKey);
+                return;
+            }
+
+            const cached = await cacheGet(cacheKey);
+
+            if (requestId !== projectMaterialRequestCounter || projectId !== projectFileContextId()) {
+                return;
+            }
+
+            state.projectMaterials[String(projectId)] = cached && Array.isArray(cached.items) ? cached.items : [];
+            state.projectMaterialsUpdatedAt[String(projectId)] = cached ? cached.cached_at || null : null;
+            state.projectMaterialsOffline = true;
+
+            if (!force) {
+                showFeedback('error', friendlyMessage(error.message, 'Materialeintraege konnten nicht geladen werden.'));
+            }
+        } finally {
+            if (requestId === projectMaterialRequestCounter) {
+                state.projectMaterialsLoading = false;
+                render();
+            }
+        }
+    }
+
+    async function loadProjectContext(projectId, force) {
+        if (projectId === null || !isCurrentAuthorizedProject(projectId)) {
+            return;
+        }
+
+        if (!projectById(projectId) || !navigator.onLine) {
+            await loadCachedProjectOrder(projectId);
+        }
+
+        const tasks = [];
+
+        if (showAppWidget('show_project_files')) {
+            tasks.push(loadProjectFiles(projectId, force));
+        }
+
+        if (showAppWidget('show_project_materials')) {
+            tasks.push(loadProjectMaterials(projectId, force));
+        }
+
+        await Promise.all(tasks);
+    }
+
+    function isCurrentAuthorizedProject(projectId) {
+        const normalizedId = Number(projectId);
+
+        return Number.isInteger(normalizedId)
+            && normalizedId > 0
+            && activeProjects().some((project) => Number(project.id) === normalizedId);
+    }
+
+    async function pruneUnauthorizedProjectState() {
+        const knownProjectIds = new Set(
+            Object.keys(state.projectOrders)
+                .concat(Object.keys(state.projectFiles))
+                .concat(Object.keys(state.projectMaterials))
+        );
+        const userPart = currentSessionUserCachePart();
+
+        try {
+            const storedKeys = await cacheKeys();
+            const prefixes = [
+                'project_order_v1_user_' + userPart + '_project_',
+                'project_materials_v1_user_' + userPart + '_project_',
+                'project_files_user_' + userPart + '_'
+            ];
+
+            storedKeys.forEach(function (storedKey) {
+                const key = String(storedKey);
+                const prefix = prefixes.find((candidate) => key.startsWith(candidate));
+
+                if (!prefix) {
+                    return;
+                }
+
+                const projectId = Number(key.slice(prefix.length));
+
+                if (Number.isInteger(projectId) && projectId > 0) {
+                    knownProjectIds.add(String(projectId));
+                }
+            });
+        } catch (error) {
+            console.warn('Projekt-Cacheschluessel konnten nicht gelesen werden.', error);
+        }
+
+        await Promise.all(Array.from(knownProjectIds).map(async function (projectId) {
+            if (isCurrentAuthorizedProject(projectId)) {
+                return;
+            }
+
+            delete state.projectOrders[projectId];
+            delete state.projectOrdersOffline[projectId];
+            delete state.projectOrdersUpdatedAt[projectId];
+            delete state.projectFiles[projectId];
+            delete state.projectMaterials[projectId];
+            delete state.projectMaterialsUpdatedAt[projectId];
+
+            try {
+                await Promise.all([
+                    cacheDelete(projectOrderCacheKey(projectId)),
+                    cacheDelete(projectFilesCacheKey(projectId)),
+                    cacheDelete(projectMaterialsCacheKey(projectId))
+                ]);
+            } catch (error) {
+                console.warn('Nicht mehr autorisierte Projekt-Caches konnten nicht vollstaendig entfernt werden.', error);
+            }
+        }));
+    }
+
+    async function handleProjectDeepLink() {
+        if (routeName() !== '/projektwahl' || !window.location.search) {
+            return;
+        }
+
+        const params = new URLSearchParams(window.location.search);
+
+        if (!params.has('project')) {
+            return;
+        }
+
+        const requestedId = Number(params.get('project'));
+        const authorized = Number.isInteger(requestedId)
+            && requestedId > 0
+            && activeProjects().some((project) => Number(project.id) === requestedId);
+
+        params.delete('project');
+        const query = params.toString();
+        window.history.replaceState({}, '', '/app/projektwahl' + (query ? '?' + query : ''));
+
+        if (authorized) {
+            setProjectSelectionState(requestedId);
+            return;
+        }
+
+        setProjectSelectionState(null);
+        showFeedback('error', 'Das angeforderte Projekt ist nicht verfuegbar oder fuer Sie nicht freigegeben.');
+    }
+
+    function captureProjectMaterialDraft() {
+        const projectId = projectFileContextId();
+
+        if (projectId === null) {
+            return;
+        }
+
+        state.projectMaterialDrafts[String(projectId)] = {
+            description: document.getElementById('projectMaterialDescription')?.value || '',
+            quantity: document.getElementById('projectMaterialQuantity')?.value || '',
+            unit: document.getElementById('projectMaterialUnit')?.value || '',
+            note: document.getElementById('projectMaterialNote')?.value || '',
+            work_date: document.getElementById('projectMaterialDate')?.value || ''
+        };
+    }
+
+    async function submitProjectMaterial() {
+        const projectId = projectFileContextId();
+
+        captureProjectMaterialDraft();
+
+        if (projectId === null) {
+            showFeedback('error', 'Bitte zuerst ein Projekt auswaehlen.');
+            return;
+        }
+
+        if (!navigator.onLine) {
+            state.projectMaterialsOffline = true;
+            showFeedback('error', 'Material kann nur online gespeichert werden. Ihre Eingaben bleiben erhalten.', true);
+            return;
+        }
+
+        const draft = projectMaterialDraft(projectId);
+        state.pendingAction = 'project_material';
+        render();
+
+        try {
+            await apiJson('/api/v1/app/projects/' + projectId + '/materials', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(draft)
+            });
+            delete state.projectMaterialDrafts[String(projectId)];
+            showFeedback('success', 'Materialeintrag wurde gespeichert.');
+            await loadProjectMaterials(projectId, true);
+        } catch (error) {
+            if (!isSessionExpiredError(error)) {
+                showFeedback('error', friendlyMessage(error.message, 'Materialeintrag konnte nicht gespeichert werden.'), true);
+            }
+        } finally {
+            state.pendingAction = null;
+            render();
+        }
+    }
+
+    async function archiveProjectMaterial(materialId) {
+        const projectId = projectFileContextId();
+
+        if (projectId === null || materialId <= 0) {
+            return;
+        }
+
+        if (!navigator.onLine) {
+            showFeedback('error', 'Materialeintraege koennen nur online archiviert werden.');
+            return;
+        }
+
+        state.pendingAction = 'project_material';
+        render();
+
+        try {
+            await apiJson('/api/v1/app/project-materials/' + materialId, { method: 'DELETE' });
+            showFeedback('success', 'Materialeintrag wurde archiviert.');
+            await loadProjectMaterials(projectId, true);
+        } catch (error) {
+            if (!isSessionExpiredError(error)) {
+                showFeedback('error', friendlyMessage(error.message, 'Materialeintrag konnte nicht archiviert werden.'), true);
+            }
+        } finally {
+            state.pendingAction = null;
             render();
         }
     }

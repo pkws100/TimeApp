@@ -51,6 +51,8 @@ gesonderter Vereinbarung angeboten werden.
 - App-Timesheet-Sync: `POST /api/v1/app/timesheets/sync`
 - App-Push-Test: `POST /api/v1/app/push/test`
 - App-Projektdateien: `GET/POST /api/v1/app/projects/{id}/files`
+- App-Projektmaterial: `GET/POST /api/v1/app/projects/{id}/materials`
+- Eigenen Projektmaterialeintrag archivieren: `DELETE /api/v1/app/project-materials/{id}`
 - App-Buchungsdateien: `GET/POST /api/v1/app/timesheets/{id}/files`
 - App-Kundenbestaetigung: `GET/POST /api/v1/app/timesheets/{id}/signature`
 - App-Kundenbestaetigungsbild: `GET /api/v1/app/timesheet-signatures/{id}/image`

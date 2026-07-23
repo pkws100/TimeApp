@@ -3,6 +3,390 @@ const { test, expect } = require('@playwright/test');
 
 test.use({ serviceWorkers: 'block' });
 
+async function mockProjectOrderApp(page, options = {}) {
+  const projects = options.projects || [
+    {
+      id: 1,
+      project_number: 'P-001',
+      name: 'Baustelle Eins',
+      customer_name: 'Kunde Eins',
+      address_line_1: 'Musterweg 1',
+      postal_code: '12345',
+      city: 'Berlin',
+      work_instructions: 'Leitung pruefen.\nVor Beginn fotografieren.',
+      work_instructions_updated_at: '2026-07-22 12:00:00'
+    },
+    {
+      id: 2,
+      project_number: 'P-002',
+      name: 'Baustelle Zwei',
+      customer_name: 'Kunde Zwei',
+      address_line_1: 'Bauweg 2',
+      postal_code: '54321',
+      city: 'Potsdam',
+      work_instructions: '<script>nicht ausfuehren</script>\nSicherung abschalten.',
+      work_instructions_updated_at: '2026-07-23 08:30:00'
+    }
+  ];
+  const flags = {
+    show_project_files: true,
+    show_project_work_instructions: true,
+    show_project_materials: true,
+    ...(options.flags || {})
+  };
+  const materials = {
+    1: [{ id: 11, project_id: 1, created_by_user_id: 7, created_by_name: 'Max Mustermann', work_date: '2026-07-22', description: 'Kupferrohr', quantity: '2.500', unit: 'm', note: 'Heizkreis' }],
+    2: [{ id: 21, project_id: 2, created_by_user_id: 8, created_by_name: 'Erika Beispiel', work_date: '2026-07-23', description: 'Sicherung', quantity: '1.000', unit: 'Stueck', note: null }]
+  };
+  const postedMaterials = [];
+  const archivedMaterials = [];
+
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test',
+          permissions: ['timesheets.create', 'timesheets.view_own', 'files.view']
+        }
+      })
+    });
+  });
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          today: '2026-07-23',
+          server_time: '2026-07-23T10:00:00+02:00',
+          user: { id: 7, display_name: 'Max Mustermann', email: 'max@example.test', roles: [], app_ui_settings: flags },
+          app_ui_settings: flags,
+          mandatory_app_widgets: ['day_status', 'start_time', 'end_time', 'breaks', 'current_net_minutes', 'current_project', 'time_actions'],
+          projects,
+          attachments: [],
+          today_state: { status: 'not_started', is_missing: false, work_entry: null, status_entry: null, current_break: null },
+          current_break: null,
+          breaks_today: [],
+          tracked_minutes_live_basis: null,
+          project_day_summaries: [],
+          company: {},
+          geo_policy: {},
+          personnel_events: [],
+          personnel_labels: []
+        }
+      })
+    });
+  });
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ data: { company_name: 'Muster Bau' } }) });
+  });
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ data: { enabled: false, can_subscribe: false, devices: [] } }) });
+  });
+  await page.route('**/api/v1/app/projects/*/files', async (route) => {
+    const match = route.request().url().match(/projects\/(\d+)\/files/);
+    const projectId = match ? Number(match[1]) : 0;
+    const files = projectId === 2 ? [{
+      id: 51,
+      original_name: 'auftrag.pdf',
+      mime_type: 'application/pdf',
+      size_bytes: 1234,
+      is_image: false,
+      download_url: '/api/v1/app/project-files/51/download',
+      preview_url: null
+    }] : [];
+
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, data: files }) });
+  });
+  await page.route('**/api/v1/app/projects/*/materials', async (route) => {
+    const match = route.request().url().match(/projects\/(\d+)\/materials/);
+    const projectId = match ? Number(match[1]) : 0;
+
+    if (route.request().method() === 'POST') {
+      const payload = route.request().postDataJSON();
+      postedMaterials.push({ projectId, payload });
+      materials[projectId] = [
+        ...(materials[projectId] || []),
+        {
+          id: 99,
+          project_id: projectId,
+          created_by_user_id: 7,
+          created_by_name: 'Max Mustermann',
+          ...payload
+        }
+      ];
+      await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ ok: true, data: materials[projectId].at(-1) }) });
+      return;
+    }
+
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, data: materials[projectId] || [] }) });
+  });
+  await page.route('**/api/v1/app/project-materials/*', async (route) => {
+    const match = route.request().url().match(/project-materials\/(\d+)/);
+    const materialId = match ? Number(match[1]) : 0;
+    archivedMaterials.push(materialId);
+
+    Object.keys(materials).forEach((projectId) => {
+      materials[projectId] = materials[projectId].filter((item) => item.id !== materialId);
+    });
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, data: {} }) });
+  });
+
+  return { postedMaterials, archivedMaterials, materials };
+}
+
+test('mobile project deep link shows order details, materials and isolates project switches', async ({ page }) => {
+  const mocked = await mockProjectOrderApp(page);
+
+  await page.goto('/app/projektwahl?project=2');
+
+  await expect(page.locator('#projectSelect')).toHaveValue('2');
+  await expect(page.getByRole('heading', { name: 'P-002 – Baustelle Zwei' })).toBeVisible();
+  await expect(page.getByText('Kunde Zwei')).toBeVisible();
+  await expect(page.getByText('Bauweg 2, 54321 Potsdam')).toBeVisible();
+  await expect(page.getByText('<script>nicht ausfuehren</script>')).toBeVisible();
+  await expect(page.locator('main script')).toHaveCount(0);
+  await expect(page.locator('.app-work-instructions br')).toHaveCount(1);
+  await expect(page.locator('.app-attachment-info').filter({ hasText: 'auftrag.pdf' }).getByRole('link', { name: 'Oeffnen' }))
+    .toHaveAttribute('href', '/api/v1/app/project-files/51/download');
+  await expect(page.getByText('Sicherung', { exact: true }).first()).toBeVisible();
+  await expect(page).toHaveURL('/app/projektwahl');
+
+  await page.locator('#projectSelect').selectOption('1');
+
+  await expect(page.getByRole('heading', { name: 'P-001 – Baustelle Eins' })).toBeVisible();
+  await expect(page.getByText('Kupferrohr')).toBeVisible();
+  await expect(page.getByText('Kunde Zwei')).toHaveCount(0);
+  await expect(page.getByText('Sicherung', { exact: true })).toHaveCount(0);
+
+  await page.locator('#projectMaterialDescription').fill('Dichtung');
+  await page.locator('#projectMaterialQuantity').fill('3,5');
+  await page.locator('#projectMaterialUnit').fill('Stueck');
+  await page.locator('#projectMaterialNote').fill('Direkt verbaut');
+  await page.locator('#projectMaterialForm').getByRole('button', { name: 'Material speichern' }).click();
+
+  await expect.poll(() => mocked.postedMaterials.length).toBe(1);
+  expect(mocked.postedMaterials[0]).toMatchObject({
+    projectId: 1,
+    payload: {
+      description: 'Dichtung',
+      quantity: '3,5',
+      unit: 'Stueck',
+      note: 'Direkt verbaut',
+      work_date: '2026-07-23'
+    }
+  });
+  await expect(page.getByText('Dichtung')).toBeVisible();
+
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.locator('[data-archive-project-material="99"]').click();
+  await expect.poll(() => mocked.archivedMaterials).toContain(99);
+  await expect(page.getByText('Dichtung')).toHaveCount(0);
+});
+
+test('mobile project material draft survives offline submit and UI flags hide optional sections', async ({ page, context }) => {
+  await mockProjectOrderApp(page);
+  await page.goto('/app/projektwahl?project=1');
+  await expect(page.getByText('Kupferrohr')).toBeVisible();
+  await page.locator('#projectMaterialDescription').fill('Offline-Entwurf');
+  await page.locator('#projectMaterialQuantity').fill('4');
+
+  await context.setOffline(true);
+  await page.locator('#projectMaterialForm').getByRole('button', { name: 'Material speichern' }).click();
+
+  await expect(page.getByText('Material kann nur online gespeichert werden. Ihre Eingaben bleiben erhalten.')).toBeVisible();
+  await expect(page.locator('#projectMaterialDescription')).toHaveValue('Offline-Entwurf');
+  await expect(page.locator('#projectMaterialQuantity')).toHaveValue('4');
+  await expect(page.getByText(/Offline – zuletzt synchronisierter Stand/)).toBeVisible();
+
+  await context.setOffline(false);
+  await page.unrouteAll({ behavior: 'wait' });
+  await mockProjectOrderApp(page, {
+    flags: {
+      show_project_files: false,
+      show_project_work_instructions: false,
+      show_project_materials: false
+    }
+  });
+  await page.reload();
+
+  await expect(page.getByRole('heading', { name: 'Arbeitsanweisung' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Materialdokumentation' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Projektdateien' })).toHaveCount(0);
+});
+
+test('mobile project rejects unknown deep links and renders the empty instruction state', async ({ page }) => {
+  await mockProjectOrderApp(page, {
+    projects: [{
+      id: 1,
+      project_number: 'P-001',
+      name: 'Baustelle ohne Text',
+      customer_name: '',
+      address_line_1: '',
+      postal_code: '',
+      city: '',
+      work_instructions: null,
+      work_instructions_updated_at: null
+    }]
+  });
+
+  await page.goto('/app/projektwahl?project=999');
+
+  await expect(page.getByText('Das angeforderte Projekt ist nicht verfuegbar oder fuer Sie nicht freigegeben.')).toBeVisible();
+  await expect(page.locator('#projectSelect')).toHaveValue('');
+  await expect(page).toHaveURL('/app/projektwahl');
+  await expect(page.getByRole('heading', { name: 'P-001 – Baustelle ohne Text' })).toHaveCount(0);
+
+  await page.locator('#projectSelect').selectOption('1');
+  await expect(page.getByRole('heading', { name: 'P-001 – Baustelle ohne Text' })).toBeVisible();
+  await expect(page.getByText('Fuer dieses Projekt wurde noch keine Arbeitsanweisung hinterlegt.')).toBeVisible();
+});
+
+test('mobile project never exposes revoked project data from preferred IndexedDB caches', async ({ page }) => {
+  await page.goto('/app/login');
+  await page.evaluate(async () => {
+    localStorage.setItem('app.preferredProjectId', '2');
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('zeiterfassung-app', 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains('cache')) {
+          db.createObjectStore('cache', { keyPath: 'key' });
+        }
+        if (!db.objectStoreNames.contains('queue')) {
+          const store = db.createObjectStore('queue', { keyPath: 'id' });
+          store.createIndex('status', 'status', { unique: false });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const cachedAt = '2026-07-22T12:00:00.000Z';
+    const records = [
+      {
+        key: 'project_order_v1_user_7_project_2',
+        value: {
+          item: {
+            id: 2,
+            project_number: 'ENTZOGEN',
+            name: 'Entzogenes Projekt',
+            customer_name: 'Vertraulicher Kunde',
+            work_instructions: 'Vertrauliche Arbeitsanweisung'
+          },
+          cached_at: cachedAt
+        },
+        updatedAt: Date.now()
+      },
+      {
+        key: 'project_files_user_7_2',
+        value: {
+          items: [{ id: 51, original_name: 'vertraulich.pdf', mime_type: 'application/pdf' }],
+          cached_at: cachedAt
+        },
+        updatedAt: Date.now()
+      },
+      {
+        key: 'project_materials_v1_user_7_project_2',
+        value: {
+          items: [{ id: 21, description: 'Vertrauliches Material', quantity: '1.000' }],
+          cached_at: cachedAt
+        },
+        updatedAt: Date.now()
+      }
+    ];
+
+    await new Promise((resolve, reject) => {
+      const tx = database.transaction('cache', 'readwrite');
+      records.forEach((record) => tx.objectStore('cache').put(record));
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    database.close();
+  });
+
+  await mockProjectOrderApp(page, {
+    projects: [{
+      id: 1,
+      project_number: 'P-001',
+      name: 'Weiterhin freigegeben',
+      customer_name: 'Aktueller Kunde',
+      address_line_1: '',
+      postal_code: '',
+      city: '',
+      work_instructions: 'Aktuelle Arbeitsanweisung',
+      work_instructions_updated_at: '2026-07-23 10:00:00'
+    }]
+  });
+  await page.goto('/app/projektwahl');
+
+  await expect(page.locator('#projectSelect')).toHaveValue('');
+  await expect(page.getByText('Entzogenes Projekt')).toHaveCount(0);
+  await expect(page.getByText('Vertrauliche Arbeitsanweisung')).toHaveCount(0);
+  await expect(page.getByText('vertraulich.pdf')).toHaveCount(0);
+  await expect(page.getByText('Vertrauliches Material')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('app.preferredProjectId'))).toBeNull();
+  await expect.poll(() => page.evaluate(async () => {
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('zeiterfassung-app', 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const keys = [
+      'project_order_v1_user_7_project_2',
+      'project_files_user_7_2',
+      'project_materials_v1_user_7_project_2'
+    ];
+    const remaining = await new Promise((resolve, reject) => {
+      const tx = database.transaction('cache', 'readonly');
+      const requests = keys.map((key) => tx.objectStore('cache').get(key));
+      tx.oncomplete = () => resolve(requests.filter((request) => request.result !== undefined).length);
+      tx.onerror = () => reject(tx.error);
+    });
+    database.close();
+    return remaining;
+  })).toBe(0);
+});
+
+test('admin project order form counts instructions and blocks dispatch while dirty', async ({ page }) => {
+  await page.setContent(
+    '<form data-project-master-form>'
+      + '<input type="hidden" name="csrf_token" value="token">'
+      + '<input name="name" value="Projekt Nord">'
+      + '<textarea id="work_instructions" name="work_instructions" maxlength="20000">Erste Zeile</textarea>'
+      + '<span id="work-instructions-count"></span>'
+      + '</form>'
+      + '<form data-project-dispatch-form data-project-label="P-1 – Projekt Nord" data-recipient-count="3">'
+      + '<div data-project-unsaved-notice hidden>Aenderungen zuerst speichern</div>'
+      + '<button type="submit" data-project-dispatch-button>Auftrag an Mitarbeiter senden</button>'
+      + '</form>'
+  );
+  await page.evaluate(() => {
+    window.__dispatchConfirmation = '';
+    window.confirm = (message) => {
+      window.__dispatchConfirmation = message;
+      return false;
+    };
+  });
+  await page.addScriptTag({ path: path.join(__dirname, '../../public/assets/js/admin-projects.js') });
+
+  await expect(page.locator('#work-instructions-count')).toHaveText('11');
+  await page.locator('#work_instructions').fill('Erste Zeile\nZweite Zeile');
+  await expect(page.locator('#work-instructions-count')).toHaveText('24');
+  await expect(page.locator('[data-project-dispatch-button]')).toBeDisabled();
+  await expect(page.locator('[data-project-unsaved-notice]')).toBeVisible();
+
+  await page.locator('#work_instructions').fill('Erste Zeile');
+  await expect(page.locator('[data-project-dispatch-button]')).toBeEnabled();
+  await page.locator('[data-project-dispatch-button]').click();
+  await expect.poll(() => page.evaluate(() => window.__dispatchConfirmation)).toContain('P-1 – Projekt Nord');
+  await expect.poll(() => page.evaluate(() => window.__dispatchConfirmation)).toContain('3 Mitarbeiter');
+  await expect.poll(() => page.evaluate(() => window.__dispatchConfirmation)).toContain('gespeicherten Projektstand');
+});
+
 test('mobile app login screen loads', async ({ page }) => {
   await page.goto('/app/login');
 
@@ -2363,6 +2747,13 @@ test('mobile project view exposes protected upload controls and disables them of
     });
   });
 
+  await page.route('**/api/v1/app/projects/2/materials', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, data: [] })
+    });
+  });
+
   await page.route('**/api/v1/app/push/status', async (route) => {
     await route.fulfill({
       contentType: 'application/json',
@@ -2384,7 +2775,7 @@ test('mobile project view exposes protected upload controls and disables them of
   await page.goto('/app/projektwahl');
 
   await expect(page.getByRole('heading', { name: 'Baustelle waehlen' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Baustelle Mitte' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Baustelle Mitte', exact: true })).toBeVisible();
   await expect(page.locator('#projectCameraInput')).toHaveAttribute('capture', 'environment');
   await expect(page.locator('#projectAttachmentInput')).toHaveAttribute('accept', /image\/\*/);
   await expect(page.locator('.app-attachment-info')).toContainText('baustelle.jpg');

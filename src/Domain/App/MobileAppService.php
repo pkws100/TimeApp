@@ -67,7 +67,11 @@ final class MobileAppService
                 'id' => (int) ($project['id'] ?? 0),
                 'project_number' => (string) ($project['project_number'] ?? ''),
                 'name' => (string) ($project['name'] ?? ''),
+                'address_line_1' => (string) ($project['address_line_1'] ?? ''),
+                'postal_code' => (string) ($project['postal_code'] ?? ''),
                 'city' => (string) ($project['city'] ?? ''),
+                'work_instructions' => $project['work_instructions'] ?? null,
+                'work_instructions_updated_at' => $project['work_instructions_updated_at'] ?? null,
                 'customer_signature_required' => (int) ($project['customer_signature_required'] ?? 0) === 1,
                 'customer_signature_name' => (string) ($project['customer_signature_name'] ?? ''),
                 'customer_name' => (string) ($project['customer_name'] ?? ''),
@@ -546,35 +550,7 @@ final class MobileAppService
 
     private function activeProjectsForUser(array $user): array
     {
-        $permissions = $user['permissions'] ?? [];
-
-        if (
-            in_array('*', $permissions, true)
-            || in_array('projects.manage', $permissions, true)
-            || in_array('files.manage', $permissions, true)
-            || in_array('timesheets.manage', $permissions, true)
-        ) {
-            return $this->projectService->list('active');
-        }
-
-        if (!$this->connection->tableExists('projects') || !$this->connection->tableExists('project_memberships')) {
-            return [];
-        }
-
-        $signatureColumns = $this->projectSignatureColumns();
-
-        return $this->connection->fetchAll(
-            'SELECT DISTINCT projects.id, projects.project_number, projects.name, projects.city, projects.customer_name, ' . $signatureColumns['required'] . ' AS customer_signature_required, ' . $signatureColumns['name'] . ' AS customer_signature_name
-             FROM projects
-             INNER JOIN project_memberships ON project_memberships.project_id = projects.id
-             WHERE project_memberships.user_id = :user_id
-               AND COALESCE(projects.is_deleted, 0) = 0
-               AND projects.status <> "archived"
-               AND (project_memberships.assigned_from IS NULL OR project_memberships.assigned_from <= CURDATE())
-               AND (project_memberships.assigned_until IS NULL OR project_memberships.assigned_until >= CURDATE())
-             ORDER BY projects.project_number ASC, projects.name ASC',
-            ['user_id' => (int) ($user['id'] ?? 0)]
-        );
+        return $this->projectService->listForUser($user);
     }
 
     private function findLatestEntry(int $userId, string $workDate, string $entryType): ?array

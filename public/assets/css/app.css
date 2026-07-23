@@ -1274,6 +1274,50 @@ html[data-theme="dark"] .app-info-row {
     background: rgba(8, 16, 29, 0.55);
 }
 
+.app-work-instructions {
+    padding: 1rem;
+    border-radius: 1rem;
+    border: 1px solid var(--app-line);
+    background: rgba(255, 255, 255, 0.45);
+    overflow-wrap: anywhere;
+    line-height: 1.6;
+}
+
+html[data-theme="dark"] .app-work-instructions {
+    background: rgba(8, 16, 29, 0.55);
+}
+
+.app-material-row {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+}
+
+.app-material-row > div {
+    display: grid;
+    gap: 0.3rem;
+    min-width: 0;
+}
+
+.app-material-row p {
+    margin: 0.35rem 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.app-material-row button {
+    width: 100%;
+}
+
+@media (min-width: 560px) {
+    .app-material-row {
+        grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .app-material-row button {
+        width: auto;
+    }
+}
+
 .app-legal-details {
     display: grid;
     gap: 0.8rem;
