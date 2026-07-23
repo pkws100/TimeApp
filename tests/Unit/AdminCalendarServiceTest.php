@@ -164,6 +164,58 @@ final class AdminCalendarServiceTest extends TestCase
         self::assertSame('empty', $summary['status']);
     }
 
+    public function testIndividualWorkdaysSuppressAndDeriveMissingOnTheConfiguredWeekdays(): void
+    {
+        $service = $this->serviceWithActiveUserRows([
+            $this->activeUser(['workdays_mask' => '2,3,4']),
+        ]);
+
+        self::assertSame([], $service->summarizeDay('2026-05-11', [])['missing_users']);
+        self::assertSame([7], array_column(
+            $service->summarizeDay('2026-05-12', [])['missing_users'],
+            'user_id'
+        ));
+        self::assertSame([], $service->summarizeDay('2026-05-15', [])['missing_users']);
+    }
+
+    public function testConfiguredWeekendWorkdaysCanBeDerivedAsMissing(): void
+    {
+        $saturday = $this->serviceWithActiveUserRows([
+            $this->activeUser(['id' => 7, 'workdays_mask' => '6']),
+        ])->summarizeDay('2026-05-16', []);
+        $sunday = $this->serviceWithActiveUserRows([
+            $this->activeUser(['id' => 8, 'workdays_mask' => '7']),
+        ])->summarizeDay('2026-05-17', []);
+
+        self::assertSame([7], array_column($saturday['missing_users'], 'user_id'));
+        self::assertSame('missing', $saturday['status']);
+        self::assertSame([8], array_column($sunday['missing_users'], 'user_id'));
+        self::assertSame('missing', $sunday['status']);
+    }
+
+    public function testExistingBookingStillSuppressesMissingOnConfiguredWorkday(): void
+    {
+        $service = $this->serviceWithActiveUserRows([
+            $this->activeUser(['workdays_mask' => '2,3,4']),
+        ]);
+        $summary = $service->summarizeDay('2026-05-12', [
+            $this->booking(['work_date' => '2026-05-12']),
+        ]);
+
+        self::assertSame([], $summary['missing_users']);
+        self::assertSame(0, $summary['missing_count']);
+    }
+
+    public function testFutureConfiguredWorkdayDoesNotDeriveMissing(): void
+    {
+        $futureDate = (new \DateTimeImmutable('today'))->modify('+7 days');
+        $service = $this->serviceWithActiveUserRows([
+            $this->activeUser(['workdays_mask' => $futureDate->format('N')]),
+        ]);
+
+        self::assertSame([], $service->summarizeDay($futureDate->format('Y-m-d'), [])['missing_users']);
+    }
+
     public function testDaySummaryDoesNotDeriveMissingWhenCalendarPolicyDisablesTracking(): void
     {
         $service = $this->serviceWithActiveUserRows(
@@ -271,7 +323,7 @@ final class AdminCalendarServiceTest extends TestCase
     private function serviceWithActiveUsers(array $userIds): AdminCalendarService
     {
         return $this->serviceWithActiveUserRows(array_map(
-            static fn (int $userId): array => ['id' => $userId, 'created_at' => '2026-01-01 00:00:00'],
+            fn (int $userId): array => $this->activeUser(['id' => $userId]),
             $userIds
         ));
     }
@@ -299,6 +351,21 @@ final class AdminCalendarServiceTest extends TestCase
             'entry_type' => 'work',
             'is_deleted' => 0,
             'needs_project_assignment' => false,
+            ...$overrides,
+        ];
+    }
+
+    private function activeUser(array $overrides = []): array
+    {
+        return [
+            'id' => 7,
+            'created_at' => '2026-01-01 00:00:00',
+            'first_name' => 'Test',
+            'last_name' => 'Mitarbeiter',
+            'employee_number' => 'MA-007',
+            'email' => 'test@example.test',
+            'time_tracking_required' => 1,
+            'workdays_mask' => '1,2,3,4,5',
             ...$overrides,
         ];
     }

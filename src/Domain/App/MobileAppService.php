@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\App;
 
-use App\Domain\Calendar\CalendarPolicyService;
+use App\Domain\Calendar\CalendarPolicyProvider;
 use App\Domain\Files\FileAttachmentService;
 use App\Domain\Personnel\PersonnelEventService;
 use App\Domain\Personnel\PersonnelLabelService;
@@ -14,11 +14,14 @@ use App\Domain\Terminals\NfcTagService;
 use App\Domain\Timesheets\TimesheetGeoLocationService;
 use App\Domain\Timesheets\TimesheetSignatureService;
 use App\Domain\Timesheets\WorkdayStateCalculator;
+use App\Domain\Users\UserWorkdayPolicy;
 use App\Infrastructure\Database\DatabaseConnection;
 use InvalidArgumentException;
 
 final class MobileAppService
 {
+    private UserWorkdayPolicy $userWorkdayPolicy;
+
     public function __construct(
         private DatabaseConnection $connection,
         private ProjectService $projectService,
@@ -26,12 +29,14 @@ final class MobileAppService
         private WorkdayStateCalculator $workdayStateCalculator,
         private FileAttachmentService $fileAttachmentService,
         private ?TimesheetGeoLocationService $geoLocationService = null,
-        private ?CalendarPolicyService $calendarPolicyService = null,
+        private ?CalendarPolicyProvider $calendarPolicyService = null,
         private ?TimesheetSignatureService $signatureService = null,
         private ?PersonnelEventService $personnelEventService = null,
         private ?PersonnelLabelService $personnelLabelService = null,
-        private ?NfcTagService $nfcTagService = null
+        private ?NfcTagService $nfcTagService = null,
+        ?UserWorkdayPolicy $userWorkdayPolicy = null
     ) {
+        $this->userWorkdayPolicy = $userWorkdayPolicy ?? new UserWorkdayPolicy();
     }
 
     public function dayContext(array $user): array
@@ -43,7 +48,12 @@ final class MobileAppService
         $timeTrackingRequired = (int) ($user['time_tracking_required'] ?? 1) === 1;
         $appUiSettings = AppUiSettings::normalize($user['app_ui_settings'] ?? null);
         $dayPolicy = $this->dayPolicy($today);
-        $isMissing = $this->isMissingWorkday($today, $workEntry, $lastStatusEntry, $timeTrackingRequired);
+        $isScheduledWorkday = $this->userWorkdayPolicy->isScheduledWorkday($user, $today);
+        $bookingRequired = $timeTrackingRequired
+            && $isScheduledWorkday
+            && (!$this->calendarPolicyService instanceof CalendarPolicyProvider
+                || $this->calendarPolicyService->requiresTimeTracking($today));
+        $isMissing = $this->isMissingWorkday($today, $workEntry, $lastStatusEntry, $bookingRequired);
         $breaksToday = $workEntry !== null ? $this->findBreaksForTimesheet((int) $workEntry['id']) : [];
         $currentBreak = $this->workdayStateCalculator->currentBreak($breaksToday);
         $status = $isMissing
@@ -88,6 +98,7 @@ final class MobileAppService
                 'current_break' => $currentBreak,
                 'status' => $status,
                 'is_missing' => $isMissing,
+                'booking_required' => $bookingRequired,
                 'status_source' => $isMissing ? 'derived_missing' : ($lastStatusEntry !== null ? 'stored' : null),
                 'calendar_policy' => $dayPolicy,
             ],
@@ -669,9 +680,9 @@ final class MobileAppService
         ];
     }
 
-    private function isMissingWorkday(string $workDate, ?array $workEntry, ?array $statusEntry, bool $timeTrackingRequired = true): bool
+    private function isMissingWorkday(string $workDate, ?array $workEntry, ?array $statusEntry, bool $bookingRequired = true): bool
     {
-        if (!$timeTrackingRequired) {
+        if (!$bookingRequired) {
             return false;
         }
 
@@ -679,25 +690,27 @@ final class MobileAppService
             return false;
         }
 
-        try {
-            $date = new \DateTimeImmutable($workDate);
-        } catch (\Exception) {
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $workDate) !== 1) {
+            return false;
+        }
+
+        $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $workDate);
+        $errors = \DateTimeImmutable::getLastErrors();
+
+        if (!$date instanceof \DateTimeImmutable
+            || $date->format('Y-m-d') !== $workDate
+            || ($errors !== false && ((int) $errors['warning_count'] > 0 || (int) $errors['error_count'] > 0))) {
             return false;
         }
 
         $today = new \DateTimeImmutable('today');
 
-        if ((int) $date->format('N') > 5 || $date > $today) {
-            return false;
-        }
-
-        return !$this->calendarPolicyService instanceof CalendarPolicyService
-            || $this->calendarPolicyService->requiresTimeTracking($workDate);
+        return $date <= $today;
     }
 
     private function dayPolicy(string $date): array
     {
-        if (!$this->calendarPolicyService instanceof CalendarPolicyService) {
+        if (!$this->calendarPolicyService instanceof CalendarPolicyProvider) {
             return [
                 'date' => $date,
                 'is_public_holiday' => false,

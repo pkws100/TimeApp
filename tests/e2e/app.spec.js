@@ -372,6 +372,172 @@ test('mobile today screen shows derived missing status', async ({ page }) => {
   await expect(page.locator('[data-live-topbar-status]')).toHaveText('Fehlt / nicht gebucht');
 });
 
+test('mobile today screen keeps a scheduled free day neutral', async ({ page }) => {
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test',
+          time_tracking_required: true,
+          permissions: ['timesheets.create', 'timesheets.view_own']
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          today: '2026-05-11',
+          server_time: '2026-05-11T10:00:00+02:00',
+          user: {
+            id: 7,
+            display_name: 'Max Mustermann',
+            email: 'max@example.test',
+            time_tracking_required: true,
+            roles: []
+          },
+          today_state: {
+            work_entry: null,
+            status_entry: null,
+            current_break: null,
+            status: 'not_started',
+            is_missing: false,
+            booking_required: false,
+            status_source: null
+          },
+          current_break: null,
+          breaks_today: [],
+          tracked_minutes_live_basis: null,
+          attachments: [],
+          project_day_summaries: [],
+          projects: [],
+          sync: { server_pending_count: 0 },
+          geo_policy: {
+            enabled: false,
+            notice_text: '',
+            requires_acknowledgement: false
+          },
+          company: {
+            app_display_name: 'TimeApp',
+            company_name: 'Muster Bau'
+          }
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { company_name: 'Muster Bau' } })
+    });
+  });
+
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { enabled: false, can_subscribe: false, devices: [] } })
+    });
+  });
+
+  await page.goto('/app/heute');
+
+  await expect(page.getByRole('heading', { name: 'Noch nicht gebucht' })).toBeVisible();
+  await expect(page.locator('main [data-live-status]')).toHaveText('Nicht gestartet');
+  await expect(page.getByText('Zeiterfassung ist freiwillig. Sie koennen bei Bedarf einchecken.')).toBeVisible();
+  await expect(page.locator('[data-live-topbar-status]')).toHaveText('Noch nicht gebucht');
+  await expect(page.locator('[data-live-topbar-project]')).toHaveText('freiwillig');
+  await expect(page.locator('[data-live-topbar-detail]')).toHaveText('Keine Buchung erforderlich');
+});
+
+test('mobile app ignores legacy today cache without booking requirement', async ({ page }) => {
+  await page.route('**/api/v1/auth/session', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        authenticated: true,
+        bootstrap_required: false,
+        user: {
+          id: 7,
+          display_name: 'Max Mustermann',
+          email: 'max@example.test',
+          time_tracking_required: true,
+          permissions: ['timesheets.create', 'timesheets.view_own']
+        }
+      })
+    });
+  });
+
+  await page.route('**/api/v1/app/me/day', async (route) => {
+    await route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'Offline' })
+    });
+  });
+
+  await page.route('**/api/v1/settings/company', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { company_name: 'Muster Bau' } })
+    });
+  });
+
+  await page.route('**/api/v1/app/push/status', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { enabled: false, can_subscribe: false, devices: [] } })
+    });
+  });
+
+  await page.goto('/app/heute');
+  await page.evaluate(async () => new Promise((resolve, reject) => {
+    const request = indexedDB.open('zeiterfassung-app', 1);
+
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const tx = database.transaction('cache', 'readwrite');
+      tx.objectStore('cache').put({
+        key: 'today_user_7',
+        updatedAt: Date.now(),
+        value: {
+          today: '2026-05-11',
+          user: {
+            id: 7,
+            time_tracking_required: true
+          },
+          today_state: {
+            work_entry: null,
+            status_entry: null,
+            status: 'missing',
+            is_missing: true,
+            status_source: 'derived_missing'
+          },
+          project_day_summaries: [],
+          projects: []
+        }
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    };
+  }));
+
+  await page.reload();
+
+  await expect(page.getByRole('heading', { name: 'Fehlt' })).toHaveCount(0);
+  await expect(page.locator('[data-live-topbar-status]')).not.toHaveText('Fehlt / nicht gebucht');
+  await expect(page.getByText('Fuer heute liegt noch keine Buchung vor. Diese Meldung ist automatisch abgeleitet.')).toHaveCount(0);
+});
+
 test('mobile topbar shows active work status on every app page', async ({ page }) => {
   const projectName = 'Neubau Erweiterung Nordfluegel mit sehr langem Projektnamen';
   const workEntry = {

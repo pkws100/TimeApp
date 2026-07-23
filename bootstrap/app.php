@@ -58,6 +58,7 @@ use App\Domain\Users\PermissionMatrix;
 use App\Domain\Users\RoleService;
 use App\Domain\Users\StorageUsageService;
 use App\Domain\Users\UserService;
+use App\Domain\Users\UserWorkdayPolicy;
 use App\Domain\Vacation\VacationRequestService;
 use App\Http\Controllers\AccountingExportController;
 use App\Http\Controllers\AdminAccountingController;
@@ -171,6 +172,7 @@ $permissionMatrix = new PermissionMatrix($config->get('permissions.roles', []), 
 $storageUsage = new StorageUsageService(storage_path());
 
 $calendarPolicyService = new CalendarPolicyService($connection);
+$userWorkdayPolicy = new UserWorkdayPolicy();
 $dailyTargetService = new DailyTargetService($calendarPolicyService);
 $accountJournalService = new AccountJournalService($connection);
 $timesheetWriteGuard = new TimesheetWriteGuard($connection);
@@ -178,7 +180,7 @@ $employeeAccountCutoverService = new EmployeeAccountCutoverService($connection, 
 $vacationAccountYearService = new VacationAccountYearService($connection, $accountJournalService, $employeeAccountCutoverService);
 $employeeAccountCutoverService->setVacationYearService($vacationAccountYearService);
 $timesheetDayConflictService = new TimesheetDayConflictService($connection);
-$attendanceService = new AttendanceService($connection, $calendarPolicyService);
+$attendanceService = new AttendanceService($connection, $calendarPolicyService, $userWorkdayPolicy);
 $userService = new UserService($connection);
 $roleService = new RoleService($connection, $permissionMatrix);
 $personnelLabelService = new PersonnelLabelService($connection);
@@ -190,7 +192,7 @@ $workdayStateCalculator = new WorkdayStateCalculator();
 $timesheetSignatureService = new TimesheetSignatureService($connection, $config->get('uploads', []), (string) $config->get('app.settings_encryption_key', ''));
 $timesheetService = new TimesheetService($connection, $timesheetCalculator);
 $adminBookingService = new AdminBookingService($connection, $timesheetCalculator, $timesheetSignatureService, $timesheetWriteGuard, $dailyTargetService, $timesheetDayConflictService);
-$adminCalendarService = new AdminCalendarService($connection, $adminBookingService, $calendarPolicyService, $personnelEventService);
+$adminCalendarService = new AdminCalendarService($connection, $adminBookingService, $calendarPolicyService, $personnelEventService, $userWorkdayPolicy);
 $timesheetGeoLocationService = new TimesheetGeoLocationService($connection);
 $settingsSecretService = new SettingsSecretService((string) $config->get('app.settings_encryption_key', ''));
 $companySettingsService = new CompanySettingsService($connection, $config->get('uploads', []), $settingsSecretService);
@@ -226,7 +228,7 @@ $accountingDocumentExportService = new AccountingDocumentExportService($companyS
 $backupService = new BackupService($connection, $config->get('uploads', []));
 $smtpTestService = new SmtpTestService();
 $nfcTagService = new NfcTagService($connection, (string) $config->get('app.settings_encryption_key', ''));
-$mobileAppService = new MobileAppService($connection, $projectService, $companySettingsService, $workdayStateCalculator, $fileService, $timesheetGeoLocationService, $calendarPolicyService, $timesheetSignatureService, $personnelEventService, $personnelLabelService, $nfcTagService);
+$mobileAppService = new MobileAppService($connection, $projectService, $companySettingsService, $workdayStateCalculator, $fileService, $timesheetGeoLocationService, $calendarPolicyService, $timesheetSignatureService, $personnelEventService, $personnelLabelService, $nfcTagService, $userWorkdayPolicy);
 $appTimesheetSyncService = new AppTimesheetSyncService($connection, $timesheetCalculator, $companySettingsService, $workdayStateCalculator, $timesheetSignatureService, $timesheetDayConflictService);
 $timeAccountService = new TimeAccountService($connection, $calendarPolicyService, $dailyTargetService, $accountJournalService, $employeeAccountCutoverService);
 $timeAccountExportService = new TimeAccountExportService($timeAccountService);

@@ -4,21 +4,26 @@ declare(strict_types=1);
 
 namespace App\Domain\Push;
 
-use App\Domain\Calendar\CalendarPolicyService;
+use App\Domain\Calendar\CalendarPolicyProvider;
+use App\Domain\Users\UserWorkdayPolicy;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
 use DateTimeZone;
 
 final class PushReminderService
 {
+    private UserWorkdayPolicy $userWorkdayPolicy;
+
     public function __construct(
         private DatabaseConnection $connection,
         private PushSettingsService $settingsService,
         private PushSubscriptionService $subscriptionService,
         private PushNotificationService $notificationService,
         private string $timezone,
-        private ?CalendarPolicyService $calendarPolicyService = null
+        private ?CalendarPolicyProvider $calendarPolicyService = null,
+        ?UserWorkdayPolicy $userWorkdayPolicy = null
     ) {
+        $this->userWorkdayPolicy = $userWorkdayPolicy ?? new UserWorkdayPolicy();
     }
 
     public function sendDueReminders(?DateTimeImmutable $now = null, bool $dryRun = false): array
@@ -53,7 +58,7 @@ final class PushReminderService
             return $summary;
         }
 
-        if ($this->calendarPolicyService instanceof CalendarPolicyService
+        if ($this->calendarPolicyService instanceof CalendarPolicyProvider
             && !$this->calendarPolicyService->requiresTimeTracking($now->format('Y-m-d'))) {
             $summary['messages'][] = 'Heute ist wegen Feiertag oder Betriebsurlaub keine Pflichtbuchung notwendig.';
 
@@ -61,6 +66,10 @@ final class PushReminderService
         }
 
         foreach ($this->candidateUsers($now->format('Y-m-d')) as $user) {
+            if (!$this->userWorkdayPolicy->isScheduledWorkday($user, $now)) {
+                continue;
+            }
+
             $summary['candidates']++;
             $userId = (int) $user['id'];
             $workDate = $now->format('Y-m-d');
@@ -126,22 +135,29 @@ final class PushReminderService
 
     private function candidateUsers(string $workDate): array
     {
-        if (!$this->connection->tableExists('users')
-            || !$this->connection->tableExists('timesheets')
-            || !$this->connection->tableExists('push_subscriptions')
-            || !$this->connection->tableExists('permissions')) {
-            return [];
+        foreach (['users', 'timesheets', 'roles', 'user_roles', 'role_permissions', 'permissions', 'push_subscriptions'] as $table) {
+            if (!$this->connection->tableExists($table)) {
+                return [];
+            }
         }
 
         $timeTrackingWhere = $this->connection->columnExists('users', 'time_tracking_required')
             ? '               AND COALESCE(users.time_tracking_required, 1) = 1
 '
             : '';
+        $workdaysSelect = $this->connection->columnExists('users', 'workdays_mask')
+            ? 'COALESCE(NULLIF(TRIM(users.workdays_mask), ""), "' . UserWorkdayPolicy::DEFAULT_MASK . '")'
+            : '"' . UserWorkdayPolicy::DEFAULT_MASK . '"';
+        $activeRoleWhere = $this->connection->columnExists('roles', 'is_deleted')
+            ? ' AND COALESCE(roles.is_deleted, 0) = 0'
+            : '';
 
         return $this->connection->fetchAll(
-            'SELECT DISTINCT users.id, users.first_name, users.last_name, users.email
+            'SELECT DISTINCT users.id, users.first_name, users.last_name, users.email,
+                    ' . $workdaysSelect . ' AS workdays_mask
              FROM users
              INNER JOIN user_roles ON user_roles.user_id = users.id
+             INNER JOIN roles ON roles.id = user_roles.role_id' . $activeRoleWhere . '
              INNER JOIN role_permissions ON role_permissions.role_id = user_roles.role_id
              INNER JOIN permissions ON permissions.id = role_permissions.permission_id
              INNER JOIN push_subscriptions ON push_subscriptions.user_id = users.id AND push_subscriptions.is_enabled = 1

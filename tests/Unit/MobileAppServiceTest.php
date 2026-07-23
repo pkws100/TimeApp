@@ -68,17 +68,48 @@ final class MobileAppServiceTest extends TestCase
         self::assertSame(120, $summaries[1]['total_net_minutes']);
     }
 
-    public function testMissingWorkdayIsDerivedOnlyForWeekdaysWithoutEntries(): void
+    public function testMissingWorkdayRequiresBookingRequirementAndNoEntries(): void
     {
         $service = $this->service();
         $method = new ReflectionMethod($service, 'isMissingWorkday');
         $method->setAccessible(true);
 
         self::assertTrue($method->invoke($service, '2026-05-15', null, null));
-        self::assertFalse($method->invoke($service, '2026-05-16', null, null));
+        self::assertTrue($method->invoke($service, '2026-05-16', null, null));
         self::assertFalse($method->invoke($service, '2026-05-15', ['id' => 1], null));
         self::assertFalse($method->invoke($service, '2026-05-15', null, ['entry_type' => 'sick']));
         self::assertFalse($method->invoke($service, '2026-05-15', null, null, false));
+    }
+
+    public function testDayContextUsesIndividualWorkdayForBookingRequirement(): void
+    {
+        $today = new \DateTimeImmutable('today');
+        $scheduledDay = (int) $today->format('N');
+        $otherDay = $scheduledDay === 7 ? 1 : $scheduledDay + 1;
+        $baseUser = [
+            'id' => 7,
+            'first_name' => 'Max',
+            'last_name' => 'Mustermann',
+            'email' => 'max@example.test',
+            'time_tracking_required' => 1,
+            'roles' => [],
+        ];
+
+        $freeDay = $this->service()->dayContext([
+            ...$baseUser,
+            'workdays_mask' => (string) $otherDay,
+        ]);
+        $workday = $this->service()->dayContext([
+            ...$baseUser,
+            'workdays_mask' => (string) $scheduledDay,
+        ]);
+
+        self::assertFalse($freeDay['today_state']['booking_required']);
+        self::assertFalse($freeDay['today_state']['is_missing']);
+        self::assertSame('not_started', $freeDay['today_state']['status']);
+        self::assertTrue($workday['today_state']['booking_required']);
+        self::assertTrue($workday['today_state']['is_missing']);
+        self::assertSame('missing', $workday['today_state']['status']);
     }
 
     public function testHistoryMonthBoundsUseFullCalendarMonth(): void

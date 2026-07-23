@@ -383,7 +383,7 @@
     }
 
     function todayCacheKey() {
-        return 'today_user_' + currentSessionUserCachePart();
+        return 'today_v2_user_' + currentSessionUserCachePart();
     }
 
     function clearSessionScopedState() {
@@ -1213,8 +1213,16 @@
         return true;
     }
 
+    function bookingRequiredToday() {
+        if (state.today && state.today.today_state && typeof state.today.today_state.booking_required === 'boolean') {
+            return state.today.today_state.booking_required;
+        }
+
+        return timeTrackingRequired();
+    }
+
     function isOptionalNotStartedStatus(status) {
-        return !timeTrackingRequired() && (status === 'not_started' || status === 'planned');
+        return !bookingRequiredToday() && (status === 'not_started' || status === 'planned');
     }
 
     function normalizeProjectSelectionAgainstToday() {
@@ -1747,7 +1755,7 @@
         }
 
         if (status === 'not_started' || status === 'planned') {
-            return timeTrackingRequired() ? 'missing' : 'neutral';
+            return bookingRequiredToday() ? 'missing' : 'neutral';
         }
 
         if (status === 'missing' || status === 'absent') {
@@ -2449,7 +2457,7 @@
         }
 
         if (status === 'not_started' || status === 'planned') {
-            return timeTrackingRequired() ? 'missing' : 'neutral';
+            return bookingRequiredToday() ? 'missing' : 'neutral';
         }
 
         if (status === 'missing') {
