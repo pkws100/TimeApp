@@ -17,6 +17,7 @@ use App\Domain\Users\UserService;
 use App\Http\Request;
 use App\Http\Response;
 use App\Presentation\Admin\AdminView;
+use App\Presentation\Admin\AbsencePeriodModalRenderer;
 use App\Presentation\Admin\BookingModalRenderer;
 use InvalidArgumentException;
 use RuntimeException;
@@ -59,8 +60,16 @@ final class AdminBookingController
             $csrfToken,
             $pagination
         );
+        $content .= (new AbsencePeriodModalRenderer())->render($users, $csrfToken, [
+            'can_archive' => $this->authService->hasPermission('timesheets.archive'),
+            'allow_vacation' => $this->authService->hasPermission('vacation_requests.manage'),
+        ]);
 
-        return Response::html($this->view->render('Buchungen', $content));
+        return Response::html($this->view->render(
+            'Buchungen',
+            $content,
+            '<script src="/assets/js/admin-absence-periods.js"></script>'
+        ));
     }
 
     public function create(Request $request): Response
@@ -213,6 +222,8 @@ final class AdminBookingController
                 'empty_message' => 'Keine Buchungen fuer die aktuelle Filterung gefunden.',
                 'can_manage' => $canManage,
                 'can_archive' => $canArchive,
+                'can_manage_vacation' => $this->authService->hasPermission('vacation_requests.manage'),
+                'can_archive_vacation' => $this->authService->hasPermission('vacation_requests.manage'),
                 'can_view_attachments' => true,
                 'document_statuses' => $this->documentStatusService->activeList(),
                 'open_booking_location' => $returnTo,

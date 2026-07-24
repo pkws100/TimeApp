@@ -19,13 +19,7 @@ final class TimesheetDayConflictDatabaseTest extends MariaDbTestCase
         $userId = $this->createUser();
         $projectId = $this->createProject();
         $service = new AdminBookingService($this->connection(), new TimesheetCalculator());
-        $absence = $service->createManual([
-            'user_id' => $userId,
-            'work_date' => '2026-06-01',
-            'entry_type' => 'sick',
-            'absence_reason_code' => 'sick_paid',
-            'change_reason' => 'Krankmeldung',
-        ], $adminId);
+        $absence = $this->legacyAbsence($service, $userId, '2026-06-01', 'sick', 'sick_paid');
         $service->archive((int) $absence['id'], $adminId, 'Archivtest');
         $service->createManual([
             'user_id' => $userId,
@@ -48,13 +42,7 @@ final class TimesheetDayConflictDatabaseTest extends MariaDbTestCase
         $adminId = $this->createUser(['employee_number' => 'ADMIN-R', 'email' => 'admin-r@example.test']);
         $userId = $this->createUser();
         $service = new AdminBookingService($this->connection(), new TimesheetCalculator());
-        $absence = $service->createManual([
-            'user_id' => $userId,
-            'work_date' => '2026-06-02',
-            'entry_type' => 'sick',
-            'absence_reason_code' => 'sick_paid',
-            'change_reason' => 'Krankmeldung',
-        ], $adminId);
+        $absence = $this->legacyAbsence($service, $userId, '2026-06-02', 'sick', 'sick_paid');
         $service->archive((int) $absence['id'], $adminId, 'Archivtest');
         $service->restore((int) $absence['id'], $adminId, 'Wiederherstellen');
 
@@ -73,13 +61,7 @@ final class TimesheetDayConflictDatabaseTest extends MariaDbTestCase
             null,
             new DailyTargetService($calendar)
         );
-        $absence = $service->createManual([
-            'user_id' => $userId,
-            'work_date' => '2027-01-01',
-            'entry_type' => 'vacation',
-            'absence_reason_code' => 'vacation_paid',
-            'change_reason' => 'Urlaub',
-        ], $adminId);
+        $absence = $this->legacyAbsence($service, $userId, '2027-01-01', 'vacation', 'vacation_paid');
         $service->archive((int) $absence['id'], $adminId, 'Archivtest');
         $calendar->saveRegion('NW');
         $restoreService = new AdminBookingService($this->connection(), new TimesheetCalculator());
@@ -87,5 +69,31 @@ final class TimesheetDayConflictDatabaseTest extends MariaDbTestCase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('kein anrechenbarer Arbeitstag');
         $restoreService->restore((int) $absence['id'], $adminId, 'Wiederherstellen');
+    }
+
+    private function legacyAbsence(
+        AdminBookingService $service,
+        int $userId,
+        string $date,
+        string $entryType,
+        string $reason
+    ): array {
+        $this->connection()->execute(
+            'INSERT INTO timesheets (
+                user_id, work_date, gross_minutes, break_minutes, net_minutes,
+                credited_minutes, entry_type, absence_reason_code, source, created_at, updated_at, is_deleted
+             ) VALUES (
+                :user_id, :work_date, 0, 0, 0,
+                480, :entry_type, :absence_reason_code, "admin", NOW(), NOW(), 0
+             )',
+            [
+                'user_id' => $userId,
+                'work_date' => $date,
+                'entry_type' => $entryType,
+                'absence_reason_code' => $reason,
+            ]
+        );
+
+        return $service->find($this->connection()->lastInsertId()) ?? [];
     }
 }

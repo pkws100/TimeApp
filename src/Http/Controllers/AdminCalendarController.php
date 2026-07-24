@@ -17,6 +17,7 @@ use App\Domain\Users\UserService;
 use App\Http\Request;
 use App\Http\Response;
 use App\Presentation\Admin\AdminView;
+use App\Presentation\Admin\AbsencePeriodModalRenderer;
 use App\Presentation\Admin\BookingModalRenderer;
 use DateTimeImmutable;
 
@@ -73,13 +74,25 @@ final class AdminCalendarController
                 'csrf_token' => $csrfToken,
                 'can_manage' => $canManage,
                 'can_archive' => $canArchive,
+                'can_manage_vacation' => $this->authService->hasPermission('vacation_requests.manage'),
+                'can_archive_vacation' => $this->authService->hasPermission('vacation_requests.manage'),
                 'can_view_attachments' => true,
                 'document_statuses' => $this->documentStatusService->activeList(),
                 'selected_booking' => $this->selectedBooking($request),
+                'absence_reason_options' => $this->bookingService->absenceReasonOptions(),
             ]
         );
+        $content .= (new AbsencePeriodModalRenderer())->render($users, $csrfToken, [
+            'selected_date' => $selectedDate,
+            'can_archive' => $canArchive,
+            'allow_vacation' => $this->authService->hasPermission('vacation_requests.manage'),
+        ]);
 
-        return Response::html($this->view->render('Kalender', $content, '<script src="/assets/js/admin-calendar.js"></script>'));
+        return Response::html($this->view->render(
+            'Kalender',
+            $content,
+            '<script src="/assets/js/admin-calendar.js"></script><script src="/assets/js/admin-absence-periods.js"></script>'
+        ));
     }
 
     public function month(Request $request): Response
@@ -242,6 +255,8 @@ HTML;
                 'empty_message' => 'An diesem Tag sind keine aktiven Buchungen vorhanden.',
                 'can_manage' => $canManage,
                 'can_archive' => $canArchive,
+                'can_manage_vacation' => $this->authService->hasPermission('vacation_requests.manage'),
+                'can_archive_vacation' => $this->authService->hasPermission('vacation_requests.manage'),
                 'can_view_attachments' => true,
                 'document_statuses' => $this->documentStatusService->activeList(),
                 'open_booking_location' => $returnTo,
@@ -251,6 +266,9 @@ HTML;
         $calendarPolicy = is_array($summary['calendar_policy'] ?? null) ? $summary['calendar_policy'] : [];
         $policyNotice = $this->renderCalendarPolicyNotice($calendarPolicy);
         $missingUsersNotice = $this->renderMissingUsersNotice(is_array($summary['missing_users'] ?? null) ? $summary['missing_users'] : []);
+        $absenceAction = $canManage
+            ? '<button type="button" class="button" data-absence-period-open data-selected-date="' . $this->e($date) . '">Abwesenheit nacherfassen</button>'
+            : '';
 
         return <<<HTML
 <div class="calendar-detail__header">
@@ -260,6 +278,7 @@ HTML;
     </div>
     <span class="badge calendar-status-badge is-{$this->e((string) ($summary['status'] ?? 'empty'))}">{$this->e((string) ($summary['status_label'] ?? 'Keine Buchung'))}</span>
 </div>
+<div class="toolbar-actions">{$absenceAction}</div>
 {$policyNotice}
 <div class="calendar-stats">
     <div><span>Buchungen</span><strong>{$this->e((string) ($summary['active_booking_count'] ?? 0))}</strong></div>
@@ -305,11 +324,10 @@ HTML;
     <form method="post" action="/admin/bookings" class="form-grid">
         <input type="hidden" name="return_to" value="{$this->e($returnTo)}">
         <input type="hidden" name="csrf_token" value="{$this->e($csrfToken)}">
+        <input type="hidden" name="entry_type" value="work">
         <label><span>Mitarbeiter</span><select name="user_id" required>{$this->userOptions($users)}</select></label>
         <label><span>Datum</span><input type="date" name="work_date" value="{$this->e($date)}" required></label>
         <label><span>Projekt</span><select name="project_id">{$this->projectOptions($projects)}</select></label>
-        <label><span>Typ</span><select name="entry_type">{$this->entryTypeOptions()}</select></label>
-        <label><span>Abwesenheitsgrund</span><select name="absence_reason_code">{$this->absenceReasonOptions()}</select></label>
         <label><span>Start</span><input type="time" name="start_time"></label>
         <label><span>Ende</span><input type="time" name="end_time"></label>
         <label><span>Pause in Minuten</span><input type="number" name="break_minutes" min="0" step="1" value="0"></label>

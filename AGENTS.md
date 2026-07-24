@@ -116,6 +116,8 @@ Bereits umgesetzt:
 - vollstaendige Admin-Stichtagshistorie mit finalen und revidierten Generationen, generationsbezogenen read-only Journalen und eindeutig gekennzeichneten revidierten PDF-Protokollen
 - jahresbezogene Admin-Urlaubskontenansicht unter `/admin/vacation-requests` mit eingebuchtem Urlaub, vergangenem und zukuenftig genehmigtem Verbrauch, offenen Antraegen, Resturlaub und verfuegbarem Urlaub
 - interne Stichtagssperren in `accounting_closures` mit `source_type = employee_account_cutover`, wirksam fuer Timesheet-Schreibschutz, aber ausgeblendet in normalen Abschlusslisten und Exporten
+- editierbare ganztagige Abwesenheitszeitraeume fuer Urlaub, Krankheit und Fehlzeit mit serverseitiger Vorschau, atomarer Set-Differenz-Korrektur und einzelnen Tagesbuchungen je anrechenbarem Arbeitstag
+- direkte Admin-Urlaubszeitraeume ohne kuenstlichen Mitarbeiterantrag sowie antragsgebundene Zeitraeume fuer genehmigte Urlaubsantraege
 
 Noch nicht final umgesetzt:
 
@@ -155,6 +157,15 @@ Diese Entscheidungen gelten aktuell als gesetzt und sollen nicht ohne expliziten
 - Positive rechnerische Zeitkontostaende werden neutral als positiver Zeitkontostand bezeichnet, nicht automatisch als genehmigte Ueberstunden.
 - Fehlende Tagesbuchungen koennen fuer aktive Mitarbeiter an Werktagen als Status angezeigt werden; dieser abgeleitete Fehlend-Status erzeugt keine automatische `timesheets`-Buchung.
 - Gesetzliche Feiertage und Betriebsurlaub sind Anzeige- und Pflichtlogik; sie erzeugen keine automatischen `timesheets`-Buchungen und deaktivieren abgeleitetes Fehlen bzw. Fehlbuchungs-Pushes.
+- Ganztagige Admin-Abwesenheiten werden ueber `absence_periods` gruppiert. Der Kopf behaelt den gesamten Von-bis-Zeitraum; `timesheets` entstehen nur fuer positive Solltage nach `CalendarPolicyService` und `DailyTargetService`.
+- Zeitraumkorrekturen arbeiten atomar als Datums-Set-Differenz: unveraenderte Tage behalten ihre Timesheet-ID, entfallene Tage werden archiviert und neue Tage eingefuegt. Bestehende Tageszeilen werden nie auf ein anderes Datum verschoben.
+- Verknuepfte Tagesbuchungen und historische Zeilen mit `vacation_request_id` duerfen nicht einzeln bearbeitet, archiviert, wiederhergestellt oder per Bulk-Aktion geaendert werden. Korrekturen erfolgen am gesamten Zeitraum.
+- Direkte Admin-Urlaubsbuchungen erzeugen keinen kuenstlichen Urlaubsantrag. Genehmigte Urlaubsantraege erzeugen genau einen Zeitraum mit `source = vacation_request`; freie historische Einzelbuchungen werden nicht heuristisch gruppiert.
+- Abwesenheitszeitraeume verwenden die feste Sperrreihenfolge: Mitarbeiter-Abwesenheitslock `employee-absence-user-{id}`, globaler `accounting-timesheet-write`-Lock, erneute Vorschau/Pruefung, DB-Transaktion, Freigabe in umgekehrter Reihenfolge.
+- Die angezeigte Zeitraumvorschau wird mit einem serverseitig neu berechneten Vorschau-Token gebunden. Speichern mit fehlender oder durch parallele Policy-/Kontodaten veralteter Vorschau wird abgewiesen und verlangt eine erneute Pruefung.
+- Kalenderzeitraeume benoetigen `timesheets.manage` und zum vollstaendigen Archivieren `timesheets.archive`. Ist ihr Typ Urlaub, wird zusaetzlich `vacation_requests.manage` verlangt; Urlaubsperioden aus dem Urlaubsbereich oder aus genehmigten Antraegen werden ausschliesslich ueber `vacation_requests.manage` verwaltet.
+- Neue Einzelbuchungen ueber den alten Admin-Buchungsweg sind nur noch fuer `work` erlaubt. Historische freie Abwesenheitszeilen bleiben lesbar und innerhalb ihrer Abwesenheitskategorie korrigierbar, koennen aber nicht in Arbeitszeit umgewandelt werden.
+- Der Mitarbeiter eines vorhandenen Abwesenheitszeitraums ist unveraenderlich. Bei einer Fehlzuordnung wird der gesamte Zeitraum mit Pflichtbegruendung archiviert und anschliessend fuer den richtigen Mitarbeiter neu angelegt.
 - Das Firmenprofil ist ein globaler Singleton-Datensatz in `company_settings`.
 - SMTP-Settings liegen aktuell in MariaDB; `smtp_password` wird verschluesselt gespeichert und nutzt `SETTINGS_ENCRYPTION_KEY` bzw. `APP_SECRET` aus der Umgebung.
 - GEO ist fachlich vorbereitet, aber noch nicht produktiv Teil der Zeiterfassung.
@@ -171,6 +182,7 @@ Wichtige Tabellen / Bereiche:
 - `assets`, `asset_assignments`, `asset_files`
 - `company_settings`
 - `timesheets`
+- `absence_periods`, `absence_period_change_log`
 - `employee_account_cutovers`, `time_account_entries`, `vacation_account_entries`
 
 Wichtige Migrationssaetze im Repo:
@@ -190,6 +202,8 @@ Regeln:
 - Betriebsschliessungen werden fuer Tagespolicies nach zeitlicher Jahresueberlappung geladen; eine Schliessung ueber den Jahreswechsel wirkt daher in beiden Kalenderjahren.
 - Archivierungsfelder sind Teil der Historien- und GoBD-Strategie
 - Beziehungen und Historie duerfen durch Archivierung nicht unlesbar werden
+- `timesheets.absence_period_id` gruppiert erzeugte Tageszeilen unter einem Zeitraumskopf; `absence_period_change_log` dokumentiert Anlage, Korrektur und Archivierung mit Akteur, Pflichtbegruendung sowie Vorher-/Nachher-Snapshot.
+- An `absence_periods` verknuepfte Tageszeilen bleiben system-versioniert. Schemaaenderungen an ihrem FK folgen deshalb ebenfalls der `KEEP`/`ERROR`-Regel fuer `system_versioning_alter_history`.
 
 ## 9. Rollen, Rechte und Zugriffe
 Das Rechtekonzept ist getrennt von der Rollendefinition modelliert.

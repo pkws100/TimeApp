@@ -18,6 +18,7 @@ final class AdminBookingService
     private const DEFAULT_PAGE = 1;
     private const DEFAULT_PER_PAGE = 100;
     private const PER_PAGE_OPTIONS = [25, 50, 75, 100];
+    private TimesheetAuditService $auditService;
 
     public function __construct(
         private DatabaseConnection $connection,
@@ -25,11 +26,13 @@ final class AdminBookingService
         private ?TimesheetSignatureService $signatureService = null,
         private ?TimesheetWriteGuard $writeGuard = null,
         private ?DailyTargetService $dailyTargetService = null,
-        private ?TimesheetDayConflictService $dayConflictService = null
+        private ?TimesheetDayConflictService $dayConflictService = null,
+        ?TimesheetAuditService $auditService = null
     ) {
         $this->writeGuard ??= new TimesheetWriteGuard($connection);
         $this->dailyTargetService ??= new DailyTargetService(new CalendarPolicyService($connection));
         $this->dayConflictService ??= new TimesheetDayConflictService($connection);
+        $this->auditService = $auditService ?? new TimesheetAuditService($connection);
     }
 
     public function activeCount(): int
@@ -362,6 +365,9 @@ final class AdminBookingService
         }
 
         $normalized = $this->normalizeManualCreatePayload($payload, $forcedProjectId);
+        if ((string) $normalized['entry_type'] !== 'work') {
+            throw new InvalidArgumentException('Ganztagige Abwesenheiten muessen ueber einen Von-bis-Zeitraum gebucht werden.');
+        }
         $this->assertActiveUserExists((int) $normalized['user_id']);
 
         if (!$this->connection->tableExists('timesheets')) {
@@ -419,6 +425,7 @@ final class AdminBookingService
         if ($before === null) {
             throw new InvalidArgumentException('Die Buchung wurde nicht gefunden.');
         }
+        $this->assertStandaloneBooking($before);
 
         return $this->withAccountingWriteLock(function () use ($id, $payload, $changedByUserId, $reason, $before): ?array {
             $this->assertNotLockedByAccountingClosure($id);
@@ -491,6 +498,7 @@ final class AdminBookingService
                     if ($before === null) {
                         continue;
                     }
+                    $this->assertStandaloneBooking($before);
 
                     $this->assertNotLockedByAccountingClosure($bookingId);
                     $this->assertAccountingPeriodOpen(
@@ -649,6 +657,11 @@ final class AdminBookingService
             'timesheets.entry_type',
             $this->absenceReasonSelect(),
             $this->sourceSelect(),
+            $this->absencePeriodSelect(),
+            $this->vacationRequestSelect(),
+            $this->absencePeriodDateSelect('date_from'),
+            $this->absencePeriodDateSelect('date_to'),
+            $this->absencePeriodSourceSelect(),
             'timesheets.note',
             'timesheets.updated_at',
             'COALESCE(timesheets.is_deleted, 0) AS is_deleted',
@@ -684,6 +697,34 @@ final class AdminBookingService
         return $this->hasTimesheetSourceColumn()
             ? 'COALESCE(timesheets.source, "app") AS source'
             : '"app" AS source';
+    }
+
+    private function absencePeriodSelect(): string
+    {
+        return $this->connection->columnExists('timesheets', 'absence_period_id')
+            ? 'timesheets.absence_period_id'
+            : 'NULL AS absence_period_id';
+    }
+
+    private function vacationRequestSelect(): string
+    {
+        return $this->connection->columnExists('timesheets', 'vacation_request_id')
+            ? 'timesheets.vacation_request_id'
+            : 'NULL AS vacation_request_id';
+    }
+
+    private function absencePeriodDateSelect(string $column): string
+    {
+        return $this->connection->tableExists('absence_periods')
+            ? '(SELECT absence_periods.' . $column . ' FROM absence_periods WHERE absence_periods.id = timesheets.absence_period_id) AS absence_period_' . $column
+            : 'NULL AS absence_period_' . $column;
+    }
+
+    private function absencePeriodSourceSelect(): string
+    {
+        return $this->connection->tableExists('absence_periods')
+            ? '(SELECT absence_periods.source FROM absence_periods WHERE absence_periods.id = timesheets.absence_period_id) AS absence_period_source'
+            : 'NULL AS absence_period_source';
     }
 
     private function insertColumnSql(string $column): string
@@ -725,6 +766,7 @@ final class AdminBookingService
         if ($before === null) {
             throw new InvalidArgumentException('Die Buchung wurde nicht gefunden.');
         }
+        $this->assertStandaloneBooking($before);
 
         $this->withAccountingWriteLock(function () use ($id, $archived, $changedByUserId, $reason, $before): void {
             $current = $this->find($id);
@@ -897,6 +939,10 @@ final class AdminBookingService
     {
         $entryType = trim((string) ($payload['entry_type'] ?? ($before['entry_type'] ?? 'work')));
         $entryType = array_key_exists($entryType, $this->entryTypeOptions()) ? $entryType : 'work';
+        $beforeEntryType = (string) ($before['entry_type'] ?? 'work');
+        if (($beforeEntryType === 'work') !== ($entryType === 'work')) {
+            throw new InvalidArgumentException('Arbeitszeit und ganztagige Abwesenheit koennen nicht ineinander umgewandelt werden.');
+        }
         $requestedReason = trim((string) ($payload['absence_reason_code'] ?? ($before['absence_reason_code'] ?? '')));
         $absenceContextChanged = $entryType !== (string) ($before['entry_type'] ?? '')
             || $requestedReason !== trim((string) ($before['absence_reason_code'] ?? ''));
@@ -1167,6 +1213,16 @@ final class AdminBookingService
             'absence_reason_label' => $this->absenceReasonOptions()[(string) ($row['absence_reason_code'] ?? '')] ?? '',
             'source' => (string) ($row['source'] ?? 'app'),
             'source_label' => $this->sourceLabel((string) ($row['source'] ?? 'app')),
+            'absence_period_id' => isset($row['absence_period_id']) ? (int) $row['absence_period_id'] : null,
+            'vacation_request_id' => isset($row['vacation_request_id']) ? (int) $row['vacation_request_id'] : null,
+            'absence_period_date_from' => $row['absence_period_date_from'] ?? null,
+            'absence_period_date_to' => $row['absence_period_date_to'] ?? null,
+            'absence_period_source' => $row['absence_period_source'] ?? null,
+            'is_period_managed' => (int) ($row['absence_period_id'] ?? 0) > 0
+                || (int) ($row['vacation_request_id'] ?? 0) > 0,
+            'absence_period_edit_url' => (int) ($row['absence_period_id'] ?? 0) > 0
+                ? '/admin/absence-periods/' . (int) $row['absence_period_id']
+                : null,
             'note' => self::nullableTrimmed($row['note'] ?? null),
             'updated_at' => (string) ($row['updated_at'] ?? ''),
             'is_deleted' => $isDeleted,
@@ -1234,37 +1290,14 @@ final class AdminBookingService
 
     private function logChange(int $timesheetId, string $actionType, int $changedByUserId, string $reason, ?array $before, ?array $after): void
     {
-        if (!$this->connection->tableExists('timesheet_change_log')) {
-            return;
-        }
+        $this->auditService->log($timesheetId, $actionType, $changedByUserId, $reason, $before, $after);
+    }
 
-        $this->connection->execute(
-            'INSERT INTO timesheet_change_log (
-                timesheet_id,
-                action_type,
-                changed_by_user_id,
-                change_reason,
-                before_snapshot,
-                after_snapshot,
-                created_at
-             ) VALUES (
-                :timesheet_id,
-                :action_type,
-                :changed_by_user_id,
-                :change_reason,
-                :before_snapshot,
-                :after_snapshot,
-                NOW()
-             )',
-            [
-                'timesheet_id' => $timesheetId,
-                'action_type' => $actionType,
-                'changed_by_user_id' => $changedByUserId > 0 ? $changedByUserId : null,
-                'change_reason' => $reason,
-                'before_snapshot' => $before !== null ? json_encode($before, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE) : null,
-                'after_snapshot' => $after !== null ? json_encode($after, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE) : null,
-            ]
-        );
+    private function assertStandaloneBooking(array $booking): void
+    {
+        if ((int) ($booking['absence_period_id'] ?? 0) > 0 || (int) ($booking['vacation_request_id'] ?? 0) > 0) {
+            throw new InvalidArgumentException('Diese Buchung gehoert zu einem Abwesenheitszeitraum und kann nur ueber "Gesamten Zeitraum bearbeiten" geaendert werden.');
+        }
     }
 
     private function normalizeDate(mixed $value): ?string

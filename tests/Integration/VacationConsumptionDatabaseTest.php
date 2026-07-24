@@ -27,20 +27,10 @@ final class VacationConsumptionDatabaseTest extends MariaDbTestCase
         $dates = $this->fiveWeekdays($year);
         $bookingService = new AdminBookingService($this->connection(), new TimesheetCalculator());
 
-        $paid = $bookingService->createManual([
-            'user_id' => $userId,
-            'work_date' => $dates[0],
-            'entry_type' => 'vacation',
-            'absence_reason_code' => 'vacation_paid',
-            'change_reason' => 'Bezahlter Testurlaub',
-        ], $adminId);
-        $unpaid = $bookingService->createManual([
-            'user_id' => $userId,
-            'work_date' => $dates[1],
-            'entry_type' => 'vacation',
-            'absence_reason_code' => 'unpaid_leave',
-            'change_reason' => 'Unbezahlte Testabwesenheit',
-        ], $adminId);
+        $paidId = $this->insertAbsence($userId, $dates[0], 'vacation', 'vacation_paid', 480);
+        $unpaidId = $this->insertAbsence($userId, $dates[1], 'absent', 'unpaid_leave', 0);
+        $paid = $bookingService->find($paidId) ?? [];
+        $unpaid = $bookingService->find($unpaidId) ?? [];
         $this->insertAbsence($userId, $dates[2], 'vacation', null, 0);
         $legacyUnpaidId = $this->insertAbsence($userId, $dates[3], 'vacation', 'unpaid_leave', 0);
         $this->insertAbsence($userId, $dates[4], 'absent', 'unpaid_leave', 0);
