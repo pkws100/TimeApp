@@ -78,6 +78,7 @@ final class AdminCalendarControllerTest extends TestCase
         self::assertStringContainsString('data-calendar-grid', $html);
         self::assertStringContainsString('data-calendar-day-panel aria-live="polite" aria-busy="false"', $html);
         self::assertStringContainsString('Buchung hinzufuegen', $html);
+        self::assertStringContainsString('Abwesenheit nacherfassen', $html);
         self::assertStringContainsString('/admin/bookings', $html);
     }
 

@@ -1323,6 +1323,64 @@ html[data-theme="dark"] .booking-card.has-booking-issue {
     background: var(--page-surface-soft);
 }
 
+.absence-period-modal__dialog {
+    max-width: 920px;
+}
+
+.absence-period-modal__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .75rem;
+    position: sticky;
+    bottom: 0;
+    padding: .85rem 0;
+    background: var(--page-surface);
+}
+
+.absence-period-preview {
+    display: grid;
+    gap: .75rem;
+}
+
+.absence-period-preview__summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: .75rem;
+}
+
+.absence-period-preview__summary > * {
+    padding: .75rem;
+    border: 1px solid var(--page-line);
+    border-radius: .75rem;
+}
+
+.absence-period-confirm {
+    display: flex;
+    align-items: flex-start;
+    gap: .65rem;
+    padding: .85rem;
+    border: 1px solid var(--page-warn);
+    border-radius: .75rem;
+}
+
+@media (max-width: 760px) {
+    .absence-period-modal__dialog {
+        width: 100%;
+        min-height: 100dvh;
+        max-height: 100dvh;
+        border-radius: 0;
+    }
+
+    .absence-period-preview__summary {
+        grid-template-columns: 1fr;
+    }
+
+    .absence-period-modal__actions .button {
+        min-height: 48px;
+        flex: 1 1 100%;
+    }
+}
+
 .table-note {
     display: inline-block;
     max-width: 28ch;
@@ -2205,5 +2263,16 @@ html[data-theme="dark"] .badge.error {
     .admin-attachment-viewer__actions {
         flex-direction: column;
         align-items: stretch;
+    }
+}
+
+@media (max-width: 760px) {
+    .admin-modal__dialog.absence-period-modal__dialog {
+        width: 100%;
+        height: 100dvh;
+        min-height: 100dvh;
+        max-height: 100dvh;
+        margin: 0;
+        border-radius: 0;
     }
 }

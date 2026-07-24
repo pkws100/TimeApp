@@ -7,11 +7,13 @@ namespace App\Http\Controllers;
 use App\Domain\Auth\AuthService;
 use App\Domain\Auth\CsrfService;
 use App\Domain\TimeAccounts\TimeAccountService;
+use App\Domain\Timesheets\AbsencePeriodService;
 use App\Domain\Users\UserService;
 use App\Domain\Vacation\VacationRequestService;
 use App\Http\Request;
 use App\Http\Response;
 use App\Presentation\Admin\AdminView;
+use App\Presentation\Admin\AbsencePeriodModalRenderer;
 use InvalidArgumentException;
 
 final class AdminVacationRequestController
@@ -22,7 +24,8 @@ final class AdminVacationRequestController
         private TimeAccountService $timeAccountService,
         private UserService $userService,
         private AuthService $authService,
-        private CsrfService $csrfService
+        private CsrfService $csrfService,
+        private ?AbsencePeriodService $absencePeriodService = null
     ) {
     }
 
@@ -40,10 +43,23 @@ final class AdminVacationRequestController
             $this->userService->list('active'),
             static fn (array $user): bool => (string) ($user['employment_status'] ?? '') === 'active'
         ));
+        $directPeriods = $this->absencePeriodService?->listVacationPeriods($filters) ?? [];
+        $content = $this->renderPage($requests, $overview, $users, $filters, $request, $directPeriods);
+
+        if ($this->absencePeriodService instanceof AbsencePeriodService) {
+            $content .= (new AbsencePeriodModalRenderer())->render($users, $this->csrfService->token(), [
+                'vacation_only' => true,
+                'selected_user_id' => (int) $filters['user_id'],
+                'can_archive' => $this->authService->hasPermission('vacation_requests.manage'),
+            ]);
+        }
 
         return Response::html($this->view->render(
             'Urlaubskonten und Urlaubsantraege',
-            $this->renderPage($requests, $overview, $users, $filters, $request)
+            $content,
+            $this->absencePeriodService instanceof AbsencePeriodService
+                ? '<script src="/assets/js/admin-absence-periods.js"></script>'
+                : ''
         ));
     }
 
@@ -91,7 +107,7 @@ final class AdminVacationRequestController
         }
     }
 
-    private function renderPage(array $requests, array $overview, array $users, array $filters, Request $request): string
+    private function renderPage(array $requests, array $overview, array $users, array $filters, Request $request, array $directPeriods = []): string
     {
         $csrfToken = $this->e($this->csrfService->token());
         $statusOptions = $this->options([
@@ -109,6 +125,12 @@ final class AdminVacationRequestController
         $accountRows = $this->accountRows($overview['rows'] ?? [], $canViewTimeAccounts, $canManageTimeAccounts);
         $accountCards = $this->accountCards($overview['rows'] ?? [], $canViewTimeAccounts, $canManageTimeAccounts);
         $year = (int) ($overview['year'] ?? $filters['year'] ?? date('Y'));
+        $directVacationAction = $this->authService->hasPermission('vacation_requests.manage')
+            && $this->absencePeriodService instanceof AbsencePeriodService
+            ? '<button type="button" class="button" data-absence-period-open data-selected-user-id="' . (int) ($filters['user_id'] ?? 0) . '">Urlaub fuer Mitarbeiter buchen</button>'
+            : '';
+        $directPeriodRows = $this->directPeriodRows($directPeriods);
+        $directPeriodCards = $this->directPeriodCards($directPeriods);
 
         return <<<HTML
 <header class="page-header">
@@ -117,6 +139,7 @@ final class AdminVacationRequestController
         <h1>Urlaubskonten und Urlaubsantraege</h1>
         <p>Urlaubsstaende einsehen und Antraege pruefen, genehmigen oder ablehnen.</p>
     </div>
+    <div class="toolbar-actions">{$directVacationAction}</div>
 </header>
 {$notice}
 <section class="card stack">
@@ -142,6 +165,20 @@ final class AdminVacationRequestController
         </div>
     </div>
     <div class="vacation-account-mobile">{$accountCards}</div>
+</section>
+<section class="card stack">
+    <div>
+        <p class="eyebrow">Direkt gebucht</p>
+        <h2>Direkt gebuchte Urlaubszeitraeume</h2>
+        <p class="muted">Diese Zeitraeume wurden durch berechtigte Admins direkt wirksam gebucht und sind keine Mitarbeiterantraege.</p>
+    </div>
+    <div class="table-scroll vacation-account-desktop">
+        <table>
+            <thead><tr><th>Mitarbeiter</th><th>Zeitraum</th><th>Tage</th><th>Herkunft</th><th>Aktion</th></tr></thead>
+            <tbody>{$directPeriodRows}</tbody>
+        </table>
+    </div>
+    <div class="vacation-account-mobile">{$directPeriodCards}</div>
 </section>
 <section class="card stack">
     <div>
@@ -177,7 +214,11 @@ HTML;
                     . '<button class="button" type="submit" formaction="/admin/vacation-requests/' . $id . '/approve">Genehmigen</button>'
                     . '<button class="button button-danger" type="submit" formaction="/admin/vacation-requests/' . $id . '/reject">Ablehnen</button>'
                     . '</form>'
-                : '<span class="muted">Abgeschlossen</span>';
+                : ($status === 'approved'
+                    && (int) ($request['absence_period_id'] ?? 0) > 0
+                    && $this->authService->hasPermission('vacation_requests.manage')
+                    ? '<button type="button" class="button button-secondary" data-absence-period-edit="' . (int) $request['absence_period_id'] . '">Zeitraum korrigieren</button>'
+                    : '<span class="muted">Abgeschlossen</span>');
 
             $html .= '<tr>'
                 . '<td>' . $this->statusBadge($status) . '</td>'
@@ -188,6 +229,85 @@ HTML;
                 . '<td>' . $this->e((string) ($request['decision_note'] ?? '')) . '</td>'
                 . '<td class="table-actions">' . $actions . '</td>'
                 . '</tr>';
+        }
+
+        return $html;
+    }
+
+    private function directPeriodRows(array $periods): string
+    {
+        if ($periods === []) {
+            return '<tr><td colspan="5" class="table-empty">Keine direkt gebuchten Urlaubszeitraeume fuer diese Auswahl vorhanden.</td></tr>';
+        }
+
+        $html = '';
+
+        foreach ($periods as $period) {
+            $source = (string) ($period['source'] ?? '') === 'admin_vacation' ? 'Urlaubsbereich' : 'Kalender';
+            $canManage = (string) ($period['source'] ?? '') === 'admin_vacation'
+                ? $this->authService->hasPermission('vacation_requests.manage')
+                : (
+                    $this->authService->hasPermission('timesheets.manage')
+                    && $this->authService->hasPermission('vacation_requests.manage')
+                );
+            $canArchive = (string) ($period['source'] ?? '') === 'admin_vacation'
+                ? $this->authService->hasPermission('vacation_requests.manage')
+                : (
+                    $this->authService->hasPermission('timesheets.archive')
+                    && $this->authService->hasPermission('vacation_requests.manage')
+                );
+            $action = $canManage || $canArchive
+                ? '<button type="button" class="button button-secondary" data-absence-period-edit="' . (int) $period['id'] . '">'
+                    . ($canManage ? 'Zeitraum bearbeiten' : 'Zeitraum oeffnen')
+                    . '</button>'
+                : '<span class="muted">Nur Lesen</span>';
+            $html .= '<tr>'
+                . '<td>' . $this->e((string) ($period['employee_name'] ?? '')) . '</td>'
+                . '<td>' . $this->e((string) ($period['date_from'] ?? '')) . ' bis ' . $this->e((string) ($period['date_to'] ?? '')) . '</td>'
+                . '<td>' . (int) ($period['booked_day_count'] ?? 0) . '</td>'
+                . '<td>' . $this->e($source) . '</td>'
+                . '<td>' . $action . '</td>'
+                . '</tr>';
+        }
+
+        return $html;
+    }
+
+    private function directPeriodCards(array $periods): string
+    {
+        if ($periods === []) {
+            return '<p class="table-empty">Keine direkt gebuchten Urlaubszeitraeume fuer diese Auswahl vorhanden.</p>';
+        }
+
+        $html = '';
+        foreach ($periods as $period) {
+            $source = (string) ($period['source'] ?? '') === 'admin_vacation' ? 'Urlaubsbereich' : 'Kalender';
+            $canManage = (string) ($period['source'] ?? '') === 'admin_vacation'
+                ? $this->authService->hasPermission('vacation_requests.manage')
+                : (
+                    $this->authService->hasPermission('timesheets.manage')
+                    && $this->authService->hasPermission('vacation_requests.manage')
+                );
+            $canArchive = (string) ($period['source'] ?? '') === 'admin_vacation'
+                ? $this->authService->hasPermission('vacation_requests.manage')
+                : (
+                    $this->authService->hasPermission('timesheets.archive')
+                    && $this->authService->hasPermission('vacation_requests.manage')
+                );
+            $action = $canManage || $canArchive
+                ? '<button type="button" class="button button-secondary" data-absence-period-edit="' . (int) $period['id'] . '">'
+                    . ($canManage ? 'Zeitraum bearbeiten' : 'Zeitraum oeffnen')
+                    . '</button>'
+                : '<span class="muted">Nur Lesen</span>';
+            $html .= '<article class="card vacation-account-card">'
+                . '<strong>' . $this->e((string) ($period['employee_name'] ?? '')) . '</strong>'
+                . '<dl>'
+                . '<div><dt>Zeitraum</dt><dd>' . $this->e((string) ($period['date_from'] ?? '')) . ' bis ' . $this->e((string) ($period['date_to'] ?? '')) . '</dd></div>'
+                . '<div><dt>Tage</dt><dd>' . (int) ($period['booked_day_count'] ?? 0) . '</dd></div>'
+                . '<div><dt>Herkunft</dt><dd>' . $this->e($source) . '</dd></div>'
+                . '</dl>'
+                . '<div class="table-actions">' . $action . '</div>'
+                . '</article>';
         }
 
         return $html;

@@ -657,6 +657,17 @@ final class AdminManagementControllerTest extends TestCase
         self::assertStringContainsString('projects.manage', $bootstrap);
     }
 
+    public function testAbsencePeriodRoutesAreRegisteredWithSeparatedPermissions(): void
+    {
+        $bootstrap = file_get_contents(base_path('bootstrap/app.php')) ?: '';
+
+        self::assertStringContainsString("/admin/absence-periods/preview", $bootstrap);
+        self::assertStringContainsString("/admin/vacation-periods/preview", $bootstrap);
+        self::assertStringContainsString("/admin/absence-periods/{id}/archive", $bootstrap);
+        self::assertStringContainsString("timesheets.manage", $bootstrap);
+        self::assertStringContainsString("vacation_requests.manage", $bootstrap);
+    }
+
     private function invokeProjectLifecycleForm(string $archiveAction, string $restoreAction, bool $archived): string
     {
         $controller = $this->controller();

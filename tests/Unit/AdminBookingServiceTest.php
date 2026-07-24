@@ -312,6 +312,33 @@ final class AdminBookingServiceTest extends TestCase
         self::assertStringContainsString('(string) ($before[\'work_date\'] ?? \'\')', $source);
     }
 
+    public function testStandaloneCreateAndWorkConversionCannotBypassPeriodWorkflow(): void
+    {
+        $service = new AdminBookingService(new DatabaseConnection([]), new TimesheetCalculator());
+
+        try {
+            $service->createManual([
+                'user_id' => 7,
+                'work_date' => '2026-07-24',
+                'entry_type' => 'sick',
+                'absence_reason_code' => 'sick_paid',
+                'change_reason' => 'Bypassversuch',
+            ], 1);
+            self::fail('Eine neue Einzelabwesenheit muss abgewiesen werden.');
+        } catch (InvalidArgumentException $exception) {
+            self::assertStringContainsString('Von-bis-Zeitraum', $exception->getMessage());
+        }
+
+        $method = new ReflectionMethod($service, 'normalizeBookingPayload');
+        $method->setAccessible(true);
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('koennen nicht ineinander umgewandelt');
+        $method->invoke($service, [
+            'entry_type' => 'vacation',
+            'absence_reason_code' => 'vacation_paid',
+        ], $this->bookingRow(['entry_type' => 'work']));
+    }
+
     /**
      * @param array<string, mixed> $overrides
      *

@@ -470,6 +470,8 @@
         var restoreForm = modal.querySelector('[data-booking-action-form="restore"]');
         var archiveButton = modal.querySelector('[data-booking-archive-button]');
         var restoreButton = modal.querySelector('[data-booking-restore-button]');
+        var periodNotice = modal.querySelector('[data-booking-period-notice]');
+        var periodEditButton = modal.querySelector('[data-booking-period-edit]');
 
         modal.hidden = false;
         modal.setAttribute('aria-hidden', 'false');
@@ -554,6 +556,24 @@
             if (visibleReason) {
                 visibleReason.value = '';
             }
+
+            updateForm.querySelectorAll('input, select, textarea, button[type="submit"]').forEach(function (control) {
+                if (!control.dataset.bookingBaseDisabled) {
+                    control.dataset.bookingBaseDisabled = control.disabled ? '1' : '0';
+                }
+                control.disabled = Boolean(booking.is_period_managed) || control.dataset.bookingBaseDisabled === '1';
+            });
+        }
+
+        if (periodNotice) {
+            periodNotice.hidden = !booking.is_period_managed;
+        }
+
+        if (periodEditButton) {
+            periodEditButton.dataset.absencePeriodEdit = booking.absence_period_id || '';
+            periodEditButton.hidden = !booking.is_period_managed
+                || !booking.absence_period_id
+                || (!booking.can_manage_period && !booking.can_archive_period);
         }
 
         modal.querySelectorAll('input[name="return_to"]').forEach(function (field) {
@@ -573,11 +593,11 @@
         }
 
         if (archiveButton) {
-            archiveButton.hidden = Boolean(booking.is_deleted);
+            archiveButton.hidden = Boolean(booking.is_deleted) || Boolean(booking.is_period_managed);
         }
 
         if (restoreButton) {
-            restoreButton.hidden = !Boolean(booking.is_deleted);
+            restoreButton.hidden = !Boolean(booking.is_deleted) || Boolean(booking.is_period_managed);
         }
 
         renderLocations(modal, booking.geo_records);

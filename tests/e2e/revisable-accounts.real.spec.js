@@ -245,4 +245,112 @@ test.describe('real revisable account workflow', () => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
     await context.close();
   });
+
+  test('admin creates, corrects and validates an absence period atomically', async ({ page }) => {
+    const employeeId = process.env.UI_TEST_EMPLOYEE_ID;
+    const dateFrom = process.env.UI_TEST_ABSENCE_DATE_FROM;
+    const dateShortTo = process.env.UI_TEST_ABSENCE_DATE_SHORT_TO;
+    const dateTo = process.env.UI_TEST_ABSENCE_DATE_TO;
+    const dateExtendedTo = process.env.UI_TEST_ABSENCE_DATE_EXTENDED_TO;
+    const conflictDate = process.env.UI_TEST_ABSENCE_CONFLICT_DATE;
+    const year = dateFrom.slice(0, 4);
+
+    await page.goto('/admin/login');
+    await page.getByLabel('E-Mail').fill(process.env.UI_TEST_ADMIN_EMAIL);
+    await page.getByLabel('Passwort').fill(process.env.UI_TEST_ADMIN_PASSWORD);
+    await page.getByRole('button', { name: 'Anmelden' }).click();
+    await page.goto('/admin/vacation-requests?year=' + year + '&user_id=' + employeeId);
+    const accountRow = page.locator('section.vacation-account-overview .vacation-account-desktop tbody tr')
+      .filter({ hasText: 'UI Mitarbeiter' });
+    const parseDays = (value) => Number(String(value).replace(/[^\d,-]/g, '').replace('.', '').replace(',', '.'));
+    const remainingBefore = parseDays(await accountRow.locator('td').nth(6).innerText());
+
+    await page.getByRole('button', { name: 'Urlaub fuer Mitarbeiter buchen' }).click();
+    const modal = page.locator('[data-absence-period-modal]');
+    await expect(modal).toBeVisible();
+    await modal.locator('select[name="user_id"]').selectOption(employeeId);
+    await modal.locator('input[name="date_from"]').fill(dateFrom);
+    await modal.locator('input[name="date_to"]').fill(dateTo);
+    await modal.locator('textarea[name="note"]').fill('Playwright Von-bis-Urlaub');
+    await modal.locator('textarea[name="change_reason"]').fill('Playwright Neuanlage');
+    await modal.getByRole('button', { name: 'Zeitraum pruefen' }).click();
+    await expect(modal.locator('[data-absence-period-preview]')).toContainText('Buchungstage');
+    await expect(modal.locator('[data-absence-period-preview]')).not.toContainText('Blockiert');
+    await modal.getByRole('button', { name: 'Verbindlich speichern' }).click();
+
+    const directSection = page.locator('section').filter({
+      has: page.getByRole('heading', { name: 'Direkt gebuchte Urlaubszeitraeume' })
+    });
+    const directRow = directSection.locator('tbody tr').filter({ hasText: 'UI Mitarbeiter' });
+    await expect(directRow).toContainText(dateFrom + ' bis ' + dateTo);
+    const remainingAfter = parseDays(await accountRow.locator('td').nth(6).innerText());
+    expect(remainingAfter).toBeLessThan(remainingBefore);
+
+    await directSection.locator('[data-absence-period-edit]:visible').click();
+    await expect(modal).toBeVisible();
+    await expect(modal.locator('select[name="user_id"]')).toBeDisabled();
+    await modal.locator('input[name="date_to"]').fill(dateShortTo);
+    await modal.locator('textarea[name="change_reason"]').fill('Playwright Verkuerzung');
+    await modal.getByRole('button', { name: 'Zeitraum pruefen' }).click();
+    await expect(modal.locator('[data-absence-period-preview]')).toContainText('entfaellt');
+    await modal.getByRole('button', { name: 'Verbindlich speichern' }).click();
+    await expect(directSection.locator('tbody tr').filter({ hasText: 'UI Mitarbeiter' }))
+      .toContainText(dateFrom + ' bis ' + dateShortTo);
+
+    await directSection.locator('[data-absence-period-edit]:visible').click();
+    await expect(modal).toBeVisible();
+    await modal.locator('input[name="date_to"]').fill(dateExtendedTo);
+    await modal.locator('textarea[name="change_reason"]').fill('Playwright Verlaengerung');
+    await modal.getByRole('button', { name: 'Zeitraum pruefen' }).click();
+    await expect(modal.locator('[data-absence-period-preview]')).toContainText('neu');
+    await modal.getByRole('button', { name: 'Verbindlich speichern' }).click();
+    await expect(directSection.locator('tbody tr').filter({ hasText: 'UI Mitarbeiter' }))
+      .toContainText(dateFrom + ' bis ' + dateExtendedTo);
+
+    await page.goto('/admin/calendar?month=' + dateFrom.slice(0, 7) + '&date=' + dateFrom);
+    await expect(page.locator('.calendar-bookings-card')).toContainText('Urlaub');
+    const periodButton = page.getByRole('button', { name: 'Gesamten Zeitraum bearbeiten' });
+    await expect(periodButton).toBeVisible();
+    await periodButton.click();
+    await expect(page).toHaveURL(/absence_period_id=\d+/);
+    await page.goBack();
+    await expect(page).not.toHaveURL(/absence_period_id=/);
+    await expect(modal).toBeHidden();
+    await page.goForward();
+    await expect(page).toHaveURL(/absence_period_id=\d+/);
+    await expect(modal).toBeVisible();
+    await page.reload();
+    await expect(modal).toBeVisible();
+    await modal.getByRole('button', { name: 'Schliessen' }).click();
+    await expect(page).not.toHaveURL(/absence_period_id=/);
+
+    await page.goto('/admin/calendar?month=' + conflictDate.slice(0, 7) + '&date=' + conflictDate);
+    await page.getByRole('button', { name: 'Abwesenheit nacherfassen' }).click();
+    await modal.locator('select[name="user_id"]').selectOption(employeeId);
+    await modal.locator('input[name="date_from"]').fill(conflictDate);
+    await modal.locator('input[name="date_to"]').fill(conflictDate);
+    await modal.locator('textarea[name="change_reason"]').fill('Playwright Konfliktpruefung');
+    await modal.getByRole('button', { name: 'Zeitraum pruefen' }).click();
+    await expect(modal.locator('[data-absence-period-preview]')).toContainText('Blockiert');
+    await expect(modal.getByRole('button', { name: 'Verbindlich speichern' })).toBeDisabled();
+
+    await modal.locator('input[name="date_from"]').fill(dateFrom);
+    await modal.locator('input[name="date_to"]').fill('2070-12-12');
+    await modal.getByRole('button', { name: 'Zeitraum pruefen' }).click();
+    await expect(modal.locator('[data-absence-period-error]')).toContainText('366');
+    await expect(modal.locator('[data-absence-period-error]')).toBeFocused();
+    await expect(modal.getByRole('button', { name: 'Verbindlich speichern' })).toBeDisabled();
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
+    const modalBounds = await modal.locator('.absence-period-modal__dialog').boundingBox();
+    expect(modalBounds.x).toBe(0);
+    expect(modalBounds.y).toBe(0);
+    expect(Math.round(modalBounds.width)).toBe(390);
+    expect(Math.round(modalBounds.height)).toBe(844);
+    const lastFocusable = modal.getByRole('button', { name: 'Zeitraum pruefen' });
+    await lastFocusable.focus();
+    await page.keyboard.press('Tab');
+    await expect(modal.getByRole('button', { name: 'Schliessen' })).toBeFocused();
+  });
 });

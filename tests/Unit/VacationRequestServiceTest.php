@@ -37,6 +37,24 @@ final class VacationRequestServiceTest extends TestCase
         $service->createForUser(1, ['date_from' => '2026-01-02', 'date_to' => '2026-01-05']);
     }
 
+    public function testCreateRejectsOutOfRangeAndOverlongRequestsBeforeDateIteration(): void
+    {
+        $pdo = new VacationPdoDouble();
+        $pdo->users[1] = $pdo->user();
+        $service = $this->service($pdo);
+
+        try {
+            $service->createForUser(1, ['date_from' => '1999-12-31', 'date_to' => '2000-01-02']);
+            self::fail('Jahre vor 2000 muessen abgewiesen werden.');
+        } catch (InvalidArgumentException $exception) {
+            self::assertStringContainsString('gueltigen Zeitraum', $exception->getMessage());
+        }
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('maximal 366');
+        $service->createForUser(1, ['date_from' => '2026-01-01', 'date_to' => '2070-12-12']);
+    }
+
     public function testApproveCreatesVacationTimesheetsAndIsIdempotent(): void
     {
         $pdo = new VacationPdoDouble();

@@ -8,6 +8,7 @@ use App\Domain\Calendar\CalendarPolicyService;
 use App\Domain\TimeAccounts\DailyTargetService;
 use App\Domain\Timesheets\TimesheetDayConflictService;
 use App\Domain\Timesheets\TimesheetWriteGuard;
+use App\Domain\Timesheets\AbsencePeriodService;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateInterval;
 use DatePeriod;
@@ -23,7 +24,8 @@ final class VacationRequestService
         private CalendarPolicyService $calendarPolicyService,
         private TimesheetWriteGuard $writeGuard,
         private ?DailyTargetService $dailyTargetService = null,
-        private ?TimesheetDayConflictService $dayConflictService = null
+        private ?TimesheetDayConflictService $dayConflictService = null,
+        private ?AbsencePeriodService $absencePeriodService = null
     ) {
         $this->dailyTargetService ??= new DailyTargetService($calendarPolicyService);
         $this->dayConflictService ??= new TimesheetDayConflictService($connection);
@@ -125,29 +127,39 @@ final class VacationRequestService
         $employeeNote = $this->nullableTrimmed($payload['employee_note'] ?? ($payload['note'] ?? null));
 
         return $this->withUserVacationLock($userId, function () use ($userId, $preview, $employeeNote): array {
-            $this->assertNoOverlappingRequest($userId, $preview['date_from'], $preview['date_to']);
+            return $this->writeGuard->withAccountingWriteLock(function () use ($userId, $preview, $employeeNote): array {
+                $this->assertNoOverlappingRequest($userId, $preview['date_from'], $preview['date_to']);
+                $this->writeGuard->assertAccountingPeriodsOpen($userId, $preview['work_dates']);
+                $this->dayConflictService?->assertNoConflictsForVacationRequest($userId, $preview['work_dates']);
 
-            $this->connection->execute(
-                'INSERT INTO vacation_requests (
-                    user_id, date_from, date_to, day_count, status, employee_note, decision_note, requested_at, decided_at, decided_by_user_id, created_at, updated_at, is_deleted, deleted_at, deleted_by_user_id
-                 ) VALUES (
-                    :user_id, :date_from, :date_to, :day_count, "pending", :employee_note, NULL, NOW(), NULL, NULL, NOW(), NOW(), 0, NULL, NULL
-                 )',
-                [
-                    'user_id' => $userId,
-                    'date_from' => $preview['date_from'],
-                    'date_to' => $preview['date_to'],
-                    'day_count' => $preview['day_count'],
-                    'employee_note' => $employeeNote,
-                ]
-            );
+                $this->connection->execute(
+                    'INSERT INTO vacation_requests (
+                        user_id, date_from, date_to, day_count, status, employee_note, decision_note, requested_at, decided_at, decided_by_user_id, created_at, updated_at, is_deleted, deleted_at, deleted_by_user_id
+                     ) VALUES (
+                        :user_id, :date_from, :date_to, :day_count, "pending", :employee_note, NULL, NOW(), NULL, NULL, NOW(), NOW(), 0, NULL, NULL
+                     )',
+                    [
+                        'user_id' => $userId,
+                        'date_from' => $preview['date_from'],
+                        'date_to' => $preview['date_to'],
+                        'day_count' => $preview['day_count'],
+                        'employee_note' => $employeeNote,
+                    ]
+                );
 
-            return $this->find((int) $this->connection->lastInsertId()) ?? [];
+                return $this->find((int) $this->connection->lastInsertId()) ?? [];
+            });
         });
     }
 
     public function approve(int $requestId, int $adminUserId, ?string $decisionNote = null): array
     {
+        if ($this->absencePeriodService instanceof AbsencePeriodService) {
+            $this->absencePeriodService->approveVacationRequest($requestId, $adminUserId, $decisionNote);
+
+            return $this->find($requestId) ?? [];
+        }
+
         $request = $this->find($requestId);
 
         if ($request === null) {
@@ -489,7 +501,7 @@ final class VacationRequestService
 
     private function withUserVacationLock(int $userId, callable $callback): mixed
     {
-        $lockName = 'vacation-request-user-' . max(0, $userId);
+        $lockName = 'employee-absence-user-' . max(0, $userId);
         $locked = (int) ($this->connection->fetchColumn('SELECT GET_LOCK(:lock_name, 10)', ['lock_name' => $lockName]) ?? 0);
 
         if ($locked !== 1) {
@@ -552,6 +564,13 @@ final class VacationRequestService
         if ($dateTo < $dateFrom) {
             throw new InvalidArgumentException('Das Enddatum darf nicht vor dem Startdatum liegen.');
         }
+        $calendarDays = (int) (new DateTimeImmutable($dateFrom))
+            ->diff(new DateTimeImmutable($dateTo))
+            ->days + 1;
+
+        if ($calendarDays > 366) {
+            throw new InvalidArgumentException('Ein Urlaubsantrag darf maximal 366 Kalendertage umfassen.');
+        }
 
         return ['date_from' => $dateFrom, 'date_to' => $dateTo];
     }
@@ -568,7 +587,9 @@ final class VacationRequestService
         $errors = DateTimeImmutable::getLastErrors();
 
         if ($date instanceof DateTimeImmutable && $date->format('Y-m-d') === $value && ($errors === false || ((int) $errors['warning_count'] === 0 && (int) $errors['error_count'] === 0))) {
-            return $date->format('Y-m-d');
+            $year = (int) $date->format('Y');
+
+            return $year >= 2000 && $year <= 2100 ? $date->format('Y-m-d') : null;
         }
 
         return null;
@@ -626,6 +647,20 @@ final class VacationRequestService
     private function normalizeRequestRow(array $row): array
     {
         $name = trim((string) ($row['first_name'] ?? '') . ' ' . (string) ($row['last_name'] ?? ''));
+        $absencePeriodId = isset($row['absence_period_id']) ? (int) $row['absence_period_id'] : 0;
+
+        if ($absencePeriodId <= 0
+            && (int) ($row['id'] ?? 0) > 0
+            && $this->connection->tableExists('absence_periods')) {
+            $absencePeriodId = (int) ($this->connection->fetchColumn(
+                'SELECT id
+                 FROM absence_periods
+                 WHERE vacation_request_id = :vacation_request_id
+                 ORDER BY id DESC
+                 LIMIT 1',
+                ['vacation_request_id' => (int) $row['id']]
+            ) ?? 0);
+        }
 
         return [
             'id' => (int) ($row['id'] ?? 0),
@@ -643,6 +678,7 @@ final class VacationRequestService
             'created_at' => (string) ($row['created_at'] ?? ''),
             'updated_at' => (string) ($row['updated_at'] ?? ''),
             'is_deleted' => (int) ($row['is_deleted'] ?? 0),
+            'absence_period_id' => $absencePeriodId > 0 ? $absencePeriodId : null,
         ];
     }
 

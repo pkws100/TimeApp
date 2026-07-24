@@ -11,7 +11,7 @@
 - `project_dispatches`, `project_dispatch_recipients`
 - `assets`, `asset_assignments`, `asset_files`
 - `company_settings`
-- `timesheets`, `timesheet_customer_signatures`
+- `timesheets`, `timesheet_customer_signatures`, `absence_periods`, `absence_period_change_log`
 - `employee_account_cutovers`, `time_account_entries`, `vacation_account_entries`
 
 ## Fachliche Leitlinien
@@ -28,6 +28,10 @@
 - `timesheets` deckt `work`, `sick`, `vacation`, `holiday` und `absent` ab.
 - `timesheets.credited_minutes` speichert ausschliesslich Zeitgutschriften fuer nicht geleistete Arbeit; `absence_reason_code` differenziert Abwesenheiten wie bezahlten Urlaub, bezahlte Krankheit, unbezahlte Abwesenheit und unentschuldigtes Fehlen.
 - Verbrauchter Erholungsurlaub ist `entry_type = vacation` zusammen mit `absence_reason_code = vacation_paid`. Historische Urlaubstage mit `absence_reason_code IS NULL` gelten weiter als bezahlt; ein explizites `unpaid_leave` ist unabhaengig vom Legacy-`entry_type` eine unbezahlte Abwesenheit und mindert das Urlaubskonto nicht.
+- `absence_periods` ist der revisionsfaehige Kopf fuer ganztagige Von-bis-Abwesenheiten. Der Kopf speichert den vollstaendigen Kalenderzeitraum, waehrend `timesheets.absence_period_id` nur die je positivem Solltag erzeugten Tagesbuchungen verknuepft.
+- Ein Zeitraum stammt serverseitig aus `admin_calendar`, `admin_vacation` oder `vacation_request`. Direkte Admin-Urlaube bleiben von Mitarbeiterantraegen getrennt; ein genehmigter Antrag ist ueber `vacation_request_id` eindeutig genau einem Zeitraum zugeordnet.
+- Die unveraenderliche Quelle steuert die Grundberechtigung: Kalenderzeitraeume verwenden Timesheet-Rechte, Urlaubsbereich und Antrag verwenden Urlaubsrechte. Ein Kalenderzeitraum vom Typ Urlaub benoetigt kumulativ auch das Urlaubsverwaltungsrecht.
+- `absence_period_change_log` ist ein unveraenderliches Fach-Audit mit Aktion, Akteur, Pflichtbegruendung und Vorher-/Nachher-Snapshot. Die betroffenen Tageszeilen werden zusaetzlich im bestehenden `timesheet_change_log` protokolliert.
 - Ein finaler Einfuehrungsstichtag in `employee_account_cutovers` definiert den verbindlich uebernommenen Zeitkontostand am Ende des Vortages. Zeiten vor `effective_from` veraendern den neuen kumulierten Zeitkontostand nicht mehr.
 - `time_account_entries` und `vacation_account_entries` sind unveraenderliche Journale fuer Eroeffnungen, manuelle Korrekturen, Auszahlungen, Verfall und Gegenbuchungen. Fehler werden durch `reversal`-Buchungen mit `reversal_of_id` korrigiert, nicht durch Bearbeiten oder Loeschen alter Journalzeilen.
 - Stichtagsfinalisierungen speichern fachliche Nullwerte weiterhin im Stichtagsdatensatz und Protokoll, erzeugen dafuer aber keine wirkungslosen Journalzeilen. Revidierungen gleichen nur offene, von null verschiedene Ursprungsbuchungen aus; bereits ausgeglichene Eintraege und Reversal-Zeilen werden nicht erneut verarbeitet.
@@ -55,6 +59,9 @@
 - Ohne finalisierten Stichtag bleiben Monatsauswertungen verfuegbar, aber es wird kein kumulierter Zeitkontostand erfunden.
 - Monate vollstaendig vor dem aktiven Stichtag liefern `cutover_status = not_active_in_period` und zeigen keinen kuenstlichen Eroeffnungs- oder Endbestand.
 - Manuelle ganztagige Abwesenheiten sind nur an Tagen mit positivem effektivem Tages-Soll erlaubt. Wochenenden, Feiertage und Betriebsschliessungen erzeugen keinen zusaetzlichen Abwesenheitsgutschrift-Bedarf.
+- Von-bis-Abwesenheiten behalten Wochenenden, Feiertage, Betriebsschliessungen und Null-Soll-Tage im Kopfzeitraum, ueberspringen sie aber transparent bei der Erzeugung von Tagesbuchungen.
+- Zeitraumkorrekturen bilden atomar die Set-Differenz alter und neuer Buchungstage. Gleiche Daten behalten ihre Timesheet-ID und Anhaenge, entfernte Daten werden archiviert und neue Daten eingefuegt; eine vorhandene Zeile wird nie auf ein anderes Datum verschoben.
+- Einzelne verknuepfte Tageszeilen sowie Legacy-Zeilen mit `vacation_request_id` sind gegen Bearbeitung, Bulk-Aenderung, Archivierung und Wiederherstellung geschuetzt.
 - Mehrere Arbeitsbuchungen am selben Tag sind zulaessig. Arbeit plus ganztagige Abwesenheit sowie doppelte ganztagige Abwesenheiten werden zentral serverseitig blockiert.
 - Dieselben Konflikt- und Tages-Soll-Pruefungen gelten beim Wiederherstellen archivierter Buchungen erneut gegen den aktuellen Kalender- und Buchungsstand.
 - Betriebsschliessungen werden fuer Tagesberechnungen ueber `date_from/date_to` nach Kalenderjahresueberlappung geladen; das Hilfsfeld `year` dient nur Listen und Gruppierung.
@@ -63,6 +70,8 @@
 - Arbeitszeitmodell-Aenderungen bei aktiven Zeitkonten mit Bewegungen werden blockiert, weil historische Arbeitszeitmodellversionen noch nicht voll modelliert sind.
 - Feiertagsregionen und rueckwirkende Betriebsschliessungen werden blockiert, wenn aktive Zeitkonten betroffen waeren.
 - Die feste Sperrreihenfolge fuer Stichtagsfinalisierung und Revidierung lautet: Mitarbeiter-Stichtagslock, globaler `accounting-timesheet-write`-Lock, erneute Vorschau/Pruefung, DB-Transaktion, Freigabe in umgekehrter Reihenfolge.
+- Die feste Sperrreihenfolge fuer Anlage, Korrektur und Archivierung eines Abwesenheitszeitraums lautet: `employee-absence-user-{id}`, globaler `accounting-timesheet-write`-Lock, erneute Vorschau und Pruefung aller alten und neuen Tage, DB-Transaktion, Freigabe in umgekehrter Reihenfolge. Konflikte, Abrechnungssperren, Stichtage und veraltete `lock_version` brechen den gesamten Vorgang ab.
+- Anlage und Korrektur vergleichen ausserdem ein Vorschau-Token mit der unter den Schreiblocks neu berechneten Vorschau. Aendern sich Buchungstage, Warnungen, Kalenderpolicy oder Urlaubsauswirkung zwischen Vorschau und Speichern, muss der Admin den neuen Stand erneut pruefen.
 
 ## Seeder-Startpunkt
 - Standard-Seeds liefern Rollen, Rechte und notwendige Referenzdaten.
@@ -74,4 +83,5 @@
 - Zeitkonto-, Lock-, Migrations-, Foreign-Key- und System-Versioning-Tests verwenden pro Testklasse eine zufaellige Scratch-Datenbank auf MariaDB.
 - Die Testbasis migriert das Schema mit Phinx, leert Testdaten zwischen Methoden und entfernt die Datenbank danach. Produktivdatenbanken werden nicht als Testziel verwendet.
 - Lokale Testzugriffe koennen mit `TIMEAPP_TEST_DB_*` konfiguriert werden. Ein isolierter App-Prozess kann `DB_OVERRIDE_FILE` auf einen separaten oder nicht vorhandenen Override-Pfad setzen.
+- `bin/inspect-absence-periods.php` prueft historische Antrags-, Zeitraum- und Tagesverknuepfungen read-only und meldet Inkonsistenzen, ohne freie Einzelbuchungen heuristisch zu veraendern.
 - Der reale Playwright-Zeitkonto-Runner erstellt ausschliesslich zufaellige Datenbanken mit dem Praefix `timeapp_ui_`, verwendet synthetische Benutzer und entfernt Datenbank, Serverlogs und Browserartefakte auch bei Fehlern. Jahresuebergreifende Betriebsschliessungen werden relativ zum aktuellen Jahr erzeugt, damit der Workflow nicht durch veraltete feste Testdaten ausfaellt.

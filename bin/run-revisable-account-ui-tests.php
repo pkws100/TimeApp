@@ -29,6 +29,19 @@ while ((int) $restoreDateValue->format('N') !== 1) {
 $restoreDate = $restoreDateValue->format('Y-m-d');
 $vacationDate = null;
 $vacationYear = null;
+$absenceStartValue = new DateTimeImmutable('+35 days');
+while ((int) $absenceStartValue->format('N') > 5) {
+    $absenceStartValue = $absenceStartValue->modify('+1 day');
+}
+$absenceDateFrom = $absenceStartValue->format('Y-m-d');
+$absenceDateShortTo = $absenceStartValue->modify('+2 days')->format('Y-m-d');
+$absenceDateTo = $absenceStartValue->modify('+6 days')->format('Y-m-d');
+$absenceDateExtendedTo = $absenceStartValue->modify('+9 days')->format('Y-m-d');
+$absenceConflictValue = $absenceStartValue->modify('+21 days');
+while ((int) $absenceConflictValue->format('N') > 5) {
+    $absenceConflictValue = $absenceConflictValue->modify('+1 day');
+}
+$absenceConflictDate = $absenceConflictValue->format('Y-m-d');
 
 $removeTree = static function (string $path) use (&$removeTree): void {
     if (!is_dir($path)) {
@@ -212,6 +225,16 @@ try {
     $connection->execute(
         'INSERT INTO timesheets (
             user_id, project_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes,
+            credited_minutes, entry_type, source, note, updated_at, is_deleted
+         ) VALUES (
+            :user_id, :project_id, :work_date, "07:00:00", "15:00:00", 480, 30, 450,
+            0, "work", "admin", "Konflikt fuer Zeitraum-Vorschau", NOW(), 0
+         )',
+        ['user_id' => $employeeId, 'project_id' => $projectId, 'work_date' => $absenceConflictDate]
+    );
+    $connection->execute(
+        'INSERT INTO timesheets (
+            user_id, project_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes,
             credited_minutes, absence_reason_code, entry_type, source, note, updated_at, is_deleted, deleted_at
          ) VALUES (
             :user_id, NULL, :work_date, NULL, NULL, 0, 0, 0,
@@ -279,6 +302,7 @@ try {
         'UI_TEST_ADMIN_PASSWORD' => $password,
         'UI_TEST_EMPLOYEE_EMAIL' => 'ui-employee@example.test',
         'UI_TEST_EMPLOYEE_PASSWORD' => $password,
+        'UI_TEST_EMPLOYEE_ID' => (string) $employeeId,
         'UI_TEST_PAGINATION_USER_ID' => (string) $paginationUserId,
         'UI_TEST_RESTORE_BOOKING_ID' => (string) $restoreBookingId,
         'UI_TEST_ACCOUNT_YEAR' => (string) $accountYear,
@@ -287,6 +311,11 @@ try {
         'UI_TEST_CLOSURE_YEAR' => (string) $closureYear,
         'UI_TEST_CLOSURE_DATE_FROM' => $closureDateFrom,
         'UI_TEST_CLOSURE_DATE_TO' => $closureDateTo,
+        'UI_TEST_ABSENCE_DATE_FROM' => $absenceDateFrom,
+        'UI_TEST_ABSENCE_DATE_SHORT_TO' => $absenceDateShortTo,
+        'UI_TEST_ABSENCE_DATE_TO' => $absenceDateTo,
+        'UI_TEST_ABSENCE_DATE_EXTENDED_TO' => $absenceDateExtendedTo,
+        'UI_TEST_ABSENCE_CONFLICT_DATE' => $absenceConflictDate,
     ]);
     $playwright = base_path('node_modules/.bin/playwright');
     fwrite(STDOUT, $run([$playwright, 'test', 'tests/e2e/revisable-accounts.real.spec.js', '--output=' . $outputDirectory], $playwrightEnvironment));

@@ -17,6 +17,8 @@ final class BookingModalRenderer
         $emptyMessage = (string) ($options['empty_message'] ?? 'Keine Buchungen vorhanden.');
         $canManage = (bool) ($options['can_manage'] ?? false);
         $canArchive = (bool) ($options['can_archive'] ?? false);
+        $canManageVacation = (bool) ($options['can_manage_vacation'] ?? false);
+        $canArchiveVacation = (bool) ($options['can_archive_vacation'] ?? $canManageVacation);
         $canViewAttachments = (bool) ($options['can_view_attachments'] ?? false);
         $openBookingLocation = (string) ($options['open_booking_location'] ?? '/admin/bookings');
         $canOpenModal = $canManage || $canArchive || $canViewAttachments;
@@ -84,14 +86,29 @@ final class BookingModalRenderer
             $signatureDisplay = $signature !== null
                 ? '<span class="badge ok">Bestaetigt</span><br><span class="muted">' . $this->e((string) ($signature['customer_name'] ?? '')) . '</span>'
                 : '<span class="muted">-</span>';
+            $isPeriodManaged = (bool) ($booking['is_period_managed'] ?? false);
+            $periodId = (int) ($booking['absence_period_id'] ?? 0);
+            $periodSource = (string) ($booking['absence_period_source'] ?? '');
+            $canManagePeriod = in_array($periodSource, ['admin_vacation', 'vacation_request'], true)
+                ? $canManageVacation
+                : ($canManage && ($displayEntryType !== 'vacation' || $canManageVacation));
+            $canArchivePeriod = in_array($periodSource, ['admin_vacation', 'vacation_request'], true)
+                ? $canArchiveVacation
+                : ($canArchive && ($displayEntryType !== 'vacation' || $canArchiveVacation));
             $actionLabel = $canManage ? 'Bearbeiten' : 'Ansehen';
-            $actionButton = $canOpenModal
-                ? '<a class="button button-secondary booking-edit-trigger" data-booking-open aria-haspopup="dialog" href="' . $this->e($this->openBookingLocation($openBookingLocation, $id)) . '">' . $this->e($actionLabel) . '</a>'
-                : '<span class="muted">Nur Ansicht</span>';
+            $actionButton = $isPeriodManaged && $periodId > 0 && ($canManagePeriod || $canArchivePeriod)
+                ? '<button type="button" class="button button-secondary" data-absence-period-edit="' . $periodId . '">Gesamten Zeitraum bearbeiten</button>'
+                : ($isPeriodManaged
+                    ? '<span class="muted">Nur Ansicht</span>'
+                    : ($canOpenModal
+                        ? '<a class="button button-secondary booking-edit-trigger" data-booking-open aria-haspopup="dialog" href="' . $this->e($this->openBookingLocation($openBookingLocation, $id)) . '">' . $this->e($actionLabel) . '</a>'
+                        : '<span class="muted">Nur Ansicht</span>'));
             $selectionCell = $showSelection
-                ? '<td data-booking-column="selection"><input type="checkbox" name="booking_ids[]" value="' . $id . '"' . ($bulkFormId !== '' ? ' form="' . $this->e($bulkFormId) . '"' : '') . '></td>'
+                ? '<td data-booking-column="selection"><input type="checkbox" name="booking_ids[]" value="' . $id . '"' . ($bulkFormId !== '' ? ' form="' . $this->e($bulkFormId) . '"' : '') . ($isPeriodManaged ? ' disabled title="Nur ueber den gesamten Zeitraum aenderbar"' : '') . '></td>'
                 : '';
             $rowData = $this->rowData($booking, $typeLabel, $projectLabel);
+            $rowData['can_manage_period'] = $canManagePeriod;
+            $rowData['can_archive_period'] = $canArchivePeriod;
             $rowClasses = trim(($canOpenModal ? 'booking-row is-clickable' : 'booking-row') . ($hasBookingIssue ? ' has-booking-issue' : ''));
             $tabIndex = $canOpenModal ? '0' : '-1';
 
@@ -100,7 +117,7 @@ final class BookingModalRenderer
                 . '<td data-booking-column="date">' . $this->e((string) ($booking['work_date'] ?? '')) . '</td>'
                 . '<td data-booking-column="employee"><strong>' . $this->e((string) ($booking['employee_name'] ?? '')) . '</strong><br><span class="muted">' . $this->e((string) ($booking['employee_number'] ?? '')) . '</span></td>'
                 . '<td data-booking-column="project">' . $projectDisplay . '</td>'
-                . '<td data-booking-column="type">' . $typeDisplay . '</td>'
+                . '<td data-booking-column="type">' . $typeDisplay . ($isPeriodManaged ? '<br><span class="badge">Zeitraumbuchung</span>' : '') . '</td>'
                 . '<td data-booking-column="source"><span class="badge">' . $this->e($sourceLabel) . '</span></td>'
                 . '<td data-booking-column="start">' . $this->displayTime($booking['start_time'] ?? null) . '</td>'
                 . '<td data-booking-column="end">' . $this->displayTime($booking['end_time'] ?? null) . '</td>'
@@ -116,7 +133,7 @@ final class BookingModalRenderer
                 . '</tr>';
 
             $selectionControl = $showSelection
-                ? '<label class="booking-card__check"><input type="checkbox" name="booking_ids[]" value="' . $id . '"' . ($bulkFormId !== '' ? ' form="' . $this->e($bulkFormId) . '"' : '') . '><span>Auswaehlen</span></label>'
+                ? '<label class="booking-card__check"><input type="checkbox" name="booking_ids[]" value="' . $id . '"' . ($bulkFormId !== '' ? ' form="' . $this->e($bulkFormId) . '"' : '') . ($isPeriodManaged ? ' disabled' : '') . '><span>' . ($isPeriodManaged ? 'Zeitraum' : 'Auswaehlen') . '</span></label>'
                 : '';
             $issueBadges = ($needsProjectAssignment ? '<span class="badge warn">Projekt offen</span>' : '')
                 . ($hasIncompleteTime ? '<span class="badge error">Zeit unvollstaendig</span>' : '');
@@ -129,7 +146,7 @@ final class BookingModalRenderer
                 . '<div><span class="muted">' . $this->e((string) ($booking['work_date'] ?? '')) . '</span><strong>' . $this->e((string) ($booking['employee_name'] ?? '')) . '</strong></div>'
                 . $selectionControl
                 . '</div>'
-                . '<div class="booking-card__badges">' . $statusBadge . ($issueBadges !== '' ? $issueBadges : '') . '<span class="badge">' . $this->e($sourceLabel) . '</span></div>'
+                . '<div class="booking-card__badges">' . $statusBadge . ($issueBadges !== '' ? $issueBadges : '') . '<span class="badge">' . $this->e($sourceLabel) . '</span>' . ($isPeriodManaged ? '<span class="badge">Zeitraumbuchung</span>' : '') . '</div>'
                 . '<dl class="booking-card__meta">'
                 . '<div><dt>Projekt</dt><dd>' . $this->e($projectLabel) . '</dd></div>'
                 . '<div><dt>Typ</dt><dd>' . $this->e($typeLabel) . '</dd></div>'
@@ -299,6 +316,10 @@ HTML
                 <span class="muted">Version</span>
                 <strong data-booking-modal-version>{$versionHint}</strong>
             </div>
+        </div>
+        <div class="notice info" data-booking-period-notice hidden>
+            Diese Tagesbuchung gehoert zu einem Abwesenheitszeitraum und ist hier nur lesbar.
+            <button type="button" class="button button-secondary" data-booking-period-edit>Gesamten Zeitraum bearbeiten</button>
         </div>
         <form method="post" action="{$this->e($updateAction)}" data-booking-update-form data-booking-reason-form class="stack">
             <input type="hidden" name="_method" value="PUT">
@@ -515,6 +536,12 @@ HTML;
             'credited_minutes' => $booking['credited_minutes'] ?? null,
             'source' => (string) ($booking['source'] ?? 'app'),
             'source_label' => (string) ($booking['source_label'] ?? $this->sourceLabel((string) ($booking['source'] ?? 'app'))),
+            'absence_period_id' => isset($booking['absence_period_id']) ? (int) $booking['absence_period_id'] : null,
+            'vacation_request_id' => isset($booking['vacation_request_id']) ? (int) $booking['vacation_request_id'] : null,
+            'absence_period_date_from' => $booking['absence_period_date_from'] ?? null,
+            'absence_period_date_to' => $booking['absence_period_date_to'] ?? null,
+            'absence_period_source' => $booking['absence_period_source'] ?? null,
+            'is_period_managed' => (bool) ($booking['is_period_managed'] ?? false),
             'work_date' => (string) ($booking['work_date'] ?? ''),
             'start_time' => $this->timeValue($booking['start_time'] ?? null),
             'end_time' => $this->timeValue($booking['end_time'] ?? null),

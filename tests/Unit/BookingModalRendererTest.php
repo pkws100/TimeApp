@@ -160,6 +160,87 @@ final class BookingModalRendererTest extends TestCase
         self::assertStringContainsString('data-booking-action-form="archive"', $html);
     }
 
+    public function testRequestManagedPeriodNeedsVacationPermissionForItsEditAction(): void
+    {
+        $booking = [
+            'id' => 91,
+            'work_date' => '2026-07-24',
+            'employee_name' => 'Erika Beispiel',
+            'employee_number' => 'MA-091',
+            'project_id' => null,
+            'entry_type' => 'vacation',
+            'source' => 'vacation_request',
+            'source_label' => 'Urlaubsantrag',
+            'start_time' => null,
+            'end_time' => null,
+            'break_minutes' => 0,
+            'net_minutes' => 0,
+            'note' => '',
+            'is_deleted' => 0,
+            'version_hint' => 'v1',
+            'absence_period_id' => 14,
+            'absence_period_source' => 'vacation_request',
+            'is_period_managed' => true,
+        ];
+        $renderer = new BookingModalRenderer();
+
+        $readOnly = $renderer->renderTable([$booking], [], ['vacation' => 'Urlaub'], [
+            'can_manage' => true,
+            'can_manage_vacation' => false,
+        ]);
+        self::assertStringNotContainsString('data-absence-period-edit="14"', $readOnly);
+        self::assertStringContainsString('Nur Ansicht', $readOnly);
+        self::assertStringContainsString('&quot;can_manage_period&quot;:false', $readOnly);
+        self::assertStringContainsString('&quot;can_archive_period&quot;:false', $readOnly);
+
+        $editable = $renderer->renderTable([$booking], [], ['vacation' => 'Urlaub'], [
+            'can_manage' => true,
+            'can_manage_vacation' => true,
+        ]);
+        self::assertStringContainsString('data-absence-period-edit="14"', $editable);
+        self::assertStringContainsString('Gesamten Zeitraum bearbeiten', $editable);
+        self::assertStringContainsString('&quot;can_manage_period&quot;:true', $editable);
+    }
+
+    public function testCalendarVacationPeriodNeedsCalendarAndVacationPermissionsForItsEditAction(): void
+    {
+        $booking = [
+            'id' => 92,
+            'work_date' => '2026-07-27',
+            'employee_name' => 'Erika Beispiel',
+            'employee_number' => 'MA-092',
+            'entry_type' => 'vacation',
+            'source' => 'admin',
+            'is_deleted' => 0,
+            'absence_period_id' => 15,
+            'absence_period_source' => 'admin_calendar',
+            'is_period_managed' => true,
+        ];
+        $renderer = new BookingModalRenderer();
+
+        $calendarRightsOnly = $renderer->renderTable([$booking], [], ['vacation' => 'Urlaub'], [
+            'can_manage' => true,
+            'can_manage_vacation' => false,
+        ]);
+        self::assertStringNotContainsString('data-absence-period-edit="15"', $calendarRightsOnly);
+        self::assertStringContainsString('&quot;can_manage_period&quot;:false', $calendarRightsOnly);
+
+        $vacationRightsOnly = $renderer->renderTable([$booking], [], ['vacation' => 'Urlaub'], [
+            'can_manage' => false,
+            'can_archive' => false,
+            'can_manage_vacation' => true,
+            'can_archive_vacation' => true,
+        ]);
+        self::assertStringNotContainsString('data-absence-period-edit="15"', $vacationRightsOnly);
+
+        $bothPermissions = $renderer->renderTable([$booking], [], ['vacation' => 'Urlaub'], [
+            'can_manage' => true,
+            'can_manage_vacation' => true,
+        ]);
+        self::assertStringContainsString('data-absence-period-edit="15"', $bothPermissions);
+        self::assertStringContainsString('&quot;can_manage_period&quot;:true', $bothPermissions);
+    }
+
     public function testRenderModalShowsTimesheetAttachmentsWithDownloadAndArchiveControls(): void
     {
         $renderer = new BookingModalRenderer();
