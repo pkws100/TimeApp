@@ -232,6 +232,123 @@ button,
     box-shadow: var(--app-shadow);
 }
 
+.app-account-balance-card {
+    border-width: 2px;
+}
+
+.app-account-balance-card.is-positive,
+.app-account-balance-card.is-balanced {
+    border-color: rgba(22, 101, 52, 0.42);
+    background:
+        linear-gradient(180deg, rgba(22, 101, 52, 0.14) 0%, rgba(255, 255, 255, 0.94) 100%),
+        var(--app-surface);
+}
+
+.app-account-balance-card.is-negative {
+    border-color: rgba(146, 64, 14, 0.46);
+    background:
+        linear-gradient(180deg, rgba(251, 191, 36, 0.22) 0%, rgba(255, 255, 255, 0.94) 100%),
+        var(--app-surface);
+}
+
+.app-account-balance-card.is-unavailable {
+    border-color: var(--app-line);
+}
+
+.app-account-balance-value {
+    margin: 0;
+    color: var(--app-ok);
+    font-size: clamp(2.2rem, 10vw, 4rem);
+    font-weight: 900;
+    letter-spacing: -0.04em;
+    line-height: 1;
+}
+
+.app-account-balance-card.is-negative .app-account-balance-value {
+    color: var(--app-warn);
+}
+
+.app-account-balance-meta,
+.app-account-balance-hint {
+    margin-bottom: 0;
+    line-height: 1.5;
+}
+
+.app-account-balance-hint {
+    font-weight: 700;
+}
+
+.app-account-today-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: fit-content;
+    max-width: 100%;
+    text-decoration: none;
+}
+
+.app-account-details {
+    display: block;
+}
+
+.app-account-details > summary {
+    min-height: 52px;
+    display: flex;
+    align-items: center;
+    padding: 0.85rem 1rem;
+    border-radius: 1rem;
+    border: 1px solid var(--app-line);
+    background: rgba(255, 255, 255, 0.45);
+    cursor: pointer;
+    font-weight: 800;
+}
+
+.app-account-details[open] > summary {
+    margin-bottom: 1rem;
+}
+
+.app-account-details-content {
+    min-width: 0;
+}
+
+.app-account-explanation {
+    padding: 1rem;
+    border-radius: 1rem;
+    border: 1px solid var(--app-line);
+    background: rgba(255, 255, 255, 0.45);
+    line-height: 1.5;
+}
+
+.app-account-explanation p:last-child {
+    margin-bottom: 0;
+}
+
+html[data-theme="dark"] .app-account-balance-card.is-positive,
+html[data-theme="dark"] .app-account-balance-card.is-balanced {
+    background:
+        linear-gradient(180deg, rgba(22, 101, 52, 0.3) 0%, rgba(14, 24, 42, 0.94) 100%),
+        var(--app-surface);
+}
+
+html[data-theme="dark"] .app-account-balance-card.is-negative {
+    background:
+        linear-gradient(180deg, rgba(146, 64, 14, 0.3) 0%, rgba(14, 24, 42, 0.94) 100%),
+        var(--app-surface);
+}
+
+html[data-theme="dark"] .app-account-balance-value {
+    color: #7ce6a4;
+}
+
+html[data-theme="dark"] .app-account-balance-card.is-negative .app-account-balance-value {
+    color: #ffb86c;
+}
+
+html[data-theme="dark"] .app-account-details > summary,
+html[data-theme="dark"] .app-account-explanation {
+    background: rgba(8, 16, 29, 0.55);
+}
+
 .app-status-card {
     position: relative;
     overflow: hidden;

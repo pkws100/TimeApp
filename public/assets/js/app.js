@@ -31,6 +31,7 @@
     const GEO_ACK_KEY = 'app.geoAck';
     const DB_NAME = 'zeiterfassung-app';
     const DB_VERSION = 1;
+    const VACATION_CACHE_SCHEMA_VERSION = 2;
     const currentRoute = window.location.pathname || '/app';
     const root = document.getElementById('appRoot');
     const bootstrap = window.__APP_BOOTSTRAP__ || {};
@@ -83,6 +84,9 @@
         vacationRequests: [],
         vacationLoading: false,
         vacationOffline: false,
+        vacationCacheCompatible: false,
+        vacationCachedAt: null,
+        vacationDetailsOpen: false,
         vacationPreview: null,
         vacationForm: { date_from: '', date_to: '', employee_note: '' },
         installPromptAvailable: false,
@@ -436,6 +440,9 @@
         state.vacationRequests = [];
         state.vacationLoading = false;
         state.vacationOffline = false;
+        state.vacationCacheCompatible = false;
+        state.vacationCachedAt = null;
+        state.vacationDetailsOpen = false;
         state.vacationPreview = null;
         state.vacationForm = { date_from: '', date_to: '', employee_note: '' };
     }
@@ -3040,63 +3047,179 @@
         );
     }
 
+    function employeeBalancePresentation(account) {
+        const balance = account && account.employee_balance ? account.employee_balance : null;
+
+        if (!balance) {
+            return {
+                tone: 'is-unavailable',
+                title: state.vacationOffline ? 'Zeitkontostand offline nicht verfuegbar' : 'Zeitkontostand nicht verfuegbar',
+                value: '',
+                meta: 'Nach der naechsten erfolgreichen Aktualisierung wird der abgeschlossene Stand angezeigt.',
+                hint: ''
+            };
+        }
+
+        const asOfLabel = balance.as_of_date ? formatDate(balance.as_of_date) : '-';
+        const meta = 'Stand Ende ' + asOfLabel + ' – der heutige Tag ist noch nicht enthalten.';
+
+        if (balance.status === 'positive') {
+            return {
+                tone: 'is-positive',
+                title: 'Plusstunden',
+                value: balance.label || '',
+                meta: meta,
+                hint: 'Rechnerischer positiver Zeitkontostand; nicht automatisch genehmigte Ueberstunden.'
+            };
+        }
+
+        if (balance.status === 'negative') {
+            return {
+                tone: 'is-negative',
+                title: 'Fehlstunden laut aktuellem Buchungsstand',
+                value: balance.label || '',
+                meta: meta,
+                hint: 'Bitte pruefen Sie fehlende Buchungen. Verbindliche Korrekturen klaeren Sie mit der Verwaltung.'
+            };
+        }
+
+        if (balance.status === 'balanced') {
+            return {
+                tone: 'is-balanced',
+                title: 'Zeitkonto ausgeglichen',
+                value: balance.label || '00:00',
+                meta: meta,
+                hint: ''
+            };
+        }
+
+        if (balance.status === 'not_active') {
+            return {
+                tone: 'is-unavailable',
+                title: account.cutover_date ? ('Zeitkonto ab ' + formatDate(account.cutover_date) + ' aktiv') : 'Zeitkonto noch nicht aktiv',
+                value: '',
+                meta: meta,
+                hint: 'Vor dem Einrichtungsdatum wird kein Zeitkontostand ausgegeben.'
+            };
+        }
+
+        return {
+            tone: 'is-unavailable',
+            title: 'Zeitkonto noch nicht eingerichtet',
+            value: '',
+            meta: meta,
+            hint: 'Die Verwaltung muss den Startstand noch fachlich einrichten.'
+        };
+    }
+
     function vacationView() {
         const account = state.timeAccount || {};
         const vacation = account.vacation || {};
         const requests = Array.isArray(state.vacationRequests) ? state.vacationRequests : [];
         const preview = state.vacationPreview;
         const form = state.vacationForm || {};
-        const notActiveInPeriod = account.cutover_status === 'not_active_in_period';
-        const accountMessage = account.account_message || '';
-        const balanceLabel = notActiveInPeriod ? 'Noch nicht aktiv' : (account.closing_balance_label || 'Nicht eingerichtet');
-        const balanceMeta = accountMessage || (account.cutover_date ? ('Seit ' + account.cutover_date) : 'Zeitkonto noch nicht eingerichtet');
+        const balance = employeeBalancePresentation(account);
+        const timeBalanceValue = account.employee_balance && account.employee_balance.label
+            ? account.employee_balance.label
+            : balance.title;
         const loading = state.vacationLoading ? '<div class="app-empty">Urlaubsdaten werden geladen ...</div>' : '';
-        const offline = state.vacationOffline ? '<div class="app-empty">Letzter bekannter Stand. Antraege koennen nur online gesendet werden.</div>' : '';
-        const accountNotice = accountMessage ? '<div class="app-empty">' + escapeHtml(accountMessage) + '</div>' : '';
+        const offline = state.vacationOffline
+            ? (state.vacationCacheCompatible
+                ? '<div class="app-empty">Offline: letzter kompatibler Stand'
+                    + (state.vacationCachedAt ? ' vom ' + escapeHtml(formatDateTimeStamp(state.vacationCachedAt)) : '')
+                    + '. Antraege koennen nur online gesendet werden.</div>'
+                : '<div class="app-empty">Zeitkontostand wird nach der naechsten Verbindung aktualisiert. Urlaub und vorhandene Antraege stammen aus dem letzten Cache.</div>')
+            : '';
+        const provisionalVacation = account.cutover_status === 'missing'
+            ? '<div class="app-empty"><strong>Vorlaeufiges Urlaubskonto:</strong> Die Werte stammen aus den Stammdaten und vorhandenen Buchungen. Der verbindliche Startstand ist noch nicht eingerichtet.</div>'
+            : '';
+        const requiredVacationFields = [
+            'entitlement_days',
+            'carryover_days',
+            'opening_adjustment_days',
+            'manual_adjustment_days',
+            'total_days',
+            'approved_taken_days',
+            'approved_taken_past_days',
+            'future_approved_days',
+            'pending_days',
+            'remaining_days',
+            'available_days'
+        ];
+        const vacationDetailsAvailable = requiredVacationFields.every((field) => Object.prototype.hasOwnProperty.call(vacation, field));
+        const restVacationValue = Object.prototype.hasOwnProperty.call(vacation, 'remaining_days')
+            ? formatVacationDays(vacation.remaining_days)
+            : 'Nicht verfuegbar';
+        const availableVacationValue = Object.prototype.hasOwnProperty.call(vacation, 'available_days')
+            ? formatVacationDays(vacation.available_days)
+            : 'Nicht verfuegbar';
+        const balanceValue = balance.value !== ''
+            ? '<p class="app-account-balance-value">' + escapeHtml(balance.value) + '</p>'
+            : '';
+        const balanceHint = balance.hint !== ''
+            ? '<p class="app-account-balance-hint">' + escapeHtml(balance.hint) + '</p>'
+            : '';
         const previewMarkup = preview
             ? '<div class="app-empty"><strong>Vorschau:</strong> ' + escapeHtml(String(preview.day_count || 0)) + ' Urlaubstage<br><span class="muted">' + escapeHtml((preview.work_dates || []).join(', ') || 'Keine anrechenbaren Arbeitstage') + '</span></div>'
             : '';
         const rows = requests.length === 0
             ? '<div class="app-empty">Noch keine Urlaubsantraege vorhanden.</div>'
             : '<div class="app-info-list">' + requests.map(vacationRequestRow).join('') + '</div>';
+        const vacationDetailsMarkup = vacationDetailsAvailable
+            ? appInfoRows([
+                { label: 'Jahresanspruch', value: formatVacationDays(vacation.entitlement_days) },
+                { label: 'Uebertrag', value: formatVacationDays(vacation.carryover_days) },
+                { label: 'Eroeffnungsanpassung', value: formatSignedVacationDays(vacation.opening_adjustment_days) },
+                { label: 'Urlaubskorrekturen', value: formatSignedVacationDays(vacation.manual_adjustment_days) },
+                { label: 'Urlaubskonto gesamt', value: formatVacationDays(vacation.total_days) },
+                { label: 'Gebuchter Urlaub gesamt', value: formatVacationDays(vacation.approved_taken_days) },
+                { label: 'Davon bis heute', value: formatVacationDays(vacation.approved_taken_past_days) },
+                { label: 'Davon zukuenftig', value: formatVacationDays(vacation.future_approved_days) },
+                { label: 'Offen beantragt', value: formatVacationDays(vacation.pending_days) },
+                { label: 'Resturlaub', value: formatVacationDays(vacation.remaining_days) },
+                { label: 'Verfuegbar', value: formatVacationDays(vacation.available_days) }
+            ])
+                + '<div class="app-account-explanation"><p><strong>Resturlaub</strong> = Urlaubskonto gesamt minus gebuchter Urlaub.</p><p><strong>Verfuegbar</strong> = Resturlaub minus offen beantragter Urlaub.</p><p>„Davon bis heute“ und „Davon zukuenftig“ sind Teilmengen des gebuchten Urlaubs und werden nicht noch einmal abgezogen.</p></div>'
+            : '<div class="app-empty">Die vollstaendige Urlaubskonto-Aufschluesselung ist in diesem gespeicherten Stand nicht verfuegbar. Es werden keine fehlenden Werte als null angenommen.</div>';
 
         return shell(
-            '<section class="app-grid app-metrics">'
-            + metric('Zeitkontostand', escapeHtml(balanceLabel), balanceMeta)
-            + metric('Monatsveraenderung', escapeHtml(account.period_delta_label || account.saldo_label || '+00:00'), 'Stand ' + (account.as_of_date || 'heute'))
-            + metric('Arbeitszeit', escapeHtml(account.actual_label || '00:00'), 'Gutschriften ' + (account.credited_absence_label || '00:00'))
-            + metric('Resturlaub', escapeHtml(formatVacationDays(vacation.remaining_days || 0)), 'Ohne offene Antraege')
-            + metric('Verfuegbar', escapeHtml(formatVacationDays(vacation.available_days || 0)), 'Nach offenen Antraegen')
+            '<section class="app-card app-grid app-account-balance-card ' + balance.tone + '" aria-labelledby="employeeBalanceTitle">'
+            + '<div><p class="muted">Mein Zeitkonto</p><h1 id="employeeBalanceTitle">' + escapeHtml(balance.title) + '</h1></div>'
+            + balanceValue
+            + '<p class="app-account-balance-meta">' + escapeHtml(balance.meta) + '</p>'
+            + balanceHint
+            + '<a class="app-button app-button-secondary app-account-today-link" href="/app/heute" data-app-link="1">Heutige Buchungen ansehen</a>'
             + '</section>'
             + loading
             + offline
-            + accountNotice
-            + '<section class="app-card app-grid">'
-            + '<div><p class="muted">Urlaubskonto</p><h1>Urlaub und Zeitkonto</h1></div>'
-            + appInfoRows([
-                { label: 'Jahresanspruch', value: formatVacationDays(vacation.entitlement_days || 0) },
-                { label: 'Uebertrag', value: formatVacationDays(vacation.carryover_days || 0) },
-                { label: 'Eroeffnungsanpassung', value: formatVacationDays(vacation.opening_adjustment_days || 0) },
-                { label: 'Genehmigt/genommen', value: formatVacationDays(vacation.approved_taken_days || 0) },
-                { label: 'Zukuenftig genehmigt', value: formatVacationDays(vacation.future_approved_days || 0) },
-                { label: 'Offen beantragt', value: formatVacationDays(vacation.pending_days || 0) },
-                { label: 'Resturlaub', value: formatVacationDays(vacation.remaining_days || 0) },
-                { label: 'Verfuegbar', value: formatVacationDays(vacation.available_days || 0) }
-            ])
+            + provisionalVacation
+            + '<section class="app-grid app-metrics app-vacation-metrics">'
+            + metric('Resturlaub', escapeHtml(restVacationValue), vacationDetailsAvailable ? 'Urlaubskonto gesamt minus gebuchter Urlaub' : 'Letzter nachweisbarer Wert')
+            + metric('Verfuegbar', escapeHtml(availableVacationValue), vacationDetailsAvailable ? 'Nach offenen Antraegen' : 'Letzter nachweisbarer Wert')
             + '</section>'
             + '<section class="app-card app-grid">'
-            + '<div><p class="muted">Zeitkonto</p><h2>Aktueller Stand</h2></div>'
+            + '<div><p class="muted">Urlaubskonto</p><h2>So setzt sich mein Urlaub zusammen</h2></div>'
+            + vacationDetailsMarkup
+            + '</section>'
+            + '<details class="app-card app-grid app-account-details"' + (state.vacationDetailsOpen ? ' open' : '') + '>'
+            + '<summary id="timeAccountDetailsSummary">So setzt sich mein Zeitkonto zusammen</summary>'
+            + '<div class="app-grid app-account-details-content">'
             + appInfoRows([
-                { label: 'Zeitkonto seit', value: notActiveInPeriod && account.cutover_date ? ('Ab ' + account.cutover_date) : (account.cutover_date || 'Nicht eingerichtet') },
-                { label: 'Stand zum', value: account.as_of_date || '-' },
+                { label: 'Zeitkonto seit', value: account.cutover_date ? formatDate(account.cutover_date) : 'Nicht eingerichtet' },
+                { label: 'Stand zum', value: account.employee_balance && account.employee_balance.as_of_date ? formatDate(account.employee_balance.as_of_date) : '-' },
+                { label: 'Zeitkonto zu Monatsbeginn', value: account.opening_balance_at_period_start_label || '' },
                 { label: 'Monatssoll gesamt', value: account.month_target_label || '00:00' },
-                { label: 'Soll bis Stand', value: account.target_label || '00:00' },
+                { label: 'Sollzeit bis zum Standdatum', value: account.target_label || '00:00' },
                 { label: 'Geleistete Arbeitszeit', value: account.actual_label || '00:00' },
-                { label: 'Zeitgutschriften', value: account.credited_absence_label || '00:00' },
-                { label: 'Korrekturen', value: account.manual_adjustment_label || '+00:00' }
+                { label: 'Bezahlte Abwesenheiten', value: account.credited_absence_label || '00:00' },
+                { label: 'Zeitkonto-Korrekturen', value: account.manual_adjustment_label || '+00:00' },
+                { label: 'Veraenderung im laufenden Monat', value: account.period_delta_label || '+00:00' },
+                { label: 'Zeitkontostand', value: timeBalanceValue }
             ])
+            + '<div class="app-account-explanation"><p><strong>Monatsveraenderung</strong> = geleistete Arbeitszeit + bezahlte Abwesenheiten + Korrekturen minus Sollzeit.</p><p><strong>Zeitkontostand</strong> = Stand zu Monatsbeginn plus Monatsveraenderung bis zum Standdatum.</p><p>Bezahlter Urlaub, bezahlte Krankheit und bezahlte Freistellung werden mit der individuellen Normarbeitszeit des jeweiligen Tages gutgeschrieben.</p></div>'
             + accountHistoryRows(account)
-            + '</section>'
+            + '</div>'
+            + '</details>'
             + '<section class="app-card app-grid">'
             + '<div><p class="muted">Neuer Antrag</p><h2>Urlaub beantragen</h2></div>'
             + '<form id="vacationRequestForm" class="app-grid">'
@@ -3127,7 +3250,7 @@
         });
 
         vacationEntries.forEach((entry) => {
-            rows.push('<div class="app-info-row"><span>' + escapeHtml(entry.effective_date || '') + ' · Urlaub</span><strong>' + escapeHtml(formatVacationDays(Number(entry.days || 0))) + '</strong></div>');
+            rows.push('<div class="app-info-row"><span>' + escapeHtml(entry.effective_date || '') + ' · Urlaub</span><strong>' + escapeHtml(formatSignedVacationDays(Number(entry.days || 0))) + '</strong></div>');
         });
 
         const unavailable = account.history_unavailable
@@ -3177,6 +3300,13 @@
         const number = Number(value || 0);
 
         return number.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' Tage';
+    }
+
+    function formatSignedVacationDays(value) {
+        const number = Number(value || 0);
+        const sign = number >= 0 ? '+' : '-';
+
+        return sign + Math.abs(number).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' Tage';
     }
 
     function profileView() {
@@ -3472,6 +3602,8 @@
             return;
         }
 
+        const restoreTimeAccountDetailsFocus = document.activeElement
+            && document.activeElement.id === 'timeAccountDetailsSummary';
         let html = '';
 
         if (!state.session.authenticated) {
@@ -3495,9 +3627,25 @@
         root.innerHTML = html;
         syncThemeControls();
         bindInteractions();
+
+        if (restoreTimeAccountDetailsFocus) {
+            const summary = document.getElementById('timeAccountDetailsSummary');
+
+            if (summary) {
+                summary.focus();
+            }
+        }
     }
 
     function bindInteractions() {
+        const timeAccountDetails = document.querySelector('.app-account-details');
+
+        if (timeAccountDetails) {
+            timeAccountDetails.addEventListener('toggle', function () {
+                state.vacationDetailsOpen = timeAccountDetails.open;
+            });
+        }
+
         const menuToggle = document.getElementById('appMenuToggle');
 
         if (menuToggle) {
@@ -4029,9 +4177,7 @@
                 const cachedVacation = await readVacationCache();
 
                 if (cachedVacation) {
-                    state.timeAccount = cachedVacation.time_account || null;
-                    state.vacationRequests = Array.isArray(cachedVacation.requests) ? cachedVacation.requests : [];
-                    state.vacationOffline = true;
+                    applyVacationCachePayload(cachedVacation);
                 }
             }
 
@@ -4330,6 +4476,22 @@
         }
     }
 
+    function applyVacationCachePayload(cached) {
+        const compatible = Number(cached && cached.schema_version ? cached.schema_version : 0) === VACATION_CACHE_SCHEMA_VERSION
+            && Boolean(cached && cached.time_account && cached.time_account.employee_balance);
+        const cachedAccount = cached && cached.time_account ? Object.assign({}, cached.time_account) : null;
+
+        if (cachedAccount && !compatible) {
+            delete cachedAccount.employee_balance;
+        }
+
+        state.timeAccount = cachedAccount;
+        state.vacationRequests = cached && Array.isArray(cached.requests) ? cached.requests : [];
+        state.vacationCacheCompatible = compatible;
+        state.vacationCachedAt = cached && cached.cached_at ? cached.cached_at : null;
+        state.vacationOffline = true;
+    }
+
     async function loadVacationData(force) {
         if (!state.session.authenticated) {
             return;
@@ -4337,8 +4499,11 @@
 
         if (!navigator.onLine) {
             const cached = await readVacationCache();
-            state.timeAccount = cached ? (cached.time_account || null) : state.timeAccount;
-            state.vacationRequests = cached && Array.isArray(cached.requests) ? cached.requests : state.vacationRequests;
+
+            if (cached) {
+                applyVacationCachePayload(cached);
+            }
+
             state.vacationOffline = true;
             state.vacationLoading = false;
             render();
@@ -4379,13 +4544,16 @@
             }
             state.vacationRequests = requestsResult.data && Array.isArray(requestsResult.data.items) ? requestsResult.data.items : [];
             state.vacationOffline = false;
+            state.vacationCacheCompatible = Boolean(state.timeAccount && state.timeAccount.employee_balance);
+            state.vacationCachedAt = new Date().toISOString();
 
             try {
                 await writeVacationCache({
+                    schema_version: VACATION_CACHE_SCHEMA_VERSION,
                     cutover_id: summaryCutoverId > 0 ? summaryCutoverId : null,
                     time_account: state.timeAccount,
                     requests: state.vacationRequests,
-                    cached_at: new Date().toISOString()
+                    cached_at: state.vacationCachedAt
                 });
             } catch (cacheError) {
                 console.warn('Urlaubscache konnte nicht geschrieben werden.', cacheError);
@@ -4398,9 +4566,7 @@
             const cached = await readVacationCache();
 
             if (cached) {
-                state.timeAccount = cached.time_account || null;
-                state.vacationRequests = Array.isArray(cached.requests) ? cached.requests : [];
-                state.vacationOffline = true;
+                applyVacationCachePayload(cached);
             } else if (!force) {
                 showFeedback('error', error.message || 'Urlaubsdaten konnten nicht geladen werden.');
             }

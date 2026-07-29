@@ -216,9 +216,33 @@ test.describe('real revisable account workflow', () => {
     await page.locator('#loginForm input[name="password"]').fill(process.env.UI_TEST_EMPLOYEE_PASSWORD);
     await page.locator('#loginForm button[type="submit"]').click();
     await page.waitForURL('**/app/heute');
+    const summaryResponsePromise = page.waitForResponse((response) => response.url().includes('/api/v1/app/time-account/summary'));
     await page.goto('/app/urlaub');
-    await expect(page.getByText('+15:00').first()).toBeVisible();
+    const summaryResponse = await summaryResponsePromise;
+    const summaryPayload = await summaryResponse.json();
+    const employeeBalance = summaryPayload.data.employee_balance;
+    const expectedBalanceTitle = {
+      positive: 'Plusstunden',
+      negative: 'Fehlstunden laut aktuellem Buchungsstand',
+      balanced: 'Zeitkonto ausgeglichen',
+      not_configured: 'Zeitkonto noch nicht eingerichtet',
+      not_active: summaryPayload.data.cutover_date
+        ? 'Zeitkonto ab ' + summaryPayload.data.cutover_date.split('-').reverse().join('.') + ' aktiv'
+        : 'Zeitkonto noch nicht aktiv'
+    }[employeeBalance.status];
+    await expect(page.locator('#employeeBalanceTitle')).toHaveText(expectedBalanceTitle);
+    if (employeeBalance.label) {
+      await expect(page.locator('.app-account-balance-value')).toHaveText(employeeBalance.label);
+    } else {
+      await expect(page.locator('.app-account-balance-value')).toHaveCount(0);
+    }
+    expect(employeeBalance.current_day_included).toBe(false);
+    expect(employeeBalance.calculation_basis).toBe('completed_calendar_days');
+    await expect(page.getByText(/der heutige Tag ist noch nicht enthalten/)).toBeVisible();
     await expect(page.locator('.app-info-row').filter({ hasText: 'Resturlaub' }).getByText(expectedRestVacation, { exact: true })).toBeVisible();
+    await page.locator('.app-account-details summary').click();
+    await expect(page.getByText('Bezahlte Abwesenheiten', { exact: true })).toBeVisible();
+    await expect(page.getByText(/individuellen Normarbeitszeit/)).toBeVisible();
     await page.route('**/api/v1/app/time-account/entries?limit=10', async (route) => {
       await route.fulfill({
         contentType: 'application/json',

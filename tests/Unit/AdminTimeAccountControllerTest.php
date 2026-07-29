@@ -38,10 +38,16 @@ final class AdminTimeAccountControllerTest extends TestCase
                 'q' => 'Ada',
                 'saldo_filter' => 'negative',
                 'vacation_filter' => 'pending',
+                'setup_filter' => 'missing',
                 'sort' => 'saldo',
                 'direction' => 'desc',
                 'page' => 3,
                 'per_page' => 25,
+            ],
+            'readiness' => [
+                'required_count' => 4,
+                'ready_count' => 1,
+                'missing_count' => 3,
             ],
         ], [
             ['id' => 7, 'first_name' => 'Ada', 'last_name' => 'Admin', 'employment_status' => 'active'],
@@ -54,11 +60,14 @@ final class AdminTimeAccountControllerTest extends TestCase
         self::assertStringContainsString('q=Ada', $html);
         self::assertStringContainsString('saldo_filter=negative', $html);
         self::assertStringContainsString('vacation_filter=pending', $html);
+        self::assertStringContainsString('setup_filter=missing', $html);
         self::assertStringContainsString('sort=saldo', $html);
         self::assertStringContainsString('direction=desc', $html);
         self::assertStringContainsString('format=csv', $html);
         self::assertStringContainsString('format=xlsx', $html);
         self::assertStringContainsString('format=pdf', $html);
+        self::assertStringContainsString('3 zeiterfassungspflichtige Mitarbeiter ohne finalen Zeitkonto-Stichtag.', $html);
+        self::assertStringContainsString('Betroffene Mitarbeiter anzeigen', $html);
         self::assertDoesNotMatchRegularExpression('#/admin/time-accounts/export[^"]*(page|per_page)=#', $html);
     }
 

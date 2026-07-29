@@ -79,6 +79,7 @@ final class AppPwaMetadataTest extends TestCase
         $script = ob_get_clean() ?: '';
 
         self::assertStringContainsString('const APP_NAME = "HTD Zeiterfassung";', $script);
+        self::assertStringContainsString("const CACHE_NAME = 'zeiterfassung-app-v7';", $script);
         self::assertStringContainsString("const APP_FALLBACK_URL = '/app';", $script);
         self::assertStringContainsString('if (isAppShellRequest) {', $script);
         self::assertStringContainsString('fetch(request).then((response) => {', $script);

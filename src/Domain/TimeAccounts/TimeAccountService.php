@@ -9,6 +9,7 @@ use App\Infrastructure\Database\DatabaseConnection;
 use DateInterval;
 use DatePeriod;
 use DateTimeImmutable;
+use DateTimeZone;
 
 final class TimeAccountService
 {
@@ -125,6 +126,51 @@ final class TimeAccountService
             'time_entries' => $includeEntries ? ($this->journalService?->timeEntriesForUser($userId, null, $standDate, $cutoverId, 50) ?? []) : [],
             'vacation_entries' => $includeEntries ? ($this->journalService?->vacationEntriesForUser($userId, $year, $cutoverId, 50) ?? []) : [],
         ];
+    }
+
+    public function employeeMonthlyAccount(int $userId, int $year, int $month, ?string $today = null): array
+    {
+        $localToday = $this->employeeLocalDate($today);
+        $completedThrough = $localToday->modify('-1 day');
+        $timezone = new DateTimeZone('Europe/Berlin');
+        $monthStart = new DateTimeImmutable(sprintf('%04d-%02d-01', $year, $month), $timezone);
+        $currentMonthStart = $localToday->modify('first day of this month');
+
+        if ($monthStart > $currentMonthStart) {
+            $year = (int) $localToday->format('Y');
+            $month = (int) $localToday->format('m');
+            $monthStart = $currentMonthStart;
+        }
+
+        $monthEnd = $monthStart;
+        $monthEnd = $monthEnd->modify('last day of this month');
+        $calculationDate = $completedThrough > $monthEnd ? $monthEnd : $completedThrough;
+        $account = $this->monthlyAccount($userId, $year, $month, $calculationDate->format('Y-m-d'));
+        $cutoverStatus = (string) ($account['cutover_status'] ?? 'missing');
+        $cutoverDate = (string) ($account['cutover_date'] ?? '');
+        $balance = isset($account['closing_balance_minutes']) ? (int) $account['closing_balance_minutes'] : null;
+        $status = 'not_configured';
+
+        if ($cutoverStatus === 'not_active_in_period'
+            || ($cutoverDate !== '' && $cutoverDate > $calculationDate->format('Y-m-d'))) {
+            $status = 'not_active';
+            $balance = null;
+        } elseif ($cutoverStatus !== 'missing' && $balance !== null) {
+            $status = $balance < 0 ? 'negative' : ($balance > 0 ? 'positive' : 'balanced');
+        }
+
+        $account['employee_balance'] = [
+            'status' => $status,
+            'minutes' => $balance,
+            'label' => $balance === null
+                ? null
+                : ($balance === 0 ? '00:00' : $this->signedDurationLabel($balance)),
+            'as_of_date' => $calculationDate->format('Y-m-d'),
+            'calculation_basis' => 'completed_calendar_days',
+            'current_day_included' => false,
+        ];
+
+        return $account;
     }
 
     public function vacationYear(int $userId, int $year, ?array $user = null): array
@@ -287,7 +333,11 @@ final class TimeAccountService
     public function adminOverview(int $year, int $month, array $filters = []): array
     {
         $filters = $this->normalizeAdminFilters($filters);
-        $users = $this->activeUsers();
+        $users = $this->withAccountSetupStatus(
+            $this->activeUsers(),
+            $this->cutoverService?->activeCutoversByUser() ?? []
+        );
+        $readiness = $this->accountReadiness($users);
         $filterUserId = (int) ($filters['user_id'] ?? 0);
         $includeEntries = $filterUserId > 0;
 
@@ -300,6 +350,13 @@ final class TimeAccountService
             $users = array_values(array_filter($users, function (array $user) use ($needle): bool {
                 return str_contains(mb_strtolower($this->userSearchLabel($user)), $needle);
             }));
+        }
+
+        if ($filters['setup_filter'] === 'missing') {
+            $users = array_values(array_filter(
+                $users,
+                static fn (array $user): bool => (string) ($user['_account_setup_status'] ?? '') === 'missing'
+            ));
         }
 
         $sort = (string) $filters['sort'];
@@ -322,6 +379,7 @@ final class TimeAccountService
                 'rows' => array_map(fn (array $user): array => $this->monthlyAccount((int) $user['id'], $year, $month, null, $includeEntries), $pageUsers),
                 'pagination' => $pagination,
                 'filters' => [...$filters, 'user_id' => $filterUserId > 0 ? $filterUserId : null],
+                'readiness' => $readiness,
             ];
         }
 
@@ -392,6 +450,7 @@ final class TimeAccountService
             'rows' => array_slice($rows, $offset, $pagination['per_page']),
             'pagination' => $pagination,
             'filters' => [...$filters, 'user_id' => $filterUserId > 0 ? $filterUserId : null],
+            'readiness' => $readiness,
         ];
     }
 
@@ -649,6 +708,27 @@ final class TimeAccountService
         return (new DateTimeImmutable('today'))->format('Y-m-d');
     }
 
+    private function employeeLocalDate(?string $today): DateTimeImmutable
+    {
+        $timezone = new DateTimeZone('Europe/Berlin');
+        $value = trim((string) ($today ?? ''));
+
+        if ($value === '') {
+            return new DateTimeImmutable('today', $timezone);
+        }
+
+        $date = DateTimeImmutable::createFromFormat('!Y-m-d', $value, $timezone);
+        $errors = DateTimeImmutable::getLastErrors();
+
+        if ($date instanceof DateTimeImmutable
+            && $date->format('Y-m-d') === $value
+            && ($errors === false || ((int) $errors['warning_count'] === 0 && (int) $errors['error_count'] === 0))) {
+            return $date;
+        }
+
+        return new DateTimeImmutable('today', $timezone);
+    }
+
     private function standDateForPeriod(DateTimeImmutable $start, DateTimeImmutable $end, string $asOfDate): ?string
     {
         if ($asOfDate < $start->format('Y-m-d')) {
@@ -717,12 +797,15 @@ final class TimeAccountService
         $saldoFilter = in_array($saldoFilter, ['negative', 'positive', 'zero'], true) ? $saldoFilter : '';
         $vacationFilter = trim((string) ($input['vacation_filter'] ?? ''));
         $vacationFilter = in_array($vacationFilter, ['negative_remaining', 'negative_available', 'pending'], true) ? $vacationFilter : '';
+        $setupFilter = trim((string) ($input['setup_filter'] ?? ''));
+        $setupFilter = $setupFilter === 'missing' ? 'missing' : '';
 
         return [
             'user_id' => max(0, (int) ($input['user_id'] ?? 0)),
             'q' => mb_substr(trim((string) ($input['q'] ?? '')), 0, 120),
             'saldo_filter' => $saldoFilter,
             'vacation_filter' => $vacationFilter,
+            'setup_filter' => $setupFilter,
             'sort' => $sort,
             'direction' => $direction,
             'page' => $page,
@@ -732,7 +815,10 @@ final class TimeAccountService
 
     private function adminRows(int $year, int $month, array $filters): array
     {
-        $users = $this->activeUsers();
+        $users = $this->withAccountSetupStatus(
+            $this->activeUsers(),
+            $this->cutoverService?->activeCutoversByUser() ?? []
+        );
         $filterUserId = (int) ($filters['user_id'] ?? 0);
 
         if ($filterUserId > 0) {
@@ -744,6 +830,13 @@ final class TimeAccountService
             $users = array_values(array_filter($users, function (array $user) use ($needle): bool {
                 return str_contains(mb_strtolower($this->userSearchLabel($user)), $needle);
             }));
+        }
+
+        if ($filters['setup_filter'] === 'missing') {
+            $users = array_values(array_filter(
+                $users,
+                static fn (array $user): bool => (string) ($user['_account_setup_status'] ?? '') === 'missing'
+            ));
         }
 
         $rows = array_map(
@@ -1131,12 +1224,50 @@ final class TimeAccountService
 
         return $this->connection->fetchAll(
             'SELECT id, employee_number, first_name, last_name, email,
-                    workdays_mask, vacation_days_year, vacation_carryover_days
+                    workdays_mask, vacation_days_year, vacation_carryover_days,
+                    ' . $this->columnOrLiteral('time_tracking_required', '1', 'time_tracking_required') . '
              FROM users
              WHERE COALESCE(is_deleted, 0) = 0
                AND employment_status = "active"
              ORDER BY last_name ASC, first_name ASC, id ASC'
         );
+    }
+
+    private function withAccountSetupStatus(array $users, array $activeCutoversByUser): array
+    {
+        return array_map(function (array $user) use ($activeCutoversByUser): array {
+            if ((int) ($user['time_tracking_required'] ?? 1) !== 1) {
+                $user['_account_setup_status'] = 'not_required';
+
+                return $user;
+            }
+
+            $user['_account_setup_status'] = !isset($activeCutoversByUser[(int) ($user['id'] ?? 0)])
+                ? 'missing'
+                : 'ready';
+
+            return $user;
+        }, $users);
+    }
+
+    private function accountReadiness(array $users): array
+    {
+        $required = array_values(array_filter(
+            $users,
+            static fn (array $user): bool => in_array((string) ($user['_account_setup_status'] ?? ''), ['missing', 'ready'], true)
+        ));
+
+        return [
+            'required_count' => count($required),
+            'ready_count' => count(array_filter(
+                $required,
+                static fn (array $user): bool => (string) ($user['_account_setup_status'] ?? '') === 'ready'
+            )),
+            'missing_count' => count(array_filter(
+                $required,
+                static fn (array $user): bool => (string) ($user['_account_setup_status'] ?? '') === 'missing'
+            )),
+        ];
     }
 
     private function adminVacationRow(array $user, int $year): array
