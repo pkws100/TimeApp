@@ -8,6 +8,8 @@ use App\Domain\Auth\AuthService;
 use App\Domain\TimeAccounts\TimeAccountService;
 use App\Http\Request;
 use App\Http\Response;
+use DateTimeImmutable;
+use DateTimeZone;
 
 final class AppTimeAccountController
 {
@@ -25,14 +27,20 @@ final class AppTimeAccountController
             return Response::json(['ok' => false, 'message' => 'Bitte erneut anmelden.'], 401);
         }
 
-        $year = (int) $request->query('year', (int) date('Y'));
-        $month = (int) $request->query('month', (int) date('m'));
-        $year = $year >= 2000 && $year <= 2100 ? $year : (int) date('Y');
-        $month = $month >= 1 && $month <= 12 ? $month : (int) date('m');
+        $today = new DateTimeImmutable('today', new DateTimeZone('Europe/Berlin'));
+        $year = (int) $request->query('year', (int) $today->format('Y'));
+        $month = (int) $request->query('month', (int) $today->format('m'));
+        $year = $year >= 2000 && $year <= 2100 ? $year : (int) $today->format('Y');
+        $month = $month >= 1 && $month <= 12 ? $month : (int) $today->format('m');
 
         return Response::json([
             'ok' => true,
-            'data' => $this->timeAccountService->monthlyAccount((int) $user['id'], $year, $month),
+            'data' => $this->timeAccountService->employeeMonthlyAccount(
+                (int) $user['id'],
+                $year,
+                $month,
+                $today->format('Y-m-d')
+            ),
         ]);
     }
 

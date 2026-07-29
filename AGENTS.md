@@ -112,6 +112,7 @@ Bereits umgesetzt:
 - revisionsfaehige Zeit- und Urlaubskonten mit Einfuehrungsstichtag, Eroeffnungssaldo, jahresbezogenem Urlaubskonto-Journal, Zeitkonto-Journal, Korrektur-/Gegenbuchungen und Stichtagsprotokoll
 - serverseitige Zeitgutschriften fuer bezahlte Abwesenheiten ueber `timesheets.credited_minutes` und fachliche Abwesenheitsgruende ueber `absence_reason_code`
 - kumulierter Zeitkontostand ab finalisiertem Stichtag, aktuelle Monatsberechnung nur bis Standdatum und neutrale Anzeige von positivem/negativem Zeitkontostand
+- Mitarbeiter sehen den hervorgehobenen Zeitkontostand in der PWA immer nur bis zum Ende des vorherigen Kalendertages in `Europe/Berlin`; der laufende Tag wird dort nicht als Minus bewertet. Admin-, Export- und Abrechnungsberechnungen behalten ihr jeweiliges Standdatum.
 - Stichtagsgenerationen ueber `cutover_id` in Zeit- und Urlaubskonto-Journalen; aktive Berechnungen lesen nur die aktive finale Generation, revidierte Generationen bleiben historisch erhalten
 - vollstaendige Admin-Stichtagshistorie mit finalen und revidierten Generationen, generationsbezogenen read-only Journalen und eindeutig gekennzeichneten revidierten PDF-Protokollen
 - jahresbezogene Admin-Urlaubskontenansicht unter `/admin/vacation-requests` mit eingebuchtem Urlaub, vergangenem und zukuenftig genehmigtem Verbrauch, offenen Antraegen, Resturlaub und verfuegbarem Urlaub
@@ -155,6 +156,7 @@ Diese Entscheidungen gelten aktuell als gesetzt und sollen nicht ohne expliziten
 - Arbeit plus ganztagige Abwesenheit sowie doppelte ganztagige Abwesenheiten am selben Tag werden zentral blockiert; mehrere Arbeitsbuchungen bleiben erlaubt.
 - Beim Wiederherstellen archivierter Buchungen werden Periodensperre, anrechenbarer Arbeitstag und Tageskonflikte erneut gegen den aktuellen Zustand geprueft.
 - Positive rechnerische Zeitkontostaende werden neutral als positiver Zeitkontostand bezeichnet, nicht automatisch als genehmigte Ueberstunden.
+- Ohne finalen Mitarbeiter-Stichtag darf die PWA keinen kumulierten Plus-/Minussaldo anzeigen. Urlaubswerte aus Stammdaten und vorhandenen Buchungen bleiben sichtbar, muessen dann aber als vorlaeufig gekennzeichnet sein.
 - Fehlende Tagesbuchungen koennen fuer aktive Mitarbeiter an Werktagen als Status angezeigt werden; dieser abgeleitete Fehlend-Status erzeugt keine automatische `timesheets`-Buchung.
 - Gesetzliche Feiertage und Betriebsurlaub sind Anzeige- und Pflichtlogik; sie erzeugen keine automatischen `timesheets`-Buchungen und deaktivieren abgeleitetes Fehlen bzw. Fehlbuchungs-Pushes.
 - Ganztagige Admin-Abwesenheiten werden ueber `absence_periods` gruppiert. Der Kopf behaelt den gesamten Von-bis-Zeitraum; `timesheets` entstehen nur fuer positive Solltage nach `CalendarPolicyService` und `DailyTargetService`.

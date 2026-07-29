@@ -19,6 +19,26 @@ use Tests\Support\MariaDbTestCase;
 
 final class TimeAccountJournalEndpointTest extends MariaDbTestCase
 {
+    public function testAppSummaryReturnsCompletedDayBalanceContractWithoutInventedSaldo(): void
+    {
+        $userId = $this->createUser(['email' => 'employee-summary@example.test']);
+        [$accounts] = $this->services();
+        $_SESSION['auth']['user_id'] = $userId;
+        $auth = new AuthService($this->connection(), new PermissionMatrix([], []));
+        $controller = new AppTimeAccountController($accounts, $auth);
+
+        $payload = $this->json($controller->summary(new Request('GET', '/api/v1/app/time-account/summary', [], [], [], [], [])));
+        $balance = $payload['data']['employee_balance'];
+        $yesterday = (new \DateTimeImmutable('today', new \DateTimeZone('Europe/Berlin')))->modify('-1 day')->format('Y-m-d');
+
+        self::assertSame('not_configured', $balance['status']);
+        self::assertNull($balance['minutes']);
+        self::assertNull($balance['label']);
+        self::assertSame($yesterday, $balance['as_of_date']);
+        self::assertSame('completed_calendar_days', $balance['calculation_basis']);
+        self::assertFalse($balance['current_day_included']);
+    }
+
     public function testAppEndpointReturnsOnlyOwnActiveGenerationWithBoundedPagination(): void
     {
         $adminId = $this->createUser(['employee_number' => 'ADMIN-E', 'email' => 'admin-e@example.test']);

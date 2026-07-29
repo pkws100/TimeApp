@@ -53,10 +53,12 @@
 - Spesen werden ueber `expenses_amount` erfasst, damit PDF- und Exportberichte dieselbe Datenbasis verwenden.
 - Tatsaechliche Arbeitszeit (`net_minutes` bei `work`) und Zeitgutschrift (`credited_minutes` bei bezahlten Abwesenheiten) sind getrennte Groessen.
 - Zeitkontostand = Eroeffnungssaldo + Arbeitszeit ab Stichtag + bezahlte Abwesenheitsgutschriften - effektives Soll ab Stichtag + Journal-Korrekturen.
+- Der hervorgehobene Mitarbeiterstand in `/app` verwendet als fachliches Standdatum ausschliesslich den letzten vollstaendig abgeschlossenen Kalendertag in `Europe/Berlin`. Dadurch wird das Soll des laufenden Tages nicht vor Arbeitsbeginn als Fehlzeit dargestellt; am ersten Monatstag bleibt der Abschlussstand des Vormonats sichtbar und die neue Monatsveraenderung beginnt bei null. Diese Darstellungsregel veraendert die Standdaten von Admin, Exporten und Abrechnung nicht.
 - Die Monatsveraenderung ist die Veraenderung innerhalb des betrachteten Monats; der Gesamtstand ist der kumulierte Saldo seit Stichtag.
 - Der aktuelle Monat rechnet fuer den aktuellen Kontostand nur bis zum Standdatum, standardmaessig heute. Zukuenftige Arbeitstage erzeugen keine aktuellen Minusstunden.
 - Feiertage und bezahlte Betriebsschliessungen reduzieren das Soll. Sie erzeugen keine zusaetzliche automatische Zeitgutschrift, damit keine Doppelwertung entsteht.
 - Ohne finalisierten Stichtag bleiben Monatsauswertungen verfuegbar, aber es wird kein kumulierter Zeitkontostand erfunden.
+- Die Mitarbeiter-API kennzeichnet einen fehlenden oder noch nicht wirksamen Stichtag semantisch und liefert dafuer keine Saldozahl. Vorlaeufige Urlaubswerte duerfen weiterhin aus User-Vorschlagswerten und vorhandenen Buchungen gebildet werden, muessen in der PWA aber als vorlaeufig erkennbar sein.
 - Monate vollstaendig vor dem aktiven Stichtag liefern `cutover_status = not_active_in_period` und zeigen keinen kuenstlichen Eroeffnungs- oder Endbestand.
 - Manuelle ganztagige Abwesenheiten sind nur an Tagen mit positivem effektivem Tages-Soll erlaubt. Wochenenden, Feiertage und Betriebsschliessungen erzeugen keinen zusaetzlichen Abwesenheitsgutschrift-Bedarf.
 - Von-bis-Abwesenheiten behalten Wochenenden, Feiertage, Betriebsschliessungen und Null-Soll-Tage im Kopfzeitraum, ueberspringen sie aber transparent bei der Erzeugung von Tagesbuchungen.

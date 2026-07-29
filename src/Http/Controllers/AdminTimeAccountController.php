@@ -40,6 +40,7 @@ final class AdminTimeAccountController
             'q' => (string) $request->query('q', ''),
             'saldo_filter' => (string) $request->query('saldo_filter', ''),
             'vacation_filter' => (string) $request->query('vacation_filter', ''),
+            'setup_filter' => (string) $request->query('setup_filter', ''),
             'sort' => (string) $request->query('sort', 'name'),
             'direction' => (string) $request->query('direction', 'asc'),
             'page' => (int) $request->query('page', 1),
@@ -413,6 +414,10 @@ final class AdminTimeAccountController
             'negative_remaining' => 'Resturlaub negativ',
             'negative_available' => 'Verfuegbar negativ',
         ], (string) ($filters['vacation_filter'] ?? ''));
+        $setupFilterOptions = $this->options([
+            '' => 'Alle Einrichtungsstaende',
+            'missing' => 'Zeitkonto nicht eingerichtet',
+        ], (string) ($filters['setup_filter'] ?? ''));
         $perPageOptions = $this->perPageOptions((int) ($filters['per_page'] ?? 50));
         $pager = $this->paginationControls($overview['pagination'] ?? [], $year, $month, $filters);
         $sort = (string) ($filters['sort'] ?? 'name');
@@ -425,6 +430,12 @@ final class AdminTimeAccountController
             . '<a class="button" href="' . $this->e($exportBase . $separator . 'format=pdf') . '">PDF</a>';
         $cutoverForm = $canManage ? $this->cutoverForm($users, $csrf, $cutoverPreview, (int) ($filters['user_id'] ?? 0)) : '';
         $adjustmentForms = $canManage ? $this->adjustmentForms($users, $csrf) : '';
+        $missingAccounts = (int) ($overview['readiness']['missing_count'] ?? 0);
+        $readinessNotice = $missingAccounts > 0
+            ? '<p class="notice warn"><strong>' . $missingAccounts . ' zeiterfassungspflichtige Mitarbeiter ohne finalen Zeitkonto-Stichtag.</strong> '
+                . 'In der Mitarbeiter-App wird bis zur fachlichen Einrichtung kein Zeitkontostand angezeigt. '
+                . '<a href="/admin/time-accounts?year=' . $year . '&month=' . $month . '&setup_filter=missing">Betroffene Mitarbeiter anzeigen</a></p>'
+            : '';
 
         return <<<HTML
 <header class="page-header">
@@ -438,6 +449,7 @@ final class AdminTimeAccountController
     </div>
 </header>
 {$notice}
+{$readinessNotice}
 <section class="card stack">
     <form method="get" action="/admin/time-accounts" class="form-grid">
         <label><span>Jahr</span><input type="number" name="year" min="2000" max="2100" value="{$this->e((string) $year)}"></label>
@@ -446,6 +458,7 @@ final class AdminTimeAccountController
         <label><span>Suche</span><input type="search" name="q" value="{$this->e((string) ($filters['q'] ?? ''))}" placeholder="Name suchen"></label>
         <label><span>Saldo</span><select name="saldo_filter">{$saldoFilterOptions}</select></label>
         <label><span>Urlaub</span><select name="vacation_filter">{$vacationFilterOptions}</select></label>
+        <label><span>Einrichtung</span><select name="setup_filter">{$setupFilterOptions}</select></label>
         <label><span>Sortierung</span><select name="sort">{$sortOptions}</select></label>
         <label><span>Richtung</span><select name="direction">{$directionOptions}</select></label>
         <label><span>Pro Seite</span><select name="per_page">{$perPageOptions}</select></label>
@@ -538,6 +551,10 @@ HTML;
         $actions = $cutoverId > 0
             ? '<a class="button button-secondary" href="/admin/time-accounts/cutovers/' . $cutoverId . '/protocol">Protokoll</a>'
             : '<span class="muted">Stichtag offen</span>';
+
+        if ($canManage && $cutoverId <= 0 && $userId > 0) {
+            $actions .= '<a class="button" href="/admin/time-accounts?user_id=' . $userId . '#time-account-cutover-form">Stichtag einrichten</a>';
+        }
 
         if ($userId > 0) {
             $actions .= '<a class="button button-secondary" href="/admin/time-accounts/users/' . $userId . '/cutovers">Stichtagshistorie</a>';
@@ -651,7 +668,7 @@ HTML;
         }
 
         return <<<HTML
-<section class="card stack">
+<section class="card stack" id="time-account-cutover-form">
     <h2>Stichtag einrichten</h2>
     <form method="post" action="/admin/time-accounts/cutovers/preview" class="form-grid">
         <input type="hidden" name="csrf_token" value="{$csrfToken}">
@@ -827,6 +844,7 @@ HTML;
             'q' => (string) $request->query('q', ''),
             'saldo_filter' => (string) $request->query('saldo_filter', ''),
             'vacation_filter' => (string) $request->query('vacation_filter', ''),
+            'setup_filter' => (string) $request->query('setup_filter', ''),
             'sort' => (string) $request->query('sort', 'name'),
             'direction' => (string) $request->query('direction', 'asc'),
             'page' => (int) $request->query('page', 1),

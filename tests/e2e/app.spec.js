@@ -139,6 +139,161 @@ async function mockProjectOrderApp(page, options = {}) {
   return { postedMaterials, archivedMaterials, materials };
 }
 
+test('employee vacation page explains completed-day balance and vacation arithmetic', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('app.theme', 'dark'));
+  await mockProjectOrderApp(page);
+  let balanceStatus = 'positive';
+  let balanceMinutes = 90;
+  let balanceLabel = '+01:30';
+  let cutoverStatus = 'final';
+  let cutoverDate = '2026-01-01';
+  let summaryFails = false;
+
+  await page.route('**/api/v1/app/time-account/summary', async (route) => {
+    if (summaryFails) {
+      await route.abort();
+      return;
+    }
+
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        data: {
+          cutover_status: cutoverStatus,
+          cutover_id: cutoverStatus === 'missing' ? null : 41,
+          cutover_date: cutoverStatus === 'missing' ? null : cutoverDate,
+          employee_balance: {
+            status: balanceStatus,
+            minutes: balanceMinutes,
+            label: balanceLabel,
+            as_of_date: '2026-07-28',
+            calculation_basis: 'completed_calendar_days',
+            current_day_included: false
+          },
+          month_target_label: '184:00',
+          target_label: '152:00',
+          actual_label: '145:30',
+          credited_absence_label: '08:00',
+          manual_adjustment_label: '+00:00',
+          period_delta_label: '+01:30',
+          vacation: {
+            entitlement_days: 30,
+            carryover_days: 2,
+            opening_adjustment_days: -1,
+            manual_adjustment_days: 1,
+            total_days: 32,
+            approved_taken_days: 12,
+            approved_taken_past_days: 7,
+            future_approved_days: 5,
+            pending_days: 2,
+            remaining_days: 20,
+            available_days: 18
+          }
+        }
+      })
+    });
+  });
+  await page.route('**/api/v1/app/time-account/entries?limit=10', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, data: { cutover_id: 41, time_entries: [], vacation_entries: [] } })
+    });
+  });
+  await page.route('**/api/v1/app/vacation-requests', async (route) => {
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, data: { items: [] } }) });
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/app/urlaub');
+
+  await expect(page.getByRole('heading', { name: 'Plusstunden' })).toBeVisible();
+  await expect(page.locator('.app-account-balance-value')).toHaveText('+01:30');
+  await expect(page.getByText('Stand Ende 28.07.2026 – der heutige Tag ist noch nicht enthalten.')).toBeVisible();
+  await expect(page.getByText(/nicht automatisch genehmigte Ueberstunden/)).toBeVisible();
+  await expect(page.getByText('Urlaubskonto gesamt', { exact: true })).toBeVisible();
+  await expect(page.getByText('Gebuchter Urlaub gesamt', { exact: true })).toBeVisible();
+  await expect(page.getByText('Davon zukuenftig', { exact: true })).toBeVisible();
+  await expect(page.locator('.app-info-row').filter({ hasText: 'Urlaubskorrekturen' }).locator('strong')).toHaveText('+1,00 Tage');
+  await expect(page.locator('.app-account-balance-value')).toHaveCSS('color', 'rgb(124, 230, 164)');
+
+  const details = page.locator('.app-account-details');
+  await expect(details).not.toHaveAttribute('open', '');
+  await details.locator('summary').click();
+  await details.locator('summary').focus();
+  await expect(page.getByText('Sollzeit bis zum Standdatum', { exact: true })).toBeVisible();
+  await expect(page.getByText('Bezahlte Abwesenheiten', { exact: true })).toBeVisible();
+  await expect(page.getByText(/individuellen Normarbeitszeit/)).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.waitForTimeout(500);
+  await expect(details).toHaveAttribute('open', '');
+  await expect(details.locator('summary')).toBeFocused();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
+
+  balanceStatus = 'negative';
+  balanceMinutes = -120;
+  balanceLabel = '-02:00';
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Fehlstunden laut aktuellem Buchungsstand' })).toBeVisible();
+  await expect(page.getByText(/Bitte pruefen Sie fehlende Buchungen/)).toBeVisible();
+  await expect(page.locator('.app-account-balance-value')).toHaveCSS('color', 'rgb(255, 184, 108)');
+
+  balanceStatus = 'not_configured';
+  balanceMinutes = null;
+  balanceLabel = null;
+  cutoverStatus = 'missing';
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Zeitkonto noch nicht eingerichtet' })).toBeVisible();
+  await expect(page.locator('.app-account-balance-value')).toHaveCount(0);
+  await expect(page.getByText(/Vorlaeufiges Urlaubskonto/)).toBeVisible();
+  const provisionalBox = await page.getByText(/Vorlaeufiges Urlaubskonto/).boundingBox();
+  const vacationMetricsBox = await page.locator('.app-vacation-metrics').boundingBox();
+  expect(provisionalBox.y).toBeLessThan(vacationMetricsBox.y);
+
+  balanceStatus = 'not_active';
+  cutoverStatus = 'final';
+  cutoverDate = '2026-08-01';
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Zeitkonto ab 01.08.2026 aktiv' })).toBeVisible();
+  await expect(page.locator('.app-account-balance-value')).toHaveCount(0);
+
+  await page.evaluate(async () => {
+    const month = new Date();
+    const monthValue = month.getFullYear() + '-' + String(month.getMonth() + 1).padStart(2, '0');
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('zeiterfassung-app', 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction('cache', 'readwrite');
+      transaction.objectStore('cache').put({
+        key: 'vacation:7:' + monthValue,
+        value: {
+          cutover_id: null,
+          time_account: {
+            cutover_status: 'final',
+            closing_balance_label: '+99:00',
+            vacation: { remaining_days: 20, available_days: 18 }
+          },
+          requests: [],
+          cached_at: '2099-01-01T00:00:00.000Z'
+        },
+        updatedAt: Date.now()
+      });
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error);
+    });
+  });
+  summaryFails = true;
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Zeitkontostand offline nicht verfuegbar' })).toBeVisible();
+  await expect(page.getByText('+99:00')).toHaveCount(0);
+  await expect(page.getByText(/Zeitkontostand wird nach der naechsten Verbindung aktualisiert/)).toBeVisible();
+  await expect(page.getByText(/vollstaendige Urlaubskonto-Aufschluesselung ist in diesem gespeicherten Stand nicht verfuegbar/)).toBeVisible();
+  await expect(page.getByText('Jahresanspruch', { exact: true })).toHaveCount(0);
+});
+
 test('mobile project deep link shows order details, materials and isolates project switches', async ({ page }) => {
   const mocked = await mockProjectOrderApp(page);
 
