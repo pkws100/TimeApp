@@ -155,6 +155,24 @@ final class ProjectWorkOrdersDatabaseTest extends MariaDbTestCase
         self::assertTrue($access->canAccess($this->actor($strangerId, ['projects.manage']), $projectId));
     }
 
+    public function testProjectFileAccessExcludesGlobalTimesheetManagersWithoutMembership(): void
+    {
+        $memberId = $this->createUser();
+        $strangerId = $this->createUser();
+        $projectId = $this->createProject();
+        $this->assign($projectId, $memberId);
+        $access = new ProjectAccessService($this->connection());
+
+        self::assertTrue($access->canAccessFiles($this->actor($memberId, ['files.view']), $projectId));
+        self::assertFalse($access->canAccessFiles($this->actor($strangerId, ['files.view', 'timesheets.manage']), $projectId));
+        self::assertTrue($access->canAccessFiles($this->actor($strangerId, ['files.manage']), $projectId));
+        self::assertTrue($access->canAccessFiles($this->actor($strangerId, ['projects.manage']), $projectId));
+
+        $genericFileController = (string) file_get_contents(base_path('src/Http/Controllers/FileController.php'));
+        self::assertStringContainsString('projectAccessService->canAccessFiles($user, $projectId)', $genericFileController);
+        self::assertStringNotContainsString('projectAccessService->canAccess($user, $projectId)', $genericFileController);
+    }
+
     public function testMobileDayContextIncludesOnlyAuthorizedProjectOrderDetails(): void
     {
         $userId = $this->createUser();
