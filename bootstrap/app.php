@@ -474,6 +474,8 @@ $router->delete('/admin/projects/{id}', $admin([$adminManagementController, 'pro
 $router->post('/admin/projects/{id}/restore', $admin([$adminManagementController, 'projectRestore'], 'projects.manage'));
 $router->post('/admin/projects/{id}/bookings', $admin([$adminManagementController, 'projectBookingStore'], 'timesheets.manage'));
 $router->post('/admin/projects/{id}/files', $admin([$adminManagementController, 'projectFileStore'], 'files.upload'));
+$router->get('/admin/project-files/{id}/preview', $admin([$adminManagementController, 'projectFilePreview'], null));
+$router->get('/admin/project-files/{id}/download', $admin([$adminManagementController, 'projectFileDownload'], null));
 $router->delete('/admin/project-files/{id}', $admin([$adminManagementController, 'projectFileArchive'], 'files.manage'));
 $router->post('/admin/project-files/{id}/status', $admin([$adminManagementController, 'projectFileStatus'], 'files.manage'));
 $router->post('/admin/projects/{id}/dispatch', $admin([$adminManagementController, 'projectDispatch'], 'projects.manage'));

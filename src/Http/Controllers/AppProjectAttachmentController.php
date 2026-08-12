@@ -130,7 +130,7 @@ final class AppProjectAttachmentController
     {
         $user = $this->authService->currentUser();
 
-        return $user !== null && $this->projectAccessService->canAccess($user, $projectId);
+        return $user !== null && $this->projectAccessService->canAccessFiles($user, $projectId);
     }
 
     private function canAccessProjectFile(int $fileId): bool
@@ -141,7 +141,7 @@ final class AppProjectAttachmentController
         return $user !== null
             && $file !== null
             && (int) ($file['is_deleted'] ?? 0) === 0
-            && $this->projectAccessService->canAccess($user, (int) ($file['project_id'] ?? 0));
+            && $this->projectAccessService->canAccessFiles($user, (int) ($file['project_id'] ?? 0));
     }
 
     private function downloadResponse(?array $file): Response

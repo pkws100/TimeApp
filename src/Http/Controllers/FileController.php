@@ -108,6 +108,6 @@ final class FileController
     {
         $user = $this->authService->currentUser();
 
-        return $user !== null && $this->projectAccessService->canAccess($user, $projectId);
+        return $user !== null && $this->projectAccessService->canAccessFiles($user, $projectId);
     }
 }

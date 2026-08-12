@@ -76,6 +76,104 @@ final class AdminManagementControllerTest extends TestCase
         self::assertStringNotContainsString('<Admin>', $html);
     }
 
+    public function testProjectAttachmentSectionRendersProtectedPreviewAndDownloadActions(): void
+    {
+        $_SESSION['_csrf_token'] = 'file-csrf';
+        $controller = $this->controller();
+        $method = new ReflectionMethod($controller, 'renderAttachmentSection');
+        $method->setAccessible(true);
+        $html = (string) $method->invoke($controller, 'Projektdateien', '/admin/projects/5/files', [[
+            'id' => 17,
+            'original_name' => 'Plan <final>.pdf',
+            'mime_type' => 'application/pdf',
+            'size_bytes' => 1234,
+            'uploaded_at' => '2026-08-11 14:18:40',
+            'is_deleted' => 0,
+            'is_previewable' => false,
+            'document_status' => null,
+        ], [
+            'id' => 18,
+            'original_name' => 'Archiv.pdf',
+            'mime_type' => 'application/pdf',
+            'size_bytes' => 42,
+            'uploaded_at' => '2026-08-10 12:00:00',
+            'is_deleted' => 1,
+            'is_previewable' => false,
+            'document_status' => null,
+        ]], 'project', true);
+
+        self::assertStringContainsString('href="/admin/project-files/17/preview"', $html);
+        self::assertStringContainsString('href="/admin/project-files/17/download"', $html);
+        self::assertStringContainsString('class="table-scroll"', $html);
+        self::assertStringContainsString('aria-label="Projektdateien horizontal scrollen"', $html);
+        self::assertStringContainsString('Plan &lt;final&gt;.pdf ansehen', $html);
+        self::assertStringContainsString('>Ansehen</a>', $html);
+        self::assertStringContainsString('>Herunterladen</a>', $html);
+        self::assertStringNotContainsString('/admin/project-files/18/preview', $html);
+        self::assertStringNotContainsString('/admin/project-files/18/download', $html);
+
+        $withoutReadPermission = (string) $method->invoke($controller, 'Projektdateien', '/admin/projects/5/files', [[
+            'id' => 17,
+            'original_name' => 'Plan.pdf',
+            'mime_type' => 'application/pdf',
+            'size_bytes' => 1234,
+            'uploaded_at' => '2026-08-11 14:18:40',
+            'is_deleted' => 0,
+            'is_previewable' => false,
+            'document_status' => null,
+        ]], 'project', false);
+
+        self::assertStringNotContainsString('/admin/project-files/17/preview', $withoutReadPermission);
+        self::assertStringNotContainsString('/admin/project-files/17/download', $withoutReadPermission);
+    }
+
+    public function testProjectFileReadReturnsNotFoundWithoutFilePermission(): void
+    {
+        $controller = $this->controller();
+        $response = $controller->projectFileDownload(
+            new Request('GET', '/admin/project-files/17/download', [], [], [], [], []),
+            ['id' => '17']
+        );
+
+        self::assertSame(404, $response->status());
+        self::assertSame('text/plain; charset=utf-8', $response->headers()['Content-Type'] ?? null);
+    }
+
+    public function testProjectFileBinaryResponseSeparatesPreviewAndDownloadDisposition(): void
+    {
+        $path = tempnam(sys_get_temp_dir(), 'project-file-test-');
+        self::assertNotFalse($path);
+        file_put_contents($path, 'pdf-content');
+
+        try {
+            $controller = $this->controller();
+            $method = new ReflectionMethod($controller, 'projectFileBinaryResponse');
+            $method->setAccessible(true);
+            $file = [
+                'path' => $path,
+                'original_name' => 'Prüfbericht 1.pdf',
+                'mime_type' => 'application/pdf',
+                'is_image' => false,
+            ];
+
+            $preview = $method->invoke($controller, $file, true);
+            $download = $method->invoke($controller, $file, false);
+
+            self::assertSame(200, $preview->status());
+            self::assertSame(
+                "inline; filename=\"Pr--fbericht-1.pdf\"; filename*=UTF-8''Pr%C3%BCfbericht%201.pdf",
+                $preview->headers()['Content-Disposition'] ?? null
+            );
+            self::assertSame(
+                "attachment; filename=\"Pr--fbericht-1.pdf\"; filename*=UTF-8''Pr%C3%BCfbericht%201.pdf",
+                $download->headers()['Content-Disposition'] ?? null
+            );
+            self::assertSame('nosniff', $preview->headers()['X-Content-Type-Options'] ?? null);
+        } finally {
+            @unlink($path);
+        }
+    }
+
     public function testProjectMaterialSectionMarksArchivedRowsAndUsesCsrfForArchive(): void
     {
         $_SESSION['_csrf_token'] = 'material-csrf';
@@ -655,6 +753,24 @@ final class AdminManagementControllerTest extends TestCase
         self::assertStringContainsString('/admin/projects/{id}/memberships', $bootstrap);
         self::assertStringContainsString('projectMembershipUpdate', $bootstrap);
         self::assertStringContainsString('projects.manage', $bootstrap);
+    }
+
+    public function testProjectFileReadRoutesDelegateAlternativeFilePermissionsToController(): void
+    {
+        $bootstrap = file_get_contents(base_path('bootstrap/app.php')) ?: '';
+
+        self::assertStringContainsString("/admin/project-files/{id}/preview", $bootstrap);
+        self::assertStringContainsString("/admin/project-files/{id}/download", $bootstrap);
+        self::assertStringContainsString("projectFilePreview", $bootstrap);
+        self::assertStringContainsString("projectFileDownload", $bootstrap);
+        self::assertStringContainsString(
+            "\$router->get('/admin/project-files/{id}/preview', \$admin([\$adminManagementController, 'projectFilePreview'], null));",
+            $bootstrap
+        );
+        self::assertStringContainsString(
+            "\$router->get('/admin/project-files/{id}/download', \$admin([\$adminManagementController, 'projectFileDownload'], null));",
+            $bootstrap
+        );
     }
 
     public function testAbsencePeriodRoutesAreRegisteredWithSeparatedPermissions(): void

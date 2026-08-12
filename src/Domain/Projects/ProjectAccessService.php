@@ -15,6 +15,12 @@ final class ProjectAccessService
         'timesheets.manage',
     ];
 
+    private const GLOBAL_FILE_PERMISSIONS = [
+        '*',
+        'projects.manage',
+        'files.manage',
+    ];
+
     public function __construct(private DatabaseConnection $connection)
     {
     }
@@ -54,6 +60,38 @@ final class ProjectAccessService
         }
 
         return in_array($projectId, $this->activeProjectIdsForUser($user), true);
+    }
+
+    public function canAccessFiles(array $user, int $projectId): bool
+    {
+        if (!$this->isActiveUser($user) || $projectId <= 0 || !$this->projectExists($projectId)) {
+            return false;
+        }
+
+        if ($this->hasAnyPermission($user, self::GLOBAL_FILE_PERMISSIONS)) {
+            return true;
+        }
+
+        if (!$this->activeProjectExists($projectId)) {
+            return false;
+        }
+
+        if (!$this->connection->tableExists('project_memberships')) {
+            return false;
+        }
+
+        return (int) ($this->connection->fetchColumn(
+            'SELECT COUNT(*)
+             FROM project_memberships
+             WHERE project_id = :project_id
+               AND user_id = :user_id
+               AND (assigned_from IS NULL OR assigned_from <= CURDATE())
+               AND (assigned_until IS NULL OR assigned_until >= CURDATE())',
+            [
+                'project_id' => $projectId,
+                'user_id' => (int) ($user['id'] ?? 0),
+            ]
+        ) ?? 0) > 0;
     }
 
     /** @return list<int> */
@@ -132,5 +170,12 @@ final class ProjectAccessService
         return (int) ($user['id'] ?? 0) > 0
             && (int) ($user['is_deleted'] ?? 0) === 0
             && (string) ($user['employment_status'] ?? 'active') === 'active';
+    }
+
+    private function hasAnyPermission(array $user, array $requiredPermissions): bool
+    {
+        $permissions = is_array($user['permissions'] ?? null) ? $user['permissions'] : [];
+
+        return array_intersect($requiredPermissions, $permissions) !== [];
     }
 }

@@ -143,7 +143,13 @@ final class AdminManagementController
 
         $content = $this->renderProjectForm('/admin/projects/' . (int) $project['id'], 'Projekt bearbeiten', $project, $formErrors)
             . $this->renderProjectMembershipSection($project, $activeUsers, $membershipUserIds)
-            . $this->renderAttachmentSection('Auftragsunterlagen und Projektdateien', '/admin/projects/' . (int) $project['id'] . '/files', $files, 'project')
+            . $this->renderAttachmentSection(
+                'Auftragsunterlagen und Projektdateien',
+                '/admin/projects/' . (int) $project['id'] . '/files',
+                $files,
+                'project',
+                $this->canViewProjectFiles()
+            )
             . $this->renderProjectDispatchSection($project, $dispatchRecipients, $dispatchHistory)
             . $this->renderProjectMaterialSection($project, $materials)
             . $this->renderProjectBookingsSection($project, $bookings, $allProjects, $bookingUsers, $request);
@@ -337,6 +343,16 @@ final class AdminManagementController
         return Response::redirect('/admin/projects?error=file-not-found');
     }
 
+    public function projectFilePreview(Request $request, array $params): Response
+    {
+        return $this->projectFileResponse((int) ($params['id'] ?? 0), true);
+    }
+
+    public function projectFileDownload(Request $request, array $params): Response
+    {
+        return $this->projectFileResponse((int) ($params['id'] ?? 0), false);
+    }
+
     public function projectDispatch(Request $request, array $params): Response
     {
         $projectId = (int) ($params['id'] ?? 0);
@@ -467,7 +483,7 @@ final class AdminManagementController
 
         $files = $this->fileAttachmentService->listForAsset((int) $asset['id'], 'all');
         $content = $this->renderAssetForm('/admin/assets/' . (int) $asset['id'], 'Geraet bearbeiten', $asset)
-            . $this->renderAttachmentSection('Geraeteanhaenge', '/admin/assets/' . (int) $asset['id'] . '/files', $files, 'asset');
+            . $this->renderAttachmentSection('Geraeteanhaenge', '/admin/assets/' . (int) $asset['id'] . '/files', $files, 'asset', false);
 
         return Response::html($this->view->render('Geraet bearbeiten', $content));
     }
@@ -1749,28 +1765,45 @@ HTML;
         }));
     }
 
-    private function renderAttachmentSection(string $title, string $uploadAction, array $files, string $type): string
+    private function renderAttachmentSection(string $title, string $uploadAction, array $files, string $type, bool $canViewFiles): string
     {
         $rows = '';
         $csrfToken = $this->csrfService->token();
         $statusOptions = $this->documentStatusOptions();
 
         foreach ($files as $file) {
+            $fileId = (int) ($file['id'] ?? 0);
+            $isArchived = (int) ($file['is_deleted'] ?? 0) === 1;
             $archiveAction = $type === 'project'
-                ? '/admin/project-files/' . (int) $file['id']
-                : '/admin/asset-files/' . (int) $file['id'];
+                ? '/admin/project-files/' . $fileId
+                : '/admin/asset-files/' . $fileId;
             $statusAction = $archiveAction . '/status';
             $status = is_array($file['document_status'] ?? null) ? $file['document_status'] : null;
             $statusBadge = $status !== null
                 ? '<span class="document-status-badge" style="--document-status-color: ' . $this->e((string) ($status['color'] ?? '#64748b')) . '">' . $this->e((string) ($status['label'] ?? 'Unbearbeitet')) . '</span>'
                 : '<span class="muted">Kein Status</span>';
-            $statusForm = ((int) ($file['is_deleted'] ?? 0) === 0)
+            $statusForm = !$isArchived
                 ? '<form method="post" action="' . $this->e($statusAction) . '" class="inline-form">'
                     . '<input type="hidden" name="csrf_token" value="' . $this->e($csrfToken) . '">'
                     . '<select name="document_status_id">' . $this->markSelectedOption($statusOptions, (string) ($status['id'] ?? '')) . '</select>'
                     . '<button class="button button-secondary" type="submit">Status speichern</button>'
                     . '</form>'
                 : '';
+            $fileActions = '';
+
+            if ($type === 'project' && $canViewFiles && !$isArchived && $fileId > 0) {
+                $mimeType = strtolower(trim((string) ($file['mime_type'] ?? '')));
+                $isPreviewable = (bool) ($file['is_previewable'] ?? false) || $mimeType === 'application/pdf';
+                $previewUrl = '/admin/project-files/' . $fileId . '/preview';
+                $downloadUrl = '/admin/project-files/' . $fileId . '/download';
+                $fileLabel = trim((string) ($file['original_name'] ?? '')) ?: 'Projektdatei';
+
+                if ($isPreviewable) {
+                    $fileActions .= '<a class="button button-secondary" href="' . $this->e($previewUrl) . '" target="_blank" rel="noopener" aria-label="' . $this->e($fileLabel . ' ansehen') . '">Ansehen</a>';
+                }
+
+                $fileActions .= '<a class="button button-secondary" href="' . $this->e($downloadUrl) . '" aria-label="' . $this->e($fileLabel . ' herunterladen') . '">Herunterladen</a>';
+            }
 
             $rows .= '<tr>'
                 . '<td>' . $this->e((string) $file['original_name']) . '</td>'
@@ -1778,8 +1811,8 @@ HTML;
                 . '<td>' . $this->e((string) $file['size_bytes']) . '</td>'
                 . '<td>' . $this->e((string) $file['uploaded_at']) . '</td>'
                 . '<td>' . $statusBadge . '</td>'
-                . '<td>' . (((int) ($file['is_deleted'] ?? 0) === 1) ? '<span class="badge warn">Archiviert</span>' : '<span class="badge ok">Aktiv</span>') . '</td>'
-                . '<td class="table-actions">' . $statusForm . $this->archiveForm($archiveAction, (int) ($file['is_deleted'] ?? 0) === 1) . '</td>'
+                . '<td>' . ($isArchived ? '<span class="badge warn">Archiviert</span>' : '<span class="badge ok">Aktiv</span>') . '</td>'
+                . '<td class="table-actions">' . $fileActions . $statusForm . $this->archiveForm($archiveAction, $isArchived) . '</td>'
                 . '</tr>';
         }
 
@@ -1796,12 +1829,65 @@ HTML;
         <input type="file" name="file" required>
         <button class="button" type="submit">Datei hochladen</button>
     </form>
-    <table>
-        <thead><tr><th>Datei</th><th>MIME</th><th>Bytes</th><th>Hochgeladen</th><th>Dokumentstatus</th><th>Archiv</th><th>Aktionen</th></tr></thead>
-        <tbody>{$rows}</tbody>
-    </table>
+    <div class="table-scroll" tabindex="0" aria-label="{$this->e($title)} horizontal scrollen">
+        <table>
+            <thead><tr><th>Datei</th><th>MIME</th><th>Bytes</th><th>Hochgeladen</th><th>Dokumentstatus</th><th>Archiv</th><th>Aktionen</th></tr></thead>
+            <tbody>{$rows}</tbody>
+        </table>
+    </div>
 </section>
 HTML;
+    }
+
+    private function projectFileResponse(int $fileId, bool $inline): Response
+    {
+        if (!$this->canViewProjectFiles()) {
+            return new Response('Datei nicht gefunden.', 404, ['Content-Type' => 'text/plain; charset=utf-8']);
+        }
+
+        $file = $this->fileAttachmentService->findProjectFile($fileId);
+
+        if (
+            $file === null
+            || (int) ($file['is_deleted'] ?? 0) === 1
+            || !$this->canAccessProjectFiles((int) ($file['project_id'] ?? 0))
+        ) {
+            return new Response('Datei nicht gefunden.', 404, ['Content-Type' => 'text/plain; charset=utf-8']);
+        }
+
+        $downloadableFile = $this->fileAttachmentService->downloadableProjectFile($fileId);
+
+        if ($downloadableFile === null) {
+            return new Response('Datei nicht gefunden.', 404, ['Content-Type' => 'text/plain; charset=utf-8']);
+        }
+
+        return $this->projectFileBinaryResponse($downloadableFile, $inline);
+    }
+
+    private function projectFileBinaryResponse(array $file, bool $inline): Response
+    {
+        $content = file_get_contents((string) ($file['path'] ?? ''));
+
+        if ($content === false) {
+            return new Response('Datei nicht gefunden.', 404, ['Content-Type' => 'text/plain; charset=utf-8']);
+        }
+
+        $mimeType = (string) ($file['mime_type'] ?? 'application/octet-stream');
+        $originalFilename = basename(str_replace('\\', '/', trim((string) ($file['original_name'] ?? ''))));
+        $originalFilename = preg_replace('/[\x00-\x1F\x7F]/u', '', $originalFilename) ?: 'download.bin';
+        $safeFilename = preg_replace('/[^a-zA-Z0-9._-]/', '-', $originalFilename) ?: 'download.bin';
+        $canRenderInline = (bool) ($file['is_image'] ?? false) || $mimeType === 'application/pdf';
+        $disposition = ($inline && $canRenderInline ? 'inline' : 'attachment')
+            . '; filename="' . $safeFilename . '"'
+            . "; filename*=UTF-8''" . rawurlencode($originalFilename);
+
+        return new Response($content, 200, [
+            'Content-Type' => $mimeType,
+            'Content-Length' => (string) strlen($content),
+            'Content-Disposition' => $disposition,
+            'Cache-Control' => 'private, max-age=300',
+            'X-Content-Type-Options' => 'nosniff',
+        ]);
     }
 
     private function renderProjectDispatchSection(array $project, array $recipients, array $history): string
@@ -2236,6 +2322,21 @@ HTML;
         }
 
         return $this->projectAccessService->canAccess($this->authService->currentUser() ?? [], $projectId);
+    }
+
+    private function canViewProjectFiles(): bool
+    {
+        return $this->authService->hasPermission('files.view')
+            || $this->authService->hasPermission('files.manage');
+    }
+
+    private function canAccessProjectFiles(int $projectId): bool
+    {
+        if (!$this->projectAccessService instanceof ProjectAccessService) {
+            return true;
+        }
+
+        return $this->projectAccessService->canAccessFiles($this->authService->currentUser() ?? [], $projectId);
     }
 
     private function scope(Request $request): string
