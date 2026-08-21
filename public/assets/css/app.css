@@ -1490,6 +1490,12 @@ html[data-theme="dark"] .app-stat-row {
     flex: 1 1 12rem;
 }
 
+@media (max-width: 559px) {
+    .app-today-actions {
+        row-gap: 30px;
+    }
+}
+
 .app-time-edit-grid {
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
 }

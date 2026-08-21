@@ -2758,7 +2758,7 @@
             + '<div class="app-stat-row"><span class="muted">Pausen heute</span><strong data-live-today-break-total>' + escapeHtml(formatDurationMinutes(totalBreakMinutes)) + '</strong></div>'
             + '<div class="app-stat-row"><span class="muted">Projekt</span><strong data-live-project-name>' + escapeHtml(currentProjectName()) + '</strong></div>'
             + '</div>'
-            + '<div class="app-inline-actions">'
+            + '<div class="app-inline-actions app-today-actions">'
             + (canCheckIn ? '<button type="button" data-action="check_in" ' + (isBusy('check_in') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('check_in', 'Check-in')) + '</button>' : '')
             + (canPause ? '<button type="button" data-action="pause" ' + (isBusy('pause') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('pause', 'Pause buchen')) + '</button>' : '')
             + (canCheckOut ? '<button type="button" data-action="check_out" ' + (isBusy('check_out') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('check_out', 'Check-out')) + '</button>' : '')
