@@ -48,7 +48,7 @@ static_assert(sizeof(PKWS_PORTAL_ADMIN_PASSWORD) >= 13, "PKWS_PORTAL_ADMIN_PASSW
 #endif
 static_assert(sizeof(PKWS_PROVISIONING_ID) >= 13, "PKWS_PROVISIONING_ID muss mindestens 12 Zeichen haben.");
 
-static const char *FIRMWARE_VERSION = "pkws-time-terminal-v1.1.2";
+static const char *FIRMWARE_VERSION = "pkws-time-terminal-v1.1.3";
 static const char *NVS_NAMESPACE = "pkws-time";
 static const char *SETUP_AP_PASSWORD = PKWS_SETUP_AP_PASSWORD;
 static const char *PORTAL_ADMIN_PASSWORD = PKWS_PORTAL_ADMIN_PASSWORD;
@@ -72,11 +72,17 @@ static const unsigned long WIFI_ATTEMPT_MS = 5000;
 static const uint8_t WIFI_MAX_ATTEMPTS = 4;
 static const unsigned long API_RETRY_MS = 15000;
 static const uint16_t HTTP_TIMEOUT_MS = 5000;
+static const unsigned long TLS_HANDSHAKE_TIMEOUT_SECONDS = 10;
 static const unsigned long DOWNLOAD_TOTAL_TIMEOUT_MS = 15000;
 static const unsigned long DOWNLOAD_IDLE_TIMEOUT_MS = 3000;
 static const unsigned long TIME_SYNC_TIMEOUT_MS = 30000;
 static const uint32_t READY_CLOCK_CHECK_INTERVAL_MS = 1000;
 static const uint32_t SCAN_FEEDBACK_BEFORE_SEND_MS = 180;
+static const uint32_t LIVE_SCAN_MAX_RETRY_DELAY_MS = 15000;
+static const uint32_t LIVE_SCAN_MAX_OPERATION_MS = 120000;
+static const uint32_t QUEUE_FOREGROUND_MAX_WAIT_MS = 30000;
+static const uint32_t PORTAL_RECOVERY_QUEUE_PAUSE_MS = 5UL * 60UL * 1000UL;
+static const uint32_t MAX_PERSISTED_QUEUE_DELAY_MS = 60UL * 60UL * 1000UL;
 static const unsigned long TRUST_WARNING_BUFFER_SECONDS = 90UL * 24UL * 60UL * 60UL;
 static const size_t MAX_TRUST_BUNDLE_BYTES = 24576;
 static const size_t MAX_CONFIG_RESPONSE_BYTES = 16384;
@@ -109,13 +115,14 @@ enum class DeviceState {
     TLS_RECOVERY,
     QUEUE_SYNC,
     SHOW_RESULT,
-    ERROR_RETRY
+    ERROR_RETRY,
+    RESTART_PENDING
 };
 
 enum class ApiTransport { HTTP_PLAIN, HTTPS_VERIFIED, INVALID };
 enum class TlsState { NOT_APPLICABLE, NOT_CHECKED, TIME_INVALID, TRUST_MISSING, CONNECTING, VERIFIED, VALIDATION_FAILED, RECOVERY };
 enum class ScanLifecycle { NONE, VOLATILE, PERSISTED, SENT_CONFIRMED, REJECTED };
-enum class QueueSyncOutcome { EMPTY, CONFIRMED, TEMPORARY, TLS_FAILURE, REJECTED, BLOCKED, CORRUPT };
+enum class QueueSyncOutcome { EMPTY, CONFIRMED, TEMPORARY, DEFERRED, TLS_FAILURE, REJECTED, BLOCKED, CORRUPT };
 
 struct TerminalConfig {
     String ssid;
@@ -143,6 +150,8 @@ struct OfflineScan {
     String deviceTime;
     String reason;
     uint32_t sequence = 0;
+    uint64_t notBeforeEpoch = 0;
+    uint32_t notBeforeDelayMs = 0;
 };
 
 struct QueueSyncContext {
@@ -151,6 +160,7 @@ struct QueueSyncContext {
     uint8_t attempt = 0;
     unsigned long nextAttemptAt = 0;
     unsigned long startedAt = 0;
+    uint32_t lastDisplayedWaitSeconds = UINT32_MAX;
     String lastError;
 };
 
@@ -170,6 +180,8 @@ bool webPortalStarted = false;
 bool setupRoutesRegistered = false;
 bool restartScheduled = false;
 unsigned long restartAt = 0;
+bool queueRecoveryPending = false;
+unsigned long nextQueueRecoveryAt = 0;
 uint8_t wifiAttempt = 0;
 unsigned long wifiAttemptStartedAt = 0;
 String apiStatus = "not_checked";
@@ -190,10 +202,13 @@ bool lastScanResponseJsonParsed = false;
 bool lastScanResponseOk = false;
 uint8_t currentScanAttempt = 0;
 unsigned long nextScanAttemptAt = 0;
+uint32_t lastDisplayedScanWaitSeconds = UINT32_MAX;
 unsigned long lastUidAt = 0;
 unsigned long resultUntil = 0;
 unsigned long nextApiRetryAt = 0;
 unsigned long nextQueueSyncCycleAt = 0;
+uint32_t relativeQueueDelaySequence = 0;
+unsigned long relativeQueueDelayDeadline = 0;
 unsigned long lastRetryAfterMs = 0;
 String savedDisplayLines[4] = {"PK-WS TimeApp", "Tag vorhalten", "Bereit", ""};
 char lastRenderedReadyClockLine[24] = "";
@@ -254,7 +269,7 @@ unsigned long beepStepUntil = 0;
 void applySignalFromJson(JsonVariantConst root, const String &fallbackLed, const String &fallbackBeep);
 void applyLedSignal(const String &signal);
 void lcdShow(const String &line1, const String &line2, const String &line3, const String &line4);
-bool persistCurrentScan(const String &reason);
+bool persistCurrentScan(const String &reason, uint32_t notBeforeDelayMs = 0);
 bool apiGet(const String &path, String &body, int &status, String &why, bool authenticated = true, size_t responseLimit = MAX_CONFIG_RESPONSE_BYTES);
 bool installTrustBundle(const String &raw, bool allowRollback, String &why);
 void finishTrustInstall(bool verified);
@@ -333,6 +348,48 @@ String tlsStateLabel()
     return tlsStateLabel(tlsState);
 }
 
+const char *deviceStateLabel(DeviceState value)
+{
+    switch (value) {
+        case DeviceState::BOOT: return "boot";
+        case DeviceState::CONFIG_CHECK: return "config-check";
+        case DeviceState::SETUP_MODE: return "setup-mode";
+        case DeviceState::WIFI_CONNECT: return "wifi-connect";
+        case DeviceState::TIME_SYNC: return "time-sync";
+        case DeviceState::API_CONFIG: return "api-config";
+        case DeviceState::READY: return "ready";
+        case DeviceState::NFC_SCAN: return "nfc-scan";
+        case DeviceState::SEND_SCAN: return "send-scan";
+        case DeviceState::TLS_RECOVERY: return "tls-recovery";
+        case DeviceState::QUEUE_SYNC: return "queue-sync";
+        case DeviceState::SHOW_RESULT: return "show-result";
+        case DeviceState::ERROR_RETRY: return "error-retry";
+        case DeviceState::RESTART_PENDING: return "restart-pending";
+    }
+    return "unknown";
+}
+
+const char *deviceStateHuman(DeviceState value)
+{
+    switch (value) {
+        case DeviceState::BOOT: return "Start";
+        case DeviceState::CONFIG_CHECK: return "Konfiguration wird geprueft";
+        case DeviceState::SETUP_MODE: return "Setup-Modus";
+        case DeviceState::WIFI_CONNECT: return "WLAN-Verbindung";
+        case DeviceState::TIME_SYNC: return "Zeitsynchronisierung";
+        case DeviceState::API_CONFIG: return "API-Pruefung";
+        case DeviceState::READY: return "Bereit";
+        case DeviceState::NFC_SCAN: return "Bereit fuer NFC-Scan";
+        case DeviceState::SEND_SCAN: return "Live-Scan wird gesendet";
+        case DeviceState::TLS_RECOVERY: return "TLS-Wiederherstellung";
+        case DeviceState::QUEUE_SYNC: return "Offline-Queue wird synchronisiert";
+        case DeviceState::SHOW_RESULT: return "Ergebnis wird angezeigt";
+        case DeviceState::ERROR_RETRY: return "API-Wiederholungsversuch";
+        case DeviceState::RESTART_PENDING: return "Neustart vorbereitet";
+    }
+    return "Unbekannt";
+}
+
 String tlsStateHuman(TlsState value)
 {
     if (value == TlsState::NOT_APPLICABLE) return "nicht anwendbar (HTTP)";
@@ -361,7 +418,8 @@ bool provisioningCredentialsAreSafe()
 bool storageMutationBlocked()
 {
     return state == DeviceState::SEND_SCAN || state == DeviceState::QUEUE_SYNC || state == DeviceState::TLS_RECOVERY
-        || queueSync.active || scanLifecycle != ScanLifecycle::NONE
+        || state == DeviceState::RESTART_PENDING
+        || queueSync.active || queueRecoveryPending || scanLifecycle != ScanLifecycle::NONE
         || currentRequestId.length() > 0 || currentUid.length() > 0;
 }
 
@@ -978,12 +1036,13 @@ size_t queueCorruptDepth()
     return count;
 }
 
-bool enqueueScan(const OfflineScan &scan, String &why)
+bool enqueueScan(OfflineScan &scan, String &why)
 {
     if (!filesystemMounted) { why = "filesystem_mount_failed"; return false; }
     if (queueDepth() >= MAX_QUEUE_ENTRIES) { why = "queue_full"; return false; }
     uint32_t sequence = nextQueueSequence();
     if (sequence == 0) { why = "queue_sequence_write_failed"; return false; }
+    scan.sequence = sequence;
     DynamicJsonDocument document(768);
     document["request_id"] = scan.requestId;
     document["nfc_uid"] = scan.uid;
@@ -991,6 +1050,8 @@ bool enqueueScan(const OfflineScan &scan, String &why)
     document["firmware_version"] = FIRMWARE_VERSION;
     document["queued_reason"] = scan.reason;
     document["sequence"] = sequence;
+    document["not_before_epoch"] = scan.notBeforeEpoch;
+    document["not_before_delay_ms"] = scan.notBeforeDelayMs;
     String body;
     serializeJson(document, body);
     String target = queuePath(sequence);
@@ -1000,6 +1061,81 @@ bool enqueueScan(const OfflineScan &scan, String &why)
     if (!check || check.size() == 0) { if (check) check.close(); LittleFS.remove(target); why = "queue_write_failed"; return false; }
     check.close();
     return true;
+}
+
+bool queuedScanFileStructurallyValid(const String &path, uint32_t expectedSequence)
+{
+    File candidate = LittleFS.open(path, "r");
+    if (!candidate || candidate.size() == 0 || candidate.size() > 1024) {
+        if (candidate) candidate.close();
+        return false;
+    }
+    DynamicJsonDocument document(896);
+    const bool valid = !deserializeJson(document, candidate)
+        && (uint32_t) (document["sequence"] | 0) == expectedSequence
+        && document["request_id"].is<const char *>()
+        && document["nfc_uid"].is<const char *>();
+    candidate.close();
+    return valid;
+}
+
+bool recoverDeferredQueueUpdates()
+{
+    if (!filesystemMounted) return false;
+    bool recovered = true;
+    File directory = LittleFS.open(QUEUE_DIRECTORY, "r");
+    if (!directory || !directory.isDirectory()) return false;
+    for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
+        String backup = entry.name();
+        entry.close();
+        if (!backup.endsWith(".json.defer.bak")) continue;
+        String target = backup.substring(0, backup.length() - strlen(".defer.bak"));
+        String staging = target + ".defer.tmp";
+        const uint32_t expectedSequence = queueSequenceFromPath(target);
+        if (!LittleFS.exists(target)) {
+            const bool stagingValid = LittleFS.exists(staging)
+                && queuedScanFileStructurallyValid(staging, expectedSequence);
+            if (stagingValid) recovered = LittleFS.rename(staging, target) && recovered;
+            else {
+                if (LittleFS.exists(staging)) recovered = LittleFS.rename(staging, (staging + ".corrupt").c_str()) && recovered;
+                recovered = LittleFS.rename(backup, target) && recovered;
+            }
+        }
+        if (LittleFS.exists(target)) {
+            if (queuedScanFileStructurallyValid(target, expectedSequence)) {
+                if (LittleFS.exists(backup)) recovered = LittleFS.remove(backup) && recovered;
+            }
+            else {
+                const bool quarantined = LittleFS.rename(target, (target + ".corrupt").c_str());
+                recovered = quarantined && recovered;
+                if (quarantined) recovered = LittleFS.rename(backup, target) && recovered;
+            }
+        }
+    }
+    directory.close();
+
+    directory = LittleFS.open(QUEUE_DIRECTORY, "r");
+    if (!directory || !directory.isDirectory()) return false;
+    for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
+        String staging = entry.name();
+        entry.close();
+        if (!staging.endsWith(".json.defer.tmp")) continue;
+        String target = staging.substring(0, staging.length() - strlen(".defer.tmp"));
+        if (LittleFS.exists(target)) recovered = LittleFS.remove(staging) && recovered;
+        else if (queuedScanFileStructurallyValid(staging, queueSequenceFromPath(target))) recovered = LittleFS.rename(staging, target) && recovered;
+        else recovered = LittleFS.rename(staging, (staging + ".corrupt").c_str()) && recovered;
+    }
+    directory.close();
+    return recovered;
+}
+
+bool quarantineCorruptQueuedScan(const String &selected)
+{
+    String corrupt = selected + ".corrupt";
+    if (LittleFS.rename(selected.c_str(), corrupt.c_str())) return true;
+    queueSync.lastError = "queue_corrupt_quarantine_failed";
+    lastTerminalError = queueSync.lastError;
+    return false;
 }
 
 bool nextQueuedScan(OfflineScan &scan)
@@ -1022,31 +1158,141 @@ bool nextQueuedScan(OfflineScan &scan)
     File file = LittleFS.open(selected, "r");
     if (!file || file.size() > 1024) {
         if (file) file.close();
-        String corrupt = selected + ".corrupt";
-        LittleFS.rename(selected.c_str(), corrupt.c_str());
+        quarantineCorruptQueuedScan(selected);
         return false;
     }
     DynamicJsonDocument document(768);
     DeserializationError error = deserializeJson(document, file);
     file.close();
-    if (error || !document["request_id"].is<const char *>() || !document["nfc_uid"].is<const char *>()) {
-        String corrupt = selected + ".corrupt";
-        LittleFS.rename(selected.c_str(), corrupt.c_str());
+    const uint32_t storedSequence = (uint32_t) (document["sequence"] | 0);
+    if (error || !document["request_id"].is<const char *>() || !document["nfc_uid"].is<const char *>()
+        || storedSequence == 0 || storedSequence != selectedSequence) {
+        quarantineCorruptQueuedScan(selected);
         return false;
     }
     scan.requestId = document["request_id"].as<String>();
     scan.uid = document["nfc_uid"].as<String>();
     scan.deviceTime = document["device_time"].as<String>();
     scan.reason = document["queued_reason"].as<String>();
-    scan.sequence = (uint32_t) (document["sequence"] | 0);
+    scan.sequence = selectedSequence;
+    scan.notBeforeEpoch = document["not_before_epoch"] | 0ULL;
+    scan.notBeforeDelayMs = document["not_before_delay_ms"] | 0U;
     return true;
 }
 
-void acknowledgeQueuedScan(const OfflineScan &scan)
+bool deferQueuedScan(OfflineScan &scan, uint32_t delayMs)
+{
+    if (!filesystemMounted || scan.sequence == 0) {
+        lastTerminalError = "queue_not_before_unavailable";
+        return false;
+    }
+    const String target = queuePath(scan.sequence);
+    File file = LittleFS.open(target, "r");
+    if (!file || file.size() == 0 || file.size() > 1024) {
+        if (file) file.close();
+        lastTerminalError = "queue_not_before_read_failed";
+        return false;
+    }
+    DynamicJsonDocument document(896);
+    DeserializationError error = deserializeJson(document, file);
+    file.close();
+    if (error || (uint32_t) (document["sequence"] | 0) != scan.sequence
+        || document["request_id"].as<String>() != scan.requestId) {
+        lastTerminalError = "queue_not_before_verify_failed";
+        return false;
+    }
+
+    const uint64_t nowEpoch = static_cast<uint64_t>(time(nullptr));
+    const uint64_t requestedEpoch = isTimeValid()
+        ? nowEpoch + (static_cast<uint64_t>(delayMs) + 999ULL) / 1000ULL
+        : 0;
+    const uint64_t storedEpoch = document["not_before_epoch"] | 0ULL;
+    scan.notBeforeEpoch = requestedEpoch > storedEpoch ? requestedEpoch : storedEpoch;
+    const uint32_t storedDelayMs = document["not_before_delay_ms"] | 0U;
+    scan.notBeforeDelayMs = delayMs > storedDelayMs ? delayMs : storedDelayMs;
+    document["not_before_epoch"] = scan.notBeforeEpoch;
+    document["not_before_delay_ms"] = scan.notBeforeDelayMs;
+    String body;
+    serializeJson(document, body);
+    const String temporary = target + ".defer.tmp";
+    const String backup = target + ".defer.bak";
+    LittleFS.remove(temporary);
+    File staging = LittleFS.open(temporary, "w");
+    if (!staging) {
+        lastTerminalError = "queue_not_before_write_failed";
+        return false;
+    }
+    const bool written = staging.print(body) == body.length();
+    staging.flush();
+    staging.close();
+    if (!written) {
+        LittleFS.remove(temporary);
+        lastTerminalError = "queue_not_before_write_failed";
+        return false;
+    }
+    LittleFS.remove(backup);
+    if (!LittleFS.rename(target, backup)) {
+        LittleFS.remove(temporary);
+        lastTerminalError = "queue_not_before_backup_failed";
+        return false;
+    }
+    if (!LittleFS.rename(temporary, target)) {
+        LittleFS.rename(backup, target);
+        queueRecoveryPending = !recoverDeferredQueueUpdates();
+        if (queueRecoveryPending) nextQueueRecoveryAt = millis();
+        lastTerminalError = "queue_not_before_activate_failed";
+        return false;
+    }
+    File activated = LittleFS.open(target, "r");
+    DynamicJsonDocument activatedDocument(896);
+    const bool activatedValid = activated && activated.size() > 0 && activated.size() <= 1024
+        && !deserializeJson(activatedDocument, activated)
+        && (uint32_t) (activatedDocument["sequence"] | 0) == scan.sequence
+        && activatedDocument["request_id"].as<String>() == scan.requestId
+        && (uint64_t) (activatedDocument["not_before_epoch"] | 0ULL) == scan.notBeforeEpoch
+        && (uint32_t) (activatedDocument["not_before_delay_ms"] | 0U) == scan.notBeforeDelayMs;
+    if (activated) activated.close();
+    if (!activatedValid) {
+        LittleFS.remove(target);
+        LittleFS.rename(backup, target);
+        queueRecoveryPending = !recoverDeferredQueueUpdates();
+        if (queueRecoveryPending) nextQueueRecoveryAt = millis();
+        lastTerminalError = "queue_not_before_activate_verify_failed";
+        return false;
+    }
+    LittleFS.remove(backup);
+    if (!isTimeValid() && scan.notBeforeDelayMs > 0) {
+        relativeQueueDelaySequence = scan.sequence;
+        const uint32_t boundedDelay = scan.notBeforeDelayMs > MAX_PERSISTED_QUEUE_DELAY_MS
+            ? MAX_PERSISTED_QUEUE_DELAY_MS
+            : scan.notBeforeDelayMs;
+        relativeQueueDelayDeadline = millis() + boundedDelay;
+    } else {
+        relativeQueueDelaySequence = 0;
+        relativeQueueDelayDeadline = 0;
+    }
+    return true;
+}
+
+bool acknowledgeQueuedScan(const OfflineScan &scan)
 {
     String pending = queuePath(scan.sequence);
     String acknowledged = queuePath(scan.sequence, ".acked");
-    if (LittleFS.rename(pending, acknowledged)) LittleFS.remove(acknowledged);
+    if (!LittleFS.exists(pending) || !LittleFS.rename(pending, acknowledged)) {
+        lastTerminalError = "queue_ack_rename_failed";
+        return false;
+    }
+
+    // The .acked suffix is outside the active FIFO. A failed cleanup must not
+    // resend a server-confirmed request_id, but remains visible for diagnosis.
+    if (LittleFS.exists(pending)) {
+        lastTerminalError = "queue_ack_verify_failed";
+        return false;
+    }
+    if (!LittleFS.remove(acknowledged)) {
+        lastTerminalError = "queue_ack_cleanup_failed";
+    }
+    return true;
 }
 
 bool rejectQueuedScan(const OfflineScan &scan, int status, const String &code, const String &message)
@@ -1239,7 +1485,7 @@ void applyScanFeedback(ScanFeedbackState feedback)
 
 void updateBuzzer()
 {
-    if (!beepActive || millis() < beepStepUntil) {
+    if (!beepActive || terminalDeadlinePending(millis(), beepStepUntil)) {
         return;
     }
 
@@ -1518,6 +1764,8 @@ String setupHtml()
     page += htmlEscape(apiBaseLabel);
     page += F("</code><span>API Status</span><code>");
     page += htmlEscape(apiStatus);
+    page += F("</code><span>Betriebszustand</span><code id=\"deviceState\">");
+    page += deviceStateHuman(state);
     page += F("</code><span>API Test</span><code>");
     page += htmlEscape(lastApiTestSummary);
     page += F("</code><span>Transport / TLS</span><code>");
@@ -1541,10 +1789,10 @@ String setupHtml()
     page += F("</code><span>Speicher</span><code>");
     page += "Heap " + String(ESP.getFreeHeap()) + " / Minimum " + String(ESP.getMinFreeHeap()) + " / Stack " + String(uxTaskGetStackHighWaterMark(nullptr));
     page += F("</code></div><form method=\"post\" action=\"/logout\"><button class=\"secondary\" type=\"submit\">Ausloggen</button></form></section>");
-    page += F("<section class=\"panel\"><h2>WLAN suchen</h2><button type=\"button\" onclick=\"scanWifi()\"");
+    page += F("<section class=\"panel\"><h2>WLAN suchen</h2><button id=\"scanWifiButton\" type=\"button\" onclick=\"scanWifi()\"");
     if (formatBlocked) page += F(" disabled");
     page += F(">WLANs suchen</button><div id=\"networks\" class=\"muted\" aria-live=\"polite\">Noch nicht gesucht.</div></section>");
-    page += F("<section class=\"panel\"><h2>Konfiguration</h2><form id=\"configForm\" method=\"post\" action=\"/save\">");
+    page += F("<section class=\"panel\"><h2>Konfiguration</h2><form id=\"configForm\" data-maintenance-form method=\"post\" action=\"/save\">");
     page += setupKeyInput();
     page += F("<label for=\"ssid\">WLAN-SSID</label><input id=\"ssid\" name=\"ssid\" required value=\"");
     page += htmlEscape(config.ssid);
@@ -1558,7 +1806,7 @@ String setupHtml()
     page += maskedToken.length() > 0 ? F("gespeichert - leer lassen zum Beibehalten") : F("");
     page += F("\"><label for=\"device-name\">Geraetename optional</label><input id=\"device-name\" name=\"device_name\" value=\"");
     page += htmlEscape(config.deviceName);
-    page += F("\"><button type=\"submit\">Speichern und verbinden</button><button class=\"good\" type=\"button\" onclick=\"testApi()\"");
+    page += F("\"><button type=\"submit\">Speichern und verbinden</button><button id=\"apiTestButton\" class=\"good\" type=\"button\" onclick=\"testApi()\"");
     if (formatBlocked) page += F(" disabled");
     page += F(">API testen</button></form>");
     page += F("<div id=\"apiResult\" class=\"result muted\" aria-live=\"polite\">");
@@ -1579,51 +1827,75 @@ String setupHtml()
     page += F("</div><div id=\"hardwareResult\" class=\"result muted\" aria-live=\"polite\">Bereit fuer Hardwaretests.</div>");
     if (hardwareTestsBlocked) page += F("<p class=\"muted\">Hardwaretests sind nur im per Setup-Taster aktivierten Setup-Modus verfügbar, damit keine reale Buchung beeinflusst wird.</p>");
     page += F("</section>");
-    page += F("<section class=\"panel\"><form method=\"post\" action=\"/reset\" onsubmit=\"return confirm('Konfiguration wirklich loeschen?')\"><input type=\"hidden\" name=\"setup_key\" value=\"");
+    page += F("<section class=\"panel\"><form data-maintenance-form method=\"post\" action=\"/reset\" onsubmit=\"return confirm('Konfiguration wirklich loeschen?')\"><input type=\"hidden\" name=\"setup_key\" value=\"");
     page += htmlEscape(setupFormKey);
     page += F("\"><button class=\"danger\" type=\"submit\">Konfiguration loeschen</button></form>");
     page += F("<form method=\"post\" action=\"/reboot\" onsubmit=\"return confirm('Terminal neu starten?')\"><input type=\"hidden\" name=\"setup_key\" value=\"");
     page += htmlEscape(setupFormKey);
-    page += F("\"><button class=\"secondary\" type=\"submit\">Neustart</button></form></section>");
-    page += F("<section class=\"panel\"><h2>Trust und Queue</h2><form method=\"post\" action=\"/trust/check\">");
+    page += F("\"><button id=\"safeRestartButton\" class=\"secondary\" type=\"submit\"");
+    if (state == DeviceState::RESTART_PENDING) page += F(" disabled");
+    page += F(">Sicherer Neustart</button></form><p id=\"restartPendingNotice\" class=\"muted\"");
+    if (state != DeviceState::RESTART_PENDING) page += F(" hidden");
+    page += F(">Der Neustart wurde bereits vorbereitet. Bitte kurz warten.</p><p id=\"queueRecoveryNotice\" class=\"error\"");
+    if (!queueRecoveryPending) page += F(" hidden");
+    page += F(">Queue-Speicher wird wiederhergestellt. Wartungsaktionen bleiben bis zur erfolgreichen Pruefung gesperrt.</p>");
+    page += F("<p id=\"busyOperationNotice\" class=\"error\"");
+    if (!formatBlocked || queueRecoveryPending || state == DeviceState::RESTART_PENDING) page += F(" hidden");
+    page += F(">Ein Vorgang blockiert Wartungsaktionen. Der sichere Abbruch speichert einen offenen Live-Scan zuerst in der Queue und pausiert die Synchronisierung fuer 5 Minuten.</p><form id=\"recoveryAbortForm\" method=\"post\" action=\"/recovery/abort\" onsubmit=\"return confirm('Laufenden Vorgang sicher abbrechen? Persistierte Queue-Eintraege bleiben erhalten.')\"");
+    if (!formatBlocked || queueRecoveryPending || state == DeviceState::RESTART_PENDING) page += F(" hidden");
+    page += F(">");
     page += setupKeyInput();
-    page += F("<button class=\"secondary\" type=\"submit\">Signiertes Bundle pruefen</button></form><form method=\"post\" action=\"/trust/upload\" enctype=\"multipart/form-data\">");
+    page += F("<button class=\"danger\" type=\"submit\">Vorgang sicher abbrechen</button></form>");
+    page += F("</section>");
+    page += F("<section class=\"panel\"><h2>Trust und Queue</h2><form data-maintenance-form method=\"post\" action=\"/trust/check\">");
     page += setupKeyInput();
-    page += F("<label for=\"trust-bundle-file\">Bundle-Datei</label><input id=\"trust-bundle-file\" name=\"bundle\" type=\"file\" accept=\"application/json\" required><button class=\"secondary\" type=\"submit\">Signiertes Bundle hochladen</button></form><form method=\"post\" action=\"/trust/previous\">");
+    page += F("<button class=\"secondary\" type=\"submit\">Signiertes Bundle pruefen</button></form><form data-maintenance-form method=\"post\" action=\"/trust/upload\" enctype=\"multipart/form-data\">");
     page += setupKeyInput();
-    page += F("<button class=\"secondary\" type=\"submit\">Previous aktivieren</button></form><form method=\"post\" action=\"/trust/factory\">");
+    page += F("<label for=\"trust-bundle-file\">Bundle-Datei</label><input id=\"trust-bundle-file\" name=\"bundle\" type=\"file\" accept=\"application/json\" required><button class=\"secondary\" type=\"submit\">Signiertes Bundle hochladen</button></form><form data-maintenance-form method=\"post\" action=\"/trust/previous\">");
     page += setupKeyInput();
-    page += F("<button class=\"secondary\" type=\"submit\">Factory-Trust aktivieren</button></form><form method=\"post\" action=\"/queue/sync\">");
+    page += F("<button class=\"secondary\" type=\"submit\">Previous aktivieren</button></form><form data-maintenance-form method=\"post\" action=\"/trust/factory\">");
     page += setupKeyInput();
-    page += F("<button class=\"secondary\" type=\"submit\">Queue synchronisieren</button></form><form method=\"post\" action=\"/queue/unblock\">");
+    page += F("<button class=\"secondary\" type=\"submit\">Factory-Trust aktivieren</button></form><form data-maintenance-form method=\"post\" action=\"/queue/sync\">");
     page += setupKeyInput();
-    page += F("<button class=\"secondary\" type=\"submit\">Terminal-Zugang pruefen und Queue entsperren</button></form><form method=\"post\" action=\"/trust/quarantine/delete\" onsubmit=\"return confirm('Unverifizierten Trust-Kandidaten dauerhaft loeschen?')\">");
+    page += F("<button class=\"secondary\" type=\"submit\">Queue synchronisieren</button></form><form data-maintenance-form method=\"post\" action=\"/queue/unblock\">");
+    page += setupKeyInput();
+    page += F("<button class=\"secondary\" type=\"submit\">Terminal-Zugang pruefen und Queue entsperren</button></form><form data-maintenance-form method=\"post\" action=\"/trust/quarantine/delete\" onsubmit=\"return confirm('Unverifizierten Trust-Kandidaten dauerhaft loeschen?')\">");
     page += setupKeyInput();
     page += F("<label for=\"confirm-quarantine-delete\">Bestaetigung</label><input id=\"confirm-quarantine-delete\" name=\"confirm_delete\" placeholder=\"LOESCHEN\" required><button class=\"danger\" type=\"submit\">Trust-Kandidaten aus Quarantaene loeschen</button></form><div class=\"result muted\"><strong>Abgelehnte Offline-Buchungen</strong><br>Maximal ");
     page += String(MAX_REJECTED_QUEUE_ENTRIES);
-    page += F(" Eintraege; bei Erreichen bleibt die aktive Buchung sicher erhalten und der Admin muss bereinigen. <button class=\"secondary\" type=\"button\" onclick=\"loadRejected(0)\">Abgelehnte Eintraege laden</button><button id=\"nextRejected\" class=\"secondary\" type=\"button\" style=\"display:none\">Weitere Eintraege</button><pre id=\"rejectedQueue\" aria-live=\"polite\">Noch nicht geladen.</pre><form method=\"post\" action=\"/queue/rejected/delete\" onsubmit=\"return confirm('Abgelehnten Queue-Eintrag unwiderruflich loeschen?')\">");
+    page += F(" Eintraege; bei Erreichen bleibt die aktive Buchung sicher erhalten und der Admin muss bereinigen. <button class=\"secondary\" type=\"button\" onclick=\"loadRejected(0)\">Abgelehnte Eintraege laden</button><button id=\"nextRejected\" class=\"secondary\" type=\"button\" style=\"display:none\">Weitere Eintraege</button><pre id=\"rejectedQueue\" aria-live=\"polite\">Noch nicht geladen.</pre><form data-maintenance-form method=\"post\" action=\"/queue/rejected/delete\" onsubmit=\"return confirm('Abgelehnten Queue-Eintrag unwiderruflich loeschen?')\">");
     page += setupKeyInput();
     page += F("<label for=\"rejected-sequence\">Sequenz</label><input id=\"rejected-sequence\" name=\"sequence\" type=\"number\" min=\"1\" required><label for=\"confirm-rejected-delete\">Bestaetigung</label><input id=\"confirm-rejected-delete\" name=\"confirm_delete\" placeholder=\"LOESCHEN\" required><button class=\"danger\" type=\"submit\">Abgelehnten Eintrag loeschen</button></form></div><form method=\"post\" action=\"/filesystem/format\" onsubmit=\"return confirm('Aktive Queue, abgelehnte Diagnoseeintraege und Trust-Dateien werden unwiderruflich geloescht. Fortfahren?')\">");
     page += setupKeyInput();
     page += F("<label for=\"confirm-format\">Bestaetigung</label><input id=\"confirm-format\" name=\"confirm_format\" placeholder=\"FORMATIEREN eingeben\"");
     if (formatBlocked) page += F(" disabled");
-    page += F("><button class=\"danger\" type=\"submit\"");
+    page += F("><button id=\"formatFilesystemButton\" class=\"danger\" type=\"submit\"");
     if (formatBlocked) page += F(" disabled");
     page += F(">Dateisystem doppelt bestaetigt formatieren</button></form>");
-    if (formatBlocked) page += F("<p class=\"error\">Formatierung waehrend laufendem Scan, TLS-Recovery oder Queue-Sync gesperrt.</p>");
+    page += F("<p id=\"formatBlockedNotice\" class=\"error\"");
+    if (!formatBlocked) page += F(" hidden");
+    page += F(">Formatierung bleibt gesperrt, solange der Vorgang laeuft oder bis er sicher abgebrochen wurde.</p>");
     page += F("</section>");
     page += F("<script>const setupKey='");
     page += htmlEscape(setupFormKey);
     page += F("';async function scanWifi(){const box=document.getElementById('networks');box.textContent='Suche laeuft...';try{const r=await fetch('/scan-wifi?setup_key='+encodeURIComponent(setupKey));const d=await r.json();if(!r.ok)throw new Error(d.message||'WLAN-Scan nicht erlaubt.');if(!d.networks||!d.networks.length){box.textContent='Keine WLANs gefunden.';return;}box.innerHTML=d.networks.map(n=>'<div class=\"net\"><button type=\"button\" onclick=\"pickSsid(this.dataset.ssid)\" data-ssid=\"'+esc(n.ssid)+'\">'+esc(n.ssid)+'</button><span>'+n.rssi+' dBm</span></div>').join('');}catch(e){box.textContent=e.message||'WLAN-Scan fehlgeschlagen.';}}");
     page += F("function pickSsid(s){document.getElementById('ssid').value=s;}function formBody(form){const b=new URLSearchParams(new FormData(form));if(!b.has('setup_key'))b.set('setup_key',setupKey);return b;}");
     page += F("async function testApi(){const box=document.getElementById('apiResult');box.textContent='API-Test laeuft...';try{const r=await fetch('/test-api',{method:'POST',body:formBody(document.getElementById('configForm'))});const d=await r.json();box.textContent=JSON.stringify(d,null,2);}catch(e){box.textContent='API-Test fehlgeschlagen.';}}");
-    page += F("function renderDiag(d){document.getElementById('diagSsid').textContent=d.ssid||'-';document.getElementById('diagSignal').textContent=(d.wifi_status==='connected')?(d.wifi_rssi_dbm+' dBm / '+d.wifi_quality_percent+'% / '+d.wifi_quality):'nicht verbunden';}");
+    page += F("function setMaintenanceBlocked(blocked,restartPending,abortAvailable,queueRecovery){document.getElementById('busyOperationNotice').hidden=!blocked||restartPending||!abortAvailable;document.getElementById('recoveryAbortForm').hidden=!abortAvailable||restartPending;document.getElementById('restartPendingNotice').hidden=!restartPending;document.getElementById('queueRecoveryNotice').hidden=!queueRecovery;document.getElementById('safeRestartButton').disabled=restartPending;document.getElementById('formatBlockedNotice').hidden=!blocked;document.querySelectorAll('[data-maintenance-form] input,[data-maintenance-form] button,[data-maintenance-form] select,[data-maintenance-form] textarea').forEach(el=>el.disabled=blocked);document.getElementById('confirm-format').disabled=blocked;document.getElementById('formatFilesystemButton').disabled=blocked;document.getElementById('scanWifiButton').disabled=blocked;document.getElementById('apiTestButton').disabled=blocked;}function renderDiag(d){document.getElementById('diagSsid').textContent=d.ssid||'-';document.getElementById('diagSignal').textContent=(d.wifi_status==='connected')?(d.wifi_rssi_dbm+' dBm / '+d.wifi_quality_percent+'% / '+d.wifi_quality):'nicht verbunden';document.getElementById('deviceState').textContent=d.device_state_human||d.device_state||'-';setMaintenanceBlocked(!!d.maintenance_blocked,!!d.restart_pending,!!d.recovery_abort_available,!!d.queue_recovery_pending);}");
     page += F("async function refreshDiag(){const box=document.getElementById('hardwareResult');box.textContent='WLAN-Diagnose wird aktualisiert...';try{const r=await fetch('/status');const d=await r.json();if(!r.ok)throw new Error(d.message||'Bitte neu einloggen.');renderDiag(d);box.textContent='WLAN: '+(d.ssid||'-')+'\\nSignal: '+(d.wifi_status==='connected'?(d.wifi_rssi_dbm+' dBm / '+d.wifi_quality_percent+'% / '+d.wifi_quality):'nicht verbunden')+'\\nIP: '+(d.sta_ip||d.ip||'-');}catch(e){box.textContent=e.message||'WLAN-Diagnose fehlgeschlagen.';}}");
     page += F("function renderNfc(d){return 'NFC Reader\\nRC522 Version: '+(d.reader_version||'-')+'\\nReader Status: '+(d.reader_ok?'OK':'Pruefen')+'\\nDebug: '+(d.debug||'-')+'\\nUID: '+(d.uid||'-')+'\\nUID Bytes: '+(d.uid_bytes||0)+'\\nRestzeit: '+(d.remaining_ms||0)+' ms';}");
     page += F("async function postAction(url,msg){const box=document.getElementById('hardwareResult');box.textContent=msg;try{const b=new URLSearchParams();b.set('setup_key',setupKey);const r=await fetch(url,{method:'POST',body:b});const d=await r.json();box.textContent=JSON.stringify(d,null,2);}catch(e){box.textContent='Test fehlgeschlagen.';}}");
     page += F("async function startNfcTest(){await postAction('/test/nfc/start','NFC-Test gestartet. Tag vorhalten.');pollNfc(0);}async function pollNfc(i){const box=document.getElementById('hardwareResult');try{const r=await fetch('/test/nfc/status?setup_key='+encodeURIComponent(setupKey));const d=await r.json();if(!r.ok)throw new Error(d.message||'Bitte neu einloggen.');box.textContent=renderNfc(d);if(d.active&&!d.uid&&i<20)setTimeout(()=>pollNfc(i+1),1000);}catch(e){box.textContent=e.message||'NFC-Status fehlgeschlagen.';}}");
     page += F("async function loadRejected(offset){const box=document.getElementById('rejectedQueue'),next=document.getElementById('nextRejected');box.textContent='Lade...';try{const r=await fetch('/queue/rejected?offset='+offset+'&limit=20');const d=await r.json();if(!r.ok)throw new Error('Abgelehnte Queue nicht abrufbar.');box.textContent=(d.entries||[]).map(e=>'#'+e.sequence+' / HTTP '+e.http_status+' / '+(e.server_code||'-')+' / '+(e.rejected_at||'-')).join('\\n')||'Keine abgelehnten Eintraege.';if((d.total||0)>offset+20){next.style.display='block';next.onclick=()=>loadRejected(offset+20);}else next.style.display='none';}catch(e){box.textContent=e.message||'Abruf fehlgeschlagen.';}}");
-    page += F("function esc(s){return String(s||'').replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[m]));}</script>");
+    page += F("async function pollStatus(){try{const r=await fetch('/status');if(r.ok)renderDiag(await r.json());}catch(e){}}setMaintenanceBlocked(");
+    page += formatBlocked ? F("true") : F("false");
+    page += F(",");
+    page += state == DeviceState::RESTART_PENDING ? F("true") : F("false");
+    page += F(",");
+    page += formatBlocked && !queueRecoveryPending && state != DeviceState::RESTART_PENDING ? F("true") : F("false");
+    page += F(",");
+    page += queueRecoveryPending ? F("true") : F("false");
+    page += F(");setInterval(pollStatus,5000);function esc(s){return String(s||'').replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[m]));}</script>");
     page += F("</main></body></html>");
     return page;
 }
@@ -1652,6 +1924,13 @@ void sendSetupStatus()
     doc["wifi_quality"] = wifiQualityLabel();
     doc["wifi_status"] = WiFi.status() == WL_CONNECTED ? "connected" : "setup_ap";
     doc["api_base_url"] = config.apiBaseUrl;
+    doc["device_state"] = deviceStateLabel(state);
+    doc["device_state_human"] = deviceStateHuman(state);
+    doc["maintenance_blocked"] = storageMutationBlocked();
+    doc["restart_pending"] = restartScheduled || state == DeviceState::RESTART_PENDING;
+    doc["queue_recovery_pending"] = queueRecoveryPending;
+    doc["recovery_abort_available"] = storageMutationBlocked()
+        && !queueRecoveryPending && !restartScheduled && state != DeviceState::RESTART_PENDING;
     doc["api_status"] = apiStatus;
     doc["last_api_test"] = lastApiTestSummary;
     doc["transport"] = transportLabel();
@@ -1932,6 +2211,51 @@ void scheduleRestart(unsigned long waitMs)
 {
     restartScheduled = true;
     restartAt = millis() + waitMs;
+    state = DeviceState::RESTART_PENDING;
+    stateEnteredAt = millis();
+}
+
+bool abortBusyOperationSafely(String &why)
+{
+    if (restartScheduled || state == DeviceState::RESTART_PENDING) {
+        why = "restart_pending";
+        return false;
+    }
+    if (queueRecoveryPending) {
+        why = "queue_recovery_pending";
+        return false;
+    }
+    if (!storageMutationBlocked()) {
+        why = "no_busy_operation";
+        return false;
+    }
+
+    if (currentUid.length() > 0 && currentRequestId.length() > 0
+        && scanLifecycle != ScanLifecycle::PERSISTED) {
+        if (!persistCurrentScan("portal_recovery_abort")) {
+            why = lastTerminalError.length() ? lastTerminalError : "scan_persist_failed";
+            return false;
+        }
+    }
+
+    currentUid = "";
+    currentRequestId = "";
+    currentDeviceTime = "";
+    queueSync.active = false;
+    queueSync.attempt = 0;
+    queueSync.nextAttemptAt = 0;
+    queueSync.lastDisplayedWaitSeconds = UINT32_MAX;
+    scanLifecycle = ScanLifecycle::NONE;
+    resumeScanAfterWifiReconnect = false;
+    currentScanAttempt = 0;
+    lastRetryAfterMs = 0;
+    nextQueueSyncCycleAt = queueDepth() > 0
+        ? extendedScheduledDeadline(millis(), nextQueueSyncCycleAt, PORTAL_RECOVERY_QUEUE_PAUSE_MS)
+        : 0;
+    apiStatus = "portal_recovery_abort";
+    lastTerminalError = "portal_recovery_abort";
+    enterState(DeviceState::READY);
+    return true;
 }
 
 void setupRoutes()
@@ -2255,10 +2579,11 @@ void setupRoutes()
         doc["reader_version"] = nfcTestReaderVersion;
         doc["reader_ok"] = rc522VersionLooksValid(nfcTestReaderVersion);
         doc["debug"] = nfcTestDebug;
-        bool exposeUid = nfcTestActive || (nfcTestResultVisibleUntil > 0 && millis() < nfcTestResultVisibleUntil);
+        const uint32_t now = millis();
+        bool exposeUid = nfcTestActive || (nfcTestResultVisibleUntil > 0 && terminalDeadlinePending(now, nfcTestResultVisibleUntil));
         doc["uid"] = exposeUid ? nfcTestUid : String("");
         doc["uid_bytes"] = exposeUid ? nfcTestUidSize : 0;
-        doc["remaining_ms"] = nfcTestActive && nfcTestUntil > millis() ? (uint32_t)(nfcTestUntil - millis()) : 0;
+        doc["remaining_ms"] = nfcTestActive ? terminalMillisecondsUntil(now, nfcTestUntil) : 0;
         sendJson(doc);
     });
 
@@ -2276,12 +2601,43 @@ void setupRoutes()
         scheduleRestart(1500);
     });
 
+    setupServer.on("/recovery/abort", HTTP_POST, []() {
+        if (!setupPostAuthorized()) {
+            setupServer.send(403, "text/plain", "Setup-Sitzung ungueltig.");
+            return;
+        }
+        String why;
+        if (!abortBusyOperationSafely(why)) {
+            int status = (why == "no_busy_operation" || why == "restart_pending" || why == "queue_recovery_pending") ? 409 : 507;
+            String message = why == "no_busy_operation"
+                ? "Kein laufender Vorgang vorhanden."
+                : why == "restart_pending"
+                    ? "Der Neustart wurde bereits vorbereitet und kann nicht mehr abgebrochen werden."
+                    : why == "queue_recovery_pending"
+                        ? "Die Queue-Speicher-Recovery kann nicht abgebrochen werden. Ein sicherer Neustart bleibt moeglich."
+                    : "Sicherer Abbruch nicht moeglich; offener Scan konnte nicht gespeichert werden: " + why;
+            setupServer.send(status, "text/plain", message);
+            return;
+        }
+        setupServer.send(200, "text/html", "<p>Laufender Vorgang sicher beendet. Queue-Eintraege bleiben erhalten; Synchronisierung pausiert fuer 5 Minuten.</p><p><a href=\"/\">Zurueck</a></p>");
+    });
+
     setupServer.on("/reboot", HTTP_POST, []() {
         if (!setupPostAuthorized()) {
             setupServer.send(403, "text/html", "<p>Setup-Sitzung ungueltig. Bitte Seite neu laden.</p><p><a href=\"/\">Zurueck</a></p>");
             return;
         }
-        if (storageMutationBlocked()) { setupServer.send(409, "text/plain", blockedMaintenanceMessage()); return; }
+        if (restartScheduled || state == DeviceState::RESTART_PENDING) {
+            setupServer.send(409, "text/plain", "Der Neustart wurde bereits vorbereitet.");
+            return;
+        }
+        if (storageMutationBlocked() && !queueRecoveryPending) {
+            String why;
+            if (!abortBusyOperationSafely(why)) {
+                setupServer.send(507, "text/plain", "Neustart abgelehnt; offener Scan konnte nicht sicher gespeichert werden: " + why);
+                return;
+            }
+        }
 
         lcdShow("Neustart", "bitte warten", "", "");
         setupServer.send(200, "text/html", "<p>Neustart...</p>");
@@ -2362,11 +2718,18 @@ void enterState(DeviceState next)
         setAllLeds(false, false, true);
     } else if (next == DeviceState::NFC_SCAN) {
         setAllLeds(false, false, true);
+    } else if (next == DeviceState::SEND_SCAN) {
+        lastDisplayedScanWaitSeconds = UINT32_MAX;
     } else if (next == DeviceState::TLS_RECOVERY) {
         tlsState = TlsState::RECOVERY;
         recoveryStatus = "running";
         lcdShow("TLS Recovery", "Scan gespeichert", "Trust wird", "geprueft");
     } else if (next == DeviceState::QUEUE_SYNC) {
+        // A queue context may survive WLAN reconnect or TLS recovery. Never
+        // carry an absolute retry deadline across that state transition: it
+        // could otherwise become a multi-week wait after millis() wraps.
+        queueSync.nextAttemptAt = queueRetryDeadlineOnSyncEntry(millis());
+        queueSync.lastDisplayedWaitSeconds = UINT32_MAX;
         lcdShow("Offline Queue", "Synchronisierung", "bitte warten", "");
     } else if (next == DeviceState::ERROR_RETRY) {
         nextApiRetryAt = millis() + API_RETRY_MS;
@@ -2375,6 +2738,7 @@ void enterState(DeviceState next)
 
 void handleSetupButton()
 {
+    if (restartScheduled) return;
     if (!provisioningSecurityValid) return;
     if (state == DeviceState::SETUP_MODE) {
         return;
@@ -2420,6 +2784,7 @@ void addApiHeaders(HTTPClient &http)
 bool beginApiRequest(HTTPClient &http, WiFiClient &plain, WiFiClientSecure &secure, const String &url, String &why)
 {
     http.setTimeout(HTTP_TIMEOUT_MS);
+    http.setConnectTimeout(HTTP_TIMEOUT_MS);
     ApiTransport transport = transportFor(config.apiBaseUrl);
     if (transport == ApiTransport::HTTP_PLAIN) {
         tlsState = TlsState::NOT_APPLICABLE;
@@ -2430,6 +2795,7 @@ bool beginApiRequest(HTTPClient &http, WiFiClient &plain, WiFiClientSecure &secu
     if (!isTimeValid()) { tlsState = TlsState::TIME_INVALID; why = "tls_time_invalid"; return false; }
     if (!activeTrust.valid || activeTrust.certificates.length() == 0) { tlsState = TlsState::TRUST_MISSING; why = "tls_trust_missing"; return false; }
     tlsState = TlsState::CONNECTING;
+    secure.setHandshakeTimeout(TLS_HANDSHAKE_TIMEOUT_SECONDS);
     secure.setCACert(activeTrust.certificates.c_str());
     return http.begin(secure, url);
 }
@@ -2507,6 +2873,8 @@ bool recoveryDownload(String &bundle, String &why)
     client.setInsecure();
     HTTPClient http;
     http.setTimeout(HTTP_TIMEOUT_MS);
+    http.setConnectTimeout(HTTP_TIMEOUT_MS);
+    client.setHandshakeTimeout(TLS_HANDSHAKE_TIMEOUT_SECONDS);
     if (!http.begin(client, httpUrl("/api/v1/terminal/trust-bundle"))) { why = "tls_recovery_connect_failed"; return false; }
     int status = http.GET();
     bool read = status == 200 && readLimitedResponse(http, bundle, MAX_TRUST_BUNDLE_BYTES, why);
@@ -2611,7 +2979,7 @@ bool fetchApiConfig()
         }
         uint32_t advertisedVersion = (uint32_t) (doc["trust_bundle"]["latest_version"] | 0);
         if (isHttpsTransport() && advertisedVersion > activeTrust.version
-            && (nextTrustCheckAt == 0 || millis() >= nextTrustCheckAt)) {
+            && terminalScheduledDeadlineReached(millis(), nextTrustCheckAt)) {
             String bundle, trustWhy;
             int trustStatusCode = 0;
             bool candidateInstalled = apiGet("/api/v1/terminal/trust-bundle", bundle, trustStatusCode, trustWhy, false, MAX_TRUST_BUNDLE_BYTES)
@@ -2720,7 +3088,7 @@ String normalizeUid(MFRC522::Uid *uid)
     return normalized;
 }
 
-bool sendScanRequest()
+bool sendScanRequest(bool queuedRequest = false)
 {
     lastScanResponseJsonParsed = false;
     lastScanResponseOk = false;
@@ -2803,47 +3171,53 @@ bool sendScanRequest()
             apiStatus = String("scan_global_block_") + status;
             return false;
         }
-        String fallbackRejected[4] = {"Scan abgelehnt", "Bitte Admin", "informieren", ""};
-        applyDisplayFromJson(doc.as<JsonVariantConst>(), fallbackRejected);
-        applyScanFeedback(ScanFeedbackState::SERVER_REJECTED);
+        if (scanResponseShouldUpdateLiveFeedback(queuedRequest)) {
+            String fallbackRejected[4] = {"Scan abgelehnt", "Bitte Admin", "informieren", ""};
+            applyDisplayFromJson(doc.as<JsonVariantConst>(), fallbackRejected);
+            applyScanFeedback(ScanFeedbackState::SERVER_REJECTED);
+            resultUntil = millis() + holdMsFromJson(doc.as<JsonVariantConst>());
+        }
         scanLifecycle = ScanLifecycle::REJECTED;
         currentUid = "";
         currentRequestId = "";
         currentDeviceTime = "";
-        resultUntil = millis() + holdMsFromJson(doc.as<JsonVariantConst>());
         apiStatus = String("scan_rejected_") + status;
-        enterState(DeviceState::SHOW_RESULT);
+        if (scanResponseShouldUpdateLiveFeedback(queuedRequest)) enterState(DeviceState::SHOW_RESULT);
         return true;
     }
 
     if (!serverResponseConfirmsBooking(status, true, responseOk)) {
-        String fallbackRejected[4] = {"Scan nicht", "bestaetigt", "Bitte Admin", "informieren"};
-        applyDisplayFromJson(doc.as<JsonVariantConst>(), fallbackRejected);
-        applyScanFeedback(ScanFeedbackState::SERVER_REJECTED);
-        resultUntil = millis() + holdMsFromJson(doc.as<JsonVariantConst>());
+        if (scanResponseShouldUpdateLiveFeedback(queuedRequest)) {
+            String fallbackRejected[4] = {"Scan nicht", "bestaetigt", "Bitte Admin", "informieren"};
+            applyDisplayFromJson(doc.as<JsonVariantConst>(), fallbackRejected);
+            applyScanFeedback(ScanFeedbackState::SERVER_REJECTED);
+            resultUntil = millis() + holdMsFromJson(doc.as<JsonVariantConst>());
+        }
         apiStatus = "scan_not_confirmed";
         scanLifecycle = ScanLifecycle::REJECTED;
         currentUid = "";
         currentRequestId = "";
         currentDeviceTime = "";
-        enterState(DeviceState::SHOW_RESULT);
+        if (scanResponseShouldUpdateLiveFeedback(queuedRequest)) enterState(DeviceState::SHOW_RESULT);
         return true;
     }
 
-    String fallback[4] = {"Scan Antwort", "empfangen", "", ""};
-    applyDisplayFromJson(doc.as<JsonVariantConst>(), fallback);
-    applyScanFeedback(ScanFeedbackState::SERVER_CONFIRMED);
-    resultUntil = millis() + holdMsFromJson(doc.as<JsonVariantConst>());
+    if (scanResponseShouldUpdateLiveFeedback(queuedRequest)) {
+        String fallback[4] = {"Scan Antwort", "empfangen", "", ""};
+        applyDisplayFromJson(doc.as<JsonVariantConst>(), fallback);
+        applyScanFeedback(ScanFeedbackState::SERVER_CONFIRMED);
+        resultUntil = millis() + holdMsFromJson(doc.as<JsonVariantConst>());
+    }
     apiStatus = "scan_ok";
     scanLifecycle = ScanLifecycle::SENT_CONFIRMED;
     currentUid = "";
     currentRequestId = "";
     currentDeviceTime = "";
-    enterState(DeviceState::SHOW_RESULT);
+    if (scanResponseShouldUpdateLiveFeedback(queuedRequest)) enterState(DeviceState::SHOW_RESULT);
     return true;
 }
 
-bool persistCurrentScan(const String &reason)
+bool persistCurrentScan(const String &reason, uint32_t notBeforeDelayMs)
 {
     if (currentUid.length() == 0 || currentRequestId.length() == 0) return true;
     OfflineScan scan;
@@ -2851,6 +3225,11 @@ bool persistCurrentScan(const String &reason)
     scan.uid = currentUid;
     scan.deviceTime = currentDeviceTime.length() > 0 ? currentDeviceTime : isoDeviceTimeOrNull();
     scan.reason = reason;
+    scan.notBeforeDelayMs = notBeforeDelayMs;
+    if (notBeforeDelayMs > 0 && isTimeValid()) {
+        scan.notBeforeEpoch = static_cast<uint64_t>(time(nullptr))
+            + (static_cast<uint64_t>(notBeforeDelayMs) + 999ULL) / 1000ULL;
+    }
     String why;
     if (!enqueueScan(scan, why)) {
         lastTerminalError = why;
@@ -2858,6 +3237,13 @@ bool persistCurrentScan(const String &reason)
         applyLedSignal("red");
         triggerBeep("error");
         return false;
+    }
+    if (!isTimeValid() && scan.notBeforeDelayMs > 0) {
+        relativeQueueDelaySequence = scan.sequence;
+        const uint32_t boundedDelay = scan.notBeforeDelayMs > MAX_PERSISTED_QUEUE_DELAY_MS
+            ? MAX_PERSISTED_QUEUE_DELAY_MS
+            : scan.notBeforeDelayMs;
+        relativeQueueDelayDeadline = millis() + boundedDelay;
     }
     scanLifecycle = ScanLifecycle::PERSISTED;
     currentUid = "";
@@ -2871,6 +3257,7 @@ void retainOpenScanForPersistenceRetry()
     // Never transition to READY/SHOW_RESULT here: currentUid and request_id
     // remain the sole live scan until it can be sent or persisted safely.
     scanLifecycle = ScanLifecycle::VOLATILE;
+    stateEnteredAt = millis();
     currentScanAttempt = 0;
     nextScanAttemptAt = millis() + API_RETRY_MS;
     lcdShow("Scan noch offen", "nicht gespeichert", "Retry folgt", "Tag nicht scannen");
@@ -2880,19 +3267,48 @@ void retainOpenScanForPersistenceRetry()
 QueueSyncOutcome syncOneQueuedScan()
 {
     if (!queueSync.active) {
+        queueSync.lastError = "";
         if (!nextQueuedScan(queueSync.scan)) return queueDepth() == 0 ? QueueSyncOutcome::EMPTY : QueueSyncOutcome::CORRUPT;
         queueSync.active = true;
         queueSync.attempt = 0;
+        queueSync.nextAttemptAt = queueRetryDeadlineOnSyncEntry(millis());
         queueSync.startedAt = millis();
+        uint32_t persistedDelay = 0;
+        if (isTimeValid() && queueSync.scan.notBeforeEpoch > 0) {
+            persistedDelay = persistentNotBeforeDelayMilliseconds(
+                static_cast<uint64_t>(time(nullptr)),
+                queueSync.scan.notBeforeEpoch,
+                MAX_PERSISTED_QUEUE_DELAY_MS
+            );
+        } else if (queueSync.scan.notBeforeDelayMs > 0) {
+            if (relativeQueueDelayNeedsStart(queueSync.scan.sequence, relativeQueueDelaySequence)) {
+                relativeQueueDelaySequence = queueSync.scan.sequence;
+                const uint32_t boundedDelay = queueSync.scan.notBeforeDelayMs > MAX_PERSISTED_QUEUE_DELAY_MS
+                    ? MAX_PERSISTED_QUEUE_DELAY_MS
+                    : queueSync.scan.notBeforeDelayMs;
+                relativeQueueDelayDeadline = millis() + boundedDelay;
+            }
+            persistedDelay = terminalMillisecondsUntil(millis(), relativeQueueDelayDeadline);
+        }
+        if (persistedDelay > 0) {
+            nextQueueSyncCycleAt = extendedScheduledDeadline(millis(), nextQueueSyncCycleAt, persistedDelay);
+            queueSync.active = false;
+            return QueueSyncOutcome::DEFERRED;
+        }
     }
 
     currentUid = queueSync.scan.uid;
     currentRequestId = queueSync.scan.requestId;
     currentDeviceTime = queueSync.scan.deviceTime;
     scanLifecycle = ScanLifecycle::PERSISTED;
-    bool sent = sendScanRequest();
+    bool sent = sendScanRequest(true);
     if (scanLifecycle == ScanLifecycle::SENT_CONFIRMED) {
-        acknowledgeQueuedScan(queueSync.scan);
+        const bool activeRecordRemoved = acknowledgeQueuedScan(queueSync.scan);
+        if (!queuedConfirmationComplete(true, activeRecordRemoved)) {
+            apiStatus = lastTerminalError.length() ? lastTerminalError : "queue_ack_failed";
+            scanLifecycle = ScanLifecycle::PERSISTED;
+            return QueueSyncOutcome::TEMPORARY;
+        }
         queueSync.active = false;
         return QueueSyncOutcome::CONFIRMED;
     }
@@ -2944,11 +3360,43 @@ void handleQueueSync()
         enterState(DeviceState::ERROR_RETRY);
         return;
     }
-    if (queueSync.active && millis() < queueSync.nextAttemptAt) return;
+    const uint32_t now = millis();
+    const uint32_t remainingMs = queueRetryWaitMilliseconds(queueSync.active, now, queueSync.nextAttemptAt);
+    if (remainingMs > 0) {
+        const uint32_t remainingSeconds = (remainingMs + 999U) / 1000U;
+        if (remainingSeconds != queueSync.lastDisplayedWaitSeconds) {
+            queueSync.lastDisplayedWaitSeconds = remainingSeconds;
+            const size_t pendingBookings = queueDepth();
+            lcdShow(
+                "Offline Queue",
+                "Synchronisierung",
+                "Retry in " + String(remainingSeconds) + " Sek.",
+                String(pendingBookings) + (pendingBookings == 1 ? " Buchung" : " Buchungen")
+            );
+        }
+        return;
+    }
+    queueSync.lastDisplayedWaitSeconds = UINT32_MAX;
     QueueSyncOutcome outcome = syncOneQueuedScan();
     if (outcome == QueueSyncOutcome::EMPTY) { queueSync.active = false; enterState(DeviceState::READY); return; }
-    if (outcome == QueueSyncOutcome::CORRUPT) { queueSync.active = false; queueSync.nextAttemptAt = millis() + 50; return; }
-    if (outcome == QueueSyncOutcome::CONFIRMED) { queueSync.active = false; scanLifecycle = ScanLifecycle::NONE; nextQueueSyncCycleAt = millis() + 1000; enterState(DeviceState::READY); return; }
+    if (outcome == QueueSyncOutcome::CORRUPT) {
+        queueSync.active = false;
+        scanLifecycle = ScanLifecycle::NONE;
+        if (queueSync.lastError == "queue_corrupt_quarantine_failed") {
+            lcdShow("Queue defekt", "Speicherfehler", "Datensatz bleibt", "Admin informieren");
+            applyLedSignal("red");
+            triggerBeep("error");
+            enterState(DeviceState::ERROR_RETRY);
+        }
+        return;
+    }
+    if (outcome == QueueSyncOutcome::DEFERRED) {
+        queueSync.active = false;
+        scanLifecycle = ScanLifecycle::NONE;
+        enterState(DeviceState::READY);
+        return;
+    }
+    if (outcome == QueueSyncOutcome::CONFIRMED) { queueSync.active = false; scanLifecycle = ScanLifecycle::NONE; nextQueueSyncCycleAt = extendedScheduledDeadline(millis(), nextQueueSyncCycleAt, 1000); enterState(DeviceState::READY); return; }
     if (outcome == QueueSyncOutcome::REJECTED) {
         queueSync.active = false;
         scanLifecycle = ScanLifecycle::NONE;
@@ -2975,14 +3423,33 @@ void handleQueueSync()
         queueSync.active = false;
         scanLifecycle = ScanLifecycle::NONE;
         lastTerminalError = "queue_retry_exhausted";
-        nextQueueSyncCycleAt = millis() + 5UL * 60UL * 1000UL;
+        nextQueueSyncCycleAt = extendedScheduledDeadline(millis(), nextQueueSyncCycleAt, 5UL * 60UL * 1000UL);
         enterState(DeviceState::READY);
         return;
     }
     queueSync.lastError = apiStatus;
     unsigned long retryDelay = lastRetryAfterMs > 0 ? lastRetryAfterMs : queueRetryDelay(queueSync.attempt + 1);
     lastRetryAfterMs = 0;
+    if (retryDelay > QUEUE_FOREGROUND_MAX_WAIT_MS) {
+        if (!deferQueuedScan(queueSync.scan, retryDelay)) {
+            queueSync.lastError = lastTerminalError;
+            queueSync.active = false;
+            scanLifecycle = ScanLifecycle::NONE;
+            nextQueueSyncCycleAt = extendedScheduledDeadline(millis(), nextQueueSyncCycleAt, retryDelay);
+            lcdShow("Queue Speicher", "Update fehlgeschl.", "Datensatz bleibt", "Admin informieren");
+            applyLedSignal("red");
+            triggerBeep("error");
+            enterState(DeviceState::ERROR_RETRY);
+            return;
+        }
+        queueSync.active = false;
+        scanLifecycle = ScanLifecycle::NONE;
+        nextQueueSyncCycleAt = extendedScheduledDeadline(millis(), nextQueueSyncCycleAt, retryDelay);
+        enterState(DeviceState::READY);
+        return;
+    }
     queueSync.nextAttemptAt = millis() + retryDelay;
+    queueSync.lastDisplayedWaitSeconds = UINT32_MAX;
 }
 
 void startWifiAttempt()
@@ -3068,14 +3535,14 @@ void checkWifiHealth()
 void updateLedTest()
 {
     if (ledTestState == LedTestState::OFF) {
-        if (ledTestNextAt > 0 && millis() >= ledTestNextAt) {
+        if (ledTestNextAt > 0 && terminalDeadlineReached(millis(), ledTestNextAt)) {
             ledTestNextAt = 0;
             setAllLeds(false, false, state == DeviceState::READY || state == DeviceState::NFC_SCAN);
         }
         return;
     }
 
-    if (millis() < ledTestNextAt) {
+    if (terminalDeadlinePending(millis(), ledTestNextAt)) {
         return;
     }
 
@@ -3096,7 +3563,7 @@ void updateLedTest()
 
 void updateTemporaryDisplay()
 {
-    if (temporaryDisplayActive && millis() >= temporaryDisplayUntil) {
+    if (temporaryDisplayActive && terminalDeadlineReached(millis(), temporaryDisplayUntil)) {
         if (state == temporaryDisplayState) {
             restoreSavedDisplay();
         } else {
@@ -3108,7 +3575,7 @@ void updateTemporaryDisplay()
 void updateNfcTest()
 {
     if (!nfcTestActive) {
-        if (nfcTestResultVisibleUntil > 0 && millis() >= nfcTestResultVisibleUntil) {
+        if (nfcTestResultVisibleUntil > 0 && terminalDeadlineReached(millis(), nfcTestResultVisibleUntil)) {
             nfcTestUid = "";
             nfcTestUidSize = 0;
             nfcTestResultVisibleUntil = 0;
@@ -3117,7 +3584,7 @@ void updateNfcTest()
         return;
     }
 
-    if (millis() >= nfcTestUntil) {
+    if (terminalDeadlineReached(millis(), nfcTestUntil)) {
         nfcTestActive = false;
         nfcTestResultVisibleUntil = millis() + 5000;
         if (nfcTestUid.length() == 0) {
@@ -3188,9 +3655,32 @@ void handleNfcScan()
 
 void handleSendScan()
 {
-    if (!scanSendDue(millis(), nextScanAttemptAt)) {
+    const uint32_t now = millis();
+    if (operationDurationExceeded(now, stateEnteredAt, LIVE_SCAN_MAX_OPERATION_MS)) {
+        if (persistCurrentScan("scan_operation_timeout")) {
+            nextQueueSyncCycleAt = extendedScheduledDeadline(now, nextQueueSyncCycleAt, PORTAL_RECOVERY_QUEUE_PAUSE_MS);
+            lcdShow("Scan gespeichert", "API Timeout", "Sync spaeter", "Terminal bleibt frei");
+            applyScanFeedback(ScanFeedbackState::STORED_OFFLINE);
+            resultUntil = now + 8000;
+            enterState(DeviceState::SHOW_RESULT);
+        } else {
+            retainOpenScanForPersistenceRetry();
+        }
         return;
     }
+
+    if (!scanSendDue(now, nextScanAttemptAt)) {
+        if (currentScanAttempt > 0) {
+            const uint32_t remainingMs = terminalMillisecondsUntil(now, nextScanAttemptAt);
+            const uint32_t remainingSeconds = (remainingMs + 999U) / 1000U;
+            if (remainingSeconds != lastDisplayedScanWaitSeconds) {
+                lastDisplayedScanWaitSeconds = remainingSeconds;
+                lcdShow("API Retry", "Scan wird", "noch " + String(remainingSeconds) + " Sek.", "bitte warten");
+            }
+        }
+        return;
+    }
+    lastDisplayedScanWaitSeconds = UINT32_MAX;
 
     stopBuzzer();
 
@@ -3221,11 +3711,24 @@ void handleSendScan()
     }
 
     if (currentScanAttempt < 3) {
-        lcdShow("API Retry", "Scan wird", "wiederholt", "bitte warten");
-        applyLedSignal("yellow");
         unsigned long retryDelay = lastRetryAfterMs > 0 ? lastRetryAfterMs : (currentScanAttempt == 1 ? 1000UL : 3000UL);
         lastRetryAfterMs = 0;
+        if (liveScanRetryShouldQueue(retryDelay, LIVE_SCAN_MAX_RETRY_DELAY_MS)) {
+            if (persistCurrentScan("server_retry_after", retryDelay)) {
+                nextQueueSyncCycleAt = extendedScheduledDeadline(millis(), nextQueueSyncCycleAt, retryDelay);
+                lcdShow("Scan gespeichert", "Server wartet", "Sync spaeter", "Terminal bleibt frei");
+                applyScanFeedback(ScanFeedbackState::STORED_OFFLINE);
+                resultUntil = millis() + 8000;
+                enterState(DeviceState::SHOW_RESULT);
+            } else {
+                retainOpenScanForPersistenceRetry();
+            }
+            return;
+        }
+        lcdShow("API Retry", "Scan wird", "wiederholt", "bitte warten");
+        applyLedSignal("yellow");
         nextScanAttemptAt = millis() + retryDelay;
+        lastDisplayedScanWaitSeconds = UINT32_MAX;
         return;
     }
     if (persistCurrentScan("network_failed")) {
@@ -3285,6 +3788,11 @@ void setup()
     if (filesystemMounted) {
         LittleFS.mkdir(QUEUE_DIRECTORY);
         LittleFS.mkdir(QUEUE_REJECTED_DIRECTORY);
+        queueRecoveryPending = !recoverDeferredQueueUpdates();
+        if (queueRecoveryPending) {
+            nextQueueRecoveryAt = millis();
+            lastTerminalError = "queue_storage_recovery_pending";
+        }
     }
     preferences.begin(NVS_NAMESPACE, false);
     bootCounter = preferences.getUInt("boot_counter", 0) + 1;
@@ -3318,8 +3826,11 @@ void loop()
     updateHardwareTests();
     handleSetupButton();
 
-    if (restartScheduled && millis() >= restartAt) {
-        ESP.restart();
+    if (restartScheduled) {
+        if (terminalDeadlineReached(millis(), restartAt)) ESP.restart();
+        if (webPortalStarted) setupServer.handleClient();
+        delay(1);
+        return;
     }
 
     if (setupPortalStarted) {
@@ -3380,12 +3891,26 @@ void loop()
         }
 
         case DeviceState::API_CONFIG:
+            if (queueRecoveryPending) {
+                const uint32_t now = millis();
+                if (terminalScheduledDeadlineReached(now, nextQueueRecoveryAt)) {
+                    queueRecoveryPending = !recoverDeferredQueueUpdates();
+                    nextQueueRecoveryAt = now + 10000UL;
+                    if (!queueRecoveryPending) lastTerminalError = "";
+                }
+                if (queueRecoveryPending) {
+                    lastTerminalError = "queue_storage_recovery_pending";
+                    lcdShow("Queue Speicher", "Recovery laeuft", "Retry in 10 Sek.", "Portal erreichbar");
+                    applyLedSignal("red");
+                    break;
+                }
+            }
             if (fetchApiConfig()) {
                 if (resumeScanAfterWifiReconnect && currentUid.length() > 0 && currentRequestId.length() > 0) {
                     lcdShow("Scan Fortsetzung", "WLAN wieder da", "sende Anfrage", "");
                     nextScanAttemptAt = millis();
                     enterState(DeviceState::SEND_SCAN);
-                } else if (queueDepth() > 0) {
+                } else if (queueDepth() > 0 && terminalScheduledDeadlineReached(millis(), nextQueueSyncCycleAt)) {
                     enterState(DeviceState::QUEUE_SYNC);
                 } else {
                     enterState(DeviceState::READY);
@@ -3407,7 +3932,8 @@ void loop()
             }
             if (installed) finishTrustInstall(recovered);
             recoveryStatus = recovered ? "recovered" : (why.length() > 0 ? why : "tls_recovery_failed");
-            if (recovered) enterState(queueDepth() > 0 ? DeviceState::QUEUE_SYNC : DeviceState::READY);
+            bool queueDue = queueDepth() > 0 && terminalScheduledDeadlineReached(millis(), nextQueueSyncCycleAt);
+            if (recovered) enterState(queueDue ? DeviceState::QUEUE_SYNC : DeviceState::READY);
             else enterState(DeviceState::ERROR_RETRY);
             break;
         }
@@ -3421,7 +3947,7 @@ void loop()
             break;
 
         case DeviceState::NFC_SCAN:
-            if (!queueSyncBlocked && queueDepth() > 0 && (nextQueueSyncCycleAt == 0 || millis() >= nextQueueSyncCycleAt)) {
+            if (!queueSyncBlocked && queueDepth() > 0 && terminalScheduledDeadlineReached(millis(), nextQueueSyncCycleAt)) {
                 enterState(DeviceState::QUEUE_SYNC);
                 break;
             }
@@ -3436,14 +3962,18 @@ void loop()
         case DeviceState::SHOW_RESULT:
             if (terminalDeadlineReached(millis(), resultUntil)) {
                 scanLifecycle = ScanLifecycle::NONE;
-                enterState(queueDepth() > 0 ? DeviceState::QUEUE_SYNC : DeviceState::READY);
+                bool queueDue = queueDepth() > 0 && terminalScheduledDeadlineReached(millis(), nextQueueSyncCycleAt);
+                enterState(queueDue ? DeviceState::QUEUE_SYNC : DeviceState::READY);
             }
             break;
 
         case DeviceState::ERROR_RETRY:
-            if (millis() >= nextApiRetryAt) {
+            if (terminalDeadlineReached(millis(), nextApiRetryAt)) {
                 enterState(DeviceState::API_CONFIG);
             }
+            break;
+
+        case DeviceState::RESTART_PENDING:
             break;
     }
 }

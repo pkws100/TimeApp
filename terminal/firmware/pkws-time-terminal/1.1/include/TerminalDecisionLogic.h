@@ -34,6 +34,79 @@ inline bool terminalDeadlineReached(uint32_t now, uint32_t deadline)
     return static_cast<int32_t>(now - deadline) >= 0;
 }
 
+inline bool terminalDeadlinePending(uint32_t now, uint32_t deadline)
+{
+    return !terminalDeadlineReached(now, deadline);
+}
+
+inline bool terminalScheduledDeadlineReached(uint32_t now, uint32_t deadline)
+{
+    return deadline == 0 || terminalDeadlineReached(now, deadline);
+}
+
+inline uint32_t terminalMillisecondsUntil(uint32_t now, uint32_t deadline)
+{
+    return terminalDeadlinePending(now, deadline) ? deadline - now : 0;
+}
+
+inline uint32_t queueRetryDeadlineOnSyncEntry(uint32_t now)
+{
+    return now;
+}
+
+inline uint32_t queueRetryWaitMilliseconds(bool active, uint32_t now, uint32_t deadline)
+{
+    return active ? terminalMillisecondsUntil(now, deadline) : 0;
+}
+
+inline bool queuedConfirmationComplete(bool serverConfirmed, bool activeRecordRemoved)
+{
+    return serverConfirmed && activeRecordRemoved;
+}
+
+inline bool scanResponseShouldUpdateLiveFeedback(bool queuedRequest)
+{
+    return !queuedRequest;
+}
+
+inline bool liveScanRetryShouldQueue(uint32_t retryDelayMs, uint32_t maximumForegroundDelayMs)
+{
+    return retryDelayMs > maximumForegroundDelayMs;
+}
+
+inline bool operationDurationExceeded(uint32_t now, uint32_t startedAt, uint32_t maximumDurationMs)
+{
+    return static_cast<uint32_t>(now - startedAt) >= maximumDurationMs;
+}
+
+inline uint32_t extendedScheduledDeadline(uint32_t now, uint32_t currentDeadline, uint32_t requestedDelayMs)
+{
+    if (currentDeadline != 0 && terminalDeadlinePending(now, currentDeadline)
+        && terminalMillisecondsUntil(now, currentDeadline) >= requestedDelayMs) {
+        return currentDeadline;
+    }
+    return now + requestedDelayMs;
+}
+
+inline uint32_t persistentNotBeforeDelayMilliseconds(
+    uint64_t nowEpochSeconds,
+    uint64_t notBeforeEpochSeconds,
+    uint32_t maximumDelayMs
+)
+{
+    if (notBeforeEpochSeconds <= nowEpochSeconds) return 0;
+    const uint64_t remainingSeconds = notBeforeEpochSeconds - nowEpochSeconds;
+    const uint64_t remainingMilliseconds = remainingSeconds * 1000ULL;
+    return remainingMilliseconds > maximumDelayMs
+        ? maximumDelayMs
+        : static_cast<uint32_t>(remainingMilliseconds);
+}
+
+inline bool relativeQueueDelayNeedsStart(uint32_t recordSequence, uint32_t trackedSequence)
+{
+    return recordSequence != trackedSequence;
+}
+
 inline bool scanSendDue(uint32_t now, uint32_t sendAt)
 {
     return terminalDeadlineReached(now, sendAt);

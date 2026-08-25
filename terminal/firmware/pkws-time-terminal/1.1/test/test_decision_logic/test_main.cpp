@@ -64,6 +64,81 @@ void testResultHoldDeadlineHandlesMillisOverflow()
     TEST_ASSERT_TRUE(terminalDeadlineReached(50, 50));
 }
 
+void testPendingAndScheduledDeadlinesHandleMillisOverflow()
+{
+    TEST_ASSERT_TRUE(terminalDeadlinePending(UINT32_MAX - 25, 50));
+    TEST_ASSERT_TRUE(terminalDeadlinePending(49, 50));
+    TEST_ASSERT_FALSE(terminalDeadlinePending(50, 50));
+    TEST_ASSERT_TRUE(terminalScheduledDeadlineReached(123, 0));
+    TEST_ASSERT_FALSE(terminalScheduledDeadlineReached(UINT32_MAX - 25, 50));
+    TEST_ASSERT_TRUE(terminalScheduledDeadlineReached(50, 50));
+    TEST_ASSERT_TRUE(terminalDeadlineReached(100, UINT32_MAX - 100));
+    TEST_ASSERT_EQUAL_UINT32(76, terminalMillisecondsUntil(UINT32_MAX - 25, 50));
+    TEST_ASSERT_EQUAL_UINT32(1, terminalMillisecondsUntil(49, 50));
+    TEST_ASSERT_EQUAL_UINT32(0, terminalMillisecondsUntil(50, 50));
+}
+
+void testQueueRetryStateSequenceHandlesRolloverAndResume()
+{
+    const uint32_t wrappedDeadline = 50;
+    TEST_ASSERT_EQUAL_UINT32(76, queueRetryWaitMilliseconds(true, UINT32_MAX - 25, wrappedDeadline));
+    TEST_ASSERT_EQUAL_UINT32(1, queueRetryWaitMilliseconds(true, 49, wrappedDeadline));
+    TEST_ASSERT_EQUAL_UINT32(0, queueRetryWaitMilliseconds(true, 50, wrappedDeadline));
+    TEST_ASSERT_EQUAL_UINT32(0, queueRetryWaitMilliseconds(false, 1, UINT32_MAX - 100));
+
+    const uint32_t resumedAt = 75;
+    const uint32_t resumedDeadline = queueRetryDeadlineOnSyncEntry(resumedAt);
+    TEST_ASSERT_EQUAL_UINT32(resumedAt, resumedDeadline);
+    TEST_ASSERT_EQUAL_UINT32(0, queueRetryWaitMilliseconds(true, resumedAt, resumedDeadline));
+}
+
+void testQueuedConfirmationRequiresLocalAck()
+{
+    TEST_ASSERT_TRUE(queuedConfirmationComplete(true, true));
+    TEST_ASSERT_FALSE(queuedConfirmationComplete(true, false));
+    TEST_ASSERT_FALSE(queuedConfirmationComplete(false, true));
+}
+
+void testQueueResponsesDoNotUseLiveScanFeedback()
+{
+    TEST_ASSERT_TRUE(scanResponseShouldUpdateLiveFeedback(false));
+    TEST_ASSERT_FALSE(scanResponseShouldUpdateLiveFeedback(true));
+}
+
+void testLongLiveRetryMovesToBackgroundQueue()
+{
+    TEST_ASSERT_FALSE(liveScanRetryShouldQueue(15000, 15000));
+    TEST_ASSERT_TRUE(liveScanRetryShouldQueue(15001, 15000));
+    TEST_ASSERT_TRUE(liveScanRetryShouldQueue(900000, 15000));
+}
+
+void testOperationDurationWatchdogHandlesMillisRollover()
+{
+    TEST_ASSERT_FALSE(operationDurationExceeded(UINT32_MAX - 50, UINT32_MAX - 100, 100));
+    TEST_ASSERT_TRUE(operationDurationExceeded(25, UINT32_MAX - 100, 100));
+    TEST_ASSERT_TRUE(operationDurationExceeded(1000, 0, 1000));
+}
+
+void testQueueBackgroundDeadlineCanOnlyBeExtended()
+{
+    TEST_ASSERT_EQUAL_UINT32(900100, extendedScheduledDeadline(100, 900100, 20000));
+    TEST_ASSERT_EQUAL_UINT32(1200100, extendedScheduledDeadline(100, 900100, 1200000));
+    TEST_ASSERT_EQUAL_UINT32(20100, extendedScheduledDeadline(100, 0, 20000));
+    TEST_ASSERT_EQUAL_UINT32(50, extendedScheduledDeadline(UINT32_MAX - 100, 50, 100));
+    TEST_ASSERT_EQUAL_UINT32(99, extendedScheduledDeadline(UINT32_MAX - 100, 50, 200));
+}
+
+void testPersistentQueueNotBeforeSurvivesRestartClock()
+{
+    TEST_ASSERT_EQUAL_UINT32(900000, persistentNotBeforeDelayMilliseconds(1000, 1900, 3600000));
+    TEST_ASSERT_EQUAL_UINT32(0, persistentNotBeforeDelayMilliseconds(1900, 1900, 3600000));
+    TEST_ASSERT_EQUAL_UINT32(0, persistentNotBeforeDelayMilliseconds(1901, 1900, 3600000));
+    TEST_ASSERT_EQUAL_UINT32(3600000, persistentNotBeforeDelayMilliseconds(1000, 10000, 3600000));
+    TEST_ASSERT_FALSE(relativeQueueDelayNeedsStart(42, 42));
+    TEST_ASSERT_TRUE(relativeQueueDelayNeedsStart(42, 0));
+    TEST_ASSERT_TRUE(relativeQueueDelayNeedsStart(43, 42));
+}
+
 void testServerResponseConfirmationRequiresExplicitOk()
 {
     TEST_ASSERT_TRUE(serverResponseConfirmsBooking(200, true, true));
@@ -176,6 +251,14 @@ int main(int, char **)
     RUN_TEST(testRetryAfterSeconds);
     RUN_TEST(testScanSendDelayAndMillisOverflow);
     RUN_TEST(testResultHoldDeadlineHandlesMillisOverflow);
+    RUN_TEST(testPendingAndScheduledDeadlinesHandleMillisOverflow);
+    RUN_TEST(testQueueRetryStateSequenceHandlesRolloverAndResume);
+    RUN_TEST(testQueuedConfirmationRequiresLocalAck);
+    RUN_TEST(testQueueResponsesDoNotUseLiveScanFeedback);
+    RUN_TEST(testLongLiveRetryMovesToBackgroundQueue);
+    RUN_TEST(testOperationDurationWatchdogHandlesMillisRollover);
+    RUN_TEST(testQueueBackgroundDeadlineCanOnlyBeExtended);
+    RUN_TEST(testPersistentQueueNotBeforeSurvivesRestartClock);
     RUN_TEST(testServerResponseConfirmationRequiresExplicitOk);
     RUN_TEST(testUnconfirmed2xxQueuedResponseUsesDeadLetter);
     RUN_TEST(testOnlyConfirmedServerResponseAllowsGreenAndSuccessBeep);

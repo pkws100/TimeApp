@@ -1,6 +1,6 @@
 # PK-WS TimeApp Terminal Firmware 1.1
 
-Firmware 1.1.2 is rebuilt from the complete frozen Firmware 1.0 baseline. It retains the RC522/LCD/LED/buzzer/setup-button workflow, captive portal, WLAN diagnostics and non-blocking display logic, then adds controlled HTTP/HTTPS transport, trust management and an offline queue. The URL scheme is an explicit security boundary: there is no HTTPS-to-HTTP fallback.
+Firmware 1.1.3 is rebuilt from the complete frozen Firmware 1.0 baseline. It retains the RC522/LCD/LED/buzzer/setup-button workflow, captive portal, WLAN diagnostics and non-blocking display logic, then adds controlled HTTP/HTTPS transport, trust management and an offline queue. The URL scheme is an explicit security boundary: there is no HTTPS-to-HTTP fallback.
 
 ## Build / flash
 
@@ -46,7 +46,11 @@ During normal operation new bundles are downloaded only with verified HTTPS (at 
 
 Up to 64 scans are stored as individual atomically created records. Every record retains its `request_id`; it is removed only after a successful server response, preserving server-side idempotency. TLS and WLAN failures persist the current scan before recovery/retry. Queue synchronization transfers one record at a time between normal loop cycles.
 
-HTTP 408, 425, 429 and 5xx responses are temporary. A numeric `Retry-After` value on HTTP 429 is honored between 1 and 900 seconds; HTTP-date values are deliberately not interpreted. Global terminal failures (`401`, `403`, `terminal_auth_required`, `terminal_auth_failed`, `terminal_disabled`, `terminal_unknown`, `terminal_ip_denied`, `terminal_storage_missing`, `feature_disabled`) keep the current record active and persistently block all automatic queue work. Only a successful authenticated config request with the current terminal identity can clear that block. Data-specific codes (`nfc_tag_invalid`, `nfc_tag_not_found`, `employee_mapping_invalid`, `nfc_uid_missing`, `invalid_uid`, `unknown_tag`, `unassigned_tag`) are moved to a reread-and-verified dead-letter record before the active file is removed. Unknown permanent failures conservatively block the queue.
+Queue, reconnect and display deadlines are safe across the ESP32 `millis()` rollover after approximately 49.7 days. Queue retry deadlines are reset after reconnect or TLS recovery, and an intentional retry wait is shown as a countdown. TCP connection establishment, TLS handshakes and response reads all have explicit bounds.
+
+Long server-directed waits are moved out of the foreground scan flow so the terminal remains usable. The authenticated local portal offers a safe recovery abort and reboot while busy: volatile scan data must be persisted first, active queue files are retained, and destructive formatting stays locked until the busy operation has ended.
+
+HTTP 408, 425, 429 and 5xx responses are temporary. A numeric `Retry-After` value on HTTP 429 is honored between 1 and 900 seconds; HTTP-date values are deliberately not interpreted. Long waits are stored as an absolute `not_before_epoch` plus a conservative relative fallback for HTTP operation without valid NTP time. Existing queue files use a recoverable staging/backup replacement, so a terminal restart cannot send the record early or lose it during the metadata update. Global terminal failures (`401`, `403`, `terminal_auth_required`, `terminal_auth_failed`, `terminal_disabled`, `terminal_unknown`, `terminal_ip_denied`, `terminal_storage_missing`, `feature_disabled`) keep the current record active and persistently block all automatic queue work. Only a successful authenticated config request with the current terminal identity can clear that block. Data-specific codes (`nfc_tag_invalid`, `nfc_tag_not_found`, `employee_mapping_invalid`, `nfc_uid_missing`, `invalid_uid`, `unknown_tag`, `unassigned_tag`) are moved to a reread-and-verified dead-letter record before the active file is removed. Unknown permanent failures conservatively block the queue.
 
 ## Scan feedback
 

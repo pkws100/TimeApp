@@ -1,4 +1,4 @@
-# Firmware 1.1.2 test plan
+# Firmware 1.1.3 test plan
 
 ## Build and rollback
 
@@ -23,6 +23,12 @@
 - Simulate power loss between temporary write/rename; active or previous bundle remains readable.
 - Test previous/factory restore and verified connection after install. Confirm WARNING/REPLACE_REQUIRED stay operational.
 - Force TLS failure: recovery either restores trust or scan is queued; reboot retains it. Restore HTTPS and verify FIFO sync and idempotent `request_id`. Fill 64 entries and observe the overflow warning.
+- Exercise queue retry deadlines immediately before and after a simulated `millis()` rollover. The queue must continue, and an intentional backoff must show a decreasing retry countdown.
+- Corrupt a queue record and force its quarantine rename to fail. The terminal must show the storage error and enter bounded API retry instead of repeatedly reading the same file in a tight queue loop.
+- Return HTTP 429 with `Retry-After: 900` for a live scan. The scan must be persisted with `not_before_epoch`, the terminal must return to ready after the result hold, and queue synchronization must wait in the background without blocking portal maintenance. Restart during the wait and verify that the record is still not sent before the persisted deadline.
+- Repeat the long `Retry-After` test over plain HTTP before NTP is valid. The relative fallback must wait once in the same boot and once conservatively after a restart, without sending early.
+- Interrupt each queue deadline update phase (`staging` written, active moved to backup, new active promoted). On reboot the valid new file or last good backup must be restored and verified. Force a rename failure and verify the visible 10-second storage-recovery retry blocks queue processing while the portal and safe restart remain available.
+- During `SEND_SCAN` and `QUEUE_SYNC`, use the authenticated portal recovery abort and safe reboot. Volatile scans must be persisted before recovery; existing queue records must remain intact and formatting must become available only after the busy state ends.
 - Verify boot recovery for `active`, `previous`, `staging`, `new` and `old-pending`; test interrupted installation before/after every rename.
 - Record `ESP.getFreeHeap()`, `ESP.getMinFreeHeap()` and stack reserve after boot, WLAN, HTTPS handshake, a full queue and queue sync.
 
@@ -33,7 +39,7 @@
 
 ## Functional inventory
 
-| Function | Firmware 1.0 | Firmware 1.1.2 | Test status |
+| Function | Firmware 1.0 | Firmware 1.1.3 | Test status |
 | --- | --- | --- | --- |
 | WLAN, RC522, LCD, LEDs, buzzer, setup button | yes | retained | hardware required |
 | Captive portal, login/form key, WLAN/API/hardware diagnostics | yes | retained and extended | portal/hardware required |
