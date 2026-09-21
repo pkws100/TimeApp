@@ -222,6 +222,91 @@ void testUtcCalendarConversionIsIndependentOfBerlinTimezone()
     TEST_ASSERT_EQUAL_INT64(SUMMER_UTC, terminalUtcTmToEpoch(utc));
 }
 
+void testQueuedRecordReplayIsLimitedToCurrentBerlinDay()
+{
+    useBerlinTimezone();
+    char date[11];
+
+    TEST_ASSERT_TRUE(formatQueuedRecordBerlinDate("2026-08-24T12:05:51Z", date, sizeof(date)));
+    TEST_ASSERT_EQUAL_STRING("24.08.2026", date);
+    TEST_ASSERT_TRUE(queuedRecordBelongsToCurrentBerlinDay(
+        "2026-08-24T12:05:51Z",
+        "24.08.2026 14:05"
+    ));
+    TEST_ASSERT_TRUE(queuedRecordBelongsToCurrentBerlinDay(
+        "24.08.2026 14:05:51",
+        "24.08.2026 14:06"
+    ));
+    TEST_ASSERT_FALSE(queuedRecordBelongsToCurrentBerlinDay(
+        "24.08.2026 14:05:51",
+        "21.09.2026 14:54"
+    ));
+    TEST_ASSERT_FALSE(queuedRecordBelongsToCurrentBerlinDay(
+        "ungueltig",
+        "21.09.2026 14:54"
+    ));
+}
+
+void testQueuedUtcRecordUsesBerlinDayAcrossMidnight()
+{
+    useBerlinTimezone();
+    char date[11];
+
+    TEST_ASSERT_TRUE(formatQueuedRecordBerlinDate("2026-08-23T22:30:00Z", date, sizeof(date)));
+    TEST_ASSERT_EQUAL_STRING("24.08.2026", date);
+    TEST_ASSERT_TRUE(queuedRecordBelongsToCurrentBerlinDay(
+        "2026-08-23T22:30:00Z",
+        "24.08.2026 00:31"
+    ));
+    TEST_ASSERT_FALSE(formatQueuedRecordBerlinDate("2026-02-30T12:00:00Z", date, sizeof(date)));
+}
+
+void testQueuedRetryIsRejectedAfterBerlinMidnight()
+{
+    useBerlinTimezone();
+    const char *queuedAt = "2026-09-21T21:59:50Z"; // 23:59:50 Europe/Berlin
+
+    TEST_ASSERT_EQUAL_INT((int) QueueReplayDateDecision::ALLOW, (int) queueReplayDateDecisionForAttempt(
+        queuedAt,
+        "21.09.2026 23:57",
+        180,
+        120
+    ));
+    TEST_ASSERT_EQUAL_INT((int) QueueReplayDateDecision::DEFER_MIDNIGHT, (int) queueReplayDateDecisionForAttempt(
+        queuedAt,
+        "21.09.2026 23:59",
+        10,
+        120
+    ));
+    TEST_ASSERT_EQUAL_INT((int) QueueReplayDateDecision::REJECT_DATE, (int) queueReplayDateDecisionForAttempt(
+        queuedAt,
+        "22.09.2026 00:00",
+        86400,
+        120
+    ));
+}
+
+void testWatchdogBootPausesOnlyARecoverableQueue()
+{
+    TEST_ASSERT_EQUAL_UINT32(300000, queueSyncStartupDelayMilliseconds(true, 1, 300000));
+    TEST_ASSERT_EQUAL_UINT32(0, queueSyncStartupDelayMilliseconds(true, 0, 300000));
+    TEST_ASSERT_EQUAL_UINT32(0, queueSyncStartupDelayMilliseconds(false, 1, 300000));
+}
+
+void testRejectedMigrationResumeIgnoresChangedClassification()
+{
+    TEST_ASSERT_TRUE(rejectedRecordIdentityMatches(
+        7, "request-7", "A1B2", "2026-09-21T20:00:00Z",
+        7, "request-7", "A1B2", "2026-09-21T20:00:00Z"
+    ));
+    TEST_ASSERT_FALSE(rejectedRecordIdentityMatches(
+        7, "request-7", "A1B2", "2026-09-21T20:00:00Z",
+        7, "request-other", "A1B2", "2026-09-21T20:00:00Z"
+    ));
+    // Server/rejection codes are deliberately not part of immutable identity:
+    // a committed classification survives a reboot and is not overwritten.
+}
+
 void testReadyClockRefreshOnlyRendersChangesInAllowedIdleState()
 {
     TEST_ASSERT_FALSE(readyClockRefreshRequired(true, false, false, "16.07.2026 14:34", "16.07.2026 14:34"));
@@ -266,6 +351,11 @@ int main(int, char **)
     RUN_TEST(testClockUsesBerlinWinterAndSummerTime);
     RUN_TEST(testDeviceTimeRemainsUtc);
     RUN_TEST(testUtcCalendarConversionIsIndependentOfBerlinTimezone);
+    RUN_TEST(testQueuedRecordReplayIsLimitedToCurrentBerlinDay);
+    RUN_TEST(testQueuedUtcRecordUsesBerlinDayAcrossMidnight);
+    RUN_TEST(testQueuedRetryIsRejectedAfterBerlinMidnight);
+    RUN_TEST(testWatchdogBootPausesOnlyARecoverableQueue);
+    RUN_TEST(testRejectedMigrationResumeIgnoresChangedClassification);
     RUN_TEST(testReadyClockRefreshOnlyRendersChangesInAllowedIdleState);
     RUN_TEST(testReadyClockCheckIntervalAndMillisOverflow);
     return UNITY_END();

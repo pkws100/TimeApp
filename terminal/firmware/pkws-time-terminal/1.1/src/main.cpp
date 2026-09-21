@@ -15,6 +15,8 @@
 #include <mbedtls/pk.h>
 #include <mbedtls/sha256.h>
 #include <mbedtls/x509_crt.h>
+#include <esp_system.h>
+#include <esp_task_wdt.h>
 #include <time.h>
 
 #include "../include/TerminalDecisionLogic.h"
@@ -48,7 +50,7 @@ static_assert(sizeof(PKWS_PORTAL_ADMIN_PASSWORD) >= 13, "PKWS_PORTAL_ADMIN_PASSW
 #endif
 static_assert(sizeof(PKWS_PROVISIONING_ID) >= 13, "PKWS_PROVISIONING_ID muss mindestens 12 Zeichen haben.");
 
-static const char *FIRMWARE_VERSION = "pkws-time-terminal-v1.1.3";
+static const char *FIRMWARE_VERSION = "pkws-time-terminal-v1.1.4";
 static const char *NVS_NAMESPACE = "pkws-time";
 static const char *SETUP_AP_PASSWORD = PKWS_SETUP_AP_PASSWORD;
 static const char *PORTAL_ADMIN_PASSWORD = PKWS_PORTAL_ADMIN_PASSWORD;
@@ -80,6 +82,9 @@ static const uint32_t READY_CLOCK_CHECK_INTERVAL_MS = 1000;
 static const uint32_t SCAN_FEEDBACK_BEFORE_SEND_MS = 180;
 static const uint32_t LIVE_SCAN_MAX_RETRY_DELAY_MS = 15000;
 static const uint32_t LIVE_SCAN_MAX_OPERATION_MS = 120000;
+static const uint32_t QUEUE_SYNC_MAX_OPERATION_MS = 60000;
+static const uint32_t SYSTEM_HARD_WATCHDOG_SECONDS = 90;
+static const uint32_t QUEUE_MIDNIGHT_SAFETY_SECONDS = 120;
 static const uint32_t QUEUE_FOREGROUND_MAX_WAIT_MS = 30000;
 static const uint32_t PORTAL_RECOVERY_QUEUE_PAUSE_MS = 5UL * 60UL * 1000UL;
 static const uint32_t MAX_PERSISTED_QUEUE_DELAY_MS = 60UL * 60UL * 1000UL;
@@ -122,7 +127,7 @@ enum class DeviceState {
 enum class ApiTransport { HTTP_PLAIN, HTTPS_VERIFIED, INVALID };
 enum class TlsState { NOT_APPLICABLE, NOT_CHECKED, TIME_INVALID, TRUST_MISSING, CONNECTING, VERIFIED, VALIDATION_FAILED, RECOVERY };
 enum class ScanLifecycle { NONE, VOLATILE, PERSISTED, SENT_CONFIRMED, REJECTED };
-enum class QueueSyncOutcome { EMPTY, CONFIRMED, TEMPORARY, DEFERRED, TLS_FAILURE, REJECTED, BLOCKED, CORRUPT };
+enum class QueueSyncOutcome { EMPTY, CONFIRMED, TEMPORARY, DEFERRED, STALE, TLS_FAILURE, REJECTED, BLOCKED, CORRUPT };
 
 struct TerminalConfig {
     String ssid;
@@ -207,6 +212,8 @@ unsigned long lastUidAt = 0;
 unsigned long resultUntil = 0;
 unsigned long nextApiRetryAt = 0;
 unsigned long nextQueueSyncCycleAt = 0;
+esp_reset_reason_t bootResetReason = ESP_RST_UNKNOWN;
+bool hardWatchdogEnabled = false;
 uint32_t relativeQueueDelaySequence = 0;
 unsigned long relativeQueueDelayDeadline = 0;
 unsigned long lastRetryAfterMs = 0;
@@ -269,7 +276,12 @@ unsigned long beepStepUntil = 0;
 void applySignalFromJson(JsonVariantConst root, const String &fallbackLed, const String &fallbackBeep);
 void applyLedSignal(const String &signal);
 void lcdShow(const String &line1, const String &line2, const String &line3, const String &line4);
-bool persistCurrentScan(const String &reason, uint32_t notBeforeDelayMs = 0);
+bool persistCurrentScan(
+    const String &reason,
+    uint32_t notBeforeDelayMs = 0,
+    OfflineScan *persistedScan = nullptr,
+    bool releaseCurrentScan = true
+);
 bool apiGet(const String &path, String &body, int &status, String &why, bool authenticated = true, size_t responseLimit = MAX_CONFIG_RESPONSE_BYTES);
 bool installTrustBundle(const String &raw, bool allowRollback, String &why);
 void finishTrustInstall(bool verified);
@@ -390,6 +402,23 @@ const char *deviceStateHuman(DeviceState value)
     return "Unbekannt";
 }
 
+const char *resetReasonLabel(esp_reset_reason_t reason)
+{
+    switch (reason) {
+        case ESP_RST_POWERON: return "power_on";
+        case ESP_RST_EXT: return "external_reset";
+        case ESP_RST_SW: return "software_restart";
+        case ESP_RST_PANIC: return "panic";
+        case ESP_RST_INT_WDT: return "interrupt_watchdog";
+        case ESP_RST_TASK_WDT: return "task_watchdog";
+        case ESP_RST_WDT: return "other_watchdog";
+        case ESP_RST_DEEPSLEEP: return "deep_sleep";
+        case ESP_RST_BROWNOUT: return "brownout";
+        case ESP_RST_SDIO: return "sdio";
+        default: return "unknown";
+    }
+}
+
 String tlsStateHuman(TlsState value)
 {
     if (value == TlsState::NOT_APPLICABLE) return "nicht anwendbar (HTTP)";
@@ -421,6 +450,13 @@ bool storageMutationBlocked()
         || state == DeviceState::RESTART_PENDING
         || queueSync.active || queueRecoveryPending || scanLifecycle != ScanLifecycle::NONE
         || currentRequestId.length() > 0 || currentUid.length() > 0;
+}
+
+bool queueBlockRequiresManualRecovery()
+{
+    return queueSyncBlocked
+        && (queueSyncBlockReason.startsWith("queue_watchdog_")
+            || queueSyncBlockReason.startsWith("queue_storage_"));
 }
 
 void loadQueueSyncBlock()
@@ -1297,10 +1333,6 @@ bool acknowledgeQueuedScan(const OfflineScan &scan)
 
 bool rejectQueuedScan(const OfflineScan &scan, int status, const String &code, const String &message)
 {
-    if (queueRejectedDepth() >= MAX_REJECTED_QUEUE_ENTRIES) {
-        lastTerminalError = "queue_rejected_full";
-        return false;
-    }
     DynamicJsonDocument document(1280);
     document["request_id"] = scan.requestId;
     document["nfc_uid"] = scan.uid;
@@ -1318,7 +1350,43 @@ bool rejectQueuedScan(const OfflineScan &scan, int status, const String &code, c
     String target = rejectedQueuePath(scan.sequence);
     String temporary = target + ".tmp";
     if (LittleFS.exists(target)) {
-        lastTerminalError = "queue_dead_letter_sequence_collision";
+        // A power loss can occur after the rejected copy was committed but
+        // before the active FIFO file was removed. Continue that exact move
+        // instead of permanently blocking the queue head as a collision.
+        File existing = LittleFS.open(target, "r");
+        DynamicJsonDocument existingDocument(1280);
+        const bool existingRecordParsed = existing && existing.size() > 0 && existing.size() <= 1536
+            && !deserializeJson(existingDocument, existing);
+        const String existingRequestId = existingDocument["request_id"] | "";
+        const String existingUid = existingDocument["nfc_uid"] | "";
+        const String existingDeviceTime = existingDocument["device_time"] | "";
+        const bool sameRejectedRecord = existingRecordParsed
+            && rejectedRecordIdentityMatches(
+                scan.sequence,
+                scan.requestId.c_str(),
+                scan.uid.c_str(),
+                scan.deviceTime.c_str(),
+                (uint32_t) (existingDocument["sequence"] | 0),
+                existingRequestId.c_str(),
+                existingUid.c_str(),
+                existingDeviceTime.c_str()
+            )
+            && existingDocument["rejection"]["http_status"].is<int>()
+            && existingDocument["rejection"]["server_code"].is<const char *>()
+            && existingDocument["rejection"]["message"].is<const char *>();
+        if (existing) existing.close();
+        if (!sameRejectedRecord) {
+            lastTerminalError = "queue_dead_letter_sequence_collision";
+            return false;
+        }
+        if (!LittleFS.remove(queuePath(scan.sequence).c_str())) {
+            lastTerminalError = "queue_dead_letter_source_cleanup_failed";
+            return false;
+        }
+        return true;
+    }
+    if (queueRejectedDepth() >= MAX_REJECTED_QUEUE_ENTRIES) {
+        lastTerminalError = "queue_rejected_full";
         return false;
     }
     if (!writeFileAtomically(target.c_str(), body, temporary.c_str())) { lastTerminalError = "queue_dead_letter_write_failed"; return false; }
@@ -1772,7 +1840,7 @@ String setupHtml()
     page += transportLabel() + " / aktuell " + tlsStateHuman(tlsState) + " / zuletzt " + tlsStateHuman(lastCompletedTlsState);
     page += F("</code><span>Trust / Queue</span><code>");
     page += activeTrustSource + " v" + String(activeTrust.version) + " / " + trustStatusHuman() + " / aktiv " + String(queueDepth()) + " / abgelehnt " + String(queueRejectedDepth()) + " / defekt " + String(queueCorruptDepth());
-    page += F("</code><span>Queue-Sync</span><code>");
+    page += F("</code><span>Queue-Sync</span><code id=\"queueSyncStatus\">");
     page += queueSyncBlocked
         ? htmlEscape("GESPERRT / " + queueSyncBlockReason + " / HTTP " + String(queueSyncBlockHttpStatus) + " / " + queueSyncBlockServerCode + " / " + queueSyncBlockedAt)
         : String("freigegeben");
@@ -1786,6 +1854,8 @@ String setupHtml()
     page += filesystemMounted ? "eingebunden" : "FEHLER: nicht eingebunden";
     page += F("</code><span>Recovery / Fehler</span><code>");
     page += htmlEscape(recoveryStatusHuman() + " / " + lastTerminalError);
+    page += F("</code><span>Watchdog / Reset</span><code>");
+    page += String(hardWatchdogEnabled ? "Queue-Schutz bereit " : "FEHLER ") + String(SYSTEM_HARD_WATCHDOG_SECONDS) + " Sek. / " + resetReasonLabel(bootResetReason);
     page += F("</code><span>Speicher</span><code>");
     page += "Heap " + String(ESP.getFreeHeap()) + " / Minimum " + String(ESP.getMinFreeHeap()) + " / Stack " + String(uxTaskGetStackHighWaterMark(nullptr));
     page += F("</code></div><form method=\"post\" action=\"/logout\"><button class=\"secondary\" type=\"submit\">Ausloggen</button></form></section>");
@@ -1881,12 +1951,12 @@ String setupHtml()
     page += F("';async function scanWifi(){const box=document.getElementById('networks');box.textContent='Suche laeuft...';try{const r=await fetch('/scan-wifi?setup_key='+encodeURIComponent(setupKey));const d=await r.json();if(!r.ok)throw new Error(d.message||'WLAN-Scan nicht erlaubt.');if(!d.networks||!d.networks.length){box.textContent='Keine WLANs gefunden.';return;}box.innerHTML=d.networks.map(n=>'<div class=\"net\"><button type=\"button\" onclick=\"pickSsid(this.dataset.ssid)\" data-ssid=\"'+esc(n.ssid)+'\">'+esc(n.ssid)+'</button><span>'+n.rssi+' dBm</span></div>').join('');}catch(e){box.textContent=e.message||'WLAN-Scan fehlgeschlagen.';}}");
     page += F("function pickSsid(s){document.getElementById('ssid').value=s;}function formBody(form){const b=new URLSearchParams(new FormData(form));if(!b.has('setup_key'))b.set('setup_key',setupKey);return b;}");
     page += F("async function testApi(){const box=document.getElementById('apiResult');box.textContent='API-Test laeuft...';try{const r=await fetch('/test-api',{method:'POST',body:formBody(document.getElementById('configForm'))});const d=await r.json();box.textContent=JSON.stringify(d,null,2);}catch(e){box.textContent='API-Test fehlgeschlagen.';}}");
-    page += F("function setMaintenanceBlocked(blocked,restartPending,abortAvailable,queueRecovery){document.getElementById('busyOperationNotice').hidden=!blocked||restartPending||!abortAvailable;document.getElementById('recoveryAbortForm').hidden=!abortAvailable||restartPending;document.getElementById('restartPendingNotice').hidden=!restartPending;document.getElementById('queueRecoveryNotice').hidden=!queueRecovery;document.getElementById('safeRestartButton').disabled=restartPending;document.getElementById('formatBlockedNotice').hidden=!blocked;document.querySelectorAll('[data-maintenance-form] input,[data-maintenance-form] button,[data-maintenance-form] select,[data-maintenance-form] textarea').forEach(el=>el.disabled=blocked);document.getElementById('confirm-format').disabled=blocked;document.getElementById('formatFilesystemButton').disabled=blocked;document.getElementById('scanWifiButton').disabled=blocked;document.getElementById('apiTestButton').disabled=blocked;}function renderDiag(d){document.getElementById('diagSsid').textContent=d.ssid||'-';document.getElementById('diagSignal').textContent=(d.wifi_status==='connected')?(d.wifi_rssi_dbm+' dBm / '+d.wifi_quality_percent+'% / '+d.wifi_quality):'nicht verbunden';document.getElementById('deviceState').textContent=d.device_state_human||d.device_state||'-';setMaintenanceBlocked(!!d.maintenance_blocked,!!d.restart_pending,!!d.recovery_abort_available,!!d.queue_recovery_pending);}");
+    page += F("function setMaintenanceBlocked(blocked,restartPending,abortAvailable,queueRecovery){document.getElementById('busyOperationNotice').hidden=!blocked||restartPending||!abortAvailable;document.getElementById('recoveryAbortForm').hidden=!abortAvailable||restartPending;document.getElementById('restartPendingNotice').hidden=!restartPending;document.getElementById('queueRecoveryNotice').hidden=!queueRecovery;document.getElementById('safeRestartButton').disabled=restartPending;document.getElementById('formatBlockedNotice').hidden=!blocked;document.querySelectorAll('[data-maintenance-form] input,[data-maintenance-form] button,[data-maintenance-form] select,[data-maintenance-form] textarea').forEach(el=>el.disabled=blocked);document.getElementById('confirm-format').disabled=blocked;document.getElementById('formatFilesystemButton').disabled=blocked;document.getElementById('scanWifiButton').disabled=blocked;document.getElementById('apiTestButton').disabled=blocked;}function renderQueueSync(d){if(d.queue_sync_blocked)return 'GESPERRT / '+(d.queue_sync_block_reason||'-')+' / HTTP '+(d.queue_sync_block_http_status||0)+' / '+(d.queue_sync_block_server_code||'-')+' / '+(d.queue_sync_blocked_at||'-');if(d.queue_sync_active)return 'aktiv / Versuch '+(d.queue_sync_attempt||1)+'/4 / '+Math.floor((d.queue_sync_elapsed_ms||0)/1000)+' Sek.'+(d.queue_sync_last_error?' / '+d.queue_sync_last_error:'');return 'freigegeben'+(d.queue_sync_last_error?' / letzter Fehler: '+d.queue_sync_last_error:'');}function renderDiag(d){document.getElementById('diagSsid').textContent=d.ssid||'-';document.getElementById('diagSignal').textContent=(d.wifi_status==='connected')?(d.wifi_rssi_dbm+' dBm / '+d.wifi_quality_percent+'% / '+d.wifi_quality):'nicht verbunden';document.getElementById('deviceState').textContent=d.device_state_human||d.device_state||'-';document.getElementById('queueSyncStatus').textContent=renderQueueSync(d);setMaintenanceBlocked(!!d.maintenance_blocked,!!d.restart_pending,!!d.recovery_abort_available,!!d.queue_recovery_pending);}");
     page += F("async function refreshDiag(){const box=document.getElementById('hardwareResult');box.textContent='WLAN-Diagnose wird aktualisiert...';try{const r=await fetch('/status');const d=await r.json();if(!r.ok)throw new Error(d.message||'Bitte neu einloggen.');renderDiag(d);box.textContent='WLAN: '+(d.ssid||'-')+'\\nSignal: '+(d.wifi_status==='connected'?(d.wifi_rssi_dbm+' dBm / '+d.wifi_quality_percent+'% / '+d.wifi_quality):'nicht verbunden')+'\\nIP: '+(d.sta_ip||d.ip||'-');}catch(e){box.textContent=e.message||'WLAN-Diagnose fehlgeschlagen.';}}");
     page += F("function renderNfc(d){return 'NFC Reader\\nRC522 Version: '+(d.reader_version||'-')+'\\nReader Status: '+(d.reader_ok?'OK':'Pruefen')+'\\nDebug: '+(d.debug||'-')+'\\nUID: '+(d.uid||'-')+'\\nUID Bytes: '+(d.uid_bytes||0)+'\\nRestzeit: '+(d.remaining_ms||0)+' ms';}");
     page += F("async function postAction(url,msg){const box=document.getElementById('hardwareResult');box.textContent=msg;try{const b=new URLSearchParams();b.set('setup_key',setupKey);const r=await fetch(url,{method:'POST',body:b});const d=await r.json();box.textContent=JSON.stringify(d,null,2);}catch(e){box.textContent='Test fehlgeschlagen.';}}");
     page += F("async function startNfcTest(){await postAction('/test/nfc/start','NFC-Test gestartet. Tag vorhalten.');pollNfc(0);}async function pollNfc(i){const box=document.getElementById('hardwareResult');try{const r=await fetch('/test/nfc/status?setup_key='+encodeURIComponent(setupKey));const d=await r.json();if(!r.ok)throw new Error(d.message||'Bitte neu einloggen.');box.textContent=renderNfc(d);if(d.active&&!d.uid&&i<20)setTimeout(()=>pollNfc(i+1),1000);}catch(e){box.textContent=e.message||'NFC-Status fehlgeschlagen.';}}");
-    page += F("async function loadRejected(offset){const box=document.getElementById('rejectedQueue'),next=document.getElementById('nextRejected');box.textContent='Lade...';try{const r=await fetch('/queue/rejected?offset='+offset+'&limit=20');const d=await r.json();if(!r.ok)throw new Error('Abgelehnte Queue nicht abrufbar.');box.textContent=(d.entries||[]).map(e=>'#'+e.sequence+' / HTTP '+e.http_status+' / '+(e.server_code||'-')+' / '+(e.rejected_at||'-')).join('\\n')||'Keine abgelehnten Eintraege.';if((d.total||0)>offset+20){next.style.display='block';next.onclick=()=>loadRejected(offset+20);}else next.style.display='none';}catch(e){box.textContent=e.message||'Abruf fehlgeschlagen.';}}");
+    page += F("async function loadRejected(offset){const box=document.getElementById('rejectedQueue'),next=document.getElementById('nextRejected');box.textContent='Lade...';try{const r=await fetch('/queue/rejected?offset='+offset+'&limit=20');const d=await r.json();if(!r.ok)throw new Error('Abgelehnte Queue nicht abrufbar.');box.textContent=(d.entries||[]).map(e=>'#'+e.sequence+' / Buchung '+(e.device_time||'-')+' / Queue-Grund '+(e.queued_reason||'-')+' / HTTP '+e.http_status+' / '+(e.server_code||'-')+' / '+(e.message||'-')+' / abgelehnt '+(e.rejected_at||'-')).join('\\n')||'Keine abgelehnten Eintraege.';if((d.total||0)>offset+20){next.style.display='block';next.onclick=()=>loadRejected(offset+20);}else next.style.display='none';}catch(e){box.textContent=e.message||'Abruf fehlgeschlagen.';}}");
     page += F("async function pollStatus(){try{const r=await fetch('/status');if(r.ok)renderDiag(await r.json());}catch(e){}}setMaintenanceBlocked(");
     page += formatBlocked ? F("true") : F("false");
     page += F(",");
@@ -1902,7 +1972,7 @@ String setupHtml()
 
 void sendSetupStatus()
 {
-    DynamicJsonDocument doc(2048);
+    DynamicJsonDocument doc(3072);
     if (!portalAuthenticated()) {
         doc["ok"] = false;
         doc["message"] = "Portal-Login erforderlich.";
@@ -1939,6 +2009,10 @@ void sendSetupStatus()
     doc["offline_queue_depth"] = queueDepth();
     doc["rejected_queue_depth"] = queueRejectedDepth();
     doc["corrupt_queue_depth"] = queueCorruptDepth();
+    doc["queue_sync_active"] = queueSync.active;
+    doc["queue_sync_attempt"] = queueSync.active ? queueSync.attempt + 1 : 0;
+    doc["queue_sync_elapsed_ms"] = queueSync.active ? static_cast<uint32_t>(millis() - queueSync.startedAt) : 0;
+    doc["queue_sync_last_error"] = queueSync.lastError;
     doc["queue_sync_blocked"] = queueSyncBlocked;
     doc["queue_sync_block_reason"] = queueSyncBlockReason;
     doc["queue_sync_block_http_status"] = queueSyncBlockHttpStatus;
@@ -1955,6 +2029,9 @@ void sendSetupStatus()
     doc["unverified_trust_candidate_present"] = LittleFS.exists(TRUST_QUARANTINE);
     doc["recovery_status"] = recoveryStatus;
     doc["filesystem_mounted"] = filesystemMounted;
+    doc["hard_watchdog_enabled"] = hardWatchdogEnabled;
+    doc["hard_watchdog_timeout_seconds"] = SYSTEM_HARD_WATCHDOG_SECONDS;
+    doc["reset_reason"] = resetReasonLabel(bootResetReason);
     // Legacy alias retained for older diagnostic collectors.
     doc["min_free_heap"] = ESP.getMinFreeHeap();
     doc["last_error"] = lastTerminalError;
@@ -2244,6 +2321,7 @@ bool abortBusyOperationSafely(String &why)
     queueSync.active = false;
     queueSync.attempt = 0;
     queueSync.nextAttemptAt = 0;
+    queueSync.startedAt = 0;
     queueSync.lastDisplayedWaitSeconds = UINT32_MAX;
     scanLifecycle = ScanLifecycle::NONE;
     resumeScanAfterWifiReconnect = false;
@@ -2439,7 +2517,7 @@ void setupRoutes()
 
     setupServer.on("/queue/rejected", HTTP_GET, []() {
         if (!portalAuthenticated()) { setupServer.send(403, "text/plain", "Portal-Login erforderlich."); return; }
-        DynamicJsonDocument doc(4096);
+        DynamicJsonDocument doc(8192);
         JsonArray entries = doc.createNestedArray("entries");
         long requestedOffset = setupServer.arg("offset").toInt();
         size_t offset = static_cast<size_t>(requestedOffset > 0 ? requestedOffset : 0);
@@ -2458,8 +2536,11 @@ void setupRoutes()
                         JsonObject item = entries.createNestedObject();
                         item["file"] = name.substring(name.lastIndexOf('/') + 1);
                         item["sequence"] = itemDoc["sequence"] | 0;
+                        item["device_time"] = itemDoc["device_time"] | "";
+                        item["queued_reason"] = itemDoc["queued_reason"] | "";
                         item["http_status"] = itemDoc["rejection"]["http_status"] | 0;
                         item["server_code"] = itemDoc["rejection"]["server_code"] | "";
+                        item["message"] = itemDoc["rejection"]["message"] | "";
                         item["rejected_at"] = itemDoc["rejection"]["rejected_at"] | "";
                     }
                     entry.close();
@@ -2785,6 +2866,11 @@ bool beginApiRequest(HTTPClient &http, WiFiClient &plain, WiFiClientSecure &secu
 {
     http.setTimeout(HTTP_TIMEOUT_MS);
     http.setConnectTimeout(HTTP_TIMEOUT_MS);
+    // Client::setTimeout uses seconds in Arduino-ESP32 2.x, while
+    // HTTPClient::setTimeout above uses milliseconds.
+    const uint32_t streamTimeoutSeconds = (HTTP_TIMEOUT_MS + 999U) / 1000U;
+    plain.setTimeout(streamTimeoutSeconds);
+    secure.setTimeout(streamTimeoutSeconds);
     ApiTransport transport = transportFor(config.apiBaseUrl);
     if (transport == ApiTransport::HTTP_PLAIN) {
         tlsState = TlsState::NOT_APPLICABLE;
@@ -2973,7 +3059,7 @@ bool fetchApiConfig()
 
     bool ok = doc["ok"] | false;
     if (status >= 200 && status < 300 && ok) {
-        if (queueSyncBlocked) clearQueueSyncBlock();
+        if (queueSyncBlocked && !queueBlockRequiresManualRecovery()) clearQueueSyncBlock();
         for (uint8_t i = 0; i < 3; i++) {
             welcomeLines[i] = doc["display"]["lines"][i] | welcomeLines[i];
         }
@@ -3217,7 +3303,12 @@ bool sendScanRequest(bool queuedRequest = false)
     return true;
 }
 
-bool persistCurrentScan(const String &reason, uint32_t notBeforeDelayMs)
+bool persistCurrentScan(
+    const String &reason,
+    uint32_t notBeforeDelayMs,
+    OfflineScan *persistedScan,
+    bool releaseCurrentScan
+)
 {
     if (currentUid.length() == 0 || currentRequestId.length() == 0) return true;
     OfflineScan scan;
@@ -3245,10 +3336,13 @@ bool persistCurrentScan(const String &reason, uint32_t notBeforeDelayMs)
             : scan.notBeforeDelayMs;
         relativeQueueDelayDeadline = millis() + boundedDelay;
     }
+    if (persistedScan != nullptr) *persistedScan = scan;
     scanLifecycle = ScanLifecycle::PERSISTED;
-    currentUid = "";
-    currentRequestId = "";
-    currentDeviceTime = "";
+    if (releaseCurrentScan) {
+        currentUid = "";
+        currentRequestId = "";
+        currentDeviceTime = "";
+    }
     return true;
 }
 
@@ -3264,11 +3358,102 @@ void retainOpenScanForPersistenceRetry()
     applyLedSignal("red");
 }
 
+bool armQueueRequestWatchdog()
+{
+    if (!hardWatchdogEnabled) return false;
+    if (esp_task_wdt_status(nullptr) != ESP_OK && esp_task_wdt_add(nullptr) != ESP_OK) {
+        return false;
+    }
+    if (esp_task_wdt_reset() == ESP_OK) return true;
+    // Never leave a failed arm attempt subscribed while the normal loop keeps
+    // running without feeding this queue-only watchdog.
+    esp_task_wdt_delete(nullptr);
+    return false;
+}
+
+bool disarmQueueRequestWatchdog()
+{
+    if (esp_task_wdt_status(nullptr) != ESP_OK) return true;
+    return esp_task_wdt_delete(nullptr) == ESP_OK;
+}
+
+void restartAfterWatchdogDisarmFailure(const char *errorCode)
+{
+    apiStatus = errorCode;
+    lastTerminalError = errorCode;
+    if (persistQueueSyncBlock(0, errorCode)) {
+        ESP.restart();
+    }
+    // If the persistent block cannot be written, keep the subscribed task
+    // unfed. The task watchdog then performs a TASK_WDT reset, whose boot path
+    // establishes the same circuit breaker before any replay is attempted.
+    while (true) delay(1000);
+}
+
+bool queuedScanPassesReplayGate(const OfflineScan &scan, QueueSyncOutcome &blockedOutcome)
+{
+    if (!isTimeValid()) {
+        nextQueueSyncCycleAt = extendedScheduledDeadline(millis(), nextQueueSyncCycleAt, 30000UL);
+        blockedOutcome = QueueSyncOutcome::DEFERRED;
+        return false;
+    }
+
+    char currentBerlinClock[24] = {};
+    const time_t nowEpoch = time(nullptr);
+    const bool currentDateAvailable = formatTerminalBerlinClock(
+        nowEpoch,
+        terminalTimeValid(nowEpoch),
+        currentBerlinClock,
+        sizeof(currentBerlinClock)
+    );
+    struct tm berlin = {};
+    if (!currentDateAvailable || localtime_r(&nowEpoch, &berlin) == nullptr) {
+        nextQueueSyncCycleAt = extendedScheduledDeadline(millis(), nextQueueSyncCycleAt, 30000UL);
+        blockedOutcome = QueueSyncOutcome::DEFERRED;
+        return false;
+    }
+    const uint32_t secondsUntilNextDay = terminalSecondsUntilNextDay(
+        berlin.tm_hour,
+        berlin.tm_min,
+        berlin.tm_sec
+    );
+    const QueueReplayDateDecision replayDecision = queueReplayDateDecisionForAttempt(
+        scan.deviceTime.c_str(),
+        currentBerlinClock,
+        secondsUntilNextDay,
+        QUEUE_MIDNIGHT_SAFETY_SECONDS
+    );
+    if (replayDecision == QueueReplayDateDecision::ALLOW) return true;
+    if (replayDecision == QueueReplayDateDecision::DEFER_MIDNIGHT) {
+        const uint32_t deferMs = (secondsUntilNextDay + 10U) * 1000U;
+        nextQueueSyncCycleAt = extendedScheduledDeadline(millis(), nextQueueSyncCycleAt, deferMs);
+        queueSync.lastError = "queue_midnight_safety_pause";
+        blockedOutcome = QueueSyncOutcome::DEFERRED;
+        return false;
+    }
+
+    if (!rejectQueuedScan(
+        scan,
+        0,
+        "stale_offline_record",
+        "Offline-Buchung stammt nicht vom aktuellen Kalendertag und wurde nicht automatisch gesendet."
+    )) {
+        queueSync.lastError = lastTerminalError.length() ? lastTerminalError : "queue_stale_quarantine_failed";
+        blockedOutcome = QueueSyncOutcome::TEMPORARY;
+        return false;
+    }
+    apiStatus = "queue_stale_quarantined";
+    lastTerminalError = "queue_stale_quarantined";
+    blockedOutcome = QueueSyncOutcome::STALE;
+    return false;
+}
+
 QueueSyncOutcome syncOneQueuedScan()
 {
     if (!queueSync.active) {
         queueSync.lastError = "";
         if (!nextQueuedScan(queueSync.scan)) return queueDepth() == 0 ? QueueSyncOutcome::EMPTY : QueueSyncOutcome::CORRUPT;
+
         queueSync.active = true;
         queueSync.attempt = 0;
         queueSync.nextAttemptAt = queueRetryDeadlineOnSyncEntry(millis());
@@ -3297,11 +3482,36 @@ QueueSyncOutcome syncOneQueuedScan()
         }
     }
 
+    // Re-evaluate immediately before every POST. A retry that crosses Berlin
+    // midnight must never turn yesterday's offline record into today's server
+    // booking.
+    QueueSyncOutcome replayGateOutcome = QueueSyncOutcome::TEMPORARY;
+    if (!queuedScanPassesReplayGate(queueSync.scan, replayGateOutcome)) {
+        return replayGateOutcome;
+    }
+    if (!armQueueRequestWatchdog()) {
+        apiStatus = "queue_watchdog_arm_failed";
+        queueSync.lastError = apiStatus;
+        lastTerminalError = apiStatus;
+        return QueueSyncOutcome::TEMPORARY;
+    }
+
     currentUid = queueSync.scan.uid;
     currentRequestId = queueSync.scan.requestId;
     currentDeviceTime = queueSync.scan.deviceTime;
     scanLifecycle = ScanLifecycle::PERSISTED;
+    lcdShow(
+        "Offline Queue",
+        "Sende Buchung",
+        "Versuch " + String(queueSync.attempt + 1) + "/4",
+        "Zeitlimit aktiv"
+    );
     bool sent = sendScanRequest(true);
+    if (!disarmQueueRequestWatchdog()) {
+        // The queue file still exists at this point. Reboot immediately rather
+        // than risk a delayed watchdog reset during unrelated live operation.
+        restartAfterWatchdogDisarmFailure("queue_watchdog_disarm_failed");
+    }
     if (scanLifecycle == ScanLifecycle::SENT_CONFIRMED) {
         const bool activeRecordRemoved = acknowledgeQueuedScan(queueSync.scan);
         if (!queuedConfirmationComplete(true, activeRecordRemoved)) {
@@ -3361,6 +3571,27 @@ void handleQueueSync()
         return;
     }
     const uint32_t now = millis();
+    if (queueSync.active
+        && operationDurationExceeded(now, queueSync.startedAt, QUEUE_SYNC_MAX_OPERATION_MS)) {
+        currentUid = "";
+        currentRequestId = "";
+        currentDeviceTime = "";
+        queueSync.active = false;
+        queueSync.attempt = 0;
+        queueSync.nextAttemptAt = 0;
+        queueSync.startedAt = 0;
+        queueSync.lastDisplayedWaitSeconds = UINT32_MAX;
+        queueSync.lastError = "queue_operation_timeout";
+        scanLifecycle = ScanLifecycle::NONE;
+        apiStatus = "queue_operation_timeout";
+        lastTerminalError = "queue_operation_timeout";
+        nextQueueSyncCycleAt = extendedScheduledDeadline(now, nextQueueSyncCycleAt, PORTAL_RECOVERY_QUEUE_PAUSE_MS);
+        enterState(DeviceState::READY);
+        enterState(DeviceState::NFC_SCAN);
+        lcdShowTemporary("Queue pausiert", "Zeitlimit erreicht", "Retry spaeter", "Portal pruefen", 10000);
+        applyLedSignal("yellow");
+        return;
+    }
     const uint32_t remainingMs = queueRetryWaitMilliseconds(queueSync.active, now, queueSync.nextAttemptAt);
     if (remainingMs > 0) {
         const uint32_t remainingSeconds = (remainingMs + 999U) / 1000U;
@@ -3392,8 +3623,22 @@ void handleQueueSync()
     }
     if (outcome == QueueSyncOutcome::DEFERRED) {
         queueSync.active = false;
+        queueSync.attempt = 0;
+        queueSync.startedAt = 0;
         scanLifecycle = ScanLifecycle::NONE;
         enterState(DeviceState::READY);
+        return;
+    }
+    if (outcome == QueueSyncOutcome::STALE) {
+        queueSync.active = false;
+        queueSync.attempt = 0;
+        queueSync.startedAt = 0;
+        scanLifecycle = ScanLifecycle::NONE;
+        enterState(DeviceState::READY);
+        enterState(DeviceState::NFC_SCAN);
+        lcdShowTemporary("Queue zur Pruefung", "Alter Datensatz", "nicht gesendet", "Portal pruefen", 10000);
+        applyLedSignal("yellow");
+        triggerBeep("ready");
         return;
     }
     if (outcome == QueueSyncOutcome::CONFIRMED) { queueSync.active = false; scanLifecycle = ScanLifecycle::NONE; nextQueueSyncCycleAt = extendedScheduledDeadline(millis(), nextQueueSyncCycleAt, 1000); enterState(DeviceState::READY); return; }
@@ -3436,10 +3681,12 @@ void handleQueueSync()
             queueSync.active = false;
             scanLifecycle = ScanLifecycle::NONE;
             nextQueueSyncCycleAt = extendedScheduledDeadline(millis(), nextQueueSyncCycleAt, retryDelay);
-            lcdShow("Queue Speicher", "Update fehlgeschl.", "Datensatz bleibt", "Admin informieren");
+            persistQueueSyncBlock(0, "queue_storage_defer_failed");
+            enterState(DeviceState::READY);
+            enterState(DeviceState::NFC_SCAN);
+            lcdShowTemporary("Queue Speicher", "Update fehlgeschl.", "Datensatz bleibt", "Portal pruefen", 10000);
             applyLedSignal("red");
             triggerBeep("error");
-            enterState(DeviceState::ERROR_RETRY);
             return;
         }
         queueSync.active = false;
@@ -3640,6 +3887,12 @@ void handleNfcScan()
 
     lastUid = uid;
     lastUidAt = now;
+    if (queueSyncBlocked) {
+        lcdShowTemporary("Terminal pausiert", "Queue gesperrt", "Portal pruefen", "nicht gebucht", 8000);
+        applyLedSignal("red");
+        triggerBeep("error");
+        return;
+    }
     currentUid = uid;
     currentRequestId = generateRequestId();
     currentDeviceTime = isoDeviceTimeOrNull();
@@ -3684,59 +3937,117 @@ void handleSendScan()
 
     stopBuzzer();
 
-    currentScanAttempt++;
-    if (sendScanRequest()) {
+    // Journal the live scan before entering any synchronous network stack.
+    // This gives a hard watchdog reset the same request_id and payload to
+    // resume idempotently after reboot.
+    OfflineScan persistedLiveScan;
+    if (!persistCurrentScan("live_pending", 0, &persistedLiveScan, false)) {
+        retainOpenScanForPersistenceRetry();
         return;
     }
 
-    if (apiStatus == "tls_validation_failed" || apiStatus == "tls_time_invalid" || apiStatus == "tls_trust_missing") {
-        if (persistCurrentScan(apiStatus)) enterState(DeviceState::TLS_RECOVERY);
-        else retainOpenScanForPersistenceRetry();
-        return;
-    }
-
-    if (scanLifecycle == ScanLifecycle::REJECTED
-        && queueFailureActionFor(lastHttpStatus, lastServerCode.c_str()) == QueueFailureAction::BLOCK_GLOBAL_KEEP_ACTIVE) {
-        if (persistCurrentScan(lastServerCode.length() ? lastServerCode : String("global_terminal_error"))) {
-            bool blockPersisted = persistQueueSyncBlock(lastHttpStatus, lastServerCode);
-            lcdShow("Queue gesperrt", "Scan gespeichert", blockPersisted ? "Zugang pruefen" : "Speicher pruefen", "Admin informieren");
-            applyLedSignal("red");
-            triggerBeep("error");
-            resultUntil = millis() + 8000;
-            enterState(DeviceState::SHOW_RESULT);
+    QueueSyncOutcome replayGateOutcome = QueueSyncOutcome::TEMPORARY;
+    if (!queuedScanPassesReplayGate(persistedLiveScan, replayGateOutcome)) {
+        currentUid = "";
+        currentRequestId = "";
+        currentDeviceTime = "";
+        scanLifecycle = ScanLifecycle::NONE;
+        if (replayGateOutcome == QueueSyncOutcome::STALE) {
+            lcdShow("Scan zur Pruefung", "Zeit nicht sicher", "nicht gesendet", "Portal pruefen");
+            applyLedSignal("yellow");
         } else {
-            retainOpenScanForPersistenceRetry();
+            lcdShow("Scan gespeichert", "Zeitfenster", "Sync spaeter", "Terminal bleibt frei");
+            applyScanFeedback(ScanFeedbackState::STORED_OFFLINE);
         }
+        resultUntil = millis() + 8000;
+        enterState(DeviceState::SHOW_RESULT);
         return;
     }
 
-    if (currentScanAttempt < 3) {
-        unsigned long retryDelay = lastRetryAfterMs > 0 ? lastRetryAfterMs : (currentScanAttempt == 1 ? 1000UL : 3000UL);
-        lastRetryAfterMs = 0;
-        if (liveScanRetryShouldQueue(retryDelay, LIVE_SCAN_MAX_RETRY_DELAY_MS)) {
-            if (persistCurrentScan("server_retry_after", retryDelay)) {
-                nextQueueSyncCycleAt = extendedScheduledDeadline(millis(), nextQueueSyncCycleAt, retryDelay);
-                lcdShow("Scan gespeichert", "Server wartet", "Sync spaeter", "Terminal bleibt frei");
-                applyScanFeedback(ScanFeedbackState::STORED_OFFLINE);
-                resultUntil = millis() + 8000;
-                enterState(DeviceState::SHOW_RESULT);
-            } else {
-                retainOpenScanForPersistenceRetry();
-            }
-            return;
-        }
-        lcdShow("API Retry", "Scan wird", "wiederholt", "bitte warten");
-        applyLedSignal("yellow");
-        nextScanAttemptAt = millis() + retryDelay;
-        lastDisplayedScanWaitSeconds = UINT32_MAX;
-        return;
-    }
-    if (persistCurrentScan("network_failed")) {
-        lcdShow("Scan gespeichert", "wird später", "synchronisiert", "");
+    if (!armQueueRequestWatchdog()) {
+        currentUid = "";
+        currentRequestId = "";
+        currentDeviceTime = "";
+        scanLifecycle = ScanLifecycle::NONE;
+        apiStatus = "live_watchdog_arm_failed";
+        lastTerminalError = apiStatus;
+        nextQueueSyncCycleAt = extendedScheduledDeadline(millis(), nextQueueSyncCycleAt, PORTAL_RECOVERY_QUEUE_PAUSE_MS);
+        lcdShow("Scan gespeichert", "Schutz nicht aktiv", "Sync spaeter", "Portal pruefen");
         applyScanFeedback(ScanFeedbackState::STORED_OFFLINE);
         resultUntil = millis() + 8000;
         enterState(DeviceState::SHOW_RESULT);
-    } else retainOpenScanForPersistenceRetry();
+        return;
+    }
+
+    currentScanAttempt++;
+    const bool requestCompleted = sendScanRequest();
+    if (!disarmQueueRequestWatchdog()) {
+        restartAfterWatchdogDisarmFailure("queue_watchdog_live_disarm_failed");
+    }
+
+    if (requestCompleted) {
+        if (scanLifecycle == ScanLifecycle::SENT_CONFIRMED) {
+            if (!acknowledgeQueuedScan(persistedLiveScan)) {
+                lastTerminalError = "live_queue_ack_failed";
+            }
+        } else if (scanLifecycle == ScanLifecycle::REJECTED) {
+            if (!rejectQueuedScan(
+                persistedLiveScan,
+                lastHttpStatus,
+                lastServerCode,
+                lastServerMessage.length() ? lastServerMessage : "Server hat die Buchung nicht bestaetigt."
+            )) {
+                lastTerminalError = "live_rejected_queue_move_failed";
+            }
+        }
+        return;
+    }
+
+    const bool tlsFailure = apiStatus == "tls_validation_failed"
+        || apiStatus == "tls_time_invalid" || apiStatus == "tls_trust_missing";
+    const bool globalBlock = scanLifecycle == ScanLifecycle::REJECTED
+        && queueFailureActionFor(lastHttpStatus, lastServerCode.c_str()) == QueueFailureAction::BLOCK_GLOBAL_KEEP_ACTIVE;
+    const uint32_t retryDelay = lastRetryAfterMs > 0 ? lastRetryAfterMs : PORTAL_RECOVERY_QUEUE_PAUSE_MS;
+    lastRetryAfterMs = 0;
+    bool retryMetadataPersisted = true;
+    if (!globalBlock && retryDelay > 0) {
+        retryMetadataPersisted = deferQueuedScan(persistedLiveScan, retryDelay);
+        nextQueueSyncCycleAt = extendedScheduledDeadline(millis(), nextQueueSyncCycleAt, retryDelay);
+        if (!retryMetadataPersisted) {
+            persistQueueSyncBlock(0, "queue_storage_defer_failed");
+        }
+    }
+    currentUid = "";
+    currentRequestId = "";
+    currentDeviceTime = "";
+    scanLifecycle = ScanLifecycle::NONE;
+
+    if (!retryMetadataPersisted) {
+        lcdShow("Queue Speicher", "Update fehlgeschl.", "Scan bleibt sicher", "Portal pruefen");
+        applyLedSignal("red");
+        triggerBeep("error");
+        resultUntil = millis() + 8000;
+        enterState(DeviceState::SHOW_RESULT);
+        return;
+    }
+    if (globalBlock) {
+        const bool blockPersisted = persistQueueSyncBlock(lastHttpStatus, lastServerCode);
+        lcdShow("Queue gesperrt", "Scan gespeichert", blockPersisted ? "Zugang pruefen" : "Speicher pruefen", "Admin informieren");
+        applyLedSignal("red");
+        triggerBeep("error");
+        resultUntil = millis() + 8000;
+        enterState(DeviceState::SHOW_RESULT);
+        return;
+    }
+    if (tlsFailure) {
+        enterState(DeviceState::TLS_RECOVERY);
+        return;
+    }
+
+    lcdShow("Scan gespeichert", "keine API-Antwort", "Sync spaeter", "Terminal bleibt frei");
+    applyScanFeedback(ScanFeedbackState::STORED_OFFLINE);
+    resultUntil = millis() + 8000;
+    enterState(DeviceState::SHOW_RESULT);
 }
 
 void handleBoot()
@@ -3771,6 +4082,7 @@ void handleBoot()
 void setup()
 {
     Serial.begin(115200);
+    bootResetReason = esp_reset_reason();
     pinMode(PIN_LED_GREEN, OUTPUT);
     pinMode(PIN_LED_RED, OUTPUT);
     pinMode(PIN_LED_YELLOW, OUTPUT);
@@ -3799,6 +4111,19 @@ void setup()
     preferences.putUInt("boot_counter", bootCounter);
     preferences.end();
     loadQueueSyncBlock();
+    const uint32_t watchdogRecoveryDelayMs = queueSyncStartupDelayMilliseconds(
+        bootResetReason == ESP_RST_TASK_WDT,
+        filesystemMounted ? queueDepth() : 0,
+        PORTAL_RECOVERY_QUEUE_PAUSE_MS
+    );
+    if (watchdogRecoveryDelayMs > 0) {
+        nextQueueSyncCycleAt = millis() + watchdogRecoveryDelayMs;
+        if (!persistQueueSyncBlock(0, "queue_watchdog_timeout")) {
+            lastTerminalError = "queue_watchdog_block_persist_failed";
+        } else {
+            lastTerminalError = "queue_watchdog_recovery_blocked";
+        }
+    }
 
     setupButtonWasPressedAtBoot = isSetupButtonPressed();
     stateEnteredAt = millis();
@@ -3817,6 +4142,13 @@ void setup()
     if (!provisioningSecurityValid) {
         Serial.println(F("SECURITY CONFIG ERROR: placeholder portal credentials or provisioning ID detected."));
         lastTerminalError = "default_portal_credentials";
+    }
+
+    const esp_err_t watchdogInitResult = esp_task_wdt_init(SYSTEM_HARD_WATCHDOG_SECONDS, true);
+    hardWatchdogEnabled = watchdogInitResult == ESP_OK;
+    if (!hardWatchdogEnabled) {
+        Serial.println(F("ERROR: hard task watchdog could not be enabled."));
+        lastTerminalError = "hard_watchdog_init_failed";
     }
 }
 
@@ -3910,6 +4242,8 @@ void loop()
                     lcdShow("Scan Fortsetzung", "WLAN wieder da", "sende Anfrage", "");
                     nextScanAttemptAt = millis();
                     enterState(DeviceState::SEND_SCAN);
+                } else if (queueBlockRequiresManualRecovery()) {
+                    enterState(DeviceState::READY);
                 } else if (queueDepth() > 0 && terminalScheduledDeadlineReached(millis(), nextQueueSyncCycleAt)) {
                     enterState(DeviceState::QUEUE_SYNC);
                 } else {
@@ -3928,7 +4262,7 @@ void loop()
                 String verifyBody;
                 int verifyStatus = 0;
                 recovered = apiGet("/api/v1/terminal/config", verifyBody, verifyStatus, why) && verifyStatus >= 200 && verifyStatus < 300;
-                if (recovered && queueSyncBlocked) clearQueueSyncBlock();
+                if (recovered && queueSyncBlocked && !queueBlockRequiresManualRecovery()) clearQueueSyncBlock();
             }
             if (installed) finishTrustInstall(recovered);
             recoveryStatus = recovered ? "recovered" : (why.length() > 0 ? why : "tls_recovery_failed");

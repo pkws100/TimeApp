@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.4 — 2026-09-21
+
+- Prevent previous-day or malformed offline records from being replayed as a booking on the server's current work day; preserve them in the rejected queue for explicit administrator review.
+- Re-check the Berlin calendar day immediately before every retry and defer within the final two minutes before midnight so a request cannot cross into the wrong server day.
+- Persist every live scan before its first POST, then arm a 90-second ESP32 task watchdog around the request; even a stuck network stack is recovered without losing the request ID or payload.
+- Persistently block automatic replay after a task-watchdog reboot until an authenticated administrator verifies access and explicitly unblocks it, preventing periodic reboot loops while NFC input is visibly paused.
+- Apply correctly dimensioned stream-level TCP/TLS timeouts in addition to the existing HTTP connect, handshake, total-response and idle-response limits.
+- Make rejected-queue moves restartable when power is lost between committing the rejected copy and removing its active FIFO source.
+- Show the active queue send attempt and that a time limit is enforced before every synchronous request.
+- Expose and display queue activity, attempt, elapsed time, queue-specific errors, rejected-record time/reason, watchdog state and last reset reason in the authenticated portal.
+
 ## 1.1.3 — 2026-08-25
 
 - Fixed offline queue retries getting stuck after the ESP32 `millis()` counter wraps after approximately 49.7 days.

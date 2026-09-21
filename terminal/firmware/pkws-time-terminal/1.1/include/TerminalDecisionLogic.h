@@ -273,6 +273,123 @@ inline time_t terminalUtcTmToEpoch(const struct tm &utc)
     return static_cast<time_t>(seconds);
 }
 
+inline bool terminalCalendarDateValid(int year, int month, int day)
+{
+    if (year < 2000 || year > 2099 || month < 1 || month > 12 || day < 1) return false;
+    static const uint8_t daysPerMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    int maximumDay = daysPerMonth[month - 1];
+    const bool leapYear = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    if (month == 2 && leapYear) maximumDay = 29;
+    return day <= maximumDay;
+}
+
+inline bool formatQueuedRecordBerlinDate(const char *deviceTime, char *buffer, size_t bufferSize)
+{
+    if (deviceTime == nullptr || buffer == nullptr || bufferSize < 11) return false;
+
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    char trailing = '\0';
+
+    // Firmware 1.1.0 through 1.1.2 queue records may contain the former local
+    // dd.mm.yyyy value. It already represents the Berlin calendar day.
+    if (std::sscanf(deviceTime, "%2d.%2d.%4d %2d:%2d:%2d%c",
+        &day, &month, &year, &hour, &minute, &second, &trailing) == 6) {
+        if (!terminalCalendarDateValid(year, month, day)
+            || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60) {
+            return false;
+        }
+        return std::snprintf(buffer, bufferSize, "%02d.%02d.%04d", day, month, year) == 10;
+    }
+
+    // Current records use UTC ISO-8601. Convert them to Europe/Berlin before
+    // comparing days so scans around UTC midnight are classified correctly.
+    if (std::sscanf(deviceTime, "%4d-%2d-%2dT%2d:%2d:%2dZ%c",
+        &year, &month, &day, &hour, &minute, &second, &trailing) != 6
+        || !terminalCalendarDateValid(year, month, day)
+        || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60) {
+        return false;
+    }
+
+    struct tm utc = {};
+    utc.tm_year = year - 1900;
+    utc.tm_mon = month - 1;
+    utc.tm_mday = day;
+    utc.tm_hour = hour;
+    utc.tm_min = minute;
+    utc.tm_sec = second;
+    const time_t epoch = terminalUtcTmToEpoch(utc);
+    struct tm berlin = {};
+    if (!terminalTimeValid(epoch) || localtime_r(&epoch, &berlin) == nullptr) return false;
+    return std::strftime(buffer, bufferSize, "%d.%m.%Y", &berlin) == 10;
+}
+
+inline bool queuedRecordBelongsToCurrentBerlinDay(const char *deviceTime, const char *currentBerlinClock)
+{
+    if (currentBerlinClock == nullptr || std::strlen(currentBerlinClock) < 10) return false;
+    char queuedDate[11] = {};
+    if (!formatQueuedRecordBerlinDate(deviceTime, queuedDate, sizeof(queuedDate))) return false;
+    return std::strncmp(queuedDate, currentBerlinClock, 10) == 0;
+}
+
+inline uint32_t terminalSecondsUntilNextDay(int hour, int minute, int second)
+{
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) return 0;
+    return 86400U - static_cast<uint32_t>(hour * 3600 + minute * 60 + second);
+}
+
+enum class QueueReplayDateDecision {
+    ALLOW,
+    DEFER_MIDNIGHT,
+    REJECT_DATE
+};
+
+inline QueueReplayDateDecision queueReplayDateDecisionForAttempt(
+    const char *deviceTime,
+    const char *currentBerlinClock,
+    uint32_t secondsUntilNextDay,
+    uint32_t midnightSafetySeconds
+) {
+    if (!queuedRecordBelongsToCurrentBerlinDay(deviceTime, currentBerlinClock)) {
+        return QueueReplayDateDecision::REJECT_DATE;
+    }
+    if (secondsUntilNextDay > 0 && secondsUntilNextDay <= midnightSafetySeconds) {
+        return QueueReplayDateDecision::DEFER_MIDNIGHT;
+    }
+    return QueueReplayDateDecision::ALLOW;
+}
+
+inline uint32_t queueSyncStartupDelayMilliseconds(
+    bool taskWatchdogReset,
+    size_t activeQueueDepth,
+    uint32_t recoveryPauseMs
+) {
+    return taskWatchdogReset && activeQueueDepth > 0 ? recoveryPauseMs : 0;
+}
+
+inline bool rejectedRecordIdentityMatches(
+    uint32_t expectedSequence,
+    const char *expectedRequestId,
+    const char *expectedUid,
+    const char *expectedDeviceTime,
+    uint32_t actualSequence,
+    const char *actualRequestId,
+    const char *actualUid,
+    const char *actualDeviceTime
+) {
+    return expectedSequence == actualSequence
+        && expectedRequestId != nullptr && actualRequestId != nullptr
+        && expectedUid != nullptr && actualUid != nullptr
+        && expectedDeviceTime != nullptr && actualDeviceTime != nullptr
+        && std::strcmp(expectedRequestId, actualRequestId) == 0
+        && std::strcmp(expectedUid, actualUid) == 0
+        && std::strcmp(expectedDeviceTime, actualDeviceTime) == 0;
+}
+
 inline bool readyClockRefreshRequired(
     bool readyOrIdleNfcState,
     bool temporaryDisplayActive,

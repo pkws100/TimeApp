@@ -1,4 +1,4 @@
-# Firmware 1.1.3 test plan
+# Firmware 1.1.4 test plan
 
 ## Build and rollback
 
@@ -24,6 +24,9 @@
 - Test previous/factory restore and verified connection after install. Confirm WARNING/REPLACE_REQUIRED stay operational.
 - Force TLS failure: recovery either restores trust or scan is queued; reboot retains it. Restore HTTPS and verify FIFO sync and idempotent `request_id`. Fill 64 entries and observe the overflow warning.
 - Exercise queue retry deadlines immediately before and after a simulated `millis()` rollover. The queue must continue, and an intentional backoff must show a decreasing retry countdown.
+- Start a queue retry shortly before Europe/Berlin midnight. During the final two-minute safety window it must not POST; after midnight it must move the record to the rejected queue with its original booking time, queue reason and rejection reason visible in the portal.
+- Simulate a power loss after a rejected copy is committed but before its active FIFO source is removed. On reboot the matching move must complete idempotently instead of blocking later records.
+- Force both a newly presented tag and an existing queue POST to outlive all normal client timeouts. The scan must already be journaled before each POST; the 90-second task watchdog must reboot the ESP32 with request ID and payload intact. Automatic replay must remain persistently blocked (no reboot loop) until the authenticated portal action verifies access and unblocks it, and the portal must report `task_watchdog` as the reset reason. While blocked, another presented tag must visibly report `nicht gebucht` and must not be accepted.
 - Corrupt a queue record and force its quarantine rename to fail. The terminal must show the storage error and enter bounded API retry instead of repeatedly reading the same file in a tight queue loop.
 - Return HTTP 429 with `Retry-After: 900` for a live scan. The scan must be persisted with `not_before_epoch`, the terminal must return to ready after the result hold, and queue synchronization must wait in the background without blocking portal maintenance. Restart during the wait and verify that the record is still not sent before the persisted deadline.
 - Repeat the long `Retry-After` test over plain HTTP before NTP is valid. The relative fallback must wait once in the same boot and once conservatively after a restart, without sending early.
@@ -39,7 +42,7 @@
 
 ## Functional inventory
 
-| Function | Firmware 1.0 | Firmware 1.1.3 | Test status |
+| Function | Firmware 1.0 | Firmware 1.1.4 | Test status |
 | --- | --- | --- | --- |
 | WLAN, RC522, LCD, LEDs, buzzer, setup button | yes | retained | hardware required |
 | Captive portal, login/form key, WLAN/API/hardware diagnostics | yes | retained and extended | portal/hardware required |
