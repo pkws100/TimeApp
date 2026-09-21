@@ -1,6 +1,6 @@
 # PK-WS TimeApp Terminal Firmware 1.1
 
-Firmware 1.1.4 is rebuilt from the complete frozen Firmware 1.0 baseline. It retains the RC522/LCD/LED/buzzer/setup-button workflow, captive portal, WLAN diagnostics and non-blocking display logic, then adds controlled HTTP/HTTPS transport, trust management and an offline queue. The URL scheme is an explicit security boundary: there is no HTTPS-to-HTTP fallback.
+Firmware 1.1.5 is rebuilt from the complete frozen Firmware 1.0 baseline. It retains the RC522/LCD/LED/buzzer/setup-button workflow, captive portal, WLAN diagnostics and non-blocking display logic, then adds controlled HTTP/HTTPS transport, trust management and an offline queue. The URL scheme is an explicit security boundary: there is no HTTPS-to-HTTP fallback.
 
 ## Build / flash
 
@@ -55,6 +55,8 @@ Long server-directed waits and every failed first attempt are moved out of the f
 HTTP 408, 425, 429 and 5xx responses are temporary. A numeric `Retry-After` value on HTTP 429 is honored between 1 and 900 seconds; HTTP-date values are deliberately not interpreted. Long waits are stored as an absolute `not_before_epoch` plus a conservative relative fallback for HTTP operation without valid NTP time. Existing queue files use a recoverable staging/backup replacement, so a terminal restart cannot send the record early or lose it during the metadata update. Global terminal failures (`401`, `403`, `terminal_auth_required`, `terminal_auth_failed`, `terminal_disabled`, `terminal_unknown`, `terminal_ip_denied`, `terminal_storage_missing`, `feature_disabled`) keep the current record active and persistently block all automatic queue work. Only a successful authenticated config request with the current terminal identity can clear that block. Data-specific codes (`nfc_tag_invalid`, `nfc_tag_not_found`, `employee_mapping_invalid`, `nfc_uid_missing`, `invalid_uid`, `unknown_tag`, `unassigned_tag`) are moved to a reread-and-verified dead-letter record before the active file is removed. Unknown permanent failures conservatively block the queue.
 
 ## Scan feedback
+
+While the terminal is idly showing the ready screen and waiting for an NFC tag, the LCD backlight switches off after 15 seconds. Reading a tag wakes it immediately. Setup, network activity, scan processing, result screens, temporary warnings and error recovery always keep the backlight on; a fresh 15-second window begins only after the terminal returns to NFC waiting.
 
 - **Yellow:** The NFC tag was read locally; server confirmation is still pending.
 - **Green:** The TimeApp confirmed the concrete booking. This requires a 2xx HTTP status, a fully read and valid JSON response, and explicit `ok: true`.

@@ -1,4 +1,4 @@
-# Firmware 1.1.4 test plan
+# Firmware 1.1.5 test plan
 
 ## Build and rollback
 
@@ -38,11 +38,12 @@
 ## Existing hardware and portal
 
 - Check RC522 UID normalization and two-second duplicate suppression, LCD, LEDs, buzzer, setup AP/button, WLAN reconnect, local login/form token, and that tokens/passwords never appear in LCD, serial output or status HTML.
+- Verify that the LCD backlight turns off after 15 seconds only on the idle `Tag vorhalten` screen, wakes immediately on any successfully read tag, and remains continuously on during setup, network work, scan processing, results, temporary warnings and every error state.
 - Mark every test without a real ESP32 and connected peripherals as **Nicht ausgeführt – reale Hardware erforderlich**.
 
 ## Functional inventory
 
-| Function | Firmware 1.0 | Firmware 1.1.4 | Test status |
+| Function | Firmware 1.0 | Firmware 1.1.5 | Test status |
 | --- | --- | --- | --- |
 | WLAN, RC522, LCD, LEDs, buzzer, setup button | yes | retained | hardware required |
 | Captive portal, login/form key, WLAN/API/hardware diagnostics | yes | retained and extended | portal/hardware required |

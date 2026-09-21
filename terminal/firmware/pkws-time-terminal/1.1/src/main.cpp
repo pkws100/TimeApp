@@ -50,7 +50,7 @@ static_assert(sizeof(PKWS_PORTAL_ADMIN_PASSWORD) >= 13, "PKWS_PORTAL_ADMIN_PASSW
 #endif
 static_assert(sizeof(PKWS_PROVISIONING_ID) >= 13, "PKWS_PROVISIONING_ID muss mindestens 12 Zeichen haben.");
 
-static const char *FIRMWARE_VERSION = "pkws-time-terminal-v1.1.4";
+static const char *FIRMWARE_VERSION = "pkws-time-terminal-v1.1.5";
 static const char *NVS_NAMESPACE = "pkws-time";
 static const char *SETUP_AP_PASSWORD = PKWS_SETUP_AP_PASSWORD;
 static const char *PORTAL_ADMIN_PASSWORD = PKWS_PORTAL_ADMIN_PASSWORD;
@@ -79,6 +79,7 @@ static const unsigned long DOWNLOAD_TOTAL_TIMEOUT_MS = 15000;
 static const unsigned long DOWNLOAD_IDLE_TIMEOUT_MS = 3000;
 static const unsigned long TIME_SYNC_TIMEOUT_MS = 30000;
 static const uint32_t READY_CLOCK_CHECK_INTERVAL_MS = 1000;
+static const uint32_t LCD_IDLE_BACKLIGHT_TIMEOUT_MS = 15000;
 static const uint32_t SCAN_FEEDBACK_BEFORE_SEND_MS = 180;
 static const uint32_t LIVE_SCAN_MAX_RETRY_DELAY_MS = 15000;
 static const uint32_t LIVE_SCAN_MAX_OPERATION_MS = 120000;
@@ -223,6 +224,9 @@ uint32_t lastReadyClockCheckAt = 0;
 bool temporaryDisplayActive = false;
 unsigned long temporaryDisplayUntil = 0;
 DeviceState temporaryDisplayState = DeviceState::BOOT;
+bool lcdBacklightIsOn = true;
+bool lcdIdleBacklightTimerArmed = false;
+uint32_t lcdIdleBacklightDeadline = 0;
 bool resumeScanAfterWifiReconnect = false;
 bool filesystemMounted = false;
 bool timeSyncStarted = false;
@@ -1430,6 +1434,36 @@ String fitLcdLine(String value)
     return value;
 }
 
+void setLcdBacklight(bool enabled)
+{
+    if (lcdBacklightIsOn == enabled) return;
+    if (enabled) lcd.backlight();
+    else lcd.noBacklight();
+    lcdBacklightIsOn = enabled;
+}
+
+void wakeLcdBacklightForIdleWindow()
+{
+    setLcdBacklight(true);
+    lcdIdleBacklightTimerArmed = true;
+    lcdIdleBacklightDeadline = static_cast<uint32_t>(millis()) + LCD_IDLE_BACKLIGHT_TIMEOUT_MS;
+}
+
+void updateLcdBacklight()
+{
+    const bool waitingForTag = state == DeviceState::NFC_SCAN;
+    const uint32_t now = static_cast<uint32_t>(millis());
+    const bool shouldRemainOn = lcdBacklightShouldRemainOn(
+        waitingForTag,
+        temporaryDisplayActive,
+        lcdIdleBacklightTimerArmed,
+        now,
+        lcdIdleBacklightDeadline
+    );
+    setLcdBacklight(shouldRemainOn);
+    if (!waitingForTag) lcdIdleBacklightTimerArmed = false;
+}
+
 void lcdShowLines(const String lines[4])
 {
     for (uint8_t row = 0; row < LCD_ROWS; row++) {
@@ -1446,6 +1480,7 @@ void lcdShow(const String &line1, const String &line2, const String &line3, cons
 
 void lcdShowTemporary(const String &line1, const String &line2, const String &line3, const String &line4, unsigned long holdMs)
 {
+    wakeLcdBacklightForIdleWindow();
     String lines[4] = {line1, line2, line3, line4};
     lcdShowLines(lines);
     temporaryDisplayActive = true;
@@ -1464,6 +1499,7 @@ void restoreSavedDisplay()
 {
     temporaryDisplayActive = false;
     if (state == DeviceState::READY || state == DeviceState::NFC_SCAN) {
+        wakeLcdBacklightForIdleWindow();
         renderReadyDisplay(true);
         return;
     }
@@ -2778,6 +2814,12 @@ void enterState(DeviceState next)
     if (next != temporaryDisplayState) {
         temporaryDisplayActive = false;
     }
+    if (next == DeviceState::NFC_SCAN) {
+        wakeLcdBacklightForIdleWindow();
+    } else {
+        lcdIdleBacklightTimerArmed = false;
+        setLcdBacklight(true);
+    }
 
     if (next == DeviceState::CONFIG_CHECK) {
         lcdShow("Konfig pruefen", "bitte warten", "", "");
@@ -3876,6 +3918,8 @@ void handleNfcScan()
         return;
     }
 
+    wakeLcdBacklightForIdleWindow();
+
     String uid = normalizeUid(&rfid.uid);
     rfid.PICC_HaltA();
     rfid.PCD_StopCrypto1();
@@ -4094,6 +4138,8 @@ void setup()
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
     lcd.init();
     lcd.backlight();
+    lcdBacklightIsOn = true;
+    lcdIdleBacklightTimerArmed = false;
     SPI.begin();
     rfid.PCD_Init();
     filesystemMounted = LittleFS.begin(false);
@@ -4156,6 +4202,7 @@ void loop()
 {
     updateBuzzer();
     updateHardwareTests();
+    updateLcdBacklight();
     handleSetupButton();
 
     if (restartScheduled) {

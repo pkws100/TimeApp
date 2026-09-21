@@ -328,6 +328,23 @@ void testReadyClockCheckIntervalAndMillisOverflow()
     TEST_ASSERT_TRUE(readyClockCheckDue(499, UINT32_MAX - 500, 1000, false));
 }
 
+void testLcdBacklightOnlyTimesOutWhileWaitingForTag()
+{
+    TEST_ASSERT_TRUE(lcdBacklightShouldRemainOn(false, false, true, 15000, 15000));
+    TEST_ASSERT_TRUE(lcdBacklightShouldRemainOn(true, true, true, 15000, 15000));
+    TEST_ASSERT_TRUE(lcdBacklightShouldRemainOn(true, false, false, 15000, 0));
+    TEST_ASSERT_TRUE(lcdBacklightShouldRemainOn(true, false, true, 14999, 15000));
+    TEST_ASSERT_FALSE(lcdBacklightShouldRemainOn(true, false, true, 15000, 15000));
+}
+
+void testLcdBacklightTimeoutHandlesMillisOverflow()
+{
+    const uint32_t deadline = (UINT32_MAX - 500) + 15000U;
+    TEST_ASSERT_TRUE(lcdBacklightShouldRemainOn(true, false, true, UINT32_MAX - 1, deadline));
+    TEST_ASSERT_TRUE(lcdBacklightShouldRemainOn(true, false, true, deadline - 1, deadline));
+    TEST_ASSERT_FALSE(lcdBacklightShouldRemainOn(true, false, true, deadline, deadline));
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -358,5 +375,7 @@ int main(int, char **)
     RUN_TEST(testRejectedMigrationResumeIgnoresChangedClassification);
     RUN_TEST(testReadyClockRefreshOnlyRendersChangesInAllowedIdleState);
     RUN_TEST(testReadyClockCheckIntervalAndMillisOverflow);
+    RUN_TEST(testLcdBacklightOnlyTimesOutWhileWaitingForTag);
+    RUN_TEST(testLcdBacklightTimeoutHandlesMillisOverflow);
     return UNITY_END();
 }

@@ -39,6 +39,17 @@ inline bool terminalDeadlinePending(uint32_t now, uint32_t deadline)
     return !terminalDeadlineReached(now, deadline);
 }
 
+inline bool lcdBacklightShouldRemainOn(
+    bool waitingForTag,
+    bool temporaryDisplayActive,
+    bool idleTimerArmed,
+    uint32_t now,
+    uint32_t idleDeadline
+) {
+    return !waitingForTag || temporaryDisplayActive || !idleTimerArmed
+        || terminalDeadlinePending(now, idleDeadline);
+}
+
 inline bool terminalScheduledDeadlineReached(uint32_t now, uint32_t deadline)
 {
     return deadline == 0 || terminalDeadlineReached(now, deadline);

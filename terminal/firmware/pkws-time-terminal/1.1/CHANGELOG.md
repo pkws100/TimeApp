@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.5 — 2026-09-21
+
+- Turn off the LCD backlight after 15 seconds only while the terminal is idly waiting for an NFC tag.
+- Wake the backlight immediately when a tag is read and start a fresh 15-second idle window after returning to the ready screen.
+- Keep the backlight on throughout setup, connectivity work, scan processing, result displays, temporary warnings and error recovery.
+- Make the backlight deadline safe across the ESP32 `millis()` rollover.
+
 ## 1.1.4 — 2026-09-21
 
 - Prevent previous-day or malformed offline records from being replayed as a booking on the server's current work day; preserve them in the rejected queue for explicit administrator review.
