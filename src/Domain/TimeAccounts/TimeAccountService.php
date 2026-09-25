@@ -152,7 +152,7 @@ final class TimeAccountService
         $status = 'not_configured';
 
         if ($cutoverStatus === 'not_active_in_period'
-            || ($cutoverDate !== '' && $cutoverDate > $calculationDate->format('Y-m-d'))) {
+            || ($cutoverDate !== '' && $cutoverDate > $localToday->format('Y-m-d'))) {
             $status = 'not_active';
             $balance = null;
         } elseif ($cutoverStatus !== 'missing' && $balance !== null) {

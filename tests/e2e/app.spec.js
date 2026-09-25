@@ -146,7 +146,7 @@ test('employee vacation page explains completed-day balance and vacation arithme
   let balanceMinutes = 90;
   let balanceLabel = '+01:30';
   let cutoverStatus = 'final';
-  let cutoverDate = '2026-01-01';
+  let cutoverDate = '2026-07-29';
   let summaryFails = false;
 
   await page.route('**/api/v1/app/time-account/summary', async (route) => {
@@ -223,6 +223,8 @@ test('employee vacation page explains completed-day balance and vacation arithme
   await details.locator('summary').focus();
   await expect(page.getByText('Sollzeit bis zum Standdatum', { exact: true })).toBeVisible();
   await expect(page.getByText('Bezahlte Abwesenheiten', { exact: true })).toBeVisible();
+  await expect(page.locator('.app-info-row').filter({ hasText: 'Zeitkonto seit' }).locator('strong')).toHaveText('29.07.2026');
+  await expect(page.locator('.app-info-row').filter({ hasText: 'Stand zum' }).locator('strong')).toHaveText('28.07.2026');
   await expect(page.getByText(/individuellen Normarbeitszeit/)).toBeVisible();
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await page.waitForTimeout(500);
