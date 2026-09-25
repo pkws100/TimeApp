@@ -1,4 +1,4 @@
-# Firmware 1.1.5 test plan
+# Firmware 1.1.6 test plan
 
 ## Build and rollback
 
@@ -39,11 +39,14 @@
 
 - Check RC522 UID normalization and two-second duplicate suppression, LCD, LEDs, buzzer, setup AP/button, WLAN reconnect, local login/form token, and that tokens/passwords never appear in LCD, serial output or status HTML.
 - Verify that the LCD backlight turns off after 15 seconds only on the idle `Tag vorhalten` screen, wakes immediately on any successfully read tag, and remains continuously on during setup, network work, scan processing, results, temporary warnings and every error state.
+- Create a real `/queue/0000000001.json` record on Arduino-ESP32 2.0.17 and verify that directory iteration selects it through `File::path()`, reaches `Sende Buchung`, and never remains on the generic queue-entry screen.
+- Verify basename and full-path sequence parsing, recovery suffixes and malformed filename quarantine. Only the exact ten-digit `NNNNNNNNNN.json` form may enter the active FIFO; names such as `0000000001.copy.json` and `0000000001.json.bak.json` must be quarantined without a POST. A quarantined record must leave queue sync, show `Queue zur Pruefung / Datensatz defekt / nicht gesendet / Portal pruefen` for ten seconds, and retain `corrupt_quarantined` as the portal phase; a record that cannot be classified or quarantined must create a visible persistent storage block.
+- Interrupt a deferred queue metadata update at each rename boundary. Power loss after the valid `.defer.tmp` has been flushed but before target-to-backup must resume the staging transaction and retain its later `Retry-After` deadline; no POST may occur early. If both a corrupt active target and a structurally valid staging copy exist, recovery must quarantine the target and activate the valid staging record without deleting it. Create multiple simultaneous recovery artifacts and verify every one is processed despite directory renames. Give target/backup/staging the same sequence but different request IDs and verify all distinct records are preserved in separate quarantine files while a persistent manual storage block prevents any automatic POST. Pre-create the default `.identity-conflict.corrupt` and `.recovery-invalid.corrupt` destinations and verify numbered alternatives are selected without blocking portal maintenance.
 - Mark every test without a real ESP32 and connected peripherals as **Nicht ausgeführt – reale Hardware erforderlich**.
 
 ## Functional inventory
 
-| Function | Firmware 1.0 | Firmware 1.1.5 | Test status |
+| Function | Firmware 1.0 | Firmware 1.1.6 | Test status |
 | --- | --- | --- | --- |
 | WLAN, RC522, LCD, LEDs, buzzer, setup button | yes | retained | hardware required |
 | Captive portal, login/form key, WLAN/API/hardware diagnostics | yes | retained and extended | portal/hardware required |

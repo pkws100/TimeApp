@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.6 — 2026-09-25
+
+- Fix the field-reproduced permanent `Offline Queue / Synchronisierung / bitte warten` state: Arduino-ESP32 2.0.17 returns a basename from `File::name()`, while the queue code incorrectly required and later reopened a full LittleFS path.
+- Use `File::path()` (with a directory fallback) for every queue path that is parsed, reopened, renamed or recovered, while accepting both the real LittleFS basename and full-path forms in the sequence parser.
+- Admit only the canonical ten-digit `NNNNNNNNNN.json` filename into the active FIFO, so foreign or recovery-suffixed files can never be posted repeatedly under an acknowledgement path that does not match.
+- Validate active, backup and staged copies by sequence, request ID, UID and device time during deferred-update recovery. Distinct records are preserved in separate quarantine files behind a persistent manual block, while only identity-matched redundant copies may be removed.
+- Rescan the LittleFS directory after every recovery mutation so multiple interrupted updates cannot be skipped by a moved directory cursor.
+- Complete a fully written same-record staging update after reboot so a persisted `Retry-After` deadline cannot be discarded, and allocate collision-free numbered quarantine names without overwriting older diagnostic copies.
+- Quarantine malformed queue filenames, show a ten-second operator warning for every quarantined record, and turn every unclassified corrupt-record result into a visible, persistent storage block instead of silently remaining in `QUEUE_SYNC`.
+- Cover record selection, replay checks, HTTP work, acknowledgement, rejection and retry metadata updates with the task-watchdog guard; a preflight filesystem stall can no longer remain on the initial queue screen indefinitely.
+- Report the current queue phase in serial diagnostics and the authenticated portal/status response.
+- Add regression tests for real LittleFS basenames, full paths, recovery suffixes, the maximum sequence and malformed/overflowing names.
+
 ## 1.1.5 — 2026-09-21
 
 - Turn off the LCD backlight after 15 seconds only while the terminal is idly waiting for an NFC tag.

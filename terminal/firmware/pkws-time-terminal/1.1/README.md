@@ -1,6 +1,6 @@
 # PK-WS TimeApp Terminal Firmware 1.1
 
-Firmware 1.1.5 is rebuilt from the complete frozen Firmware 1.0 baseline. It retains the RC522/LCD/LED/buzzer/setup-button workflow, captive portal, WLAN diagnostics and non-blocking display logic, then adds controlled HTTP/HTTPS transport, trust management and an offline queue. The URL scheme is an explicit security boundary: there is no HTTPS-to-HTTP fallback.
+Firmware 1.1.6 is rebuilt from the complete frozen Firmware 1.0 baseline. It retains the RC522/LCD/LED/buzzer/setup-button workflow, captive portal, WLAN diagnostics and non-blocking display logic, then adds controlled HTTP/HTTPS transport, trust management and an offline queue. The URL scheme is an explicit security boundary: there is no HTTPS-to-HTTP fallback.
 
 ## Build / flash
 
@@ -45,6 +45,8 @@ During normal operation new bundles are downloaded only with verified HTTPS (at 
 ## Offline scans
 
 Up to 64 scans are stored as individual atomically created records. Every record retains its `request_id`; it is removed only after a successful server response, preserving server-side idempotency. TLS and WLAN failures persist the current scan before recovery/retry. Queue synchronization transfers one record at a time between normal loop cycles.
+
+Queue directory entries are always reopened and mutated through their full LittleFS path. The sequence parser accepts the basename returned by Arduino-ESP32 2.0.17 as well as a full path, and malformed filenames are quarantined instead of keeping the terminal in `QUEUE_SYNC`. The authenticated status response and serial output expose the active queue phase for field diagnosis.
 
 Queue, reconnect and display deadlines are safe across the ESP32 `millis()` rollover after approximately 49.7 days. Queue retry deadlines are reset after reconnect or TLS recovery, and an intentional retry wait is shown as a countdown. TCP connection establishment, TLS handshakes and response reads all have explicit bounds. Every live scan is atomically journaled before its first POST. A 90-second ESP32 task watchdog is armed only around requests whose payload and request ID are already persistent. If a lower network layer nevertheless stops returning, reboot retains the record and reports the reset reason. Automatic replay is then persistently blocked until an authenticated administrator verifies terminal access and explicitly unblocks it, preventing a recurring reboot loop; new tags receive a visible `nicht gebucht` warning while blocked.
 

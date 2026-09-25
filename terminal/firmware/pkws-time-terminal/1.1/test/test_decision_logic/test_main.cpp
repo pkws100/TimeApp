@@ -345,6 +345,39 @@ void testLcdBacklightTimeoutHandlesMillisOverflow()
     TEST_ASSERT_FALSE(lcdBacklightShouldRemainOn(true, false, true, deadline, deadline));
 }
 
+void testQueueSequenceAcceptsLittleFsBasenameAndFullPath()
+{
+    TEST_ASSERT_EQUAL_UINT32(1, terminalQueueSequenceFromPath("0000000001.json"));
+    TEST_ASSERT_EQUAL_UINT32(42, terminalQueueSequenceFromPath("/queue/0000000042.json"));
+    TEST_ASSERT_EQUAL_UINT32(42, terminalQueueSequenceFromPath("/queue/0000000042.json.defer.bak"));
+    TEST_ASSERT_EQUAL_UINT32(42, terminalQueueSequenceFromPath("/queue/0000000042.acked"));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, terminalQueueSequenceFromPath("/queue-rejected/4294967295.json"));
+}
+
+void testQueueSequenceRejectsMalformedAndOverflowingNames()
+{
+    TEST_ASSERT_EQUAL_UINT32(0, terminalQueueSequenceFromPath(nullptr));
+    TEST_ASSERT_EQUAL_UINT32(0, terminalQueueSequenceFromPath(""));
+    TEST_ASSERT_EQUAL_UINT32(0, terminalQueueSequenceFromPath("/queue/"));
+    TEST_ASSERT_EQUAL_UINT32(0, terminalQueueSequenceFromPath("1.json"));
+    TEST_ASSERT_EQUAL_UINT32(0, terminalQueueSequenceFromPath("+000000001.json"));
+    TEST_ASSERT_EQUAL_UINT32(0, terminalQueueSequenceFromPath("0000000000.json"));
+    TEST_ASSERT_EQUAL_UINT32(0, terminalQueueSequenceFromPath("00000000A1.json"));
+    TEST_ASSERT_EQUAL_UINT32(0, terminalQueueSequenceFromPath("4294967296.json"));
+}
+
+void testOnlyCanonicalQueueFilenameCanBecomeActive()
+{
+    TEST_ASSERT_TRUE(terminalQueuePathIsCanonicalActive("0000000001.json"));
+    TEST_ASSERT_TRUE(terminalQueuePathIsCanonicalActive("/queue/4294967295.json"));
+    TEST_ASSERT_FALSE(terminalQueuePathIsCanonicalActive(nullptr));
+    TEST_ASSERT_FALSE(terminalQueuePathIsCanonicalActive("0000000000.json"));
+    TEST_ASSERT_FALSE(terminalQueuePathIsCanonicalActive("0000000001.copy.json"));
+    TEST_ASSERT_FALSE(terminalQueuePathIsCanonicalActive("0000000001.json.bak.json"));
+    TEST_ASSERT_FALSE(terminalQueuePathIsCanonicalActive("0000000001.json.defer.tmp"));
+    TEST_ASSERT_FALSE(terminalQueuePathIsCanonicalActive("0000000001.acked"));
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -377,5 +410,8 @@ int main(int, char **)
     RUN_TEST(testReadyClockCheckIntervalAndMillisOverflow);
     RUN_TEST(testLcdBacklightOnlyTimesOutWhileWaitingForTag);
     RUN_TEST(testLcdBacklightTimeoutHandlesMillisOverflow);
+    RUN_TEST(testQueueSequenceAcceptsLittleFsBasenameAndFullPath);
+    RUN_TEST(testQueueSequenceRejectsMalformedAndOverflowingNames);
+    RUN_TEST(testOnlyCanonicalQueueFilenameCanBecomeActive);
     return UNITY_END();
 }

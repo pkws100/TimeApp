@@ -50,7 +50,7 @@ static_assert(sizeof(PKWS_PORTAL_ADMIN_PASSWORD) >= 13, "PKWS_PORTAL_ADMIN_PASSW
 #endif
 static_assert(sizeof(PKWS_PROVISIONING_ID) >= 13, "PKWS_PROVISIONING_ID muss mindestens 12 Zeichen haben.");
 
-static const char *FIRMWARE_VERSION = "pkws-time-terminal-v1.1.5";
+static const char *FIRMWARE_VERSION = "pkws-time-terminal-v1.1.6";
 static const char *NVS_NAMESPACE = "pkws-time";
 static const char *SETUP_AP_PASSWORD = PKWS_SETUP_AP_PASSWORD;
 static const char *PORTAL_ADMIN_PASSWORD = PKWS_PORTAL_ADMIN_PASSWORD;
@@ -167,6 +167,7 @@ struct QueueSyncContext {
     unsigned long nextAttemptAt = 0;
     unsigned long startedAt = 0;
     uint32_t lastDisplayedWaitSeconds = UINT32_MAX;
+    size_t pendingCount = 0;
     String lastError;
 };
 
@@ -248,6 +249,7 @@ String uploadedTrustBundle;
 bool trustUploadTooLarge = false;
 bool provisioningSecurityValid = true;
 QueueSyncContext queueSync;
+const char *queueSyncPhase = "idle";
 bool queueSyncBlocked = false;
 String queueSyncBlockReason;
 int queueSyncBlockHttpStatus = 0;
@@ -304,6 +306,15 @@ String isoDeviceTimeOrNull();
 void startTimeSynchronization();
 void renderReadyDisplay(bool force = false);
 void refreshReadyClockIfNeeded();
+
+void setQueueSyncPhase(const char *phase)
+{
+    if (phase == nullptr) phase = "unknown";
+    if (strcmp(queueSyncPhase, phase) == 0) return;
+    queueSyncPhase = phase;
+    Serial.print(F("Queue sync phase: "));
+    Serial.println(queueSyncPhase);
+}
 
 String macSuffix()
 {
@@ -992,14 +1003,17 @@ String rejectedQueuePath(uint32_t sequence)
 
 uint32_t queueSequenceFromPath(const String &path)
 {
-    int slash = path.lastIndexOf('/');
-    int dot = path.lastIndexOf('.');
-    if (slash < 0 || dot <= slash + 1) return 0;
-    String value = path.substring(slash + 1, dot);
-    char *end = nullptr;
-    unsigned long parsed = strtoul(value.c_str(), &end, 10);
-    if (end == value.c_str() || *end != '\0' || parsed == 0 || parsed > UINT32_MAX) return 0;
-    return static_cast<uint32_t>(parsed);
+    return terminalQueueSequenceFromPath(path.c_str());
+}
+
+String filesystemEntryPath(File &entry, const char *directory)
+{
+    String path = entry.path();
+    if (path.startsWith("/")) return path;
+    String fullPath(directory);
+    if (!fullPath.endsWith("/")) fullPath += "/";
+    fullPath += entry.name();
+    return fullPath;
 }
 
 uint32_t nextQueueSequence()
@@ -1011,8 +1025,8 @@ uint32_t nextQueueSequence()
     File directory = LittleFS.open(QUEUE_DIRECTORY, "r");
     if (directory && directory.isDirectory()) {
         for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
-            String name = entry.name();
-            uint32_t existing = queueSequenceFromPath(name);
+            const String path = filesystemEntryPath(entry, QUEUE_DIRECTORY);
+            uint32_t existing = queueSequenceFromPath(path);
             if (existing > sequence) sequence = existing;
             entry.close();
         }
@@ -1021,7 +1035,8 @@ uint32_t nextQueueSequence()
     directory = LittleFS.open(QUEUE_REJECTED_DIRECTORY, "r");
     if (directory && directory.isDirectory()) {
         for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
-            uint32_t existing = queueSequenceFromPath(String(entry.name()));
+            const String path = filesystemEntryPath(entry, QUEUE_REJECTED_DIRECTORY);
+            uint32_t existing = queueSequenceFromPath(path);
             if (existing > sequence) sequence = existing;
             entry.close();
         }
@@ -1103,8 +1118,17 @@ bool enqueueScan(OfflineScan &scan, String &why)
     return true;
 }
 
-bool queuedScanFileStructurallyValid(const String &path, uint32_t expectedSequence)
+struct QueuedScanIdentity {
+    uint32_t sequence = 0;
+    String requestId;
+    String uid;
+    String deviceTime;
+    bool hasDeviceTime = false;
+};
+
+bool readQueuedScanIdentity(const String &path, uint32_t expectedSequence, QueuedScanIdentity &identity)
 {
+    identity = QueuedScanIdentity();
     File candidate = LittleFS.open(path, "r");
     if (!candidate || candidate.size() == 0 || candidate.size() > 1024) {
         if (candidate) candidate.close();
@@ -1115,64 +1139,221 @@ bool queuedScanFileStructurallyValid(const String &path, uint32_t expectedSequen
         && (uint32_t) (document["sequence"] | 0) == expectedSequence
         && document["request_id"].is<const char *>()
         && document["nfc_uid"].is<const char *>();
+    if (valid) {
+        identity.sequence = expectedSequence;
+        identity.requestId = document["request_id"].as<String>();
+        identity.uid = document["nfc_uid"].as<String>();
+        identity.hasDeviceTime = document["device_time"].is<const char *>();
+        if (identity.hasDeviceTime) identity.deviceTime = document["device_time"].as<String>();
+    }
     candidate.close();
     return valid;
+}
+
+bool queuedScanIdentitiesMatch(const QueuedScanIdentity &left, const QueuedScanIdentity &right)
+{
+    return left.sequence == right.sequence
+        && left.requestId == right.requestId
+        && left.uid == right.uid
+        && left.hasDeviceTime == right.hasDeviceTime
+        && (!left.hasDeviceTime || left.deviceTime == right.deviceTime);
+}
+
+bool findNextQueueRecoveryArtifact(const char *suffix, String &path)
+{
+    path = "";
+    File directory = LittleFS.open(QUEUE_DIRECTORY, "r");
+    if (!directory || !directory.isDirectory()) return false;
+    for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
+        const String candidate = filesystemEntryPath(entry, QUEUE_DIRECTORY);
+        entry.close();
+        if (candidate.endsWith(suffix)) {
+            path = candidate;
+            break;
+        }
+    }
+    directory.close();
+    return true;
+}
+
+bool quarantineQueueRecoveryArtifact(const String &path, const char *marker)
+{
+    if (path.length() == 0 || !LittleFS.exists(path)) return true;
+    String quarantined = path + marker;
+    if (!LittleFS.exists(quarantined)) return LittleFS.rename(path, quarantined);
+    // A previous recovery may already own the default marker. Never overwrite
+    // it or leave the terminal in a deterministic retry deadlock: choose the
+    // first free, stable numeric variant and retain every copy.
+    for (uint16_t index = 1; index <= 999; index++) {
+        quarantined = path + "." + String(index) + marker;
+        if (!LittleFS.exists(quarantined)) return LittleFS.rename(path, quarantined);
+    }
+    return false;
+}
+
+bool quarantineAndBlockQueueRecovery(
+    const String &target,
+    const String &backup,
+    const String &staging,
+    const char *reason,
+    const char *marker
+) {
+    queueSync.lastError = reason;
+    lastTerminalError = reason;
+    if (!persistQueueSyncBlock(0, reason)) return false;
+    return quarantineQueueRecoveryArtifact(target, marker)
+        && quarantineQueueRecoveryArtifact(backup, marker)
+        && quarantineQueueRecoveryArtifact(staging, marker);
+}
+
+bool recoveredQueueTargetMatches(
+    const String &target,
+    uint32_t expectedSequence,
+    const QueuedScanIdentity &sourceIdentity
+) {
+    QueuedScanIdentity activatedIdentity;
+    return readQueuedScanIdentity(target, expectedSequence, activatedIdentity)
+        && queuedScanIdentitiesMatch(sourceIdentity, activatedIdentity);
 }
 
 bool recoverDeferredQueueUpdates()
 {
     if (!filesystemMounted) return false;
-    bool recovered = true;
-    File directory = LittleFS.open(QUEUE_DIRECTORY, "r");
-    if (!directory || !directory.isDirectory()) return false;
-    for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
-        String backup = entry.name();
-        entry.close();
-        if (!backup.endsWith(".json.defer.bak")) continue;
-        String target = backup.substring(0, backup.length() - strlen(".defer.bak"));
-        String staging = target + ".defer.tmp";
-        const uint32_t expectedSequence = queueSequenceFromPath(target);
-        if (!LittleFS.exists(target)) {
-            const bool stagingValid = LittleFS.exists(staging)
-                && queuedScanFileStructurallyValid(staging, expectedSequence);
-            if (stagingValid) recovered = LittleFS.rename(staging, target) && recovered;
-            else {
-                if (LittleFS.exists(staging)) recovered = LittleFS.rename(staging, (staging + ".corrupt").c_str()) && recovered;
-                recovered = LittleFS.rename(backup, target) && recovered;
-            }
-        }
-        if (LittleFS.exists(target)) {
-            if (queuedScanFileStructurallyValid(target, expectedSequence)) {
-                if (LittleFS.exists(backup)) recovered = LittleFS.remove(backup) && recovered;
-            }
-            else {
-                const bool quarantined = LittleFS.rename(target, (target + ".corrupt").c_str());
-                recovered = quarantined && recovered;
-                if (quarantined) recovered = LittleFS.rename(backup, target) && recovered;
-            }
-        }
-    }
-    directory.close();
 
-    directory = LittleFS.open(QUEUE_DIRECTORY, "r");
-    if (!directory || !directory.isDirectory()) return false;
-    for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
-        String staging = entry.name();
-        entry.close();
-        if (!staging.endsWith(".json.defer.tmp")) continue;
-        String target = staging.substring(0, staging.length() - strlen(".defer.tmp"));
-        if (LittleFS.exists(target)) recovered = LittleFS.remove(staging) && recovered;
-        else if (queuedScanFileStructurallyValid(staging, queueSequenceFromPath(target))) recovered = LittleFS.rename(staging, target) && recovered;
-        else recovered = LittleFS.rename(staging, (staging + ".corrupt").c_str()) && recovered;
+    // Mutating an open LittleFS directory can move its readdir cursor and skip
+    // the next entry. Resolve exactly one artifact, close the directory, then
+    // rescan until no backup remains.
+    while (true) {
+        String backup;
+        if (!findNextQueueRecoveryArtifact(".json.defer.bak", backup)) return false;
+        if (backup.length() == 0) break;
+
+        const String target = backup.substring(0, backup.length() - strlen(".defer.bak"));
+        const String staging = target + ".defer.tmp";
+        const uint32_t expectedSequence = queueSequenceFromPath(target);
+        const bool targetExists = LittleFS.exists(target);
+        const bool stagingExists = LittleFS.exists(staging);
+        QueuedScanIdentity targetIdentity, backupIdentity, stagingIdentity;
+        const bool targetValid = targetExists
+            && readQueuedScanIdentity(target, expectedSequence, targetIdentity);
+        const bool backupValid = readQueuedScanIdentity(backup, expectedSequence, backupIdentity);
+        const bool stagingValid = stagingExists
+            && readQueuedScanIdentity(staging, expectedSequence, stagingIdentity);
+        const bool identityConflict =
+            (targetValid && backupValid && !queuedScanIdentitiesMatch(targetIdentity, backupIdentity))
+            || (targetValid && stagingValid && !queuedScanIdentitiesMatch(targetIdentity, stagingIdentity))
+            || (backupValid && stagingValid && !queuedScanIdentitiesMatch(backupIdentity, stagingIdentity));
+        if (expectedSequence == 0 || identityConflict) {
+            if (!quarantineAndBlockQueueRecovery(
+                    target,
+                    backup,
+                    staging,
+                    "queue_storage_recovery_identity_conflict",
+                    ".identity-conflict.corrupt")) return false;
+            continue;
+        }
+
+        if (targetValid) {
+            if (backupValid) {
+                if (!LittleFS.remove(backup)) return false;
+            } else if (!quarantineQueueRecoveryArtifact(backup, ".recovery-invalid.corrupt")) return false;
+            continue;
+        }
+
+        if (!stagingValid && !backupValid) {
+            if (!quarantineAndBlockQueueRecovery(
+                    target,
+                    backup,
+                    staging,
+                    "queue_storage_recovery_no_valid_copy",
+                    ".recovery-invalid.corrupt")) return false;
+            continue;
+        }
+
+        if (targetExists
+            && !quarantineQueueRecoveryArtifact(target, ".recovery-invalid.corrupt")) return false;
+        if (stagingValid) {
+            if (!LittleFS.rename(staging, target)
+                || !recoveredQueueTargetMatches(target, expectedSequence, stagingIdentity)) return false;
+            if (backupValid) {
+                if (!LittleFS.remove(backup)) return false;
+            } else if (!quarantineQueueRecoveryArtifact(backup, ".recovery-invalid.corrupt")) return false;
+            continue;
+        }
+
+        if (stagingExists
+            && !quarantineQueueRecoveryArtifact(staging, ".recovery-invalid.corrupt")) return false;
+        if (!LittleFS.rename(backup, target)
+            || !recoveredQueueTargetMatches(target, expectedSequence, backupIdentity)) return false;
     }
-    directory.close();
-    return recovered;
+
+    // Staging without a backup is either a fully flushed update whose commit
+    // had not started yet or the only surviving copy. Finish that transaction
+    // and reopen the directory around every mutation.
+    while (true) {
+        String staging;
+        if (!findNextQueueRecoveryArtifact(".json.defer.tmp", staging)) return false;
+        if (staging.length() == 0) break;
+
+        const String target = staging.substring(0, staging.length() - strlen(".defer.tmp"));
+        const uint32_t expectedSequence = queueSequenceFromPath(target);
+        const bool targetExists = LittleFS.exists(target);
+        QueuedScanIdentity targetIdentity, stagingIdentity;
+        const bool targetValid = targetExists
+            && readQueuedScanIdentity(target, expectedSequence, targetIdentity);
+        const bool stagingValid = readQueuedScanIdentity(staging, expectedSequence, stagingIdentity);
+        if (expectedSequence == 0
+            || (targetValid && stagingValid
+                && !queuedScanIdentitiesMatch(targetIdentity, stagingIdentity))) {
+            if (!quarantineAndBlockQueueRecovery(
+                    target,
+                    "",
+                    staging,
+                    "queue_storage_recovery_identity_conflict",
+                    ".identity-conflict.corrupt")) return false;
+            continue;
+        }
+
+        if (targetValid) {
+            if (stagingValid) {
+                // Staging was fully written and flushed before the original
+                // target-to-backup step. It contains the monotonic, newer
+                // not_before metadata, so finish that transaction instead of
+                // discarding a server-provided Retry-After deadline.
+                const String backup = target + ".defer.bak";
+                if (LittleFS.exists(backup) || !LittleFS.rename(target, backup)) return false;
+                if (!LittleFS.rename(staging, target)
+                    || !recoveredQueueTargetMatches(target, expectedSequence, stagingIdentity)) return false;
+                if (!LittleFS.remove(backup)) return false;
+            } else if (!quarantineQueueRecoveryArtifact(staging, ".recovery-invalid.corrupt")) return false;
+            continue;
+        }
+
+        if (!stagingValid) {
+            if (!quarantineAndBlockQueueRecovery(
+                    target,
+                    "",
+                    staging,
+                    "queue_storage_recovery_no_valid_copy",
+                    ".recovery-invalid.corrupt")) return false;
+            continue;
+        }
+        if (targetExists
+            && !quarantineQueueRecoveryArtifact(target, ".recovery-invalid.corrupt")) return false;
+        if (!LittleFS.rename(staging, target)
+            || !recoveredQueueTargetMatches(target, expectedSequence, stagingIdentity)) return false;
+    }
+    return true;
 }
 
 bool quarantineCorruptQueuedScan(const String &selected)
 {
     String corrupt = selected + ".corrupt";
-    if (LittleFS.rename(selected.c_str(), corrupt.c_str())) return true;
+    if (LittleFS.rename(selected.c_str(), corrupt.c_str())) {
+        queueSync.lastError = "queue_corrupt_quarantined";
+        lastTerminalError = queueSync.lastError;
+        return true;
+    }
     queueSync.lastError = "queue_corrupt_quarantine_failed";
     lastTerminalError = queueSync.lastError;
     return false;
@@ -1184,16 +1365,33 @@ bool nextQueuedScan(OfflineScan &scan)
     File directory = LittleFS.open(QUEUE_DIRECTORY, "r");
     if (!directory || !directory.isDirectory()) return false;
     String selected;
+    String malformed;
     uint32_t selectedSequence = UINT32_MAX;
+    bool selectedFound = false;
     for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
-        String name = entry.name();
+        const String name = entry.name();
+        const String path = filesystemEntryPath(entry, QUEUE_DIRECTORY);
         if (name.endsWith(".json")) {
-            uint32_t sequence = queueSequenceFromPath(name);
-            if (sequence > 0 && sequence < selectedSequence) { selected = name; selectedSequence = sequence; }
+            if (!terminalQueuePathIsCanonicalActive(path.c_str())) {
+                if (malformed.length() == 0) malformed = path;
+                entry.close();
+                continue;
+            }
+            uint32_t sequence = queueSequenceFromPath(path);
+            if (sequence == 0 && malformed.length() == 0) malformed = path;
+            else if (sequence > 0 && (!selectedFound || sequence < selectedSequence)) {
+                selected = path;
+                selectedSequence = sequence;
+                selectedFound = true;
+            }
         }
         entry.close();
     }
     directory.close();
+    if (selected.length() == 0 && malformed.length() > 0) {
+        quarantineCorruptQueuedScan(malformed);
+        return false;
+    }
     if (selected.length() == 0) return false;
     File file = LittleFS.open(selected, "r");
     if (!file || file.size() > 1024) {
@@ -1879,7 +2077,7 @@ String setupHtml()
     page += F("</code><span>Queue-Sync</span><code id=\"queueSyncStatus\">");
     page += queueSyncBlocked
         ? htmlEscape("GESPERRT / " + queueSyncBlockReason + " / HTTP " + String(queueSyncBlockHttpStatus) + " / " + queueSyncBlockServerCode + " / " + queueSyncBlockedAt)
-        : String("freigegeben");
+        : htmlEscape(String("freigegeben / Phase ") + queueSyncPhase);
     page += F("</code><span>Trust-Quarantaene</span><code>");
     page += LittleFS.exists(TRUST_QUARANTINE) ? "Unverifizierter Trust-Kandidat vorhanden" : "leer";
     page += F("</code><span>Trust-Fristen</span><code>");
@@ -1987,7 +2185,7 @@ String setupHtml()
     page += F("';async function scanWifi(){const box=document.getElementById('networks');box.textContent='Suche laeuft...';try{const r=await fetch('/scan-wifi?setup_key='+encodeURIComponent(setupKey));const d=await r.json();if(!r.ok)throw new Error(d.message||'WLAN-Scan nicht erlaubt.');if(!d.networks||!d.networks.length){box.textContent='Keine WLANs gefunden.';return;}box.innerHTML=d.networks.map(n=>'<div class=\"net\"><button type=\"button\" onclick=\"pickSsid(this.dataset.ssid)\" data-ssid=\"'+esc(n.ssid)+'\">'+esc(n.ssid)+'</button><span>'+n.rssi+' dBm</span></div>').join('');}catch(e){box.textContent=e.message||'WLAN-Scan fehlgeschlagen.';}}");
     page += F("function pickSsid(s){document.getElementById('ssid').value=s;}function formBody(form){const b=new URLSearchParams(new FormData(form));if(!b.has('setup_key'))b.set('setup_key',setupKey);return b;}");
     page += F("async function testApi(){const box=document.getElementById('apiResult');box.textContent='API-Test laeuft...';try{const r=await fetch('/test-api',{method:'POST',body:formBody(document.getElementById('configForm'))});const d=await r.json();box.textContent=JSON.stringify(d,null,2);}catch(e){box.textContent='API-Test fehlgeschlagen.';}}");
-    page += F("function setMaintenanceBlocked(blocked,restartPending,abortAvailable,queueRecovery){document.getElementById('busyOperationNotice').hidden=!blocked||restartPending||!abortAvailable;document.getElementById('recoveryAbortForm').hidden=!abortAvailable||restartPending;document.getElementById('restartPendingNotice').hidden=!restartPending;document.getElementById('queueRecoveryNotice').hidden=!queueRecovery;document.getElementById('safeRestartButton').disabled=restartPending;document.getElementById('formatBlockedNotice').hidden=!blocked;document.querySelectorAll('[data-maintenance-form] input,[data-maintenance-form] button,[data-maintenance-form] select,[data-maintenance-form] textarea').forEach(el=>el.disabled=blocked);document.getElementById('confirm-format').disabled=blocked;document.getElementById('formatFilesystemButton').disabled=blocked;document.getElementById('scanWifiButton').disabled=blocked;document.getElementById('apiTestButton').disabled=blocked;}function renderQueueSync(d){if(d.queue_sync_blocked)return 'GESPERRT / '+(d.queue_sync_block_reason||'-')+' / HTTP '+(d.queue_sync_block_http_status||0)+' / '+(d.queue_sync_block_server_code||'-')+' / '+(d.queue_sync_blocked_at||'-');if(d.queue_sync_active)return 'aktiv / Versuch '+(d.queue_sync_attempt||1)+'/4 / '+Math.floor((d.queue_sync_elapsed_ms||0)/1000)+' Sek.'+(d.queue_sync_last_error?' / '+d.queue_sync_last_error:'');return 'freigegeben'+(d.queue_sync_last_error?' / letzter Fehler: '+d.queue_sync_last_error:'');}function renderDiag(d){document.getElementById('diagSsid').textContent=d.ssid||'-';document.getElementById('diagSignal').textContent=(d.wifi_status==='connected')?(d.wifi_rssi_dbm+' dBm / '+d.wifi_quality_percent+'% / '+d.wifi_quality):'nicht verbunden';document.getElementById('deviceState').textContent=d.device_state_human||d.device_state||'-';document.getElementById('queueSyncStatus').textContent=renderQueueSync(d);setMaintenanceBlocked(!!d.maintenance_blocked,!!d.restart_pending,!!d.recovery_abort_available,!!d.queue_recovery_pending);}");
+    page += F("function setMaintenanceBlocked(blocked,restartPending,abortAvailable,queueRecovery){document.getElementById('busyOperationNotice').hidden=!blocked||restartPending||!abortAvailable;document.getElementById('recoveryAbortForm').hidden=!abortAvailable||restartPending;document.getElementById('restartPendingNotice').hidden=!restartPending;document.getElementById('queueRecoveryNotice').hidden=!queueRecovery;document.getElementById('safeRestartButton').disabled=restartPending;document.getElementById('formatBlockedNotice').hidden=!blocked;document.querySelectorAll('[data-maintenance-form] input,[data-maintenance-form] button,[data-maintenance-form] select,[data-maintenance-form] textarea').forEach(el=>el.disabled=blocked);document.getElementById('confirm-format').disabled=blocked;document.getElementById('formatFilesystemButton').disabled=blocked;document.getElementById('scanWifiButton').disabled=blocked;document.getElementById('apiTestButton').disabled=blocked;}function renderQueueSync(d){const p=' / Phase '+(d.queue_sync_phase||'-');if(d.queue_sync_blocked)return 'GESPERRT'+p+' / '+(d.queue_sync_block_reason||'-')+' / HTTP '+(d.queue_sync_block_http_status||0)+' / '+(d.queue_sync_block_server_code||'-')+' / '+(d.queue_sync_blocked_at||'-');if(d.queue_sync_active)return 'aktiv'+p+' / Versuch '+(d.queue_sync_attempt||1)+'/4 / '+Math.floor((d.queue_sync_elapsed_ms||0)/1000)+' Sek.'+(d.queue_sync_last_error?' / '+d.queue_sync_last_error:'');return 'freigegeben'+p+(d.queue_sync_last_error?' / letzter Fehler: '+d.queue_sync_last_error:'');}function renderDiag(d){document.getElementById('diagSsid').textContent=d.ssid||'-';document.getElementById('diagSignal').textContent=(d.wifi_status==='connected')?(d.wifi_rssi_dbm+' dBm / '+d.wifi_quality_percent+'% / '+d.wifi_quality):'nicht verbunden';document.getElementById('deviceState').textContent=d.device_state_human||d.device_state||'-';document.getElementById('queueSyncStatus').textContent=renderQueueSync(d);setMaintenanceBlocked(!!d.maintenance_blocked,!!d.restart_pending,!!d.recovery_abort_available,!!d.queue_recovery_pending);}");
     page += F("async function refreshDiag(){const box=document.getElementById('hardwareResult');box.textContent='WLAN-Diagnose wird aktualisiert...';try{const r=await fetch('/status');const d=await r.json();if(!r.ok)throw new Error(d.message||'Bitte neu einloggen.');renderDiag(d);box.textContent='WLAN: '+(d.ssid||'-')+'\\nSignal: '+(d.wifi_status==='connected'?(d.wifi_rssi_dbm+' dBm / '+d.wifi_quality_percent+'% / '+d.wifi_quality):'nicht verbunden')+'\\nIP: '+(d.sta_ip||d.ip||'-');}catch(e){box.textContent=e.message||'WLAN-Diagnose fehlgeschlagen.';}}");
     page += F("function renderNfc(d){return 'NFC Reader\\nRC522 Version: '+(d.reader_version||'-')+'\\nReader Status: '+(d.reader_ok?'OK':'Pruefen')+'\\nDebug: '+(d.debug||'-')+'\\nUID: '+(d.uid||'-')+'\\nUID Bytes: '+(d.uid_bytes||0)+'\\nRestzeit: '+(d.remaining_ms||0)+' ms';}");
     page += F("async function postAction(url,msg){const box=document.getElementById('hardwareResult');box.textContent=msg;try{const b=new URLSearchParams();b.set('setup_key',setupKey);const r=await fetch(url,{method:'POST',body:b});const d=await r.json();box.textContent=JSON.stringify(d,null,2);}catch(e){box.textContent='Test fehlgeschlagen.';}}");
@@ -2046,6 +2244,7 @@ void sendSetupStatus()
     doc["rejected_queue_depth"] = queueRejectedDepth();
     doc["corrupt_queue_depth"] = queueCorruptDepth();
     doc["queue_sync_active"] = queueSync.active;
+    doc["queue_sync_phase"] = queueSyncPhase;
     doc["queue_sync_attempt"] = queueSync.active ? queueSync.attempt + 1 : 0;
     doc["queue_sync_elapsed_ms"] = queueSync.active ? static_cast<uint32_t>(millis() - queueSync.startedAt) : 0;
     doc["queue_sync_last_error"] = queueSync.lastError;
@@ -2811,6 +3010,7 @@ void enterState(DeviceState next)
 {
     state = next;
     stateEnteredAt = millis();
+    setQueueSyncPhase(next == DeviceState::QUEUE_SYNC ? "entered" : "idle");
     if (next != temporaryDisplayState) {
         temporaryDisplayActive = false;
     }
@@ -3432,6 +3632,23 @@ void restartAfterWatchdogDisarmFailure(const char *errorCode)
     while (true) delay(1000);
 }
 
+class QueueRequestWatchdogGuard {
+public:
+    QueueRequestWatchdogGuard() : armed_(armQueueRequestWatchdog()) {}
+
+    ~QueueRequestWatchdogGuard()
+    {
+        if (armed_ && !disarmQueueRequestWatchdog()) {
+            restartAfterWatchdogDisarmFailure("queue_watchdog_disarm_failed");
+        }
+    }
+
+    bool armed() const { return armed_; }
+
+private:
+    bool armed_;
+};
+
 bool queuedScanPassesReplayGate(const OfflineScan &scan, QueueSyncOutcome &blockedOutcome)
 {
     if (!isTimeValid()) {
@@ -3494,9 +3711,20 @@ QueueSyncOutcome syncOneQueuedScan()
 {
     if (!queueSync.active) {
         queueSync.lastError = "";
-        if (!nextQueuedScan(queueSync.scan)) return queueDepth() == 0 ? QueueSyncOutcome::EMPTY : QueueSyncOutcome::CORRUPT;
+        setQueueSyncPhase("select_record");
+        if (!nextQueuedScan(queueSync.scan)) {
+            if (queueSync.lastError == "queue_corrupt_quarantined") {
+                setQueueSyncPhase("corrupt_quarantined");
+                return QueueSyncOutcome::CORRUPT;
+            }
+            const bool empty = queueDepth() == 0;
+            setQueueSyncPhase(empty ? "empty" : "corrupt_record");
+            return empty ? QueueSyncOutcome::EMPTY : QueueSyncOutcome::CORRUPT;
+        }
 
         queueSync.active = true;
+        setQueueSyncPhase("record_loaded");
+        queueSync.pendingCount = queueDepth();
         queueSync.attempt = 0;
         queueSync.nextAttemptAt = queueRetryDeadlineOnSyncEntry(millis());
         queueSync.startedAt = millis();
@@ -3527,15 +3755,10 @@ QueueSyncOutcome syncOneQueuedScan()
     // Re-evaluate immediately before every POST. A retry that crosses Berlin
     // midnight must never turn yesterday's offline record into today's server
     // booking.
+    setQueueSyncPhase("replay_gate");
     QueueSyncOutcome replayGateOutcome = QueueSyncOutcome::TEMPORARY;
     if (!queuedScanPassesReplayGate(queueSync.scan, replayGateOutcome)) {
         return replayGateOutcome;
-    }
-    if (!armQueueRequestWatchdog()) {
-        apiStatus = "queue_watchdog_arm_failed";
-        queueSync.lastError = apiStatus;
-        lastTerminalError = apiStatus;
-        return QueueSyncOutcome::TEMPORARY;
     }
 
     currentUid = queueSync.scan.uid;
@@ -3548,12 +3771,9 @@ QueueSyncOutcome syncOneQueuedScan()
         "Versuch " + String(queueSync.attempt + 1) + "/4",
         "Zeitlimit aktiv"
     );
+    setQueueSyncPhase("posting");
     bool sent = sendScanRequest(true);
-    if (!disarmQueueRequestWatchdog()) {
-        // The queue file still exists at this point. Reboot immediately rather
-        // than risk a delayed watchdog reset during unrelated live operation.
-        restartAfterWatchdogDisarmFailure("queue_watchdog_disarm_failed");
-    }
+    setQueueSyncPhase("post_returned");
     if (scanLifecycle == ScanLifecycle::SENT_CONFIRMED) {
         const bool activeRecordRemoved = acknowledgeQueuedScan(queueSync.scan);
         if (!queuedConfirmationComplete(true, activeRecordRemoved)) {
@@ -3639,7 +3859,7 @@ void handleQueueSync()
         const uint32_t remainingSeconds = (remainingMs + 999U) / 1000U;
         if (remainingSeconds != queueSync.lastDisplayedWaitSeconds) {
             queueSync.lastDisplayedWaitSeconds = remainingSeconds;
-            const size_t pendingBookings = queueDepth();
+            const size_t pendingBookings = queueSync.pendingCount;
             lcdShow(
                 "Offline Queue",
                 "Synchronisierung",
@@ -3650,17 +3870,43 @@ void handleQueueSync()
         return;
     }
     queueSync.lastDisplayedWaitSeconds = UINT32_MAX;
+    setQueueSyncPhase("watchdog_arm");
+    QueueRequestWatchdogGuard watchdog;
+    if (!watchdog.armed()) {
+        apiStatus = "queue_watchdog_arm_failed";
+        queueSync.lastError = apiStatus;
+        lastTerminalError = apiStatus;
+        queueSync.active = false;
+        scanLifecycle = ScanLifecycle::NONE;
+        enterState(DeviceState::ERROR_RETRY);
+        lcdShow("Queue Schutz", "nicht verfuegbar", "Automatik stoppt", "Portal pruefen");
+        applyLedSignal("red");
+        triggerBeep("error");
+        persistQueueSyncBlock(0, apiStatus);
+        return;
+    }
     QueueSyncOutcome outcome = syncOneQueuedScan();
     if (outcome == QueueSyncOutcome::EMPTY) { queueSync.active = false; enterState(DeviceState::READY); return; }
     if (outcome == QueueSyncOutcome::CORRUPT) {
         queueSync.active = false;
         scanLifecycle = ScanLifecycle::NONE;
-        if (queueSync.lastError == "queue_corrupt_quarantine_failed") {
-            lcdShow("Queue defekt", "Speicherfehler", "Datensatz bleibt", "Admin informieren");
-            applyLedSignal("red");
-            triggerBeep("error");
-            enterState(DeviceState::ERROR_RETRY);
+        if (queueSync.lastError == "queue_corrupt_quarantined") {
+            enterState(DeviceState::READY);
+            enterState(DeviceState::NFC_SCAN);
+            setQueueSyncPhase("corrupt_quarantined");
+            lcdShowTemporary("Queue zur Pruefung", "Datensatz defekt", "nicht gesendet", "Portal pruefen", 10000);
+            nextQueueSyncCycleAt = extendedScheduledDeadline(millis(), nextQueueSyncCycleAt, 10000UL);
+            applyLedSignal("yellow");
+            triggerBeep("ready");
+            return;
         }
+        if (queueSync.lastError.length() == 0) queueSync.lastError = "queue_corrupt_unclassified";
+        lastTerminalError = queueSync.lastError;
+        persistQueueSyncBlock(0, "queue_storage_corrupt_record");
+        lcdShow("Queue defekt", "Speicherfehler", "Datensatz bleibt", "Admin informieren");
+        applyLedSignal("red");
+        triggerBeep("error");
+        enterState(DeviceState::ERROR_RETRY);
         return;
     }
     if (outcome == QueueSyncOutcome::DEFERRED) {

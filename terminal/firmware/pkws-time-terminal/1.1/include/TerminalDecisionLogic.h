@@ -39,6 +39,32 @@ inline bool terminalDeadlinePending(uint32_t now, uint32_t deadline)
     return !terminalDeadlineReached(now, deadline);
 }
 
+inline uint32_t terminalQueueSequenceFromPath(const char *path)
+{
+    if (path == nullptr || *path == '\0') return 0;
+    const char *filename = std::strrchr(path, '/');
+    filename = filename == nullptr ? path : filename + 1;
+    const char *dot = std::strchr(filename, '.');
+    if (dot == nullptr || dot - filename != 10) return 0;
+    uint64_t parsed = 0;
+    for (const char *digit = filename; digit < dot; digit++) {
+        if (*digit < '0' || *digit > '9') return 0;
+        parsed = parsed * 10ULL + static_cast<uint64_t>(*digit - '0');
+        if (parsed > UINT32_MAX) return 0;
+    }
+    return parsed == 0 ? 0 : static_cast<uint32_t>(parsed);
+}
+
+inline bool terminalQueuePathIsCanonicalActive(const char *path)
+{
+    if (path == nullptr || *path == '\0') return false;
+    const char *filename = std::strrchr(path, '/');
+    filename = filename == nullptr ? path : filename + 1;
+    return std::strlen(filename) == 15
+        && std::strcmp(filename + 10, ".json") == 0
+        && terminalQueueSequenceFromPath(filename) != 0;
+}
+
 inline bool lcdBacklightShouldRemainOn(
     bool waitingForTag,
     bool temporaryDisplayActive,
