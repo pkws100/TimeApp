@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test');
 
 test.describe('real revisable account workflow', () => {
-  test.describe.configure({ mode: 'serial', timeout: 60000 });
+  test.describe.configure({ mode: 'serial', timeout: 60000, retries: 0 });
   test.skip(
     process.env.REAL_ACCOUNT_UI !== '1' || process.env.UI_ISOLATED_ACCOUNT_RUNNER !== '1',
     'requires the isolated MariaDB UI runner'
@@ -214,8 +214,10 @@ test.describe('real revisable account workflow', () => {
     await page.reload();
     await page.locator('#loginForm input[name="email"]').fill(process.env.UI_TEST_EMPLOYEE_EMAIL);
     await page.locator('#loginForm input[name="password"]').fill(process.env.UI_TEST_EMPLOYEE_PASSWORD);
-    await page.locator('#loginForm button[type="submit"]').click();
-    await page.waitForURL('**/app/heute');
+    await Promise.all([
+      page.waitForURL('**/app/heute', { waitUntil: 'domcontentloaded' }),
+      page.locator('#loginForm button[type="submit"]').click()
+    ]);
     const summaryResponsePromise = page.waitForResponse((response) => response.url().includes('/api/v1/app/time-account/summary'));
     await page.goto('/app/urlaub');
     const summaryResponse = await summaryResponsePromise;

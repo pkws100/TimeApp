@@ -6,6 +6,7 @@ namespace App\Domain\TimeAccounts;
 
 use App\Domain\Timesheets\TimesheetWriteGuard;
 use App\Infrastructure\Database\DatabaseConnection;
+use App\Support\MpdfFactory;
 use DateTimeImmutable;
 use InvalidArgumentException;
 use RuntimeException;
@@ -456,7 +457,7 @@ final class EmployeeAccountCutoverService
             throw new RuntimeException('PDF-Temp-Verzeichnis konnte nicht erstellt werden.');
         }
 
-        $pdf = new \Mpdf\Mpdf(['tempDir' => $tempDir]);
+        $pdf = MpdfFactory::create(['tempDir' => $tempDir]);
         $pdf->WriteHTML($html);
 
         return [

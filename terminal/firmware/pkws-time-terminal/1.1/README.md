@@ -1,6 +1,6 @@
 # PK-WS TimeApp Terminal Firmware 1.1
 
-Firmware 1.1.6 is rebuilt from the complete frozen Firmware 1.0 baseline. It retains the RC522/LCD/LED/buzzer/setup-button workflow, captive portal, WLAN diagnostics and non-blocking display logic, then adds controlled HTTP/HTTPS transport, trust management and an offline queue. The URL scheme is an explicit security boundary: there is no HTTPS-to-HTTP fallback.
+Firmware 1.1.7 is rebuilt from the complete frozen Firmware 1.0 baseline. It retains the RC522/LCD/LED/buzzer/setup-button workflow, captive portal, WLAN diagnostics and non-blocking display logic, then adds controlled HTTP/HTTPS transport, trust management and an offline queue. The URL scheme is an explicit security boundary: there is no HTTPS-to-HTTP fallback.
 
 ## Build / flash
 
@@ -32,7 +32,7 @@ it must never be flashed into production.
 
 - The fourth ready-screen line is always a local `Europe/Berlin` clock in `dd.mm.yyyy HH:mm`; before NTP it shows `--.--.---- --:--`. The API config response still controls only the first three persistent ready-screen lines.
 - `device_time` is always independently rendered from epoch time with `gmtime_r()` as UTC (`...Z`); local Berlin time is never labelled as UTC.
-- `http://192.168.1.10`: normal `WiFiClient`; NTP starts in parallel and never blocks config or scans; portal marks it unencrypted.
+- `http://192.168.1.10`: normal `WiFiClient`; NTP starts in parallel and never blocks config or a newly presented live scan; later offline replay remains protected by the queue date gate; portal marks the transport unencrypted.
 - `https://terminal-api.pk-ws.de`: `WiFiClientSecure` plus CA and hostname validation; `TIME_SYNC` must obtain a plausible NTP time first.
 - Unsupported URL schemes are rejected. TLS failure never emits terminal headers, tokens, NFC UIDs, or booking data through HTTP.
 

@@ -1,6 +1,9 @@
 const { defineConfig } = require('@playwright/test');
+const fs = require('fs');
 
-const chromiumExecutablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || '/usr/bin/chromium';
+const configuredChromium = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+const chromiumExecutablePath = configuredChromium
+  || (fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined);
 
 module.exports = defineConfig({
   testDir: './tests/e2e',
@@ -9,6 +12,7 @@ module.exports = defineConfig({
     timeout: 5000
   },
   reporter: [['list']],
+  retries: process.env.CI ? 1 : 0,
   use: {
     baseURL: process.env.UI_BASE_URL || 'http://127.0.0.1',
     trace: 'on-first-retry',
@@ -22,7 +26,7 @@ module.exports = defineConfig({
         browserName: 'chromium',
         viewport: { width: 390, height: 844 },
         launchOptions: {
-          executablePath: chromiumExecutablePath,
+          ...(chromiumExecutablePath ? { executablePath: chromiumExecutablePath } : {}),
           args: ['--no-sandbox', '--disable-dev-shm-usage']
         }
       }

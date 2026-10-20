@@ -4,9 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Integration;
 
-use App\Config\ConfigRepository;
 use App\Domain\Settings\CompanySettingsService;
-use App\Domain\Settings\DatabaseSettingsManager;
 use App\Domain\Timesheets\AppTimesheetSyncService;
 use App\Domain\Timesheets\TimesheetCalculator;
 use App\Domain\Timesheets\WorkdayStateCalculator;
@@ -15,6 +13,7 @@ use PDO;
 use PDOException;
 use RuntimeException;
 use PHPUnit\Framework\TestCase;
+use Tests\Support\MariaDbScratchConfig;
 
 final class AppTimesheetSyncDatabaseTest extends TestCase
 {
@@ -349,18 +348,11 @@ final class AppTimesheetSyncDatabaseTest extends TestCase
 
     public function testEmployeeCanBookAssignedProjectWithNativePdoPlaceholders(): void
     {
-        $baseConfig = $this->databaseConfig();
-        $baseConnection = new DatabaseConnection($baseConfig);
-
-        if (!$baseConnection->isAvailable()) {
-            self::fail('Keine Test-Datenbank verfuegbar.');
-        }
-
-        $pdo = $baseConnection->pdo();
+        $pdo = MariaDbScratchConfig::connectServer();
         self::assertInstanceOf(PDO::class, $pdo);
 
-        $databaseName = 'zeiterfassung_hy093_' . bin2hex(random_bytes(4));
-        $quotedDatabaseName = '`' . str_replace('`', '``', $databaseName) . '`';
+        $databaseName = 'timeapp_test_hy093_' . bin2hex(random_bytes(4));
+        $quotedDatabaseName = MariaDbScratchConfig::quoteIdentifier($databaseName);
         $databaseCreated = false;
 
         try {
@@ -371,9 +363,7 @@ final class AppTimesheetSyncDatabaseTest extends TestCase
                 self::fail('Datenbankbenutzer darf keine Scratch-Datenbank anlegen: ' . $exception->getMessage());
             }
 
-            $config = $baseConfig;
-            $config['database'] = $databaseName;
-            $connection = new DatabaseConnection($config);
+            $connection = new DatabaseConnection(MariaDbScratchConfig::connection($databaseName));
             $this->createSchema($connection);
 
             $suffix = bin2hex(random_bytes(4));
@@ -484,36 +474,15 @@ final class AppTimesheetSyncDatabaseTest extends TestCase
     }
 
     /**
-     * @return array<string, mixed>
-     */
-    private function databaseConfig(): array
-    {
-        $config = ConfigRepository::load(['database']);
-        $settings = new DatabaseSettingsManager(
-            (array) $config->get('database.connections.mysql', []),
-            (string) $config->get('database.override_file')
-        );
-
-        return $settings->current();
-    }
-
-    /**
      * @param callable(DatabaseConnection): void $callback
      */
     private function withScratchDatabase(callable $callback): void
     {
-        $baseConfig = $this->databaseConfig();
-        $baseConnection = new DatabaseConnection($baseConfig);
-
-        if (!$baseConnection->isAvailable()) {
-            self::fail('Keine Test-Datenbank verfuegbar.');
-        }
-
-        $pdo = $baseConnection->pdo();
+        $pdo = MariaDbScratchConfig::connectServer();
         self::assertInstanceOf(PDO::class, $pdo);
 
-        $databaseName = 'zeiterfassung_appsync_' . bin2hex(random_bytes(4));
-        $quotedDatabaseName = '`' . str_replace('`', '``', $databaseName) . '`';
+        $databaseName = 'timeapp_test_appsync_' . bin2hex(random_bytes(4));
+        $quotedDatabaseName = MariaDbScratchConfig::quoteIdentifier($databaseName);
         $databaseCreated = false;
 
         try {
@@ -524,9 +493,7 @@ final class AppTimesheetSyncDatabaseTest extends TestCase
                 self::fail('Datenbankbenutzer darf keine Scratch-Datenbank anlegen: ' . $exception->getMessage());
             }
 
-            $config = $baseConfig;
-            $config['database'] = $databaseName;
-            $connection = new DatabaseConnection($config);
+            $connection = new DatabaseConnection(MariaDbScratchConfig::connection($databaseName));
             $this->createSchema($connection);
 
             $callback($connection);

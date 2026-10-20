@@ -6,6 +6,7 @@ namespace App\Domain\Exports;
 
 use App\Domain\Timesheets\TimesheetService;
 use App\Infrastructure\Database\DatabaseConnection;
+use App\Support\MpdfFactory;
 use RuntimeException;
 
 final class ReportService
@@ -117,7 +118,7 @@ final class ReportService
 
         $html .= '</table>';
 
-        $pdf = new \Mpdf\Mpdf();
+        $pdf = MpdfFactory::create();
         $pdf->WriteHTML($html);
 
         return [
@@ -129,4 +130,3 @@ final class ReportService
         ];
     }
 }
-

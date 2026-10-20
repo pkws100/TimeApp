@@ -112,6 +112,14 @@ void testLongLiveRetryMovesToBackgroundQueue()
     TEST_ASSERT_TRUE(liveScanRetryShouldQueue(900000, 15000));
 }
 
+void testPlainHttpLiveScanDoesNotWaitForNtp()
+{
+    TEST_ASSERT_FALSE(liveScanMustPassReplayDateGate(true, false));
+    TEST_ASSERT_TRUE(liveScanMustPassReplayDateGate(true, true));
+    TEST_ASSERT_TRUE(liveScanMustPassReplayDateGate(false, false));
+    TEST_ASSERT_TRUE(liveScanMustPassReplayDateGate(false, true));
+}
+
 void testOperationDurationWatchdogHandlesMillisRollover()
 {
     TEST_ASSERT_FALSE(operationDurationExceeded(UINT32_MAX - 50, UINT32_MAX - 100, 100));
@@ -391,6 +399,7 @@ int main(int, char **)
     RUN_TEST(testQueuedConfirmationRequiresLocalAck);
     RUN_TEST(testQueueResponsesDoNotUseLiveScanFeedback);
     RUN_TEST(testLongLiveRetryMovesToBackgroundQueue);
+    RUN_TEST(testPlainHttpLiveScanDoesNotWaitForNtp);
     RUN_TEST(testOperationDurationWatchdogHandlesMillisRollover);
     RUN_TEST(testQueueBackgroundDeadlineCanOnlyBeExtended);
     RUN_TEST(testPersistentQueueNotBeforeSurvivesRestartClock);

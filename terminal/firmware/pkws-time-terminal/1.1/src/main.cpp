@@ -50,7 +50,7 @@ static_assert(sizeof(PKWS_PORTAL_ADMIN_PASSWORD) >= 13, "PKWS_PORTAL_ADMIN_PASSW
 #endif
 static_assert(sizeof(PKWS_PROVISIONING_ID) >= 13, "PKWS_PROVISIONING_ID muss mindestens 12 Zeichen haben.");
 
-static const char *FIRMWARE_VERSION = "pkws-time-terminal-v1.1.6";
+static const char *FIRMWARE_VERSION = "pkws-time-terminal-v1.1.7";
 static const char *NVS_NAMESPACE = "pkws-time";
 static const char *SETUP_AP_PASSWORD = PKWS_SETUP_AP_PASSWORD;
 static const char *PORTAL_ADMIN_PASSWORD = PKWS_PORTAL_ADMIN_PASSWORD;
@@ -4237,7 +4237,9 @@ void handleSendScan()
     }
 
     QueueSyncOutcome replayGateOutcome = QueueSyncOutcome::TEMPORARY;
-    if (!queuedScanPassesReplayGate(persistedLiveScan, replayGateOutcome)) {
+    const bool plainHttpTransport = transportFor(config.apiBaseUrl) == ApiTransport::HTTP_PLAIN;
+    if (liveScanMustPassReplayDateGate(plainHttpTransport, isTimeValid())
+        && !queuedScanPassesReplayGate(persistedLiveScan, replayGateOutcome)) {
         currentUid = "";
         currentRequestId = "";
         currentDeviceTime = "";

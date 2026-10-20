@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Exports;
 
+use App\Support\MpdfFactory;
 use App\Domain\Timesheets\AdminBookingService;
 use RuntimeException;
 
@@ -123,7 +124,7 @@ final class BookingExportService
             throw new RuntimeException('PDF-Temp-Verzeichnis ist nicht beschreibbar.');
         }
 
-        $pdf = new \Mpdf\Mpdf(['tempDir' => $tempDir]);
+        $pdf = MpdfFactory::create(['tempDir' => $tempDir]);
         $pdf->WriteHTML($html);
 
         return [

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Exports;
 
+use App\Support\MpdfFactory;
 use App\Domain\Settings\CompanySettingsService;
 use RuntimeException;
 use ZipArchive;
@@ -77,7 +78,7 @@ final class AccountingDocumentExportService
             throw new RuntimeException('mPDF ist nicht installiert. Bitte Composer-Abhaengigkeiten installieren.');
         }
 
-        $pdf = new \Mpdf\Mpdf(['tempDir' => $this->tempDir()]);
+        $pdf = MpdfFactory::create(['tempDir' => $this->tempDir()]);
         $pdf->WriteHTML($this->html($package));
 
         return [

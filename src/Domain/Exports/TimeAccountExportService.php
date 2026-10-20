@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Exports;
 
+use App\Support\MpdfFactory;
 use App\Domain\TimeAccounts\TimeAccountService;
 use RuntimeException;
 
@@ -124,7 +125,7 @@ final class TimeAccountExportService
             throw new RuntimeException('PDF-Temp-Verzeichnis ist nicht beschreibbar.');
         }
 
-        $pdf = new \Mpdf\Mpdf(['tempDir' => $tempDir]);
+        $pdf = MpdfFactory::create(['tempDir' => $tempDir]);
         $pdf->WriteHTML($html);
 
         return [

@@ -36,7 +36,23 @@ final class CutoverHistoryDatabaseTest extends MariaDbTestCase
         $activeEntries = $accounts->adminJournalEntries($userId, 2026, 100, 1, (int) $second['id']);
         $protocol = $cutovers->protocolData((int) $first['id']);
         $activeProtocol = $cutovers->protocolData((int) $second['id']);
-        $pdf = $cutovers->protocolPdf((int) $first['id']);
+        $serverScriptState = [
+            'SCRIPT_NAME' => [array_key_exists('SCRIPT_NAME', $_SERVER), $_SERVER['SCRIPT_NAME'] ?? null],
+            'PHP_SELF' => [array_key_exists('PHP_SELF', $_SERVER), $_SERVER['PHP_SELF'] ?? null],
+        ];
+        unset($_SERVER['SCRIPT_NAME'], $_SERVER['PHP_SELF']);
+
+        try {
+            $pdf = $cutovers->protocolPdf((int) $first['id']);
+        } finally {
+            foreach ($serverScriptState as $key => [$wasSet, $value]) {
+                if ($wasSet) {
+                    $_SERVER[$key] = $value;
+                } else {
+                    unset($_SERVER[$key]);
+                }
+            }
+        }
 
         self::assertSame([(int) $second['id'], (int) $first['id']], array_map('intval', array_column($history, 'id')));
         self::assertSame(['final', 'reversed'], array_column($history, 'status'));

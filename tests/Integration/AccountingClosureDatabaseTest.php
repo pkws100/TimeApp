@@ -4,9 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Integration;
 
-use App\Config\ConfigRepository;
 use App\Domain\Exports\AccountingClosureService;
-use App\Domain\Settings\DatabaseSettingsManager;
 use App\Domain\Timesheets\AdminBookingService;
 use App\Domain\Timesheets\TimesheetCalculator;
 use App\Infrastructure\Database\DatabaseConnection;
@@ -14,6 +12,7 @@ use InvalidArgumentException;
 use PDO;
 use PDOException;
 use PHPUnit\Framework\TestCase;
+use Tests\Support\MariaDbScratchConfig;
 
 final class AccountingClosureDatabaseTest extends TestCase
 {
@@ -129,31 +128,22 @@ final class AccountingClosureDatabaseTest extends TestCase
      */
     private function withScratchDatabase(callable $callback): void
     {
-        $baseConfig = $this->databaseConfig();
-        $baseConnection = new DatabaseConnection($baseConfig);
-
-        if (!$baseConnection->isAvailable()) {
-            self::markTestSkipped('Keine Test-Datenbank verfuegbar.');
-        }
-
-        $pdo = $baseConnection->pdo();
+        $pdo = MariaDbScratchConfig::connectServer();
         self::assertInstanceOf(PDO::class, $pdo);
 
-        $databaseName = 'zeiterfassung_accounting_' . bin2hex(random_bytes(4));
-        $quotedDatabaseName = '`' . str_replace('`', '``', $databaseName) . '`';
+        $databaseName = 'timeapp_test_accounting_' . bin2hex(random_bytes(4));
+        $quotedDatabaseName = MariaDbScratchConfig::quoteIdentifier($databaseName);
         $databaseCreated = false;
 
         try {
             try {
                 $pdo->exec('CREATE DATABASE ' . $quotedDatabaseName . ' CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
                 $databaseCreated = true;
-            } catch (PDOException) {
-                self::markTestSkipped('Datenbankbenutzer darf keine Scratch-Datenbank anlegen.');
+            } catch (PDOException $exception) {
+                self::fail('Datenbankbenutzer darf keine Scratch-Datenbank anlegen: ' . $exception->getMessage());
             }
 
-            $config = $baseConfig;
-            $config['database'] = $databaseName;
-            $connection = new DatabaseConnection($config);
+            $connection = new DatabaseConnection(MariaDbScratchConfig::connection($databaseName));
             $this->createSchema($connection);
             $callback($connection);
         } finally {
@@ -165,17 +155,6 @@ final class AccountingClosureDatabaseTest extends TestCase
                 }
             }
         }
-    }
-
-    private function databaseConfig(): array
-    {
-        $config = ConfigRepository::load(['database']);
-        $settings = new DatabaseSettingsManager(
-            (array) $config->get('database.connections.mysql', []),
-            (string) $config->get('database.override_file')
-        );
-
-        return $settings->current();
     }
 
     private function createSchema(DatabaseConnection $connection): void

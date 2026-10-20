@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Attendance;
 
 use App\Domain\Settings\CompanySettingsService;
+use App\Support\MpdfFactory;
 use DateTimeImmutable;
 use DateTimeZone;
 use RuntimeException;
@@ -31,7 +32,7 @@ final class AttendanceReportService
         $generatedAt = new DateTimeImmutable('now', new DateTimeZone($this->timezone));
         $report = $this->reportData($summary, $generatedAt);
         $company = $this->companySettingsService->current();
-        $pdf = new \Mpdf\Mpdf([
+        $pdf = MpdfFactory::create([
             'tempDir' => $this->tempDir(),
             'margin_top' => 34,
             'margin_bottom' => 21,

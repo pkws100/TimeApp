@@ -4,6 +4,9 @@
     colors="true"
     cacheResult="false"
     beStrictAboutOutputDuringTests="true"
+    failOnWarning="true"
+    failOnDeprecation="true"
+    failOnPhpunitDeprecation="true"
 >
     <testsuites>
         <testsuite name="Application Test Suite">
@@ -12,4 +15,3 @@
         </testsuite>
     </testsuites>
 </phpunit>
-

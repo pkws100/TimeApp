@@ -38,6 +38,7 @@
     "bootstrap-admin": "php bin/bootstrap-admin.php"
   },
   "config": {
+    "process-timeout": 1200,
     "sort-packages": true
   }
 }

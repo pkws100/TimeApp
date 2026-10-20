@@ -1,4 +1,4 @@
-# Firmware 1.1.6 test plan
+# Firmware 1.1.7 test plan
 
 ## Build and rollback
 
@@ -7,7 +7,7 @@
 
 ## Transport
 
-- HTTP config/scan succeeds while NTP is unavailable and portal reports unencrypted HTTP; after NTP the ready screen updates to the current Europe/Berlin time without a restart or config request.
+- HTTP config and a newly presented live scan succeed while NTP is unavailable and the portal reports unencrypted HTTP; an unsent journal record remains protected from later undated automatic replay. After NTP the ready screen updates to the current Europe/Berlin time without a restart or config request.
 - HTTPS waits in `TIME_SYNC`; valid time plus valid hostname/CA succeeds and the ready screen uses the local Europe/Berlin clock.
 - Wrong hostname, unknown CA, expired certificate and NTP timeout fail without a fallback HTTP request.
 - Inspect traffic: normal HTTPS requests never call `setInsecure`; recovery GET has no Authorization, `X-Terminal-ID`, UID, or payload.
@@ -46,7 +46,7 @@
 
 ## Functional inventory
 
-| Function | Firmware 1.0 | Firmware 1.1.6 | Test status |
+| Function | Firmware 1.0 | Firmware 1.1.7 | Test status |
 | --- | --- | --- | --- |
 | WLAN, RC522, LCD, LEDs, buzzer, setup button | yes | retained | hardware required |
 | Captive portal, login/form key, WLAN/API/hardware diagnostics | yes | retained and extended | portal/hardware required |

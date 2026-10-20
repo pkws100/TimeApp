@@ -111,6 +111,15 @@ inline bool liveScanRetryShouldQueue(uint32_t retryDelayMs, uint32_t maximumFore
     return retryDelayMs > maximumForegroundDelayMs;
 }
 
+inline bool liveScanMustPassReplayDateGate(bool plainHttpTransport, bool timeValid)
+{
+    // A live tag presentation may be sent over explicitly configured HTTP
+    // before NTP is available. The server assigns its own current work date.
+    // HTTPS and every timestamped live request still use the same date gate as
+    // persisted queue replays.
+    return !plainHttpTransport || timeValid;
+}
+
 inline bool operationDurationExceeded(uint32_t now, uint32_t startedAt, uint32_t maximumDurationMs)
 {
     return static_cast<uint32_t>(now - startedAt) >= maximumDurationMs;

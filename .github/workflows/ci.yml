@@ -39,6 +39,23 @@ jobs:
   php-and-node-checks:
     name: PHP, PHPUnit and Node checks
     runs-on: ubuntu-latest
+    env:
+      APP_ENV: testing
+      APP_DEBUG: 'true'
+      APP_SECRET: ci-test-secret
+      SETTINGS_ENCRYPTION_KEY: ci-test-settings-key
+      DB_HOST: 127.0.0.1
+      DB_PORT: '3306'
+      DB_DATABASE: timeapp_ci
+      DB_USERNAME: root
+      DB_PASSWORD: ci-test-root-password
+      DB_SOCKET: ''
+      DB_OVERRIDE_FILE: /tmp/timeapp-ci-database.override.php
+      TIMEAPP_TEST_DB_HOST: 127.0.0.1
+      TIMEAPP_TEST_DB_PORT: '3306'
+      TIMEAPP_TEST_DB_USERNAME: root
+      TIMEAPP_TEST_DB_PASSWORD: ci-test-root-password
+      TIMEAPP_TEST_DB_SOCKET: ''
 
     services:
       mariadb:
@@ -69,6 +86,11 @@ jobs:
       - name: Install Composer dependencies
         run: composer install --prefer-dist --no-interaction --no-progress
 
+      - name: Validate and audit Composer dependencies
+        run: |
+          composer validate --strict
+          composer audit --locked --no-interaction
+
       - name: PHP syntax check
         run: |
           find . \
@@ -79,22 +101,6 @@ jobs:
             | xargs -0 -n 1 php -l
 
       - name: Run PHPUnit
-        env:
-          APP_ENV: testing
-          APP_DEBUG: 'true'
-          APP_SECRET: ci-test-secret
-          SETTINGS_ENCRYPTION_KEY: ci-test-settings-key
-          DB_HOST: 127.0.0.1
-          DB_PORT: '3306'
-          DB_DATABASE: timeapp_ci
-          DB_USERNAME: root
-          DB_PASSWORD: ci-test-root-password
-          DB_SOCKET: ''
-          DB_OVERRIDE_FILE: /tmp/timeapp-ci-database.override.php
-          TIMEAPP_TEST_DB_HOST: 127.0.0.1
-          TIMEAPP_TEST_DB_PORT: '3306'
-          TIMEAPP_TEST_DB_USERNAME: root
-          TIMEAPP_TEST_DB_PASSWORD: ci-test-root-password
         run: COMPOSER_ALLOW_SUPERUSER=1 composer test
 
       - name: Setup Node.js
@@ -106,10 +112,52 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
+      - name: Audit Node dependencies
+        run: npm audit --audit-level=high
+
       - name: JavaScript syntax check
         run: |
-          node --check public/assets/js/app.js
-          node --check tests/e2e/app.spec.js
+          find public/assets/js tests/e2e \
+            -name '*.js' -print0 \
+            | xargs -0 -n 1 node --check
+          node --check playwright.config.js
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Prepare smoke-test database
+        run: |
+          php vendor/bin/phinx migrate -c phinx.php
+          php vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder
+
+      - name: Run browser smoke tests
+        run: |
+          set -euo pipefail
+          php -S 127.0.0.1:18081 tests/Support/php-server-router.php >/tmp/timeapp-ci-ui.log 2>&1 &
+          server_pid=$!
+          cleanup() {
+            kill "$server_pid" 2>/dev/null || true
+            wait "$server_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 50); do
+            if curl --fail --silent http://127.0.0.1:18081/admin/login >/dev/null; then
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              cat /tmp/timeapp-ci-ui.log
+              exit 1
+            fi
+            sleep 0.2
+          done
+          curl --fail --silent http://127.0.0.1:18081/admin/login >/dev/null || {
+            cat /tmp/timeapp-ci-ui.log
+            exit 1
+          }
+          UI_BASE_URL=http://127.0.0.1:18081 npm run ui:test:smoke
+
+      - name: Run isolated real account workflow
+        run: npm run ui:test:real
 
   docker-production-smoke:
     name: Production Docker image smoke

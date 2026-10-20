@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.7 — 2026-10-20
+
+- Restore immediate live scans over explicitly configured HTTP while NTP is unavailable. The newly journaled live record no longer enters the offline replay date gate before its first POST; HTTPS and all later queue replays remain date-gated.
+- Add a native regression test for HTTP and HTTPS live-scan gating with and without valid terminal time.
+
 ## 1.1.6 — 2026-09-25
 
 - Fix the field-reproduced permanent `Offline Queue / Synchronisierung / bitte warten` state: Arduino-ESP32 2.0.17 returns a basename from `File::name()`, while the queue code incorrectly required and later reopened a full LittleFS path.
