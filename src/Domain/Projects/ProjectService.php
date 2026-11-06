@@ -296,6 +296,67 @@ final class ProjectService
         return $record;
     }
 
+    public function suggestNextProjectNumber(): ?string
+    {
+        $rows = $this->connection->tableExists('projects')
+            ? $this->connection->fetchAll('SELECT project_number FROM projects ORDER BY id DESC')
+            : [];
+        $prefix = null;
+        $width = 5;
+        $highest = '0';
+
+        // Continue the most recently created numbered series, including archived projects.
+        foreach ($rows as $row) {
+            if (preg_match('/^(.*?)([0-9]+)$/uD', trim((string) $row['project_number']), $parts) !== 1) {
+                continue;
+            }
+
+            if ($prefix === null) {
+                $prefix = $parts[1];
+                $width = strlen($parts[2]);
+            }
+
+            if (mb_strtolower($parts[1], 'UTF-8') !== mb_strtolower($prefix, 'UTF-8')) {
+                continue;
+            }
+
+            $number = ltrim($parts[2], '0');
+            $number = $number === '' ? '0' : $number;
+
+            if (strlen($number) > strlen($highest)
+                || (strlen($number) === strlen($highest) && strcmp($number, $highest) > 0)) {
+                $highest = $number;
+            }
+        }
+
+        do {
+            $highest = $this->incrementProjectNumberSuffix($highest);
+            $candidate = ($prefix ?? '') . str_pad($highest, $width, '0', STR_PAD_LEFT);
+
+            if (mb_strlen($candidate, 'UTF-8') > 40) {
+                return null;
+            }
+        } while ($this->projectNumberExists($candidate));
+
+        return $candidate;
+    }
+
+    private function incrementProjectNumberSuffix(string $number): string
+    {
+        // Project numbers can be longer than PHP_INT_MAX; never convert the suffix to a number.
+        for ($index = strlen($number) - 1; $index >= 0; --$index) {
+            if ($number[$index] !== '9') {
+                $number[$index] = chr(ord($number[$index]) + 1);
+
+                return $number;
+            }
+
+            $number[$index] = '0';
+        }
+
+        return '1' . $number;
+    }
+
     public function projectNumberExists(string $projectNumber, ?int $excludeProjectId = null): bool
     {
         $projectNumber = trim($projectNumber);

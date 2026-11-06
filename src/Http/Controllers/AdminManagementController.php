@@ -103,7 +103,11 @@ final class AdminManagementController
 
     public function projectCreate(Request $request): Response
     {
-        return Response::html($this->view->render('Projekt anlegen', $this->renderProjectForm('/admin/projects', 'Projekt anlegen')));
+        return Response::html($this->view->render('Projekt anlegen', $this->renderProjectForm(
+            '/admin/projects',
+            'Projekt anlegen',
+            ['project_number' => $this->projectService->suggestNextProjectNumber() ?? '']
+        )));
     }
 
     public function projectEdit(Request $request, array $params): Response
@@ -915,7 +919,7 @@ HTML;
 <form method="post" action="{$this->e($action)}" class="card form-grid" data-project-master-form>
     {$method}
     <input type="hidden" name="csrf_token" value="{$csrfToken}">
-    <div{$this->fieldWrapperClass($formErrors, 'project_number')}><label for="project_number">Projektnummer</label><input id="project_number" name="project_number" value="{$this->field($project, 'project_number')}" required{$this->fieldInvalidAttribute($formErrors, 'project_number')}>{$this->fieldErrorMarkup($formErrors, 'project_number')}</div>
+    <div{$this->fieldWrapperClass($formErrors, 'project_number')}><label for="project_number">Projektnummer</label><input id="project_number" name="project_number" value="{$this->field($project, 'project_number')}" maxlength="40" required{$this->fieldInvalidAttribute($formErrors, 'project_number')}>{$this->fieldErrorMarkup($formErrors, 'project_number')}</div>
     <div{$this->fieldWrapperClass($formErrors, 'name')}><label for="name">Name</label><input id="name" name="name" value="{$this->field($project, 'name')}" required{$this->fieldInvalidAttribute($formErrors, 'name')}>{$this->fieldErrorMarkup($formErrors, 'name')}</div>
     <div class="form-field"><label for="customer_name">Kunde</label><input id="customer_name" name="customer_name" value="{$this->field($project, 'customer_name')}"></div>
     <label class="checkbox-item full-span"><input type="checkbox" name="customer_signature_required" value="1" {$signatureRequiredChecked}> <span>Kundenunterschrift bei Abschluss anfordern</span></label>

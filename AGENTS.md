@@ -122,6 +122,7 @@ Bereits umgesetzt:
 - projektbezogene Arbeitsberichte unter „Ausgeführte Arbeiten“ in App und Admin, mit Autor/Datum, idempotentem Online-Speichern und Archivierung; App-Entwuerfe bleiben benutzer-/projektbezogen lokal erhalten, bis bewusst online gespeichert wird
 - Hintergrundaktualisierungen erhalten auf derselben Projektseite bestehende Formular- und Dateiauswahlknoten sowie Scrollposition; Session- und Projektwechsel invalidieren veraltete Antworten
 - native Projektauswahl mit Suchfeld nach Nummer/Name auf Heute, Zeiterfassung und Projekt; genau ein Treffer wird bei neuer Eingabe lokal vorausgewaehlt, ohne Buchung. Mehrdeutige/leere Suchen und reine Hintergrundaktualisierungen aendern die Auswahl nicht; manuelle Auswahl inklusive „Nicht zugeordnet“ bleibt moeglich
+- Admin-Projektanlage schlaegt eine editierbare naechste Projektnummer vor: juengste Nummer mit Ziffern am Ende bestimmt Praefix und Stellenbreite, hoechster Wert dieser Serie inklusive archivierter Projekte wird erhoeht; ohne Serie Start mit `00001`, keine Reservierung beim Oeffnen
 
 Noch nicht final umgesetzt:
 

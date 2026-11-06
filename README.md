@@ -77,6 +77,16 @@ gesonderter Vereinbarung angeboten werden.
 
 ## Setup
 
+Beim Anlegen eines Projekts im Admin ist die nächste Projektnummer bereits
+vorausgefüllt und bleibt editierbar, etwa `MA-001`, `MA-002` → `MA-003` oder
+`00008` → `00009`. Bei mehreren Nummernserien wird die zuletzt angelegte Serie
+mit abschließendem Zahlenblock fortgesetzt; maßgeblich ist deren höchste Nummer,
+einschließlich archivierter Projekte. Führende Nullen bleiben erhalten. Ohne
+vorhandene Nummernserie wird `00001` vorgeschlagen. Die Nummer wird erst beim
+Speichern vergeben; gleichzeitig geöffnete Formulare können denselben Vorschlag
+zeigen. Bereits vergebene Nummern werden beim Speichern abgewiesen, die übrigen
+Eingaben bleiben erhalten.
+
 Im Projekt-Reiter der Mitarbeiter-App dokumentiert „Ausgeführte Arbeiten“ einzelne
 Arbeitsberichte mit Datum und Ersteller. Das freigegebene Projektteam sieht die
 Berichte; das Büro findet sie beim jeweiligen Projekt im Admin. Spracheingabe

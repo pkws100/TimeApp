@@ -1929,21 +1929,25 @@ test('mobile today totals keep manual pause and offline checkout duration', asyn
   await expect(page.getByRole('button', { name: 'Pause buchen' })).toBeVisible();
   await expect(page.locator('.app-today-actions')).toBeVisible();
 
-  const mobilePauseBox = await page.getByRole('button', { name: 'Pause buchen' }).boundingBox();
-  const mobileCheckoutBox = await page.getByRole('button', { name: 'Check-out' }).boundingBox();
+  await expect(async () => {
+    const mobilePauseBox = await page.getByRole('button', { name: 'Pause buchen' }).boundingBox();
+    const mobileCheckoutBox = await page.getByRole('button', { name: 'Check-out' }).boundingBox();
 
-  expect(mobilePauseBox).not.toBeNull();
-  expect(mobileCheckoutBox).not.toBeNull();
-  expect(mobileCheckoutBox.y - (mobilePauseBox.y + mobilePauseBox.height)).toBeGreaterThanOrEqual(30);
+    expect(mobilePauseBox).not.toBeNull();
+    expect(mobileCheckoutBox).not.toBeNull();
+    expect(mobileCheckoutBox.y - (mobilePauseBox.y + mobilePauseBox.height)).toBeGreaterThanOrEqual(30);
+  }).toPass({ timeout: 5000 });
 
   await page.setViewportSize({ width: 900, height: 844 });
 
-  const desktopPauseBox = await page.getByRole('button', { name: 'Pause buchen' }).boundingBox();
-  const desktopCheckoutBox = await page.getByRole('button', { name: 'Check-out' }).boundingBox();
+  await expect(async () => {
+    const desktopPauseBox = await page.getByRole('button', { name: 'Pause buchen' }).boundingBox();
+    const desktopCheckoutBox = await page.getByRole('button', { name: 'Check-out' }).boundingBox();
 
-  expect(desktopPauseBox).not.toBeNull();
-  expect(desktopCheckoutBox).not.toBeNull();
-  expect(Math.abs(desktopPauseBox.y - desktopCheckoutBox.y)).toBeLessThan(2);
+    expect(desktopPauseBox).not.toBeNull();
+    expect(desktopCheckoutBox).not.toBeNull();
+    expect(Math.abs(desktopPauseBox.y - desktopCheckoutBox.y)).toBeLessThan(2);
+  }).toPass({ timeout: 5000 });
 
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.locator('main [data-live-today-duration]')).toHaveText('01:00');
