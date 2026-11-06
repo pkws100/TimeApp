@@ -30,6 +30,7 @@ use App\Domain\Projects\ProjectService;
 use App\Domain\Projects\ProjectAccessService;
 use App\Domain\Projects\ProjectDispatchService;
 use App\Domain\Projects\ProjectMaterialService;
+use App\Domain\Projects\ProjectWorkReportService;
 use App\Domain\Push\PushNotificationService;
 use App\Domain\Push\PushSettingsService;
 use App\Domain\Push\PushSubscriptionService;
@@ -82,6 +83,7 @@ use App\Http\Controllers\AppApiController;
 use App\Http\Controllers\AppController;
 use App\Http\Controllers\AppProjectAttachmentController;
 use App\Http\Controllers\AppProjectMaterialController;
+use App\Http\Controllers\AppProjectWorkReportController;
 use App\Http\Controllers\AppPushController;
 use App\Http\Controllers\AppTimeAccountController;
 use App\Http\Controllers\AppTimesheetAttachmentController;
@@ -219,6 +221,7 @@ $pushSettingsService = new PushSettingsService($connection, $config->get('push',
 $pushSubscriptionService = new PushSubscriptionService($connection);
 $pushNotificationService = new PushNotificationService($connection, $pushSettingsService, $pushSubscriptionService);
 $projectMaterialService = new ProjectMaterialService($connection, $projectAccessService);
+$projectWorkReportService = new ProjectWorkReportService($connection, $projectAccessService);
 $projectDispatchService = new ProjectDispatchService(
     $connection,
     $projectAccessService,
@@ -299,6 +302,7 @@ $appTimesheetAttachmentController = new AppTimesheetAttachmentController($fileSe
 $appTimesheetSignatureController = new AppTimesheetSignatureController($timesheetSignatureService, $authService);
 $appProjectAttachmentController = new AppProjectAttachmentController($fileService, $authService, $projectAccessService);
 $appProjectMaterialController = new AppProjectMaterialController($projectMaterialService, $authService);
+$appProjectWorkReportController = new AppProjectWorkReportController($projectWorkReportService, $authService);
 $terminalApiController = new TerminalApiController($terminalService, $terminalPunchService, $terminalTrustBundleService);
 $adminTimesheetAttachmentController = new AdminTimesheetAttachmentController($fileService, $authService, $csrfService);
 $adminTimesheetSignatureController = new AdminTimesheetSignatureController($timesheetSignatureService, $authService, $csrfService);
@@ -321,7 +325,8 @@ $adminManagementController = new AdminManagementController(
     $terminalService,
     $projectMaterialService,
     $projectDispatchService,
-    $projectAccessService
+    $projectAccessService,
+    $projectWorkReportService
 );
 $adminBookingController = new AdminBookingController(
     $adminView,
@@ -480,6 +485,7 @@ $router->delete('/admin/project-files/{id}', $admin([$adminManagementController,
 $router->post('/admin/project-files/{id}/status', $admin([$adminManagementController, 'projectFileStatus'], 'files.manage'));
 $router->post('/admin/projects/{id}/dispatch', $admin([$adminManagementController, 'projectDispatch'], 'projects.manage'));
 $router->post('/admin/project-materials/{id}/archive', $admin([$adminManagementController, 'projectMaterialArchive'], 'projects.manage'));
+$router->post('/admin/project-work-reports/{id}/archive', $admin([$adminManagementController, 'projectWorkReportArchive'], 'projects.manage'));
 $router->get('/admin/users', $admin([$adminManagementController, 'users'], 'users.manage'));
 $router->get('/admin/users/create', $admin([$adminManagementController, 'userCreate'], 'users.manage'));
 $router->get('/admin/users/{id}/edit', $admin([$adminManagementController, 'userEdit'], 'users.manage'));
@@ -569,6 +575,9 @@ $router->get('/api/v1/app/project-files/{id}/download', $api([$appProjectAttachm
 $router->get('/api/v1/app/projects/{id}/materials', $api([$appProjectMaterialController, 'index']));
 $router->post('/api/v1/app/projects/{id}/materials', $api([$appProjectMaterialController, 'store']));
 $router->delete('/api/v1/app/project-materials/{id}', $api([$appProjectMaterialController, 'archive']));
+$router->get('/api/v1/app/projects/{id}/work-reports', $api([$appProjectWorkReportController, 'index']));
+$router->post('/api/v1/app/projects/{id}/work-reports', $api([$appProjectWorkReportController, 'store']));
+$router->delete('/api/v1/app/project-work-reports/{id}', $api([$appProjectWorkReportController, 'archive']));
 $router->get('/api/v1/app/timesheets/{id}/files', $api([$appTimesheetAttachmentController, 'index'], 'timesheets.view_own'));
 $router->post('/api/v1/app/timesheets/{id}/files', $api([$appTimesheetAttachmentController, 'upload'], 'timesheets.create'));
 $router->get('/api/v1/app/timesheet-files/{id}/download', $api([$appTimesheetAttachmentController, 'download'], 'timesheets.view_own'));

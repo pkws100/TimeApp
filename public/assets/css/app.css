@@ -7,6 +7,7 @@
     --app-ink: #14213d;
     --app-muted: #5b6473;
     --app-surface: rgba(255, 255, 255, 0.92);
+    --app-feedback-surface: #fff;
     --app-surface-soft: rgba(255, 255, 255, 0.72);
     --app-line: #d8d3c9;
     --app-accent: #d97706;
@@ -28,6 +29,7 @@ html[data-theme="dark"] {
     --app-ink: #edf2ff;
     --app-muted: #97a4bf;
     --app-surface: rgba(14, 24, 42, 0.92);
+    --app-feedback-surface: #0e182a;
     --app-surface-soft: rgba(10, 18, 33, 0.72);
     --app-line: rgba(151, 164, 191, 0.22);
     --app-shadow: 0 18px 40px rgba(0, 0, 0, 0.34);
@@ -213,6 +215,18 @@ button,
 
 .app-topbar-status.is-absence .app-topbar-status__label {
     color: #1d4ed8;
+}
+
+html[data-theme="dark"] .app-topbar-status.is-working .app-topbar-status__label {
+    color: #7ce6a4;
+}
+
+html[data-theme="dark"] .app-topbar-status.is-paused .app-topbar-status__label {
+    color: #fcd34d;
+}
+
+html[data-theme="dark"] .app-topbar-status.is-missing .app-topbar-status__label {
+    color: #fca5a5;
 }
 
 .app-layout {
@@ -473,12 +487,12 @@ html[data-theme="dark"] .app-topbar-status.is-absence .app-topbar-status__label 
 
 .app-feedback-success {
     border-color: rgba(22, 101, 52, 0.2);
-    background: linear-gradient(180deg, rgba(22, 101, 52, 0.08) 0%, rgba(255, 255, 255, 0.96) 100%);
+    background: linear-gradient(180deg, rgba(22, 101, 52, 0.08) 0%, rgba(255, 255, 255, 0.96) 100%), var(--app-feedback-surface);
 }
 
 .app-feedback-error {
     border-color: rgba(153, 27, 27, 0.2);
-    background: linear-gradient(180deg, rgba(153, 27, 27, 0.08) 0%, rgba(255, 255, 255, 0.96) 100%);
+    background: linear-gradient(180deg, rgba(153, 27, 27, 0.08) 0%, rgba(255, 255, 255, 0.96) 100%), var(--app-feedback-surface);
 }
 
 .app-feedback-close {
@@ -936,11 +950,11 @@ html[data-theme="dark"] .app-drawer {
 }
 
 html[data-theme="dark"] .app-feedback-success {
-    background: linear-gradient(180deg, rgba(22, 101, 52, 0.16) 0%, rgba(13, 22, 38, 0.96) 100%);
+    background: linear-gradient(180deg, rgba(22, 101, 52, 0.16) 0%, rgba(13, 22, 38, 0.96) 100%), var(--app-feedback-surface);
 }
 
 html[data-theme="dark"] .app-feedback-error {
-    background: linear-gradient(180deg, rgba(153, 27, 27, 0.18) 0%, rgba(13, 22, 38, 0.96) 100%);
+    background: linear-gradient(180deg, rgba(153, 27, 27, 0.18) 0%, rgba(13, 22, 38, 0.96) 100%), var(--app-feedback-surface);
 }
 
 html[data-theme="dark"] .app-projectless-card {
@@ -1417,6 +1431,11 @@ html[data-theme="dark"] .app-work-instructions {
 
 .app-material-row p {
     margin: 0.35rem 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.app-work-report-text {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
 }

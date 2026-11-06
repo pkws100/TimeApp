@@ -8,6 +8,7 @@
 ## Kernentitaeten
 - `permissions`, `roles`, `role_permissions`, `users`, `user_roles`
 - `projects`, `project_memberships`, `project_files`, `project_material_entries`
+- `project_work_reports`
 - `project_dispatches`, `project_dispatch_recipients`
 - `assets`, `asset_assignments`, `asset_files`
 - `company_settings`
@@ -22,6 +23,8 @@
 - Projekte koennen ueber `customer_signature_required` eine Kundenunterschrift beim Abschluss nahelegen und ueber `customer_signature_name` einen Standardnamen fuer die Vorbelegung liefern.
 - Projektauftraege speichern ihre Klartext-Arbeitsanweisung direkt in `projects.work_instructions`. `work_instructions_updated_at` und `work_instructions_updated_by_user_id` werden nur bei einer tatsaechlichen Inhaltsaenderung fortgeschrieben.
 - `project_material_entries` dokumentiert projektbezogen Mengen, Einheiten, Datum und Notizen. Eintraege werden mit Ersteller- und Archivierungsmetadaten nachvollziehbar gehalten und nicht physisch geloescht; daraus entstehen keine Lager- oder Rechnungsbewegungen.
+- `project_work_reports` haelt eigenstaendige Klartext-Arbeitsberichte mit Projekt, Arbeitsdatum, Session-Ersteller und Archivierungsmetadaten. Eine eindeutige Kombination aus Ersteller und `request_id` verhindert Doppelberichte bei Wiederholung; Projekt, Datum und normalisierter Text muessen zum urspruenglichen Speicherauftrag passen. Archivierte Berichte werden durch Wiederholung nicht reaktiviert. Zugriffe folgen der Projektberechtigung; Korrekturen erfolgen durch Archivieren und Neuanlage.
+- Arbeitsbericht-Entwuerfe inklusive letzter Versand-ID liegen getrennt je Benutzer und Projekt in IndexedDB. Es gibt keinen automatischen Offline-Versand; Abmeldung und bestaetigter Projekt-Rechteentzug bereinigen die zugehoerigen lokalen Berichte und Entwuerfe.
 - Jeder bewusste manuelle Auftrags-Push erzeugt einen Snapshot in `project_dispatches`. `project_dispatch_recipients` haelt pro Empfaenger den Status und die aggregierten Geraeteergebnisse; erneute Sendungen sind eigene Dispatches.
 - `company_settings` haelt genau ein globales Firmenprofil fuer Reports, E-Mails, Rechtstexte und spaetere Frontend-Policies.
 - Firmenlogo sowie AGB-/Datenschutz-PDFs werden nur per Dateireferenz gespeichert und physisch geschuetzt abgelegt.

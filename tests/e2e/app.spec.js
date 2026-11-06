@@ -3,6 +3,13 @@ const { test, expect } = require('@playwright/test');
 
 test.use({ serviceWorkers: 'block' });
 
+// Project pages also load the independent work-report list.
+test.beforeEach(async ({ page }) => {
+  await page.route('**/api/v1/app/projects/*/work-reports', (route) => route.fulfill({
+    contentType: 'application/json', body: JSON.stringify({ ok: true, data: [] })
+  }));
+});
+
 async function mockProjectOrderApp(page, options = {}) {
   const projects = options.projects || [
     {

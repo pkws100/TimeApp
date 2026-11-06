@@ -16,6 +16,7 @@ use App\Domain\Projects\ProjectAccessService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Projects\ProjectDispatchService;
 use App\Domain\Projects\ProjectMaterialService;
+use App\Domain\Projects\ProjectWorkReportService;
 use App\Domain\Terminals\NfcTagService;
 use App\Domain\Terminals\TerminalService;
 use App\Domain\Timesheets\AdminBookingService;
@@ -51,7 +52,8 @@ final class AdminManagementController
         private ?TerminalService $terminalService = null,
         private ?ProjectMaterialService $projectMaterialService = null,
         private ?ProjectDispatchService $projectDispatchService = null,
-        private ?ProjectAccessService $projectAccessService = null
+        private ?ProjectAccessService $projectAccessService = null,
+        private ?ProjectWorkReportService $projectWorkReportService = null
     ) {
     }
 
@@ -130,6 +132,7 @@ final class AdminManagementController
             : [];
         $dispatchHistory = $this->projectDispatchService?->history($actor, (int) $project['id']) ?? [];
         $materials = $this->projectMaterialService?->list($actor, (int) $project['id'], 'all') ?? [];
+        $workReports = $this->projectWorkReportService?->list($actor, (int) $project['id'], 'all') ?? [];
 
         if ($this->authService->hasPermission('timesheets.view')) {
             $bookingFilters = $this->bookingService->normalizeFilters($request->query(), (int) $project['id']);
@@ -151,6 +154,7 @@ final class AdminManagementController
                 $this->canViewProjectFiles()
             )
             . $this->renderProjectDispatchSection($project, $dispatchRecipients, $dispatchHistory)
+            . $this->renderProjectWorkReportSection($workReports)
             . $this->renderProjectMaterialSection($project, $materials)
             . $this->renderProjectBookingsSection($project, $bookings, $allProjects, $bookingUsers, $request);
 
@@ -400,6 +404,30 @@ final class AdminManagementController
             error_log('Project material archive failed: ' . $exception->getMessage());
 
             return Response::redirect('/admin/projects?error=material-archive');
+        }
+    }
+
+    public function projectWorkReportArchive(Request $request, array $params): Response
+    {
+        if (!$this->csrfService->isValid((string) $request->input('csrf_token', ''))) {
+            return Response::redirect('/admin/projects?error=csrf');
+        }
+
+        if (!$this->projectWorkReportService instanceof ProjectWorkReportService) {
+            return Response::redirect('/admin/projects?error=work-report-unavailable');
+        }
+
+        try {
+            $result = $this->projectWorkReportService->archive(
+                $this->authService->currentUser() ?? [],
+                (int) ($params['id'] ?? 0)
+            );
+
+            return Response::redirect('/admin/projects/' . (int) $result['project_id'] . '/edit?notice=work-report-archived#project-work-reports');
+        } catch (RuntimeException|InvalidArgumentException $exception) {
+            error_log('Project work report archive failed: ' . $exception->getMessage());
+
+            return Response::redirect('/admin/projects?error=work-report-archive');
         }
     }
 
@@ -1973,6 +2001,47 @@ HTML;
 HTML;
     }
 
+    private function renderProjectWorkReportSection(array $reports): string
+    {
+        $csrfToken = $this->e($this->csrfService->token());
+        $rows = '';
+
+        foreach ($reports as $report) {
+            $isDeleted = (bool) ($report['is_deleted'] ?? false);
+            $archive = $isDeleted
+                ? '<span class="muted">Archiviert</span>'
+                : '<form method="post" action="/admin/project-work-reports/' . (int) $report['id'] . '/archive" class="inline-form" onsubmit="return confirm(\'Arbeitsbericht wirklich archivieren?\')">'
+                    . '<input type="hidden" name="csrf_token" value="' . $csrfToken . '">'
+                    . '<button type="submit">Archivieren</button></form>';
+            $rows .= '<tr>'
+                . '<td>' . $this->e((string) ($report['work_date'] ?? '')) . '</td>'
+                . '<td>' . $this->e((string) ($report['created_by_name'] ?? 'Unbekannt')) . '</td>'
+                . '<td>' . nl2br($this->e((string) ($report['description'] ?? ''))) . '</td>'
+                . '<td>' . $this->e((string) ($report['created_at'] ?? '')) . '</td>'
+                . '<td>' . ($isDeleted ? '<span class="badge warn">Archiviert</span>' : '<span class="badge ok">Aktiv</span>') . '</td>'
+                . '<td>' . $archive . '</td>'
+                . '</tr>';
+        }
+
+        if ($rows === '') {
+            $rows = '<tr><td colspan="6" class="table-empty">Noch keine Arbeitsberichte fuer dieses Projekt.</td></tr>';
+        }
+
+        return <<<HTML
+<section class="card stack" id="project-work-reports">
+    <div class="section-toolbar">
+        <div><h2>Ausgeführte Arbeiten</h2><p class="muted">Arbeitsberichte aus der Mitarbeiter-App mit Datum und Mitarbeiter. Korrekturen erfolgen durch Archivieren und einen neuen Bericht.</p></div>
+    </div>
+    <div class="table-scroll">
+        <table>
+            <thead><tr><th>Datum</th><th>Mitarbeiter</th><th>Ausgeführte Arbeiten</th><th>Erfasst am</th><th>Status</th><th>Aktion</th></tr></thead>
+            <tbody>{$rows}</tbody>
+        </table>
+    </div>
+</section>
+HTML;
+    }
+
     private function renderProjectMaterialSection(array $project, array $materials): string
     {
         $projectId = (int) ($project['id'] ?? 0);
@@ -2184,6 +2253,8 @@ HTML;
                 'validation' => 'Bitte pruefen Sie die Eingaben im Formular.',
                 'booking-validation' => 'Die Buchung konnte nicht nacherfasst werden. Bitte Mitarbeiter, Datum, Zeiten und Begruendung pruefen.',
                 'csrf' => 'Die Sicherheitspruefung ist abgelaufen. Bitte erneut versuchen.',
+                'work-report-unavailable' => 'Die Arbeitsberichte sind derzeit nicht verfuegbar.',
+                'work-report-archive' => 'Der Arbeitsbericht konnte nicht archiviert werden.',
                 'terminal-tags' => 'Die NFC-Tags konnten nicht zugeordnet werden. Bitte Auswahl und Benutzerstatus pruefen.',
                 default => 'Beim Vorgang ist ein Fehler aufgetreten.',
             };
@@ -2213,6 +2284,7 @@ HTML;
             'file-archived' => 'Datei erfolgreich archiviert.',
             'project-dispatched' => 'Der bewusste Projektversand wurde verarbeitet.',
             'material-archived' => 'Materialeintrag erfolgreich archiviert.',
+            'work-report-archived' => 'Arbeitsbericht erfolgreich archiviert.',
             'terminal-tags-assigned' => max(0, (int) $request->query('count', 0)) . ' NFC-Tag(s) wurden offen zugeordnet.',
             default => 'Vorgang erfolgreich ausgefuehrt.',
         };

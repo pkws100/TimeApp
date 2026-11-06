@@ -62,6 +62,13 @@
         projectMaterialsOffline: false,
         projectMaterialsUpdatedAt: {},
         projectMaterialDrafts: {},
+        projectWorkReports: {},
+        projectWorkReportsLoading: false,
+        projectWorkReportsOffline: false,
+        projectWorkReportDrafts: {},
+        projectWorkReportDraftLoads: {},
+        projectWorkReportStorageErrors: {},
+        projectWorkReportSavingProjectId: null,
         timesheetList: [],
         timesheetDays: [],
         timesheetSummary: null,
@@ -97,6 +104,12 @@
     let clientIdCounter = 0;
     let timesheetListRequestCounter = 0;
     let projectMaterialRequestCounter = 0;
+    let projectFilesRequestCounter = 0;
+    let projectWorkReportRequestCounter = 0;
+    let onlineDataRequestCounter = 0;
+    let activeOnlineDataLoad = null;
+    let sessionGeneration = 0;
+    let workReportStorageQueue = Promise.resolve();
     let revalidateTimer = null;
     let deferredInstallPrompt = null;
 
@@ -380,6 +393,50 @@
         return 'project_materials_v1_user_' + currentSessionUserCachePart() + '_project_' + String(projectId);
     }
 
+    function projectWorkReportCacheKey(projectId, userPart) {
+        return 'project_work_reports_v1_user_' + (userPart || currentSessionUserCachePart()) + '_project_' + projectId;
+    }
+
+    function projectWorkReportDraftKey(projectId, userPart) {
+        return 'project_work_report_draft_v1_user_' + (userPart || currentSessionUserCachePart()) + '_project_' + projectId;
+    }
+
+    function sessionContext() {
+        return { generation: sessionGeneration, userPart: currentSessionUserCachePart() };
+    }
+
+    function isCurrentSessionContext(context) {
+        return context.generation === sessionGeneration && context.userPart === currentSessionUserCachePart();
+    }
+
+    function queueWorkReportStorage(operation) {
+        const result = workReportStorageQueue.then(operation);
+        workReportStorageQueue = result.catch(function () {});
+        return result;
+    }
+
+    async function clearProjectWorkReportStorage(userPart, projectId, keepDrafts) {
+        try {
+            await queueWorkReportStorage(async function () {
+                if (typeof projectId !== 'undefined') {
+                    if (!keepDrafts) await cacheDelete(projectWorkReportDraftKey(projectId, userPart));
+                    await cacheDelete(projectWorkReportCacheKey(projectId, userPart));
+                    return;
+                }
+                const prefixes = [projectWorkReportCacheKey('', userPart)];
+                if (!keepDrafts) prefixes.push(projectWorkReportDraftKey('', userPart));
+                const keys = await cacheKeys();
+                for (const key of keys) {
+                    if (prefixes.some((prefix) => String(key).startsWith(prefix))) {
+                        await cacheDelete(key);
+                    }
+                }
+            });
+        } catch (error) {
+            console.warn('Arbeitsbericht-Entwuerfe konnten nicht bereinigt werden.', error);
+        }
+    }
+
     function currentSessionUserCachePart() {
         const user = state.session && state.session.user ? state.session.user : null;
         const userId = user && typeof user.id !== 'undefined' ? Number(user.id) : 0;
@@ -414,6 +471,15 @@
     }
 
     function clearSessionScopedState() {
+        sessionGeneration += 1;
+        onlineDataRequestCounter += 1;
+        activeOnlineDataLoad = null;
+        projectMaterialRequestCounter += 1;
+        projectFilesRequestCounter += 1;
+        projectWorkReportRequestCounter += 1;
+        state.pendingAction = null;
+        state.uploadingTimesheetId = null;
+        state.uploadingProjectId = null;
         state.today = null;
         state.projects = [];
         state.projectFiles = {};
@@ -426,6 +492,13 @@
         state.projectMaterialsOffline = false;
         state.projectMaterialsUpdatedAt = {};
         state.projectMaterialDrafts = {};
+        state.projectWorkReports = {};
+        state.projectWorkReportsLoading = false;
+        state.projectWorkReportsOffline = false;
+        state.projectWorkReportDrafts = {};
+        state.projectWorkReportDraftLoads = {};
+        state.projectWorkReportStorageErrors = {};
+        state.projectWorkReportSavingProjectId = null;
         state.timesheetList = [];
         state.timesheetDays = [];
         state.timesheetSummary = null;
@@ -656,6 +729,11 @@
         }
 
         const previousTodayCacheKey = todayCacheKey();
+        const previousUserPart = currentSessionUserCachePart();
+        captureProjectWorkReportDraft();
+        const unsentDrafts = Object.entries(state.projectWorkReportDrafts)
+            .filter(([projectId, draft]) => draft.ready && isCurrentAuthorizedProject(projectId))
+            .map(([projectId, draft]) => [projectId, JSON.parse(JSON.stringify(draft))]);
         state.sessionExpiredHandled = true;
         state.session = { authenticated: false, user: null };
         state.menuOpen = false;
@@ -664,9 +742,26 @@
         state.uploadingTimesheetId = null;
         state.uploadingProjectId = null;
         clearSessionScopedState();
+        const expiredContext = sessionContext();
+        render();
 
-        await cacheSet('session', state.session);
+        try {
+            // Preserve the last local input even if generation invalidation skipped queued writes.
+            await queueWorkReportStorage(async function () {
+                for (const [projectId, draft] of unsentDrafts) {
+                    await cacheSet(projectWorkReportDraftKey(projectId, previousUserPart), draft);
+                }
+            });
+        } catch (error) {
+            message = 'Ihre Sitzung ist abgelaufen. Der letzte Arbeitsbericht-Entwurf konnte nicht auf diesem Gerät gesichert werden. Bitte prüfen Sie den Gerätespeicher.';
+        }
+        if (!isCurrentSessionContext(expiredContext)) return;
+        // Session expiry requires reauthentication, not destruction of unsent work.
+        await clearProjectWorkReportStorage(previousUserPart, undefined, true);
+        if (!isCurrentSessionContext(expiredContext)) return;
+        await cacheSet('session', state.session, () => isCurrentSessionContext(expiredContext));
         await cacheDelete(previousTodayCacheKey);
+        if (!isCurrentSessionContext(expiredContext)) return;
 
         state.route = '/app/login';
 
@@ -690,8 +785,13 @@
     }
 
     async function apiJson(url, options) {
+        const context = sessionContext();
         const response = await fetch(url, options || {});
         const payload = await parseJsonResponse(response);
+
+        if (!isCurrentSessionContext(context)) {
+            throw new SessionExpiredError('Diese Anfrage gehoert zu einer vorherigen Sitzung.');
+        }
 
         if (response.status === 401) {
             const message = payload.message || payload.error || 'Bitte erneut anmelden.';
@@ -746,14 +846,16 @@
         });
     }
 
-    async function cacheSet(key, value) {
+    async function cacheSet(key, value, guard) {
         const database = await db();
+        if (guard && !guard()) return;
 
         await new Promise((resolve, reject) => {
             const tx = database.transaction('cache', 'readwrite');
             tx.objectStore('cache').put({ key, value, updatedAt: Date.now() });
             tx.oncomplete = resolve;
             tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error || new Error('Lokaler Speichervorgang wurde abgebrochen.'));
         });
     }
 
@@ -776,6 +878,7 @@
             tx.objectStore('cache').delete(key);
             tx.oncomplete = resolve;
             tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error || new Error('Lokaler Speichervorgang wurde abgebrochen.'));
         });
     }
 
@@ -1310,6 +1413,12 @@
         }
 
         if (explicitSelection === null) {
+            return;
+        }
+
+        if (routeName() === '/projektwahl' && !availableProjectIds.includes(explicitSelection)) {
+            // A revoked selection must not silently turn into a different job site.
+            setProjectSelectionState(null);
             return;
         }
 
@@ -2233,6 +2342,7 @@
 
         const items = state.projectMaterials[String(projectId)] || [];
         const draft = projectMaterialDraft(projectId);
+        const locked = isBusy('project_material') ? ' readonly' : '';
         const currentUserId = Number(state.session && state.session.user ? state.session.user.id || 0 : 0);
         const canManage = hasPermission('projects.manage');
         const loading = state.projectMaterialsLoading ? '<div class="app-empty">Materialeintraege werden geladen ...</div>' : '';
@@ -2264,15 +2374,63 @@
             + loading
             + rows
             + '<form id="projectMaterialForm" class="app-grid">'
-            + '<label class="app-field"><span>Material / Artikel</span><input id="projectMaterialDescription" name="description" maxlength="255" required value="' + escapeHtml(draft.description) + '"></label>'
-            + '<label class="app-field"><span>Menge</span><input id="projectMaterialQuantity" name="quantity" inputmode="decimal" required value="' + escapeHtml(draft.quantity) + '"></label>'
-            + '<label class="app-field"><span>Einheit</span><input id="projectMaterialUnit" name="unit" maxlength="40" list="projectMaterialUnits" value="' + escapeHtml(draft.unit) + '"></label>'
+            + '<label class="app-field"><span>Material / Artikel</span><input id="projectMaterialDescription" name="description" maxlength="255" required' + locked + ' value="' + escapeHtml(draft.description) + '"></label>'
+            + '<label class="app-field"><span>Menge</span><input id="projectMaterialQuantity" name="quantity" inputmode="decimal" required' + locked + ' value="' + escapeHtml(draft.quantity) + '"></label>'
+            + '<label class="app-field"><span>Einheit</span><input id="projectMaterialUnit" name="unit" maxlength="40" list="projectMaterialUnits"' + locked + ' value="' + escapeHtml(draft.unit) + '"></label>'
             + '<datalist id="projectMaterialUnits"><option value="Stueck"></option><option value="m"></option><option value="m²"></option><option value="kg"></option><option value="g"></option><option value="l"></option><option value="ml"></option><option value="Rolle"></option><option value="Packung"></option><option value="Satz"></option></datalist>'
-            + '<label class="app-field"><span>Bemerkung</span><textarea id="projectMaterialNote" name="note" maxlength="2000" rows="3">' + escapeHtml(draft.note) + '</textarea></label>'
-            + '<label class="app-field"><span>Datum</span><input id="projectMaterialDate" name="work_date" type="date" max="' + escapeHtml(state.today && state.today.today ? state.today.today : '') + '" required value="' + escapeHtml(draft.work_date) + '"></label>'
+            + '<label class="app-field"><span>Bemerkung</span><textarea id="projectMaterialNote" name="note" maxlength="2000" rows="3"' + locked + '>' + escapeHtml(draft.note) + '</textarea></label>'
+            + '<label class="app-field"><span>Datum</span><input id="projectMaterialDate" name="work_date" type="date" max="' + escapeHtml(state.today && state.today.today ? state.today.today : '') + '" required' + locked + ' value="' + escapeHtml(draft.work_date) + '"></label>'
             + '<button type="submit" ' + (isBusy('project_material') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('project_material', 'Material speichern')) + '</button>'
             + '</form>'
             + '</section>';
+    }
+
+    function berlinToday() {
+        return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Berlin' }).format(new Date());
+    }
+
+    function projectWorkReportDraft(projectId) {
+        const key = String(projectId);
+        if (!state.projectWorkReportDrafts[key]) {
+            state.projectWorkReportDrafts[key] = { description: '', work_date: berlinToday(), revision: 0, ready: false, submission: null };
+        }
+        return state.projectWorkReportDrafts[key];
+    }
+
+    function projectWorkReportSectionMarkup() {
+        const projectId = projectFileContextId();
+        if (projectId === null) {
+            return '<section class="app-card app-grid" id="projectWorkReportSection"><h2>Ausgeführte Arbeiten</h2><p>Bitte zuerst ein Projekt auswählen.</p></section>';
+        }
+        const draft = projectWorkReportDraft(projectId);
+        const busy = isBusy('project_work_report') && state.projectWorkReportSavingProjectId === projectId;
+        const items = state.projectWorkReports[String(projectId)] || [];
+        const error = state.projectWorkReportStorageErrors[String(projectId)];
+        const userId = Number(currentSessionUserCachePart());
+        const rows = items.map(function (item) {
+            return '<article class="app-info-row app-material-row" data-render-key="work-report-' + Number(item.id) + '">'
+                + '<div><strong>' + escapeHtml(formatDate(item.work_date)) + '</strong>'
+                + '<small class="muted">' + escapeHtml(item.created_by_name || 'Unbekannt') + ' · Erfasst: ' + escapeHtml(formatDateTimeStamp(item.created_at)) + '</small>'
+                + '<p class="app-work-report-text">' + escapeHtml(item.description) + '</p></div>'
+                + (hasPermission('projects.manage') || Number(item.created_by_user_id) === userId
+                    ? '<button type="button" class="app-button-secondary" data-archive-project-work-report="' + Number(item.id) + '" ' + (busy ? 'disabled' : '') + '>Archivieren</button>' : '')
+                + '</article>';
+        }).join('');
+        return '<section class="app-card app-grid" id="projectWorkReportSection" data-project-id="' + projectId + '">'
+            + '<div><p class="muted">Arbeitsberichte</p><h2>Ausgeführte Arbeiten</h2><p>Dokumentieren Sie die Arbeiten per Texteingabe oder über die Diktierfunktion Ihrer Handy-Tastatur.</p></div>'
+            + '<div id="projectWorkReportStatus">'
+            + (state.projectWorkReportsOffline || !state.online ? '<div class="app-empty">Offline – zuletzt geladene Berichte. Ihr Entwurf bleibt auf diesem Gerät erhalten. Bitte mit Verbindung erneut speichern.</div>' : '')
+            + (error ? '<div class="app-empty" role="alert">' + escapeHtml(error) + '</div>' : '')
+            + '</div>'
+            + '<form id="projectWorkReportForm" class="app-grid" data-project-id="' + projectId + '">'
+            + '<label class="app-field"><span>Datum</span><input id="projectWorkReportDate" name="work_date" type="date" required max="' + escapeHtml(berlinToday()) + '" value="' + escapeHtml(draft.work_date) + '" ' + (!draft.ready || busy ? 'disabled' : '') + '></label>'
+            + '<label class="app-field"><span>Ausgeführte Arbeiten</span><textarea id="projectWorkReportDescription" name="description" maxlength="10000" rows="6" required ' + (!draft.ready || busy ? 'readonly' : '') + '>' + escapeHtml(draft.description) + '</textarea></label>'
+            + '<button type="submit" ' + (!draft.ready || state.pendingAction ? 'disabled' : '') + '>' + escapeHtml(busy ? 'Wird gespeichert …' : 'Arbeitsbericht speichern') + '</button>'
+            + '</form>'
+            + '<div id="projectWorkReportList">'
+            + (state.projectWorkReportsLoading ? '<p class="muted">Arbeitsberichte werden geladen …</p>' : '')
+            + (rows || '<div class="app-empty">Noch keine Arbeitsberichte für dieses Projekt.</div>')
+            + '</div></section>';
     }
 
     function historySummaryMetric(title, value, note) {
@@ -3044,6 +3202,7 @@
             + projectDetailsSectionMarkup()
             + (showAppWidget('show_project_files') ? projectAttachmentSectionMarkup() : '')
             + projectMaterialSectionMarkup()
+            + projectWorkReportSectionMarkup()
         );
     }
 
@@ -3597,11 +3756,226 @@
         return options.join('');
     }
 
+    let renderedAppContext = null;
+    const interactionBindings = new WeakMap();
+    const projectFormsToReset = new Set();
+
+    function bindInteraction(element, type, handler) {
+        let bindings = interactionBindings.get(element);
+
+        if (!bindings) {
+            bindings = new Map();
+            interactionBindings.set(element, bindings);
+        }
+
+        if (bindings.has(type)) {
+            element.removeEventListener(type, bindings.get(type));
+        }
+
+        bindings.set(type, handler);
+        element.addEventListener(type, handler);
+    }
+
+    function resetProjectFormAfterSave(formId) {
+        projectFormsToReset.add(formId);
+    }
+
+    function projectRenderNodeKey(node) {
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+            return null;
+        }
+
+        if (node.id) {
+            return '#' + node.id;
+        }
+
+        if (node.hasAttribute('data-render-key')) {
+            return node.tagName + ':' + node.getAttribute('data-render-key');
+        }
+
+        if (node.matches('h1, h2')) {
+            return node.tagName + ':' + node.textContent;
+        }
+
+        if (node.tagName === 'SECTION' || node.tagName === 'LABEL') {
+            const control = node.querySelector('form[id], input[id], textarea[id], select[id]');
+            const heading = node.querySelector('h1, h2');
+
+            if (control || heading) {
+                return node.tagName + ':' + (control ? control.id : heading.textContent);
+            }
+        }
+
+        if (node.matches('.app-material-row')) {
+            const archive = node.querySelector('[data-archive-project-material]');
+
+            if (archive) {
+                return 'material:' + archive.getAttribute('data-archive-project-material');
+            }
+        }
+
+        return null;
+    }
+
+    function compatibleProjectRenderNodes(current, desired) {
+        if (current.nodeType !== desired.nodeType || current.nodeName !== desired.nodeName) {
+            return false;
+        }
+
+        const currentKey = projectRenderNodeKey(current);
+        const desiredKey = projectRenderNodeKey(desired);
+
+        if (currentKey !== null || desiredKey !== null) {
+            return currentKey === desiredKey;
+        }
+
+        return current.nodeType !== Node.ELEMENT_NODE
+            || current.getAttribute('class') === desired.getAttribute('class');
+    }
+
+    function patchProjectRenderNode(current, desired, resetForm) {
+        if (current.nodeType !== Node.ELEMENT_NODE) {
+            if (current.nodeValue !== desired.nodeValue) {
+                current.nodeValue = desired.nodeValue;
+            }
+            return;
+        }
+
+        // Canvas dimensions and data flags belong to the drawing controller.
+        if (current.tagName === 'CANVAS') {
+            return;
+        }
+
+        resetForm = resetForm || (current.tagName === 'FORM' && projectFormsToReset.has(current.id));
+        const field = current.matches('input, textarea, select');
+        const preservedAttribute = (name) => (field && ['value', 'checked', 'selected'].includes(name))
+            || (current.tagName === 'TEXTAREA' && name === 'style' && !desired.hasAttribute('style'));
+
+        Array.from(current.attributes).forEach((attribute) => {
+            if (!desired.hasAttribute(attribute.name) && !preservedAttribute(attribute.name)) {
+                current.removeAttribute(attribute.name);
+            }
+        });
+        Array.from(desired.attributes).forEach((attribute) => {
+            if (!preservedAttribute(attribute.name) && current.getAttribute(attribute.name) !== attribute.value) {
+                current.setAttribute(attribute.name, attribute.value);
+            }
+        });
+
+        if (field && resetForm && current.type !== 'file') {
+            current.value = desired.value;
+            if (current.matches('input[type="checkbox"], input[type="radio"]')) {
+                current.checked = desired.checked;
+            }
+        }
+
+        // Changing textarea children also changes its editing/default-value state.
+        // Keep the original node untouched while typing, dictating or composing.
+        if (!current.matches('textarea, input')) {
+            patchProjectRenderChildren(current, desired, resetForm);
+        }
+    }
+
+    function patchProjectRenderChildren(parent, desiredParent, resetForm) {
+        const desiredChildren = Array.from(desiredParent.childNodes);
+        const available = new Set(parent.childNodes);
+        let cursor = parent.firstChild;
+
+        desiredChildren.forEach((desired, index) => {
+            const current = Array.from(available).find((node) => compatibleProjectRenderNodes(node, desired));
+
+            if (!current) {
+                parent.insertBefore(desired.cloneNode(true), cursor);
+                return;
+            }
+
+            // Remove obsolete siblings before a retained form instead of moving
+            // its subtree: detaching a focused input interrupts mobile dictation.
+            while (cursor && cursor !== current
+                && !desiredChildren.slice(index + 1).some((node) => compatibleProjectRenderNodes(cursor, node))) {
+                const obsolete = cursor;
+                cursor = cursor.nextSibling;
+                available.delete(obsolete);
+                obsolete.remove();
+            }
+
+            if (current !== cursor) {
+                parent.insertBefore(current, cursor);
+            }
+
+            available.delete(current);
+            patchProjectRenderNode(current, desired, resetForm);
+            cursor = current.nextSibling;
+        });
+
+        available.forEach((node) => node.remove());
+    }
+
+    function captureAppScrollPosition() {
+        const header = root.querySelector('.app-topbar');
+        const visibleTop = header ? Math.max(0, header.getBoundingClientRect().bottom) : 0;
+        const candidates = Array.from(root.querySelectorAll('main [id], main [data-render-key], main h1, main h2'));
+        const intersectsViewport = (node) => {
+            const bounds = node.getBoundingClientRect();
+            return bounds.height > 0 && bounds.bottom > visibleTop && bounds.top < window.innerHeight;
+        };
+        const active = document.activeElement;
+        // A tall field may start above the sticky header while its editing area
+        // is still visible. Anchor that actual field before considering siblings.
+        const anchor = active && candidates.includes(active) && intersectsViewport(active)
+            ? active
+            : candidates.find((node) => {
+                const bounds = node.getBoundingClientRect();
+                return bounds.height > 0 && bounds.top >= visibleTop && bounds.top < window.innerHeight;
+            }) || candidates.find(intersectsViewport);
+
+        return {
+            x: window.scrollX,
+            y: window.scrollY,
+            anchor,
+            anchorKey: anchor ? projectRenderNodeKey(anchor) : null,
+            anchorTop: anchor ? anchor.getBoundingClientRect().top : null
+        };
+    }
+
+    function restoreAppScrollPosition(position) {
+        let anchor = position.anchor;
+
+        if (anchor && !anchor.isConnected && position.anchorKey) {
+            anchor = Array.from(root.querySelectorAll('main [id], main [data-render-key], main h1, main h2'))
+                .find((node) => projectRenderNodeKey(node) === position.anchorKey);
+        }
+
+        const y = anchor && anchor.isConnected
+            ? window.scrollY + anchor.getBoundingClientRect().top - position.anchorTop
+            : position.y;
+
+        window.scrollTo(position.x, y);
+    }
+
     function render() {
         if (!root) {
             return;
         }
 
+        const context = {
+            authenticated: !!state.session.authenticated,
+            userId: currentSessionUserCachePart(),
+            generation: sessionGeneration,
+            route: routeName(),
+            projectId: routeName() === '/projektwahl' ? projectFileContextId() : null,
+            signatureId: state.signatureDialog && state.signatureDialog.timesheet ? state.signatureDialog.timesheet.id : null
+        };
+        const samePage = renderedAppContext
+            && renderedAppContext.authenticated === context.authenticated
+            && renderedAppContext.userId === context.userId
+            && renderedAppContext.generation === context.generation
+            && renderedAppContext.route === context.route;
+        const keepProjectDom = samePage && context.authenticated
+            && context.route === '/projektwahl'
+            && renderedAppContext.projectId === context.projectId
+            && renderedAppContext.signatureId === context.signatureId;
+        const scrollPosition = samePage ? captureAppScrollPosition() : null;
         const restoreTimeAccountDetailsFocus = document.activeElement
             && document.activeElement.id === 'timeAccountDetailsSummary';
         let html = '';
@@ -3624,16 +3998,30 @@
             html = todayView();
         }
 
-        root.innerHTML = html;
+        if (keepProjectDom) {
+            const desired = document.createElement('template');
+            desired.innerHTML = html;
+            patchProjectRenderChildren(root, desired.content, false);
+        } else {
+            root.innerHTML = html;
+        }
+
+        projectFormsToReset.clear();
+        renderedAppContext = context;
         syncThemeControls();
         bindInteractions();
+        bindProjectWorkReportInteractions();
 
         if (restoreTimeAccountDetailsFocus) {
             const summary = document.getElementById('timeAccountDetailsSummary');
 
             if (summary) {
-                summary.focus();
+                summary.focus({ preventScroll: true });
             }
+        }
+
+        if (scrollPosition) {
+            restoreAppScrollPosition(scrollPosition);
         }
     }
 
@@ -3641,7 +4029,7 @@
         const timeAccountDetails = document.querySelector('.app-account-details');
 
         if (timeAccountDetails) {
-            timeAccountDetails.addEventListener('toggle', function () {
+            bindInteraction(timeAccountDetails, 'toggle', function () {
                 state.vacationDetailsOpen = timeAccountDetails.open;
             });
         }
@@ -3649,7 +4037,7 @@
         const menuToggle = document.getElementById('appMenuToggle');
 
         if (menuToggle) {
-            menuToggle.addEventListener('click', function () {
+            bindInteraction(menuToggle, 'click', function () {
                 state.menuOpen = !state.menuOpen;
                 render();
             });
@@ -3658,7 +4046,7 @@
         const menuClose = document.getElementById('appMenuClose');
 
         if (menuClose) {
-            menuClose.addEventListener('click', function () {
+            bindInteraction(menuClose, 'click', function () {
                 state.menuOpen = false;
                 render();
             });
@@ -3667,7 +4055,7 @@
         const menuCloseButton = document.getElementById('appMenuCloseButton');
 
         if (menuCloseButton) {
-            menuCloseButton.addEventListener('click', function () {
+            bindInteraction(menuCloseButton, 'click', function () {
                 state.menuOpen = false;
                 render();
             });
@@ -3676,7 +4064,7 @@
         const feedbackClose = document.getElementById('feedbackClose');
 
         if (feedbackClose) {
-            feedbackClose.addEventListener('click', function () {
+            bindInteraction(feedbackClose, 'click', function () {
                 clearFeedback();
             });
         }
@@ -3684,7 +4072,7 @@
         const dialogCancel = document.getElementById('dialogCancel');
 
         if (dialogCancel) {
-            dialogCancel.addEventListener('click', function () {
+            bindInteraction(dialogCancel, 'click', function () {
                 closeDialog();
             });
         }
@@ -3692,7 +4080,7 @@
         const dialogConfirmPrimary = document.getElementById('dialogConfirmPrimary');
 
         if (dialogConfirmPrimary) {
-            dialogConfirmPrimary.addEventListener('click', async function () {
+            bindInteraction(dialogConfirmPrimary, 'click', async function () {
                 if (state.dialog && state.dialog.type === 'confirm-check-in-without-project') {
                     const note = requireProjectlessNote('projectlessDialogNote');
 
@@ -3711,7 +4099,7 @@
         const dialogConfirmSecondary = document.getElementById('dialogConfirmSecondary');
 
         if (dialogConfirmSecondary) {
-            dialogConfirmSecondary.addEventListener('click', function () {
+            bindInteraction(dialogConfirmSecondary, 'click', function () {
                 if (state.dialog && state.dialog.type === 'signature-prompt') {
                     state.dialog = null;
                     render();
@@ -3724,7 +4112,7 @@
         }
 
         document.querySelectorAll('[data-pause-minutes]').forEach((button) => {
-            button.addEventListener('click', async function () {
+            bindInteraction(button, 'click', async function () {
                 const minutes = Number(button.getAttribute('data-pause-minutes') || '0');
 
                 state.dialog = null;
@@ -3735,7 +4123,7 @@
         const loginForm = document.getElementById('loginForm');
 
         if (loginForm) {
-            loginForm.addEventListener('submit', async function (event) {
+            bindInteraction(loginForm, 'submit', async function (event) {
                 event.preventDefault();
                 const formData = new FormData(loginForm);
                 const response = await fetch('/api/v1/auth/login', {
@@ -3759,6 +4147,7 @@
                     return;
                 }
 
+                clearSessionScopedState();
                 state.session = payload.session || { authenticated: true, user: payload.user || null };
                 state.sessionExpiredHandled = false;
                 await cacheSet('session', state.session);
@@ -3780,7 +4169,7 @@
         }
 
         document.querySelectorAll('[data-action]').forEach((button) => {
-            button.addEventListener('click', async function () {
+            bindInteraction(button, 'click', async function () {
                 await enqueueAction(button.getAttribute('data-action'));
             });
         });
@@ -3788,7 +4177,7 @@
         const upsertButton = document.getElementById('saveUpsert');
 
         if (upsertButton) {
-            upsertButton.addEventListener('click', async function () {
+            bindInteraction(upsertButton, 'click', async function () {
                 await enqueueAction('upsert');
             });
         }
@@ -3796,7 +4185,7 @@
         const projectSelection = document.getElementById('saveProjectSelection');
 
         if (projectSelection) {
-            projectSelection.addEventListener('click', async function () {
+            bindInteraction(projectSelection, 'click', async function () {
                 await handleProjectSelection();
             });
         }
@@ -3804,7 +4193,7 @@
         const returnToProjectlessEntry = document.getElementById('returnToProjectlessEntry');
 
         if (returnToProjectlessEntry) {
-            returnToProjectlessEntry.addEventListener('click', function () {
+            bindInteraction(returnToProjectlessEntry, 'click', function () {
                 setProjectSelectionState(null);
                 navigate('/app/heute');
             });
@@ -3813,7 +4202,7 @@
         const startWithoutProject = document.getElementById('startWithoutProject');
 
         if (startWithoutProject) {
-            startWithoutProject.addEventListener('click', async function () {
+            bindInteraction(startWithoutProject, 'click', async function () {
                 const note = requireProjectlessNote('projectlessProjectNote');
 
                 if (note === null) {
@@ -3833,7 +4222,7 @@
         const projectSelect = document.getElementById('projectSelect');
 
         if (projectSelect) {
-            projectSelect.addEventListener('change', function () {
+            bindInteraction(projectSelect, 'change', function () {
                 setProjectSelectionState(selectedProjectId());
                 state.projectFilesLoading = false;
                 state.projectMaterialsLoading = false;
@@ -3848,16 +4237,16 @@
         const projectMaterialForm = document.getElementById('projectMaterialForm');
 
         if (projectMaterialForm) {
-            projectMaterialForm.addEventListener('input', captureProjectMaterialDraft);
-            projectMaterialForm.addEventListener('change', captureProjectMaterialDraft);
-            projectMaterialForm.addEventListener('submit', async function (event) {
+            bindInteraction(projectMaterialForm, 'input', captureProjectMaterialDraft);
+            bindInteraction(projectMaterialForm, 'change', captureProjectMaterialDraft);
+            bindInteraction(projectMaterialForm, 'submit', async function (event) {
                 event.preventDefault();
                 await submitProjectMaterial();
             });
         }
 
         document.querySelectorAll('[data-archive-project-material]').forEach((button) => {
-            button.addEventListener('click', async function () {
+            bindInteraction(button, 'click', async function () {
                 const materialId = Number(button.getAttribute('data-archive-project-material') || '0');
 
                 if (materialId > 0 && window.confirm('Diesen Materialeintrag archivieren?')) {
@@ -3867,7 +4256,7 @@
         });
 
         document.querySelectorAll('[data-timesheet-scope]').forEach((button) => {
-            button.addEventListener('click', function () {
+            bindInteraction(button, 'click', function () {
                 storeTimesheetFilterScope(button.getAttribute('data-timesheet-scope') || 'project');
                 render();
                 loadTimesheetList(false);
@@ -3877,7 +4266,7 @@
         const timesheetProjectFilter = document.getElementById('timesheetProjectFilter');
 
         if (timesheetProjectFilter) {
-            timesheetProjectFilter.addEventListener('change', function () {
+            bindInteraction(timesheetProjectFilter, 'change', function () {
                 const projectId = timesheetProjectFilter.value ? Number(timesheetProjectFilter.value) : null;
 
                 storeTimesheetFilterProjectId(projectId);
@@ -3889,7 +4278,7 @@
         const timesheetEntryTypeFilter = document.getElementById('timesheetEntryTypeFilter');
 
         if (timesheetEntryTypeFilter) {
-            timesheetEntryTypeFilter.addEventListener('change', function () {
+            bindInteraction(timesheetEntryTypeFilter, 'change', function () {
                 storeTimesheetFilterEntryType(timesheetEntryTypeFilter.value || 'all');
                 render();
                 loadTimesheetList(false);
@@ -3897,7 +4286,7 @@
         }
 
         document.querySelectorAll('[data-history-month]').forEach((button) => {
-            button.addEventListener('click', function () {
+            bindInteraction(button, 'click', function () {
                 storeTimesheetFilterMonth(button.getAttribute('data-history-month') || currentMonthValue());
                 render();
                 loadTimesheetList(false);
@@ -3905,7 +4294,7 @@
         });
 
         document.querySelectorAll('[data-timesheet-signature-open]').forEach((button) => {
-            button.addEventListener('click', async function () {
+            bindInteraction(button, 'click', async function () {
                 const id = Number(button.getAttribute('data-timesheet-signature-open') || '0');
                 const item = Array.isArray(state.timesheetList)
                     ? state.timesheetList.find((entry) => Number(entry.id || 0) === id)
@@ -3922,7 +4311,7 @@
         const signatureCancel = document.getElementById('signatureCancel');
 
         if (signatureCancel) {
-            signatureCancel.addEventListener('click', function () {
+            bindInteraction(signatureCancel, 'click', function () {
                 closeSignatureDialog();
             });
         }
@@ -3930,7 +4319,7 @@
         const signatureReset = document.getElementById('signatureReset');
 
         if (signatureReset) {
-            signatureReset.addEventListener('click', function () {
+            bindInteraction(signatureReset, 'click', function () {
                 resetSignatureCanvas();
             });
         }
@@ -3938,21 +4327,24 @@
         const signatureSave = document.getElementById('signatureSave');
 
         if (signatureSave) {
-            signatureSave.addEventListener('click', async function () {
+            bindInteraction(signatureSave, 'click', async function () {
                 await saveSignatureDialog();
             });
         }
 
-        setupSignatureCanvas();
+        const signatureCanvas = document.getElementById('signatureCanvas');
+        if (!signatureCanvas || signatureCanvas.dataset.ready !== '1') {
+            setupSignatureCanvas();
+        }
 
         if (!window.__timeappSignatureResizeBound) {
             window.__timeappSignatureResizeBound = true;
-            window.addEventListener('resize', function () {
+            bindInteraction(window, 'resize', function () {
                 if (state.signatureDialog) {
                     resizeSignatureCanvasPreservingDrawing();
                 }
             });
-            window.addEventListener('orientationchange', function () {
+            bindInteraction(window, 'orientationchange', function () {
                 if (state.signatureDialog) {
                     window.setTimeout(resizeSignatureCanvasPreservingDrawing, 200);
                 }
@@ -3960,7 +4352,7 @@
         }
 
         document.querySelectorAll('[data-theme-mode-button]').forEach((button) => {
-            button.addEventListener('click', function () {
+            bindInteraction(button, 'click', function () {
                 setTheme(button.getAttribute('data-theme-mode-button') || 'system');
             });
         });
@@ -3968,7 +4360,7 @@
         const geoAckSelect = document.getElementById('geoAckSelect');
 
         if (geoAckSelect) {
-            geoAckSelect.addEventListener('change', function () {
+            bindInteraction(geoAckSelect, 'change', function () {
                 try {
                     window.localStorage.setItem(GEO_ACK_KEY, geoAckSelect.value === '1' ? '1' : '0');
                     showFeedback('success', geoAckSelect.value === '1' ? 'GEO-Zustimmung wurde lokal gespeichert.' : 'GEO-Zustimmung wurde lokal zurueckgenommen.');
@@ -3982,7 +4374,7 @@
         const enablePushButton = document.getElementById('enablePushButton');
 
         if (enablePushButton) {
-            enablePushButton.addEventListener('click', async function () {
+            bindInteraction(enablePushButton, 'click', async function () {
                 await enablePushNotifications();
             });
         }
@@ -3990,7 +4382,7 @@
         const reloadPushButton = document.getElementById('reloadPushButton');
 
         if (reloadPushButton) {
-            reloadPushButton.addEventListener('click', async function () {
+            bindInteraction(reloadPushButton, 'click', async function () {
                 await loadPushStatus(false);
             });
         }
@@ -3998,13 +4390,13 @@
         const testPushButton = document.getElementById('testPushButton');
 
         if (testPushButton) {
-            testPushButton.addEventListener('click', async function () {
+            bindInteraction(testPushButton, 'click', async function () {
                 await testPushNotification();
             });
         }
 
         document.querySelectorAll('[data-disable-push-device]').forEach((button) => {
-            button.addEventListener('click', async function () {
+            bindInteraction(button, 'click', async function () {
                 await disablePushDevice(Number(button.getAttribute('data-disable-push-device') || '0'));
             });
         });
@@ -4012,7 +4404,7 @@
         const installAppButton = document.getElementById('installAppButton');
 
         if (installAppButton) {
-            installAppButton.addEventListener('click', async function () {
+            bindInteraction(installAppButton, 'click', async function () {
                 await promptAppInstall();
             });
         }
@@ -4020,7 +4412,7 @@
         const vacationPreviewButton = document.getElementById('vacationPreviewButton');
 
         if (vacationPreviewButton) {
-            vacationPreviewButton.addEventListener('click', async function () {
+            bindInteraction(vacationPreviewButton, 'click', async function () {
                 await previewVacationRequest();
             });
         }
@@ -4028,7 +4420,7 @@
         const vacationRequestForm = document.getElementById('vacationRequestForm');
 
         if (vacationRequestForm) {
-            vacationRequestForm.addEventListener('submit', async function (event) {
+            bindInteraction(vacationRequestForm, 'submit', async function (event) {
                 event.preventDefault();
                 await submitVacationRequest();
             });
@@ -4038,7 +4430,7 @@
             const input = document.getElementById(inputId);
 
             if (input) {
-                input.addEventListener('input', function () {
+                bindInteraction(input, 'input', function () {
                     state.vacationPreview = null;
                     state.vacationForm = vacationFormPayload();
                 });
@@ -4046,7 +4438,7 @@
         });
 
         document.querySelectorAll('[data-cancel-vacation-request]').forEach((button) => {
-            button.addEventListener('click', async function () {
+            bindInteraction(button, 'click', async function () {
                 await cancelVacationRequest(Number(button.getAttribute('data-cancel-vacation-request') || '0'));
             });
         });
@@ -4054,26 +4446,48 @@
         const logoutButton = document.getElementById('logoutButton');
 
         if (logoutButton) {
-            logoutButton.addEventListener('click', async function () {
+            bindInteraction(logoutButton, 'click', async function () {
                 const previousTodayCacheKey = todayCacheKey();
-                await fetch('/api/v1/auth/logout', { method: 'POST' });
+                const previousUserPart = currentSessionUserCachePart();
+                clearSessionScopedState();
                 state.session = { authenticated: false, user: null };
                 state.sessionExpiredHandled = false;
                 state.menuOpen = false;
+                state.dialog = null;
                 resetProjectSelectionState();
-                clearSessionScopedState();
-                await cacheSet('session', state.session);
-                await cacheDelete(previousTodayCacheKey);
-                await cacheDelete('today');
-                showFeedback('success', 'Sie wurden erfolgreich abgemeldet.');
                 navigate('/app/login');
+                const logoutContext = sessionContext();
+                const cleanup = (async function () {
+                    await clearProjectWorkReportStorage(previousUserPart);
+                    if (!isCurrentSessionContext(logoutContext)) return;
+                    await cacheSet('session', { authenticated: false, user: null }, () => isCurrentSessionContext(logoutContext));
+                    await cacheDelete(previousTodayCacheKey);
+                    await cacheDelete('today');
+                }());
+                let serverConfirmed = false;
+                try {
+                    serverConfirmed = (await fetch('/api/v1/auth/logout', { method: 'POST' })).ok;
+                } catch (error) {
+                    console.warn('Server-Abmeldung konnte nicht bestaetigt werden.', error);
+                }
+                try {
+                    await cleanup;
+                } catch (error) {
+                    if (isCurrentSessionContext(logoutContext)) showFeedback('error', 'Sie sind lokal abgemeldet. Lokale Daten konnten nicht vollständig bereinigt werden. Bitte prüfen Sie den Gerätespeicher.', true);
+                    return;
+                }
+                if (isCurrentSessionContext(logoutContext)) {
+                    showFeedback(serverConfirmed ? 'success' : 'error', serverConfirmed
+                        ? 'Sie wurden erfolgreich abgemeldet.'
+                        : 'Sie sind lokal abgemeldet. Die Abmeldung am Server konnte ohne Verbindung nicht bestätigt werden.', !serverConfirmed);
+                }
             });
         }
 
         const uploadAttachmentButton = document.getElementById('uploadAttachmentButton');
 
         if (uploadAttachmentButton) {
-            uploadAttachmentButton.addEventListener('click', async function () {
+            bindInteraction(uploadAttachmentButton, 'click', async function () {
                 await uploadTimesheetAttachment();
             });
         }
@@ -4081,7 +4495,7 @@
         const uploadProjectAttachmentButton = document.getElementById('uploadProjectAttachmentButton');
 
         if (uploadProjectAttachmentButton) {
-            uploadProjectAttachmentButton.addEventListener('click', async function () {
+            bindInteraction(uploadProjectAttachmentButton, 'click', async function () {
                 await uploadProjectAttachment();
             });
         }
@@ -4090,13 +4504,13 @@
         bindExclusiveFileInputs(['projectCameraInput', 'projectAttachmentInput']);
 
         document.querySelectorAll('[data-delete-attachment]').forEach((button) => {
-            button.addEventListener('click', async function () {
+            bindInteraction(button, 'click', async function () {
                 await archiveTimesheetAttachment(Number(button.getAttribute('data-delete-attachment') || '0'));
             });
         });
 
         document.querySelectorAll('[data-app-link]').forEach((link) => {
-            link.addEventListener('click', function (event) {
+            bindInteraction(link, 'click', function (event) {
                 event.preventDefault();
                 navigate(link.getAttribute('href'));
             });
@@ -4111,21 +4525,23 @@
                 return;
             }
 
-            input.addEventListener('pointerdown', function () {
+            bindInteraction(input, 'pointerdown', function () {
                 markFileSelectionGuard(30000);
             });
 
-            input.addEventListener('click', function () {
+            bindInteraction(input, 'click', function () {
                 markFileSelectionGuard(30000);
             });
 
-            input.addEventListener('change', function () {
+            bindInteraction(input, 'change', function () {
                 if (!input.files || input.files.length === 0) {
                     clearFileSelectionGuardIfIdle();
                     return;
                 }
 
-                markFileSelectionGuard(10 * 60 * 1000);
+                // Project refreshes retain the actual FileList input. Only an
+                // open native picker needs the short revalidation guard there.
+                markFileSelectionGuard(routeName() === '/projektwahl' ? 0 : 10 * 60 * 1000);
 
                 inputIds
                     .filter((otherId) => otherId !== inputId)
@@ -4152,10 +4568,12 @@
     }
 
     async function applyCachedData() {
+        const context = sessionContext();
         const cachedToday = await cacheGet(todayCacheKey());
         const cachedCompany = await cacheGet('company');
+        if (!isCurrentSessionContext(context)) return;
 
-        if (cachedToday) {
+        if (cachedToday && !state.today) {
             state.today = cachedToday;
             syncTodayStateStatus();
             normalizeProjectSelectionAgainstToday();
@@ -4205,13 +4623,39 @@
         }
     }
 
-    async function loadOnlineData(force) {
+    function loadOnlineData(force) {
+        // Callers that synchronize afterwards must await the same current settings,
+        // rather than returning early because another refresh superseded theirs.
+        const route = routeName();
+        const projectId = route === '/projektwahl' ? projectFileContextId() : null;
+        if (activeOnlineDataLoad && isCurrentSessionContext(activeOnlineDataLoad.context)
+            && activeOnlineDataLoad.route === route && activeOnlineDataLoad.projectId === projectId) {
+            return activeOnlineDataLoad.promise;
+        }
+        const entry = { context: sessionContext(), route, projectId, promise: null };
+        entry.promise = performOnlineDataLoad(force).then(function (result) {
+            if (isCurrentSessionContext(entry.context) && activeOnlineDataLoad && activeOnlineDataLoad !== entry) {
+                return activeOnlineDataLoad.promise;
+            }
+            return result;
+        }).finally(function () {
+            if (activeOnlineDataLoad === entry) activeOnlineDataLoad = null;
+        });
+        activeOnlineDataLoad = entry;
+        return entry.promise;
+    }
+
+    async function performOnlineDataLoad(force) {
         if (!state.session.authenticated) {
             return;
         }
+        const context = sessionContext();
+        const requestId = ++onlineDataRequestCounter;
+        const current = () => isCurrentSessionContext(context) && requestId === onlineDataRequestCounter;
 
         if (!navigator.onLine) {
             await applyCachedData();
+            if (!current()) return;
             if (routeName() === '/urlaub') {
                 await loadVacationData(force);
             }
@@ -4229,6 +4673,7 @@
                 publicJson('/api/v1/settings/company'),
                 apiJson('/api/v1/app/push/status')
             ]);
+            if (!current()) return;
 
             const failures = [dayResult, companyResult, pushResult].filter((result) => result.status === 'rejected');
 
@@ -4241,16 +4686,23 @@
                 syncTodayStateStatus();
                 normalizeProjectSelectionAgainstToday();
                 normalizeTimesheetFilterAgainstToday();
+                // Apply confirmed access changes before waiting for local storage.
+                render();
                 await pruneUnauthorizedProjectState();
+                if (!current()) return;
                 await cacheProjectOrders(activeProjects(), false);
+                if (!current()) return;
 
                 try {
                     await cacheSet(todayCacheKey(), state.today);
                 } catch (cacheError) {
                     console.warn('Today-Cache konnte nicht geschrieben werden.', cacheError);
+                    // Never let an offline restart authorize projects using a superseded snapshot.
+                    await cacheDelete(todayCacheKey());
                 }
-            } else if (failures.length > 0) {
+            } else if (failures.length > 0 && !state.today) {
                 const cachedToday = await cacheGet(todayCacheKey());
+                if (!current()) return;
 
                 if (cachedToday) {
                     state.today = cachedToday;
@@ -4264,6 +4716,7 @@
             }
 
             if (companyResult.status === 'fulfilled') {
+                if (!current()) return;
                 state.company = companyResult.value.data;
 
                 try {
@@ -4274,6 +4727,7 @@
             }
 
             if (pushResult.status === 'fulfilled') {
+                if (!current()) return;
                 state.push = pushResult.value.data || null;
             }
 
@@ -4298,7 +4752,7 @@
                 }
             }
         } catch (error) {
-            if (isSessionExpiredError(error)) {
+            if (!current() || isSessionExpiredError(error)) {
                 return;
             }
 
@@ -4310,7 +4764,9 @@
             }
         }
 
+        if (!current()) return;
         state.pendingCount = (await queueAll()).length;
+        if (!current()) return;
         render();
     }
 
@@ -4671,9 +5127,13 @@
         }
 
         const cacheKey = projectFilesCacheKey(projectId);
+        const context = sessionContext();
+        const requestId = ++projectFilesRequestCounter;
+        const current = () => isCurrentSessionContext(context) && requestId === projectFilesRequestCounter && isCurrentAuthorizedProject(projectId) && projectId === projectFileContextId();
 
         if (!navigator.onLine) {
             const cached = await cacheGet(cacheKey);
+            if (!current()) return;
             state.projectFiles[String(projectId)] = cached && Array.isArray(cached.items) ? cached.items : [];
             state.projectFilesLoading = false;
             render();
@@ -4685,6 +5145,7 @@
 
         try {
             const payload = await apiJson('/api/v1/app/projects/' + projectId + '/files');
+            if (!current()) return;
 
             const files = Array.isArray(payload.data) ? payload.data : [];
             state.projectFiles[String(projectId)] = files;
@@ -4694,7 +5155,7 @@
                 cached_at: new Date().toISOString()
             });
         } catch (error) {
-            if (isSessionExpiredError(error)) {
+            if (!current() || isSessionExpiredError(error)) {
                 return;
             }
 
@@ -4705,14 +5166,17 @@
             }
 
             const cached = await cacheGet(cacheKey);
+            if (!current()) return;
             state.projectFiles[String(projectId)] = cached && Array.isArray(cached.items) ? cached.items : [];
 
             if (!force) {
                 showFeedback('error', friendlyMessage(error.message, 'Projektdateien konnten nicht geladen werden.'));
             }
         } finally {
-            state.projectFilesLoading = false;
-            render();
+            if (current()) {
+                state.projectFilesLoading = false;
+                render();
+            }
         }
     }
 
@@ -4776,12 +5240,14 @@
         }
 
         const requestId = ++projectMaterialRequestCounter;
+        const context = sessionContext();
+        const current = () => isCurrentSessionContext(context) && requestId === projectMaterialRequestCounter && isCurrentAuthorizedProject(projectId) && projectId === projectFileContextId();
         const cacheKey = projectMaterialsCacheKey(projectId);
 
         if (!navigator.onLine) {
             const cached = await cacheGet(cacheKey);
 
-            if (requestId !== projectMaterialRequestCounter || projectId !== projectFileContextId()) {
+            if (!current()) {
                 return;
             }
 
@@ -4802,7 +5268,7 @@
             const items = Array.isArray(payload.data) ? payload.data : [];
             const cachedAt = new Date().toISOString();
 
-            if (requestId !== projectMaterialRequestCounter || projectId !== projectFileContextId()) {
+            if (!current()) {
                 return;
             }
 
@@ -4814,7 +5280,7 @@
                 cached_at: cachedAt
             });
         } catch (error) {
-            if (isSessionExpiredError(error)) {
+            if (!current() || isSessionExpiredError(error)) {
                 return;
             }
 
@@ -4828,7 +5294,7 @@
 
             const cached = await cacheGet(cacheKey);
 
-            if (requestId !== projectMaterialRequestCounter || projectId !== projectFileContextId()) {
+            if (!current()) {
                 return;
             }
 
@@ -4840,8 +5306,237 @@
                 showFeedback('error', friendlyMessage(error.message, 'Materialeintraege konnten nicht geladen werden.'));
             }
         } finally {
-            if (requestId === projectMaterialRequestCounter) {
+            if (current()) {
                 state.projectMaterialsLoading = false;
+                render();
+            }
+        }
+    }
+
+    async function loadProjectWorkReportDraft(projectId) {
+        const key = String(projectId);
+        const draft = projectWorkReportDraft(projectId);
+        if (draft.ready) return;
+        if (state.projectWorkReportDraftLoads[key]) return state.projectWorkReportDraftLoads[key];
+        const context = sessionContext();
+        const revision = draft.revision;
+        const promise = (async function () {
+            try {
+                const cached = await queueWorkReportStorage(() => cacheGet(projectWorkReportDraftKey(projectId, context.userPart)));
+                if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return;
+                if (draft.revision === revision && cached && typeof cached.description === 'string') {
+                    draft.description = cached.description.slice(0, 10000);
+                    draft.work_date = typeof cached.work_date === 'string' ? cached.work_date : berlinToday();
+                    draft.submission = cached.submission || null;
+                }
+            } catch (error) {
+                if (isCurrentSessionContext(context)) {
+                    state.projectWorkReportStorageErrors[key] = 'Der lokale Entwurf konnte nicht geladen werden. Bitte prüfen Sie den Gerätespeicher.';
+                }
+            } finally {
+                if (isCurrentSessionContext(context) && isCurrentAuthorizedProject(projectId)) {
+                    draft.ready = true;
+                    if (projectFileContextId() === projectId) resetProjectFormAfterSave('projectWorkReportForm');
+                    render();
+                }
+            }
+        }());
+        state.projectWorkReportDraftLoads[key] = promise;
+        return promise;
+    }
+
+    function captureProjectWorkReportDraft() {
+        const form = document.getElementById('projectWorkReportForm');
+        const projectId = Number(form && form.dataset.projectId);
+        if (!isCurrentAuthorizedProject(projectId)) return null;
+        const draft = projectWorkReportDraft(projectId);
+        if (!draft.ready || (isBusy('project_work_report') && state.projectWorkReportSavingProjectId === projectId)) return draft;
+        const description = form.querySelector('[name="description"]').value;
+        const workDate = form.querySelector('[name="work_date"]').value;
+        if (draft.description !== description || draft.work_date !== workDate) {
+            draft.description = description;
+            draft.work_date = workDate;
+            draft.revision += 1;
+            // A changed report is a new explicit save; unchanged retries keep their persisted ID.
+            draft.submission = null;
+        }
+        return draft;
+    }
+
+    async function persistProjectWorkReportDraft(projectId, draft) {
+        const context = sessionContext();
+        const snapshot = JSON.parse(JSON.stringify(draft));
+        try {
+            await queueWorkReportStorage(async function () {
+                if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return;
+                await cacheSet(projectWorkReportDraftKey(projectId, context.userPart), snapshot);
+            });
+            if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return false;
+            if (state.projectWorkReportStorageErrors[String(projectId)]) {
+                delete state.projectWorkReportStorageErrors[String(projectId)];
+                render();
+            }
+            return true;
+        } catch (error) {
+            if (isCurrentSessionContext(context) && isCurrentAuthorizedProject(projectId)) {
+                state.projectWorkReportStorageErrors[String(projectId)] = 'Ihr Entwurf konnte auf diesem Gerät nicht gesichert werden. Bitte prüfen Sie den verfügbaren Speicher. Die Eingabe bleibt geöffnet.';
+                render();
+            }
+            return false;
+        }
+    }
+
+    function bindProjectWorkReportInteractions() {
+        const form = document.getElementById('projectWorkReportForm');
+        if (form) {
+            const capture = function () {
+                const draft = captureProjectWorkReportDraft();
+                if (draft) persistProjectWorkReportDraft(Number(form.dataset.projectId), draft);
+            };
+            bindInteraction(form, 'input', capture);
+            bindInteraction(form, 'change', capture);
+            bindInteraction(form, 'submit', function (event) {
+                event.preventDefault();
+                submitProjectWorkReport();
+            });
+        }
+        document.querySelectorAll('[data-archive-project-work-report]').forEach(function (button) {
+            bindInteraction(button, 'click', function () {
+                archiveProjectWorkReport(Number(button.dataset.archiveProjectWorkReport));
+            });
+        });
+    }
+
+    async function submitProjectWorkReport() {
+        if (state.pendingAction) return;
+        const form = document.getElementById('projectWorkReportForm');
+        const projectId = Number(form && form.dataset.projectId);
+        const context = sessionContext();
+        const draft = captureProjectWorkReportDraft();
+        if (!draft || !draft.ready || !isCurrentAuthorizedProject(projectId)) return;
+        if (!navigator.onLine) {
+            await persistProjectWorkReportDraft(projectId, draft);
+            if (isCurrentSessionContext(context)) showFeedback('error', 'Arbeitsberichte können nur online gespeichert werden. Ihr Entwurf bleibt erhalten.', true);
+            return;
+        }
+        if (!draft.submission) {
+            let requestId = createClientId();
+            if (!/^[0-9a-f-]{36}$/i.test(requestId)) {
+                requestId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (character) {
+                    const random = Math.floor(Math.random() * 16);
+                    return (character === 'x' ? random : (random & 3) | 8).toString(16);
+                });
+            }
+            draft.submission = { request_id: requestId, work_date: draft.work_date, description: draft.description };
+        }
+        const submission = { ...draft.submission };
+        const revision = draft.revision;
+        state.pendingAction = 'project_work_report';
+        state.projectWorkReportSavingProjectId = projectId;
+        render();
+        try {
+            if (!await persistProjectWorkReportDraft(projectId, draft)) return;
+            if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return;
+            const payload = await apiJson('/api/v1/app/projects/' + projectId + '/work-reports', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(submission)
+            });
+            if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return;
+            if (state.projectWorkReportDrafts[String(projectId)] === draft && draft.revision === revision) {
+                await queueWorkReportStorage(() => cacheDelete(projectWorkReportDraftKey(projectId, context.userPart)));
+                if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return;
+                state.projectWorkReportDrafts[String(projectId)] = { description: '', work_date: berlinToday(), revision: 0, ready: true, submission: null };
+                if (projectFileContextId() === projectId) resetProjectFormAfterSave('projectWorkReportForm');
+            }
+            if (projectFileContextId() === projectId) {
+                showFeedback('success', payload.data && payload.data.is_deleted ? 'Dieser Arbeitsbericht wurde bereits gespeichert und archiviert.' : 'Arbeitsbericht wurde gespeichert.');
+                await loadProjectWorkReports(projectId, true);
+            }
+        } catch (error) {
+            if (!isSessionExpiredError(error) && isCurrentSessionContext(context) && isCurrentAuthorizedProject(projectId)) {
+                if (error.httpStatus === 403) {
+                    await denyProjectAccess(projectId, context);
+                    showFeedback('error', 'Dieses Projekt ist nicht mehr für Sie freigegeben.', true);
+                    return;
+                }
+                showFeedback('error', friendlyMessage(error.message, 'Arbeitsbericht konnte nicht gespeichert werden. Ihr Entwurf bleibt erhalten.'), true);
+            }
+        } finally {
+            if (isCurrentSessionContext(context)) {
+                state.pendingAction = null;
+                state.projectWorkReportSavingProjectId = null;
+                render();
+            }
+        }
+    }
+
+    async function archiveProjectWorkReport(reportId) {
+        const projectId = projectFileContextId();
+        if (state.pendingAction || !reportId || !isCurrentAuthorizedProject(projectId)) return;
+        if (!navigator.onLine) {
+            showFeedback('error', 'Arbeitsberichte können nur online archiviert werden.');
+            return;
+        }
+        if (!window.confirm('Arbeitsbericht wirklich archivieren?')) return;
+        const context = sessionContext();
+        state.pendingAction = 'project_work_report';
+        state.projectWorkReportSavingProjectId = projectId;
+        render();
+        try {
+            await apiJson('/api/v1/app/project-work-reports/' + reportId, { method: 'DELETE' });
+            if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return;
+            showFeedback('success', 'Arbeitsbericht wurde archiviert.');
+            await loadProjectWorkReports(projectId, true);
+        } catch (error) {
+            if (!isSessionExpiredError(error) && isCurrentSessionContext(context)) showFeedback('error', error.message, true);
+        } finally {
+            if (isCurrentSessionContext(context)) {
+                state.pendingAction = null;
+                state.projectWorkReportSavingProjectId = null;
+                render();
+            }
+        }
+    }
+
+    async function loadProjectWorkReports(projectId, force) {
+        const context = sessionContext();
+        const requestId = ++projectWorkReportRequestCounter;
+        const current = () => isCurrentSessionContext(context) && requestId === projectWorkReportRequestCounter && isCurrentAuthorizedProject(projectId) && projectFileContextId() === projectId;
+        const cacheKey = projectWorkReportCacheKey(projectId, context.userPart);
+        if (!current()) return;
+        state.projectWorkReportsLoading = true;
+        render();
+        try {
+            if (!navigator.onLine) throw new Error('offline');
+            const payload = await apiJson('/api/v1/app/projects/' + projectId + '/work-reports');
+            if (!current()) return;
+            const items = Array.isArray(payload.data) ? payload.data : [];
+            state.projectWorkReports[String(projectId)] = items;
+            state.projectWorkReportsOffline = false;
+            try {
+                await queueWorkReportStorage(async function () {
+                    if (current()) await cacheSet(cacheKey, { items });
+                });
+            } catch (cacheError) {
+                // A local cache failure must not replace fresh server reports with stale data.
+                console.warn('Arbeitsberichte konnten nicht lokal zwischengespeichert werden.', cacheError);
+            }
+        } catch (error) {
+            if (!current() || isSessionExpiredError(error)) return;
+            if (error.httpStatus === 403 || error.httpStatus === 404) {
+                await denyProjectAccess(projectId, context);
+                return;
+            }
+            try {
+                const cached = await cacheGet(cacheKey);
+                if (!current()) return;
+                state.projectWorkReports[String(projectId)] = cached && Array.isArray(cached.items) ? cached.items : [];
+                state.projectWorkReportsOffline = true;
+            } catch (cacheError) {
+                if (!force && current()) showFeedback('error', 'Arbeitsberichte konnten nicht geladen werden.');
+            }
+        } finally {
+            if (current()) {
+                state.projectWorkReportsLoading = false;
                 render();
             }
         }
@@ -4852,11 +5547,16 @@
             return;
         }
 
+        const context = sessionContext();
         if (!projectById(projectId) || !navigator.onLine) {
             await loadCachedProjectOrder(projectId);
         }
 
         const tasks = [];
+
+        await loadProjectWorkReportDraft(projectId);
+        if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId) || projectId !== projectFileContextId()) return;
+        tasks.push(loadProjectWorkReports(projectId, force));
 
         if (showAppWidget('show_project_files')) {
             tasks.push(loadProjectFiles(projectId, force));
@@ -4878,10 +5578,13 @@
     }
 
     async function pruneUnauthorizedProjectState() {
+        const context = sessionContext();
         const knownProjectIds = new Set(
             Object.keys(state.projectOrders)
                 .concat(Object.keys(state.projectFiles))
                 .concat(Object.keys(state.projectMaterials))
+                .concat(Object.keys(state.projectWorkReports))
+                .concat(Object.keys(state.projectWorkReportDrafts))
         );
         const userPart = currentSessionUserCachePart();
 
@@ -4890,6 +5593,8 @@
             const prefixes = [
                 'project_order_v1_user_' + userPart + '_project_',
                 'project_materials_v1_user_' + userPart + '_project_',
+                projectWorkReportDraftKey('', userPart),
+                projectWorkReportCacheKey('', userPart),
                 'project_files_user_' + userPart + '_'
             ];
 
@@ -4911,6 +5616,7 @@
             console.warn('Projekt-Cacheschluessel konnten nicht gelesen werden.', error);
         }
 
+        if (!isCurrentSessionContext(context)) return;
         await Promise.all(Array.from(knownProjectIds).map(async function (projectId) {
             if (isCurrentAuthorizedProject(projectId)) {
                 return;
@@ -4922,17 +5628,45 @@
             delete state.projectFiles[projectId];
             delete state.projectMaterials[projectId];
             delete state.projectMaterialsUpdatedAt[projectId];
+            delete state.projectMaterialDrafts[projectId];
+            delete state.projectWorkReports[projectId];
+            delete state.projectWorkReportDrafts[projectId];
+            delete state.projectWorkReportDraftLoads[projectId];
+            delete state.projectWorkReportStorageErrors[projectId];
 
             try {
                 await Promise.all([
                     cacheDelete(projectOrderCacheKey(projectId)),
                     cacheDelete(projectFilesCacheKey(projectId)),
-                    cacheDelete(projectMaterialsCacheKey(projectId))
+                    cacheDelete(projectMaterialsCacheKey(projectId)),
+                    clearProjectWorkReportStorage(userPart, projectId)
                 ]);
             } catch (error) {
                 console.warn('Nicht mehr autorisierte Projekt-Caches konnten nicht vollstaendig entfernt werden.', error);
             }
         }));
+    }
+
+    async function denyProjectAccess(projectId, context) {
+        if (!isCurrentSessionContext(context)) return;
+        if (state.today) state.today.projects = activeProjects().filter((project) => Number(project.id) !== Number(projectId));
+        onlineDataRequestCounter += 1;
+        projectWorkReportRequestCounter += 1;
+        projectMaterialRequestCounter += 1;
+        projectFilesRequestCounter += 1;
+        normalizeProjectSelectionAgainstToday();
+        render();
+        await pruneUnauthorizedProjectState();
+        if (isCurrentSessionContext(context) && state.today) {
+            try {
+                await cacheSet(todayCacheKey(), state.today, () => isCurrentSessionContext(context));
+            } catch (error) {
+                await cacheDelete(todayCacheKey());
+            }
+        }
+        if (isCurrentSessionContext(context) && routeName() === '/projektwahl' && projectFileContextId() !== null) {
+            await loadProjectContext(projectFileContextId(), true);
+        }
     }
 
     async function handleProjectDeepLink() {
@@ -4981,7 +5715,9 @@
     }
 
     async function submitProjectMaterial() {
+        if (state.pendingAction) return;
         const projectId = projectFileContextId();
+        const context = sessionContext();
 
         captureProjectMaterialDraft();
 
@@ -5006,7 +5742,9 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(draft)
             });
+            if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return;
             delete state.projectMaterialDrafts[String(projectId)];
+            if (projectFileContextId() === projectId) resetProjectFormAfterSave('projectMaterialForm');
             showFeedback('success', 'Materialeintrag wurde gespeichert.');
             await loadProjectMaterials(projectId, true);
         } catch (error) {
@@ -5014,8 +5752,10 @@
                 showFeedback('error', friendlyMessage(error.message, 'Materialeintrag konnte nicht gespeichert werden.'), true);
             }
         } finally {
-            state.pendingAction = null;
-            render();
+            if (isCurrentSessionContext(context)) {
+                state.pendingAction = null;
+                render();
+            }
         }
     }
 
@@ -5709,7 +6449,16 @@
     }
 
     function shouldSkipRevalidateForFileSelection() {
-        return Date.now() < Number(state.fileSelectionGuardUntil || 0) || hasPendingUploadSelection();
+        const stableProjectDom = renderedAppContext
+            && renderedAppContext.authenticated
+            && renderedAppContext.route === '/projektwahl'
+            && routeName() === '/projektwahl'
+            && renderedAppContext.userId === currentSessionUserCachePart()
+            && renderedAppContext.generation === sessionGeneration
+            && renderedAppContext.projectId === projectFileContextId();
+
+        return Date.now() < Number(state.fileSelectionGuardUntil || 0)
+            || (!stableProjectDom && hasPendingUploadSelection());
     }
 
     function updateProjectAttachments(projectId, files) {

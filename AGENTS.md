@@ -119,6 +119,8 @@ Bereits umgesetzt:
 - interne Stichtagssperren in `accounting_closures` mit `source_type = employee_account_cutover`, wirksam fuer Timesheet-Schreibschutz, aber ausgeblendet in normalen Abschlusslisten und Exporten
 - editierbare ganztagige Abwesenheitszeitraeume fuer Urlaub, Krankheit und Fehlzeit mit serverseitiger Vorschau, atomarer Set-Differenz-Korrektur und einzelnen Tagesbuchungen je anrechenbarem Arbeitstag
 - direkte Admin-Urlaubszeitraeume ohne kuenstlichen Mitarbeiterantrag sowie antragsgebundene Zeitraeume fuer genehmigte Urlaubsantraege
+- projektbezogene Arbeitsberichte unter „Ausgeführte Arbeiten“ in App und Admin, mit Autor/Datum, idempotentem Online-Speichern und Archivierung; App-Entwuerfe bleiben benutzer-/projektbezogen lokal erhalten, bis bewusst online gespeichert wird
+- Hintergrundaktualisierungen erhalten auf derselben Projektseite bestehende Formular- und Dateiauswahlknoten sowie Scrollposition; Session- und Projektwechsel invalidieren veraltete Antworten
 
 Noch nicht final umgesetzt:
 

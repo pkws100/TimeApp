@@ -53,6 +53,8 @@ gesonderter Vereinbarung angeboten werden.
 - App-Projektdateien: `GET/POST /api/v1/app/projects/{id}/files`
 - App-Projektmaterial: `GET/POST /api/v1/app/projects/{id}/materials`
 - Eigenen Projektmaterialeintrag archivieren: `DELETE /api/v1/app/project-materials/{id}`
+- App-Arbeitsberichte: `GET/POST /api/v1/app/projects/{id}/work-reports`
+- Arbeitsbericht archivieren: `DELETE /api/v1/app/project-work-reports/{id}`
 - App-Buchungsdateien: `GET/POST /api/v1/app/timesheets/{id}/files`
 - App-Kundenbestaetigung: `GET/POST /api/v1/app/timesheets/{id}/signature`
 - App-Kundenbestaetigungsbild: `GET /api/v1/app/timesheet-signatures/{id}/image`
@@ -74,6 +76,19 @@ gesonderter Vereinbarung angeboten werden.
 - Projekte: `GET /api/v1/projects`
 
 ## Setup
+
+Im Projekt-Reiter der Mitarbeiter-App dokumentiert „Ausgeführte Arbeiten“ einzelne
+Arbeitsberichte mit Datum und Ersteller. Das freigegebene Projektteam sieht die
+Berichte; das Büro findet sie beim jeweiligen Projekt im Admin. Spracheingabe
+erfolgt über die Diktierfunktion der Handy-Tastatur. Entwürfe werden je Benutzer
+und Projekt lokal gesichert und bei fehlender Verbindung nicht automatisch
+versendet. Nach Wiederverbindung bewusst erneut speichern. Abmeldung und
+bestätigter Rechteentzug entfernen die zugehörigen lokalen Entwürfe.
+
+Für dieses Feature vor Freigabe die additive Phinx-Migration
+`20261106120000_project_work_reports.php` anwenden. Bestehende Projekt-, Material-
+und Zeitbuchungsdaten werden dadurch nicht verändert.
+
 1. Abhaengigkeiten installieren:
 ```bash
 composer install
