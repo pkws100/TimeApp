@@ -85,6 +85,14 @@ und Projekt lokal gesichert und bei fehlender Verbindung nicht automatisch
 versendet. Nach Wiederverbindung bewusst erneut speichern. Abmeldung und
 bestätigter Rechteentzug entfernen die zugehörigen lokalen Entwürfe.
 
+Auf „Heute“, „Zeiterfassung“ und „Projekt“ lässt sich die Projektauswahl nach
+Projektnummer oder Name durchsuchen. Bei genau einem Treffer übernimmt die Suche
+dieses Projekt in das weiterhin bedienbare Dropdown; danach kann direkt per Button
+eingecheckt werden. Bei mehreren oder keinen Treffern bleibt die bisherige Auswahl
+erhalten. Ein leeres Suchfeld zeigt wieder alle freigegebenen Projekte. Die Suche
+bucht keine Zeiten und ändert keine bestehenden Buchungen. Eine manuelle Auswahl
+einschließlich „Nicht zugeordnet“ bleibt bis zur nächsten Suchtexteingabe erhalten.
+
 Für dieses Feature vor Freigabe die additive Phinx-Migration
 `20261106120000_project_work_reports.php` anwenden. Bestehende Projekt-, Material-
 und Zeitbuchungsdaten werden dadurch nicht verändert.

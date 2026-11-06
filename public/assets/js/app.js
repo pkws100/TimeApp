@@ -52,6 +52,8 @@
         uploadingProjectId: null,
         preferredProjectId: null,
         projectSelectionId: undefined,
+        projectSearchQueries: {},
+        projectSearchComposing: null,
         projectFiles: {},
         projectFilesLoading: false,
         projectOrders: {},
@@ -111,6 +113,7 @@
     let sessionGeneration = 0;
     let workReportStorageQueue = Promise.resolve();
     let revalidateTimer = null;
+    let projectSearchSelectionTimer = null;
     let deferredInstallPrompt = null;
 
     function getStoredThemeMode() {
@@ -483,6 +486,9 @@
         state.today = null;
         state.projects = [];
         state.projectFiles = {};
+        state.projectSearchQueries = {};
+        state.projectSearchComposing = null;
+        window.clearTimeout(projectSearchSelectionTimer);
         state.projectFilesLoading = false;
         state.projectOrders = {};
         state.projectOrdersOffline = {};
@@ -2923,7 +2929,7 @@
             + '</div>'
             + otherProjectHint
             + '<div class="app-grid">'
-            + '<label class="app-field"><span>Projekt</span><select id="projectSelect">' + projectOptions() + '</select></label>'
+            + projectSelectMarkup('Projekt')
             + '<label class="app-field"><span>Notiz</span><textarea id="timesheetNote" rows="4">' + escapeHtml(entry && entry.note ? entry.note : '') + '</textarea></label>'
             + '<button type="button" id="saveUpsert" ' + (isBusy('upsert') || blockedByOtherProject ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Stand speichern')) + '</button>'
             + '</div>'
@@ -2970,7 +2976,7 @@
             + '<div class="app-stat-row"><span class="muted">Aktueller Einsatz</span><strong data-live-work-duration>' + escapeHtml(formatDurationMinutes(currentEntryWorkMinutes())) + '</strong></div>'
             + '</div>'
             + '<div class="app-grid">'
-            + '<label class="app-field"><span>Projekt</span><select id="projectSelect">' + projectOptions() + '</select></label>'
+            + projectSelectMarkup('Projekt')
             + '</div>'
             + manualTimeMarkup(entry)
             + '<div class="app-inline-actions">'
@@ -3175,7 +3181,7 @@
                     : 'Kein Projekt angelegt? Starten Sie ohne Projekt und beschreiben Sie kurz die Baustelle. Die Zuordnung erfolgt spaeter im Buero.'))
             + '</p></div>'
             + (hasProjects
-                ? '<label class="app-field"><span>Aktives Projekt</span><select id="projectSelect">' + projectOptions() + '</select></label>'
+                ? projectSelectMarkup('Aktives Projekt')
                 : '')
             + (hasProjects && preferred && !hasStartedEntry
                 ? '<div class="app-empty"><strong>Vorgemerkt:</strong> ' + escapeHtml(preferred.project_number + ' - ' + preferred.name) + '</div>'
@@ -3694,23 +3700,134 @@
         return output;
     }
 
-    function projectOptions() {
-        const items = state.today && state.today.projects ? state.today.projects : [];
+    function projectPickerSelectionId() {
         const explicitSelection = projectSelectionStateId();
-        const activeId = typeof explicitSelection !== 'undefined'
+        return typeof explicitSelection !== 'undefined'
             ? explicitSelection
             : (state.today && state.today.today_state && state.today.today_state.work_entry
                 ? state.today.today_state.work_entry.project_id
                 : preferredProjectId());
+    }
 
-        const options = ['<option value="">Nicht zugeordnet</option>'];
+    function projectSearchQuery() {
+        return state.projectSearchQueries[routeName()] || '';
+    }
 
-        items.forEach((project) => {
-            const selected = activeId === project.id ? ' selected' : '';
-            options.push('<option value="' + project.id + '"' + selected + '>' + escapeHtml(project.project_number + ' - ' + project.name) + '</option>');
+    function normalizeProjectSearch(value) {
+        return String(value || '').toLocaleLowerCase('de-DE').normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '').replace(/ß/g, 'ss');
+    }
+
+    function projectSearchResults(selectedId) {
+        const terms = normalizeProjectSearch(projectSearchQuery()).trim().split(/\s+/).filter(Boolean);
+        const items = activeProjects();
+        const matches = items.filter((project) => {
+            const text = normalizeProjectSearch((project.project_number || '') + ' - ' + (project.name || ''));
+            return terms.every((term) => text.includes(term));
+        });
+        const selectedOutside = items.find((project) => Number(project.id) === Number(selectedId)
+            && !matches.includes(project));
+        return { matches, selectedOutside, count: matches.length, searching: terms.length > 0 };
+    }
+
+    function projectSearchStatus(selectedId) {
+        const results = projectSearchResults(selectedId);
+        const message = results.searching
+            ? (results.count ? results.count + ' Treffer.' : 'Keine passenden Projekte gefunden.')
+            : results.count + ' Projekte verfügbar.';
+        return message + (results.selectedOutside ? ' Die aktuelle Auswahl bleibt sichtbar.' : '');
+    }
+
+    function projectSelectMarkup(label) {
+        return '<div class="app-grid" id="projectPicker">'
+            + '<label class="app-field"><span>Projekt suchen</span><input id="projectSearch" type="search" placeholder="Projektnummer oder Name" autocomplete="off" spellcheck="false" aria-controls="projectSelect" aria-describedby="projectSearchStatus" value="' + escapeHtml(projectSearchQuery()) + '"></label>'
+            + '<label class="app-field"><span>' + escapeHtml(label) + '</span><select id="projectSelect" aria-describedby="projectSearchStatus">' + projectOptions() + '</select></label>'
+            + '<p id="projectSearchStatus" class="muted" role="status" aria-live="polite">' + escapeHtml(projectSearchStatus(projectPickerSelectionId())) + '</p>'
+            + '</div>';
+    }
+
+    function projectOptions(activeId = projectPickerSelectionId()) {
+        const results = projectSearchResults(activeId);
+        // Keep the authorized current choice even if it is outside the search results.
+        const visibleIds = new Set(results.matches.map((project) => Number(project.id)));
+        if (results.selectedOutside) visibleIds.add(Number(results.selectedOutside.id));
+
+        const options = ['<option value=""' + (activeId === null ? ' selected' : '') + '>Nicht zugeordnet</option>'];
+
+        activeProjects().forEach((project) => {
+            if (!visibleIds.has(Number(project.id))) return;
+            const selected = Number(activeId) === Number(project.id) ? ' selected' : '';
+            const label = (project.project_number ? project.project_number + ' - ' : '') + (project.name || '');
+            const suffix = results.selectedOutside === project ? ' (aktuelle Auswahl)' : '';
+            options.push('<option value="' + Number(project.id) + '"' + selected + '>' + escapeHtml(label + suffix) + '</option>');
         });
 
         return options.join('');
+    }
+
+    function applyProjectPickerSelection(projectId, preserveDrafts) {
+        window.clearTimeout(projectSearchSelectionTimer);
+        state.projectSearchComposing = null;
+        const dirtyFields = preserveDrafts
+            ? ['timesheetNote', 'manualStartTime', 'manualEndTime', 'projectlessProjectNote'].map((id) => document.getElementById(id))
+                .filter((field) => field && field.value !== field.defaultValue)
+                .map((field) => ({ id: field.id, value: field.value }))
+            : [];
+        if (preserveDrafts && document.getElementById('projectMaterialForm')) captureProjectMaterialDraft();
+        if (preserveDrafts) captureProjectWorkReportDraft();
+        setProjectSelectionState(projectId);
+        state.projectFilesLoading = false;
+        state.projectMaterialsLoading = false;
+        state.projectMaterialsOffline = !state.online;
+        render();
+        dirtyFields.forEach(({ id, value }) => {
+            const field = document.getElementById(id);
+            if (field) field.value = value;
+        });
+        if (routeName() === '/projektwahl') loadProjectContext(projectFileContextId(), false);
+    }
+
+    function filterProjectSelect(event, compositionChanged) {
+        const search = document.getElementById('projectSearch');
+        const select = document.getElementById('projectSelect');
+        if (!search || !select) return;
+        const previousValue = select.value;
+        const selectedId = previousValue === '' ? null : Number(previousValue);
+        const changed = projectSearchQuery() !== search.value;
+        if (changed) window.clearTimeout(projectSearchSelectionTimer);
+        state.projectSearchQueries[routeName()] = search.value;
+        const results = projectSearchResults(selectedId);
+        const compositionEnd = event && event.type === 'compositionend';
+        const committed = !state.projectSearchComposing && !(event && event.isComposing)
+            && (compositionEnd ? compositionChanged : changed);
+        const uniqueId = results.searching && results.matches.length === 1 ? Number(results.matches[0].id) : null;
+        const pendingFile = uniqueId !== null && uniqueId !== selectedId && hasPendingUploadSelection();
+        if (committed && uniqueId !== null && uniqueId !== selectedId && !state.pendingAction && !pendingFile) {
+            if (event && event.type === 'compositionend') {
+                const context = sessionContext();
+                const route = routeName();
+                const query = search.value;
+                // Let the final IME input commit before replacing a different project's view.
+                projectSearchSelectionTimer = window.setTimeout(function () {
+                    const current = document.getElementById('projectSelect');
+                    const latest = projectSearchResults(current && current.value !== '' ? Number(current.value) : null);
+                    if (isCurrentSessionContext(context) && routeName() === route && projectSearchQuery() === query
+                        && current && current.value === previousValue && isCurrentAuthorizedProject(uniqueId)
+                        && latest.searching && latest.matches.length === 1 && Number(latest.matches[0].id) === uniqueId
+                        && !state.projectSearchComposing && !state.pendingAction && !hasPendingUploadSelection()) {
+                        applyProjectPickerSelection(uniqueId, true);
+                    }
+                }, 0);
+            } else {
+                applyProjectPickerSelection(uniqueId, true);
+                return;
+            }
+        }
+        select.innerHTML = projectOptions(selectedId);
+        select.value = previousValue;
+        const status = document.getElementById('projectSearchStatus');
+        if (status) status.textContent = projectSearchStatus(selectedId)
+            + (pendingFile ? ' Bitte zuerst die gewählte Datei hochladen oder die Dateiauswahl leeren.' : '');
     }
 
     function timesheetProjectFilterOptions() {
@@ -3869,6 +3986,13 @@
             }
         }
 
+        if (current.id === 'projectSelect' && current.tagName === 'SELECT') {
+            // Preserve the select itself and avoid quadratic option reconciliation on large lists.
+            if (current.innerHTML !== desired.innerHTML) current.innerHTML = desired.innerHTML;
+            current.value = desired.value;
+            return;
+        }
+
         // Changing textarea children also changes its editing/default-value state.
         // Keep the original node untouched while typing, dictating or composing.
         if (!current.matches('textarea, input')) {
@@ -3978,6 +4102,9 @@
         const scrollPosition = samePage ? captureAppScrollPosition() : null;
         const restoreTimeAccountDetailsFocus = document.activeElement
             && document.activeElement.id === 'timeAccountDetailsSummary';
+        const searchFocus = samePage && document.activeElement && document.activeElement.id === 'projectSearch'
+            ? { start: document.activeElement.selectionStart, end: document.activeElement.selectionEnd, direction: document.activeElement.selectionDirection }
+            : null;
         let html = '';
 
         if (!state.session.authenticated) {
@@ -4006,11 +4133,24 @@
             root.innerHTML = html;
         }
 
+        if (state.projectSearchComposing && !state.projectSearchComposing.element.isConnected) {
+            state.projectSearchComposing = null;
+            window.clearTimeout(projectSearchSelectionTimer);
+        }
+
         projectFormsToReset.clear();
         renderedAppContext = context;
         syncThemeControls();
         bindInteractions();
         bindProjectWorkReportInteractions();
+
+        if (searchFocus && !keepProjectDom) {
+            const search = document.getElementById('projectSearch');
+            if (search) {
+                search.focus({ preventScroll: true });
+                search.setSelectionRange(searchFocus.start, searchFocus.end, searchFocus.direction);
+            }
+        }
 
         if (restoreTimeAccountDetailsFocus) {
             const summary = document.getElementById('timeAccountDetailsSummary');
@@ -4220,17 +4360,27 @@
         }
 
         const projectSelect = document.getElementById('projectSelect');
+        const projectSearch = document.getElementById('projectSearch');
+
+        if (projectSearch) {
+            bindInteraction(projectSearch, 'input', filterProjectSelect);
+            bindInteraction(projectSearch, 'search', filterProjectSelect);
+            bindInteraction(projectSearch, 'compositionstart', function () {
+                window.clearTimeout(projectSearchSelectionTimer);
+                state.projectSearchComposing = { element: projectSearch, query: projectSearch.value };
+            });
+            bindInteraction(projectSearch, 'compositionend', function (event) {
+                const composition = state.projectSearchComposing;
+                const changed = composition && composition.element === projectSearch && composition.query !== projectSearch.value;
+                state.projectSearchComposing = null;
+                filterProjectSelect(event, changed);
+            });
+        }
 
         if (projectSelect) {
             bindInteraction(projectSelect, 'change', function () {
-                setProjectSelectionState(selectedProjectId());
-                state.projectFilesLoading = false;
-                state.projectMaterialsLoading = false;
-                state.projectMaterialsOffline = !state.online;
-                render();
-                if (routeName() === '/projektwahl') {
-                    loadProjectContext(projectFileContextId(), false);
-                }
+                const selectedId = projectSelect.value === '' ? null : Number(projectSelect.value);
+                applyProjectPickerSelection(selectedId, false);
             });
         }
 
