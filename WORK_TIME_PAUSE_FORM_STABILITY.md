@@ -6,7 +6,7 @@
 - Arbeitsbranch: `fix/worktime-pause-and-form-stability`.
 - Implementierungscommit: `ac5b2de486074c208bd82f41e3dbaf9f00efe08b`. Der abschliessende Ergebnisstand mit Pruefnachweisen steht in [Draft-PR #15](https://github.com/pkws100/TimeApp/pull/15) und in der Uebergabe.
 - Keine Produktionsmigration, kein Deployment, kein Force-Push und kein automatischer Merge nach main. Keine Aktivierung bei realen Mitarbeitern; Fensteranrechnung bleibt Vorschau.
-- Die vorher vorhandenen lokalen Aenderungen an `DEPLOY.md` und `AdminAuthController.php` gehoeren nicht zu diesem Auftrag und bleiben erhalten.
+- Die vorher vorhandenen lokalen Aenderungen an `DEPLOY.md` und `AdminAuthController.php` wurden beim urspruenglichen Abschluss ausgespart. Am 12.11.2026 hat der Nutzer deren Einchecken und den Fast-Forward auf GitHub ausdruecklich beauftragt; siehe Nachtrag unten.
 
 ## Reproduzierte Fehler und Umsetzung
 
@@ -192,6 +192,7 @@ und in der Uebergabe verlinkt.
 .github/workflows/ci.yml
 AGENTS.md
 DATABASE.md
+DEPLOY.md
 WORK_TIME_PAUSE_FORM_STABILITY.md
 WORK_TIME_WINDOWS.md
 bin/run-revisable-account-ui-tests.php
@@ -209,6 +210,7 @@ src/Domain/Timesheets/AdminBookingService.php
 src/Domain/Timesheets/AppTimesheetSyncService.php
 src/Domain/Timesheets/TimesheetPauseEvidenceGuard.php
 src/Domain/WorkTime/WorkTimeUserSummaryService.php
+src/Http/Controllers/AdminAuthController.php
 src/Http/Controllers/AdminManagementController.php
 src/Http/Controllers/AdminWorkTimeController.php
 src/Http/Controllers/AppProjectMaterialController.php
@@ -251,3 +253,20 @@ Technische Empfehlung: nach erfolgreicher Head-CI fuer die fachliche Abnahme
 auf dem isolierten Entwicklungsserver bereitstellen. Produktive Aktivierung,
 verbindlich andere Fensteranrechnung und produktiver SMS-Versand bleiben
 ausserhalb dieses Auftrags.
+
+## Nachtrag: ausdrueckliche GitHub-Freigabe vom 12.11.2026
+
+Der Nutzer hat nach dem erfolgreichen Abschluss das Einchecken aller offenen
+Aenderungen und einen Fast-Forward von GitHub-main beauftragt. Damit werden auch
+die bereits vorher vorhandene Login-Theme-Anpassung und die PHP-Sicherheitsupdate-
+Dokumentation aufgenommen. Die Anleitung erstellt nun auch den vorhandenen
+`timeapp-worktime-scheduler` neu und prueft dessen PHP-Version, damit alle drei
+PHP-Dienste vom aktualisierten Docker-Image profitieren.
+
+Die Login-Aenderung verwendet das bestehende Theme-Script; Authentifizierung,
+Session und Weiterleitungen bleiben unveraendert. Die vorhandenen Auth-Units
+bestanden mit drei Tests und acht Assertions. Unabhaengige UI-, Workflow- und
+Code-Reviews pruefen die Ergaenzungen. Die vollstaendige CI des abschliessenden
+Commits und der tatsaechliche Fast-Forward werden in PR #15 dokumentiert.
+Diese Git-Freigabe umfasst keine Produktionsmigration oder Aktivierung bei
+realen Mitarbeitern.

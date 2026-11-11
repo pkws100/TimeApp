@@ -205,6 +205,69 @@ docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-web ph
 docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-web php bin/send-personnel-event-reminders.php --dry-run
 ```
 
+## PHP-Sicherheitsupdates
+
+PHP-Sicherheitsupdates sind ein eigener Betriebsschritt. `bin/update-native.sh`
+aktualisiert die Anwendung, installiert aber keine PHP-Systempakete.
+
+Die Luecken CVE-2026-109618 und CVE-2026-109619 sind fuer Debian 12 ab
+`8.2.35-1~deb12u1` korrigiert. Massgeblich sind der
+[Debian-Sicherheitsstatus](https://security-tracker.debian.org/tracker/DLA-4848-1)
+und der [PHP-Sicherheitshinweis vom 21.10.2026](https://www.php.net/archive/2026.php#2026-10-21-5).
+Reine INI-Aenderungen schliessen diese Luecken nicht vollstaendig.
+
+Bei der nativen Debian-12-Installation alle installierten PHP-8.2-Pakete aus
+dem signierten `bookworm-security`-Repository aktualisieren. Fuer die hier
+verwendete Apache/mod_php-Installation als root:
+
+```bash
+apt-get update
+apt-get --simulate --only-upgrade install \
+  php8.2 libapache2-mod-php8.2 php8.2-cli php8.2-common php8.2-curl \
+  php8.2-gd php8.2-intl php8.2-mbstring php8.2-mysql php8.2-opcache \
+  php8.2-readline php8.2-xml php8.2-zip
+apt-get --only-upgrade install \
+  php8.2 libapache2-mod-php8.2 php8.2-cli php8.2-common php8.2-curl \
+  php8.2-gd php8.2-intl php8.2-mbstring php8.2-mysql php8.2-opcache \
+  php8.2-readline php8.2-xml php8.2-zip
+apache2ctl configtest
+systemctl restart apache2
+systemctl is-active apache2
+php -v
+```
+
+Vorher die PHP-/Apache-Konfiguration sichern und den simulierten Paketplan
+pruefen. Zusaetzlich installierte PHP-Pakete bzw. SAPIs ebenfalls
+aktualisieren und deren Dienste neu starten. Ein vollstaendiger Apache-Neustart
+ist bei mod_php notwendig: Ein blosses Reload kann das alte Modul im Speicher
+behalten. `php -v` belegt nur die CLI-Version. Fuer den Abschluss auch die
+Version im echten Webprozess ueber einen kurzzeitig angelegten, ausschliesslich
+lokal abrufbaren Versionscheck pruefen und diesen sofort wieder entfernen.
+Kein oeffentliches `phpinfo()` bereitstellen. Alte Worker duerfen danach nicht
+weiterlaufen; Login, `/app` und API-Zugriffsschutz anschliessend pruefen.
+
+Im Docker-Betrieb das Basisimage vor dem Neubau aktualisieren und Webdienst
+sowie Scheduler aus dem neuen Image neu erstellen:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env build --pull timeapp-web
+docker compose -f docker-compose.prod.yml --env-file .env up -d --no-build --force-recreate timeapp-web timeapp-scheduler timeapp-worktime-scheduler
+docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-web php -v
+docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-scheduler php -v
+docker compose -f docker-compose.prod.yml --env-file .env exec -T timeapp-worktime-scheduler php -v
+```
+
+Auch dort die tatsaechlich laufende PHP-Version pruefen; der bewegliche Tag
+`php:8.2-apache` allein belegt keinen installierten Sicherheitsfix.
+
+Am 23.10.2026 wurden auf der nativen Installation alle 13 installierten
+PHP-8.2-Pakete von `8.2.31-1~deb12u1` auf `8.2.35-1~deb12u1` aktualisiert.
+Der zuvor noch geladene Webprozess meldete PHP 8.2.30; nach vollstaendigem
+Neustart meldeten 20 lokale HTTP-Pruefungen PHP 8.2.35 mit `apache2handler`.
+Alle alten Apache-Prozesse waren beendet und alle neuen Prozesse verwendeten
+die installierte Moduldatei. Dieser Befund gilt fuer diesen Server und diesen
+Pruefzeitpunkt; separat betriebene Dockerhosts wurden dabei nicht aktualisiert.
+
 ## Smoke-Checks
 
 ```bash

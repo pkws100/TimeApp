@@ -39,12 +39,13 @@ final class AdminAuthController
 
         $html = <<<HTML
 <!DOCTYPE html>
-<html lang="de">
+<html lang="de" data-theme="light" data-theme-mode="system">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Admin Login</title>
     <link rel="icon" href="/assets/app-icon.svg" type="image/svg+xml">
+    <script src="/assets/js/admin-theme.js"></script>
     <link rel="stylesheet" href="/assets/css/admin.css">
 </head>
 <body>
