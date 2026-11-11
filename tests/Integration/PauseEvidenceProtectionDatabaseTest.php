@@ -250,7 +250,7 @@ final class PauseEvidenceProtectionDatabaseTest extends MariaDbTestCase
         $date = (new DateTimeImmutable('yesterday', new DateTimeZone('Europe/Berlin')))->format('Y-m-d');
         $policies = new WorkTimePolicyService($this->connection(), true);
         $template = $policies->createTemplate(['name' => 'Protected pause evidence', 'policy' => ['windows' => array_fill(1, 7, [['start' => '08:00', 'end' => '16:00']])]], $actor);
-        $assignment = $policies->assign(['user_id' => $user, 'policy_version_id' => $template['version']['id'], 'effective_from' => (new DateTimeImmutable('tomorrow'))->format('Y-m-d')], $actor);
+        $assignment = $policies->assign(['user_id' => $user, 'policy_version_id' => $template['version']['id'], 'effective_from' => (new DateTimeImmutable('tomorrow', new DateTimeZone('Europe/Berlin')))->format('Y-m-d')], $actor);
         $this->connection()->execute('UPDATE employee_work_time_assignments SET effective_from = :date_from WHERE id = :id', ['date_from' => $date, 'id' => $assignment['id']]);
         $this->connection()->execute('INSERT INTO timesheets (user_id, work_date, entry_type, source, start_time, end_time, gross_minutes, break_minutes, net_minutes) VALUES (:user_id, :work_date, "work", "app", "07:42:00", "16:35:00", 533, 30, 503)', ['user_id' => $user, 'work_date' => $date]);
         $id = $this->connection()->lastInsertId();

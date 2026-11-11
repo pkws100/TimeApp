@@ -268,5 +268,9 @@ Session und Weiterleitungen bleiben unveraendert. Die vorhandenen Auth-Units
 bestanden mit drei Tests und acht Assertions. Unabhaengige UI-, Workflow- und
 Code-Reviews pruefen die Ergaenzungen. Die vollstaendige CI des abschliessenden
 Commits und der tatsaechliche Fast-Forward werden in PR #15 dokumentiert.
+Beim erneuten CI-Lauf nach Berliner Mitternacht zeigte sich ein Zeitzonenfehler
+im Pausenschutz-Testfixture: UTC-„morgen“ war bereits Berlin-heute. Das Fixture
+verwendet nun auch fuer die kuenftige Zuordnung ausdruecklich `Europe/Berlin`.
+Die fachliche Zukunftspruefung und saemtliche Schutz-Assertions bleiben erhalten.
 Diese Git-Freigabe umfasst keine Produktionsmigration oder Aktivierung bei
 realen Mitarbeitern.
