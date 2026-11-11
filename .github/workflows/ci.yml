@@ -38,7 +38,8 @@ jobs:
 
   php-and-node-checks:
     name: PHP, PHPUnit and Node checks
-    runs-on: ubuntu-latest
+    # The locked Playwright build supports Ubuntu 24.04; ubuntu-latest moved to 26.04.
+    runs-on: ubuntu-24.04
     env:
       APP_ENV: testing
       APP_DEBUG: 'true'
