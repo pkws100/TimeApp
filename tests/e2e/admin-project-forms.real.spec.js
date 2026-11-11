@@ -115,6 +115,27 @@ test.describe('real admin project master form stability', () => {
     await form.locator('[name="customer_signature_required"]').check();
     const node = await form.locator('#work_instructions').evaluate((element) => { window.__validationTextarea = element; return true; });
     expect(node).toBeTruthy();
+    const instructions = form.locator('#work_instructions');
+    const beforeMinute = await instructions.evaluate((element) => {
+      element.focus(); element.setSelectionRange(140, 175, 'forward'); element.scrollTop = 95;
+      element.dispatchEvent(new Event('keyup', { bubbles: true }));
+      return { x: scrollX, y: scrollY, top: element.scrollTop, start: element.selectionStart, end: element.selectionEnd };
+    });
+    let minuteNavigations = 0;
+    page.on('framenavigated', (frame) => { if (frame === page.mainFrame()) minuteNavigations += 1; });
+    await page.clock.install();
+    await page.clock.runFor(61000);
+    await page.evaluate(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      window.dispatchEvent(new Event('focus'));
+    });
+    await expect(instructions).toHaveValue(text);
+    await expect(instructions).toBeFocused();
+    expect(await instructions.evaluate((element) => element === window.__validationTextarea)).toBeTruthy();
+    expect(await instructions.evaluate((element) => ({ x: scrollX, y: scrollY, top: element.scrollTop,
+      start: element.selectionStart, end: element.selectionEnd }))).toEqual(beforeMinute);
+    expect(minuteNavigations).toBe(0);
+    await page.clock.resume();
     const response = await saveMaster(page);
     expect(response.status()).toBe(422);
     await expect(form.locator('#project_number')).toHaveAttribute('aria-invalid', 'true');
@@ -343,7 +364,8 @@ test.describe('real admin project master form stability', () => {
     await expect(page.locator('#projectMaterialQuantity')).toHaveValue('1');
     await expect(page.locator('#projectMaterialUnit')).toHaveValue('');
     await expect(page.locator('#projectMaterialNote')).toHaveValue('');
-    await expect(page.locator('#projectMaterialDate')).toHaveValue(workDate);
+    const currentDefaultDate = await page.locator('#projectMaterialDate').getAttribute('max');
+    await expect(page.locator('#projectMaterialDate')).toHaveValue(currentDefaultDate);
     await page.waitForLoadState('networkidle');
     expect(await readDraft()).toBeNull();
     expect(posts).toHaveLength(1);

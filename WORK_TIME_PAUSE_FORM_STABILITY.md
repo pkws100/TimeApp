@@ -4,7 +4,7 @@
 
 - Ausgangscommit: `9774a446ffb247d27eb5a40c7d6d9e73d1a7942b`; nach erneutem Fetch identisch mit `origin/main`.
 - Arbeitsbranch: `fix/worktime-pause-and-form-stability`.
-- Ergebniscommit und vollstaendiger GitHub-CI-Lauf werden am zugehoerigen PR und in der Uebergabe verlinkt.
+- Implementierungscommit: `ac5b2de486074c208bd82f41e3dbaf9f00efe08b`. Der abschliessende Ergebnisstand mit Pruefnachweisen steht in [Draft-PR #15](https://github.com/pkws100/TimeApp/pull/15) und in der Uebergabe.
 - Keine Produktionsmigration, kein Deployment, kein Force-Push und kein automatischer Merge nach main. Keine Aktivierung bei realen Mitarbeitern; Fensteranrechnung bleibt Vorschau.
 - Die vorher vorhandenen lokalen Aenderungen an `DEPLOY.md` und `AdminAuthController.php` gehoeren nicht zu diesem Auftrag und bleiben erhalten.
 
@@ -34,6 +34,13 @@ werden dabei erhalten. Normale manuelle Pausen ohne geschuetzten Nachweis
 funktionieren weiterhin. Eine Aenderung belegter Zeitdaten ueber den alten Weg
 wird mit Hinweis auf einen ausdruecklichen revisionsfaehigen Korrekturweg
 abgewiesen. Es wird keine stille Ersetzung alter Nachweise eingefuehrt.
+
+Der vorhandene `WorkTimePauseCorrectionService` ergaenzt bislang fehlende
+tatsaechliche Intervalle zur unveraenderten gespeicherten Pausendauer. Bereits
+vollstaendig belegte Nachweise ersetzt er nicht. Ein allgemeiner Revisions-/
+Ersetzungsweg fuer fehlerhafte Nachweise ist weiterhin nicht implementiert;
+entsprechende Legacy-Aenderungen bleiben gesperrt. Bereits historisch verlorene
+Intervalle werden nicht automatisch rekonstruiert.
 
 Gepruefte weitere Writer: `TimesheetService` liest/berechnet nur; der
 Backup-Restore kann weiterhin nur validieren. Die vorhandenen CLI-Fixtures
@@ -67,7 +74,7 @@ Nur ein ausdrueckliches Update eines bestehenden Masterformulars wird per
 feldbezogene Fehler in dieselben Formular-/Eingabeknoten uebernommen;
 Texte, andere Feldwerte und Dateiauswahlen bleiben erhalten. Sitzungs- und
 Transportfehler behalten die Eingaben ohne automatische POST-Wiederholung.
-Einzel-Submit-Sperren verhindern Mehrfachanfragen. Waehren Save neue Eingaben
+Einzel-Submit-Sperren verhindern Mehrfachanfragen. Wenn waehrend des Saves neue Eingaben
 eintreffen, bleiben diese ungespeichert sichtbar statt durch eine Navigation
 verloren zu gehen.
 
@@ -156,21 +163,28 @@ keine verbindlichen Salden oder Anrechnungsregeln wurden geaendert.
 | Vorhandene Refresh-/WorkReport-/Suche-/WorkTimefaelle plus erste Materialfaelle | 84/84 gruen. |
 | Mobile WebKit-Materialgruppe | 12/12 gruen. |
 | `TZ=UTC npm run ui:test:smoke` | 121 bestanden, 17 uebersprungen: 15 reale Faelle laufen separat; zwei optionale Live-Login-Pruefungen benoetigen nicht konfigurierte Zugangsdaten. |
-| Echte Admin-Projektform, DB-Volltext, Minute, Fokus/Cursor/Scroll, 422, Discard und Sitzung/Transport | Vier Kernfaelle gruen; zusaetzliche finale Create-/Cancelvarianten werden im vollstaendigen realen Runner geprueft. |
+| `composer test`, vollstaendiger CI-Lauf | 660 Tests / 3.245 Assertions gruen. |
+| `npm run ui:test:real`, vollstaendiger CI-Lauf | 15/15 gruen: neun vorhandene Workflows plus sechs neue echte Projekt-/Materialfaelle. DB-Volltext, Minute, Fokus/Cursor/Scroll, 422, Discard/Cancel, Sitzung/Transport, native Anlage und Material-Reload/Save sind enthalten. |
 | `composer validate --strict` | Exit 0. |
 | `composer audit --locked --no-interaction` | Exit 0, keine Advisories. |
 | `npm audit --audit-level=high` | Exit 0, keine Sicherheitsmeldungen. |
 
 Der vollstaendige PHP-Pruefbefehl ist
 `COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_PROCESS_TIMEOUT=0 composer test`, ohne Tests
-auszulassen. Der erste toolgebundene lokale Versuch endete vorzeitig mit 143
-ohne Testfehler; der erneute Lauf protokolliert seinen Prozessabschluss separat.
-`npm run ui:test:smoke`,
-`npm run ui:test:real` und `npm run ui:test:webkit` sind die vorgesehenen
-abschliessenden Browsergruppen. Die neue WebKit-Konfiguration ist zusaetzlich;
-die bestehende Chromium-Gruppe bleibt erhalten. Der Standard-Realrunner bindet
-die neue Projektformular-Spec ein. Endergebnisse und der genaue CI-Commit
-werden im PR und in der Uebergabe dokumentiert.
+auszulassen. Ein erster toolgebundener lokaler Versuch endete vorzeitig mit 143
+ohne Testfehler und zaehlt nicht als Erfolgsnachweis.
+
+Der vollstaendige [GitHub-CI-Lauf #69](https://github.com/pkws100/TimeApp/actions/runs/43114453733)
+fuer `ac5b2de486074c208bd82f41e3dbaf9f00efe08b` ist erfolgreich abgeschlossen:
+PHP/Node inklusive aller obigen Browsergruppen, Produktions-Docker-Smoke sowie
+Firmware-Builds und native Tests. Composer- und npm-Audits melden keine
+Sicherheitsluecken. Die zusaetzliche WebKit-Konfiguration erhaelt die bestehende
+Chromium-Gruppe; der Standard-Realrunner bindet die neue Projektformular-Spec
+ein. Die abschliessende Variante prueft die simulierte Minute auch unmittelbar
+vor dem absichtlich ungueltigen Projekt-Save und beruecksichtigt einen
+Datumswechsel beim leeren Materialformular. Der genaue Ergebniscommit und
+seine erneute vollstaendige CI sind in [PR #15](https://github.com/pkws100/TimeApp/pull/15)
+und in der Uebergabe verlinkt.
 
 ## Geaenderte Dateien
 
@@ -214,6 +228,10 @@ tests/e2e/work-time.spec.js
 
 Unabhaengige Workflow-/Code-Reviews fanden unter anderem den Create/Late-edit-
 Randfall und die mobile Abbruchbedienung; beide wurden gezielt korrigiert.
+Der UI-Review pruefte den echten Benutzeruebersicht-Renderer mit dem vorhandenen
+Admin-CSS bei 390 Pixeln in Light/Dark; der Verwaltungslink bleibt ohne Overflow
+mit ausreichender Touchflaeche bedienbar. Es bestehen keine offenen bestaetigten
+P1-/P2-Reviewbefunde.
 Der vorhandene geordnete PWA-Renderer wurde nicht ersetzt. Es wurde weder ein
 unbelegter Admin-Minutenreload noch eine neue globale Refresharchitektur gebaut.
 
