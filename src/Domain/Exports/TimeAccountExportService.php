@@ -95,15 +95,17 @@ final class TimeAccountExportService
             throw new RuntimeException('mPDF ist nicht installiert. Bitte Composer-Abhaengigkeiten installieren.');
         }
 
+        $windowFields = array_filter($rows === [] ? [] : array_keys($rows[0]), static fn (string $key): bool => str_starts_with($key, 'Fenster ') || in_array($key, ['Arbeitszeitfenster Status', 'Saldo vorlaeufig'], true));
+        $mainRows = $windowFields === [] ? $rows : array_map(static fn (array $row): array => array_diff_key($row, array_flip($windowFields)), $rows);
         $html = '<h1>Zeitkonten ' . htmlspecialchars($suffix, ENT_QUOTES, 'UTF-8') . '</h1><table border="1" cellpadding="6" cellspacing="0"><thead><tr>';
 
-        foreach ($this->headers($rows) as $header) {
+        foreach ($this->headers($mainRows) as $header) {
             $html .= '<th>' . htmlspecialchars((string) $header, ENT_QUOTES, 'UTF-8') . '</th>';
         }
 
         $html .= '</tr></thead><tbody>';
 
-        foreach ($rows as $row) {
+        foreach ($mainRows as $row) {
             $html .= '<tr>';
 
             foreach ($row as $cell) {
@@ -114,6 +116,20 @@ final class TimeAccountExportService
         }
 
         $html .= '</tbody></table>';
+
+        if ($windowFields !== []) {
+            $html .= '<h2>Arbeitszeitfenster – Vorschau</h2><p>Die Fensterwerte sind vorlaeufig und haben keine verbindliche Abrechnungswirkung. Die oben ausgewiesenen Zeitkonten verwenden weiterhin die erfasste Arbeitszeit.</p>';
+            foreach ($rows as $row) {
+                if (($row['Arbeitszeitfenster Status'] ?? '') === '') {
+                    continue;
+                }
+                $html .= '<h3>' . htmlspecialchars((string) ($row['Mitarbeiter'] ?? ''), ENT_QUOTES, 'UTF-8') . '</h3><table border="1" cellpadding="6" cellspacing="0">';
+                foreach ($windowFields as $field) {
+                    $html .= '<tr><th>' . htmlspecialchars($field, ENT_QUOTES, 'UTF-8') . '</th><td>' . htmlspecialchars((string) ($row[$field] ?? ''), ENT_QUOTES, 'UTF-8') . '</td></tr>';
+                }
+                $html .= '</table>';
+            }
+        }
 
         $tempDir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'baustelle-mpdf';
 
@@ -172,5 +188,6 @@ final class TimeAccountExportService
                 'Betriebsurlaub',
             ]
             : array_keys($rows[0]);
+
     }
 }

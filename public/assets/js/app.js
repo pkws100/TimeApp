@@ -90,6 +90,9 @@
         pushLoading: false,
         pushBusy: false,
         timeAccount: null,
+        workTime: null,
+        workTimeBusy: false,
+        workTimeDrafts: {},
         vacationRequests: [],
         vacationLoading: false,
         vacationOffline: false,
@@ -109,6 +112,7 @@
     let projectFilesRequestCounter = 0;
     let projectWorkReportRequestCounter = 0;
     let onlineDataRequestCounter = 0;
+    let workTimeRequestCounter = 0;
     let activeOnlineDataLoad = null;
     let sessionGeneration = 0;
     let workReportStorageQueue = Promise.resolve();
@@ -516,6 +520,9 @@
         state.timesheetHistoryDirty = false;
         state.signatureDialog = null;
         state.timeAccount = null;
+        state.workTime = null;
+        state.workTimeBusy = false;
+        state.workTimeDrafts = {};
         state.vacationRequests = [];
         state.vacationLoading = false;
         state.vacationOffline = false;
@@ -1197,6 +1204,8 @@
             holiday: 'Feiertag',
             absent: 'Fehlt',
             missing: 'Fehlt / nicht gebucht',
+            presence_only: 'Anwesend (Arbeitsbeginn offen)',
+            previous_work_open: 'Einsatz aus einem früheren Tag offen',
             unknown: 'Unbekannt'
         };
 
@@ -1549,7 +1558,39 @@
     }
 
     function currentStatus() {
+        if (hasOpenWorkTimeCarryover()) return 'previous_work_open';
+        if (hasOpenWorkTimePresence()) return 'presence_only';
         return currentProjectDayView().status || 'not_started';
+    }
+
+    function hasOpenWorkTimePresence() {
+        if (!state.workTime || !state.workTime.enabled || !state.workTime.presence_session) return false;
+        const active = globalWorkEntry();
+        return !active || !active.start_time || !!active.end_time;
+    }
+
+    function previousWorkTimeEntry() {
+        const data = state.workTime;
+        const entry = data && data.enabled && data.active_work_entry;
+        const today = state.today && state.today.today;
+        return entry && Number(entry.id) > 0 && entry.start_time && !entry.end_time && today && entry.work_date < today ? entry : null;
+    }
+
+    function hasOpenWorkTimeCarryover() {
+        return !!previousWorkTimeEntry() || !!(state.workTime && state.workTime.enabled && state.workTime.active_work_entry_conflict);
+    }
+
+    function canEndPreviousWorkTimeEntry(entry) {
+        const actualEnd = workTimeNowLocal();
+        const endTime = actualEnd.slice(11, 16) + ':00';
+        const startTime = String(entry.start_time).length === 5 ? entry.start_time + ':00' : String(entry.start_time);
+        let inferredDate = entry.work_date;
+        if (endTime < startTime) {
+            const followingDay = new Date(entry.work_date + 'T12:00:00Z');
+            followingDay.setUTCDate(followingDay.getUTCDate() + 1);
+            inferredDate = followingDay.toISOString().slice(0, 10);
+        }
+        return actualEnd.slice(0, 10) === inferredDate;
     }
 
     function currentProjectName() {
@@ -1951,6 +1992,8 @@
             working: 'Eingecheckt',
             paused: 'Pause',
             completed: 'Abgeschlossen',
+            presence_only: 'Anwesend',
+            previous_work_open: 'Früherer Einsatz offen',
             missing: 'Fehlt / nicht gebucht',
             not_started: 'Noch nicht gebucht',
             planned: 'Noch nicht gebucht',
@@ -1964,6 +2007,13 @@
     }
 
     function topbarStatusContext(status) {
+        if (status === 'previous_work_open') {
+            const entry = previousWorkTimeEntry();
+            return { project: entry ? formatDate(entry.work_date) : 'Mehrere Einsätze', detail: 'Bitte prüfen und abschließen' };
+        }
+        if (status === 'presence_only') {
+            return { project: 'Anwesenheit erfasst', detail: 'Arbeitsbeginn offen' };
+        }
         if (status === 'working') {
             return {
                 project: currentProjectName(),
@@ -2089,7 +2139,7 @@
             + feedbackMarkup()
             + dialogMarkup()
             + signatureDialogMarkup()
-            + '<main class="app-layout">' + inner + '</main>'
+            + '<main class="app-layout">' + workTimeMarkup() + inner + '</main>'
             + '<nav class="app-nav">' + appNav() + '</nav>'
             + '</div>';
     }
@@ -2098,6 +2148,118 @@
         const mode = currentThemeMode();
 
         return '<div class="app-empty"><strong>Theme:</strong> ' + escapeHtml(THEME_LABELS[mode] || 'System') + '<br><span class="muted">Umschaltung ueber das Einstellungsmenue im Header.</span></div>';
+    }
+
+    function workTimeMarkup() {
+        const data = state.workTime;
+        if (!data || !data.enabled || (!data.policy && !data.presence_session && !data.active_work_entry && !data.active_work_entry_conflict && !(data.checkout_proposals || []).length)) return '';
+        const disabled = !state.online || state.workTimeBusy || state.pendingCount > 0 ? ' disabled' : '';
+        const policy = data.policy || {};
+        const workDate = state.today && state.today.today;
+        const day = workDate ? (new Date(workDate + 'T12:00:00').getDay() || 7) : 1;
+        const windows = policy.windows && policy.windows[day] || [];
+        const sourcePreview = data.preview || {};
+        const rows = Array.isArray(sourcePreview.rows) ? sourcePreview.rows : [];
+        const hasOpenWork = rows.some((row) => row.calculation && row.calculation.calculation_status === 'open');
+        const completedRows = rows.filter((row) => !row.calculation || row.calculation.calculation_status !== 'open');
+        const preview = hasOpenWork ? {
+            ...sourcePreview,
+            ...Object.fromEntries(['actual_work_minutes', 'accountable_work_minutes', 'outside_pending_minutes'].map((key) => [key,
+                completedRows.reduce((sum, row) => sum === null || !row.calculation || row.calculation[key] === null || row.calculation[key] === undefined ? null : sum + Number(row.calculation[key]), 0)
+            ]))
+        } : sourcePreview;
+        const duration = (value) => value === null || value === undefined ? 'klärungsbedürftig' : formatDurationMinutes(value);
+        let html = '<section class="app-card app-grid app-worktime" aria-label="Kernarbeitszeit"><h2>Kernarbeitszeit</h2>'
+            + '<p>' + escapeHtml(!data.policy ? 'Heute keine aktive Kernarbeitszeitregel.' : (windows.length ? windows.map((window) => window.start + '–' + window.end + ' Uhr').join(', ') : 'Heute kein Zeitfenster festgelegt')) + '</p>'
+            + '<p class="muted">' + (!data.policy
+                ? 'Die noch offene Anwesenheit, der laufende Einsatz oder der Vorschlag gehört zu einer früher gültigen Regel.'
+                : 'Nur für Sie aktivierte Regel. Tatsächliche Arbeit außerhalb des Fensters bleibt erfasst.') + '</p>';
+        if (completedRows.length) {
+            html += '<div class="app-stat-list"><div class="app-stat-row"><span>Tatsächliche Arbeit (abgeschlossen)</span><strong>' + escapeHtml(duration(preview.actual_work_minutes)) + '</strong></div>'
+                + '<div class="app-stat-row"><span>Vorläufig anrechenbar</span><strong>' + escapeHtml(duration(preview.accountable_work_minutes)) + '</strong></div>'
+                + '<div class="app-stat-row"><span>Außenzeit offen</span><strong>' + escapeHtml(duration(preview.outside_pending_minutes)) + '</strong></div></div>'
+                + '<p class="muted">Vorschau zur Prüfung; die bestehende Kontoberechnung bleibt maßgeblich. Bei ungeklärter Pausenlage ist keine genaue Zuordnung möglich.</p>';
+        }
+        if (hasOpenWork) html += '<p role="status">Laufender Einsatz: siehe Timer. Die Fensteraufteilung folgt nach bestätigtem Arbeitsende.</p>';
+        const previousEntry = previousWorkTimeEntry();
+        if (previousEntry) {
+            const canEnd = canEndPreviousWorkTimeEntry(previousEntry);
+            html += '<section class="app-grid app-empty" role="region" aria-label="Laufender Einsatz aus früherem Tag"><h3>Laufender Einsatz vom ' + escapeHtml(formatDate(previousEntry.work_date)) + '</h3>'
+                + '<p>Beginn: ' + escapeHtml(formatTime(previousEntry.start_time)) + ' Uhr. Dieser Einsatz ist noch offen. Bestätigen Sie das tatsächliche Arbeitsende mit „Jetzt beenden“.</p>';
+            if (!canEnd) html += '<p role="alert">Dieser Einsatz lässt sich mit dem gespeicherten Startdatum und der Enduhrzeit nicht eindeutig abschließen. Bitte im Büro anhand der tatsächlichen Zeitangaben klären.</p>';
+            if (previousEntry.current_break) {
+                html += '<p role="status">Die Pause dieses Einsatzes läuft noch. Bestätigen Sie zuerst das tatsächliche Pausenende.</p>'
+                    + '<button type="button" data-worktime-previous="pause_end"' + disabled + '>Pause des laufenden Einsatzes beenden</button>';
+            }
+            html += '<button type="button" data-worktime-previous="check_out"' + (previousEntry.current_break || !canEnd ? ' disabled' : disabled) + '>Jetzt beenden</button></section>';
+        }
+        if (data.active_work_entry_conflict) {
+            html += '<p role="alert">Mehrere offene Einsätze wurden gefunden. Bitte im Büro klären, welcher Einsatz tatsächlich läuft. Neue Buchungen sind bis zur Klärung gesperrt.</p>';
+        }
+        if (data.presence_session) {
+            html += '<div class="app-empty" role="status"><strong>Außerhalb der Kernarbeitszeit anwesend</strong><p>Ihr Arbeitsbeginn ist noch nicht bestätigt. Wenn Sie bereits arbeiten, bestätigen Sie die tatsächliche Startzeit.</p>'
+                + '<label class="app-field"><span>Tatsächlicher Arbeitsbeginn (Europe/Berlin)</span><input type="datetime-local" id="workTimeActualStart" value="' + escapeHtml(state.workTimeDrafts.start || workTimeNowLocal()) + '" required></label>'
+                + '<div class="app-inline-actions"><button type="button" data-worktime-presence="work_start"' + disabled + '>Ich beginne zu arbeiten</button>'
+                + '<button type="button" class="app-button-secondary" data-worktime-presence="presence_end"' + disabled + '>Anwesenheit beenden</button></div></div>';
+        }
+        (data.checkout_proposals || []).forEach(function (proposal) {
+            const time = String(proposal.proposed_end_at || '').slice(11, 16);
+            const actual = state.workTimeDrafts[proposal.id] || '';
+            html += '<section class="app-grid app-empty" role="region" aria-label="Arbeitsende bestätigen"><h3>Arbeitsende bestätigen</h3><p>Vorschlag: ' + escapeHtml(String(proposal.proposed_end_at || '')) + '. Ihre Buchung läuft weiter, bis Sie das tatsächliche Ende bestätigen.</p>'
+                + '<button type="button" data-worktime-proposal="' + Number(proposal.id) + '" data-worktime-response="confirm"' + disabled + '>Ich habe um ' + escapeHtml(time) + ' Uhr aufgehört</button>'
+                + '<label class="app-field"><span>Tatsächliche Endzeit (bei Korrektur)</span><input type="datetime-local" data-worktime-end="' + Number(proposal.id) + '" value="' + escapeHtml(actual) + '"></label>'
+                + '<button type="button" data-worktime-proposal="' + Number(proposal.id) + '" data-worktime-response="correct"' + disabled + '>Ich habe länger gearbeitet</button>'
+                + '<button type="button" class="app-button-secondary" data-worktime-proposal="' + Number(proposal.id) + '" data-worktime-response="continue"' + disabled + '>Ich arbeite weiter</button></section>';
+        });
+        if (!state.online) html += '<p role="status">Offline: Bitte nach Wiederverbindung den aktuellen Stand laden und bestätigen.</p>';
+        if (state.pendingCount > 0) html += '<p role="status">Bitte zuerst wartende Buchungen synchronisieren.</p>';
+        return html + '</section>';
+    }
+
+    async function loadWorkTime(context) {
+        const requestId = ++workTimeRequestCounter;
+        if (!state.today || !state.today.work_time_windows_enabled) {
+            state.workTime = null;
+            return;
+        }
+        const result = await apiJson('/api/v1/app/me/work-time');
+        if (isCurrentSessionContext(context) && requestId === workTimeRequestCounter) state.workTime = result.data || null;
+    }
+
+    function workTimeNowLocal() {
+        return new Intl.DateTimeFormat('sv-SE', {
+            timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+        }).format(new Date()).replace(' ', 'T');
+    }
+
+    async function workTimeMutation(url, payload) {
+        if (!navigator.onLine || state.workTimeBusy) return false;
+        const context = sessionContext();
+        state.workTimeBusy = true;
+        render();
+        try {
+            await syncQueue();
+            if (!isCurrentSessionContext(context)) return false;
+            state.pendingCount = (await queueAll()).length;
+            if (state.pendingCount > 0) throw new Error('Bitte zuerst die wartenden Buchungen klären und synchronisieren.');
+            const result = await apiJson(url, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ...payload, csrf_token: state.workTime && state.workTime.csrf_token })
+            });
+            if (!isCurrentSessionContext(context)) return false;
+            if (payload.action === 'work_start' || payload.action === 'presence_end') state.workTimeDrafts.start = '';
+            await loadOnlineData(true);
+            showFeedback('success', result.data && result.data.message || 'Ihre Angabe wurde gespeichert.');
+            return true;
+        } catch (error) {
+            if (!isCurrentSessionContext(context) || isSessionExpiredError(error)) return false;
+            showFeedback('error', error.message || 'Bitte erneut versuchen.');
+            try { await loadWorkTime(context); } catch (_) { /* Keep the last confirmed state. */ }
+            return false;
+        } finally {
+            if (isCurrentSessionContext(context)) { state.workTimeBusy = false; render(); }
+        }
     }
 
     function compactLine(parts) {
@@ -2819,6 +2981,8 @@
             working: 'Eingecheckt',
             paused: 'Pause laeuft',
             completed: 'Einsatz abgeschlossen',
+            presence_only: 'Anwesend (Arbeitsbeginn offen)',
+            previous_work_open: 'Früherer Einsatz offen',
             not_started: isOptionalNotStartedStatus(status) ? 'Noch nicht gebucht' : 'Noch nicht eingecheckt',
             planned: isOptionalNotStartedStatus(status) ? 'Noch nicht gebucht' : 'Noch nicht eingecheckt',
             missing: 'Fehlt'
@@ -2841,6 +3005,8 @@
             missing: 'Fuer heute liegt noch keine Buchung vor. Diese Meldung ist automatisch abgeleitet.'
         };
 
+        if (status === 'presence_only') return 'Ihre Anwesenheit ist erfasst. Bitte bestätigen Sie den tatsächlichen Arbeitsbeginn oben.';
+        if (status === 'previous_work_open') return 'Bitte prüfen Sie den noch offenen Einsatz oben, bevor Sie eine neue Buchung beginnen.';
         return hints[status] || 'Aktueller Tagesstatus.';
     }
 
@@ -2885,7 +3051,7 @@
         const entry = workEntry();
         const status = currentStatus();
         const blockedByOtherProject = isBlockedByOtherActiveProject();
-        const canCheckIn = !blockedByOtherProject && status !== 'working' && status !== 'paused';
+        const canCheckIn = !blockedByOtherProject && status !== 'working' && status !== 'paused' && status !== 'presence_only' && !hasOpenWorkTimeCarryover();
         const canPause = !blockedByOtherProject && status === 'working';
         const canCheckOut = !blockedByOtherProject && (status === 'working' || status === 'paused');
         const totalBreakMinutes = todayTotalBreakMinutes();
@@ -2931,7 +3097,7 @@
             + '<div class="app-grid">'
             + projectSelectMarkup('Projekt')
             + '<label class="app-field"><span>Notiz</span><textarea id="timesheetNote" rows="4">' + escapeHtml(entry && entry.note ? entry.note : '') + '</textarea></label>'
-            + '<button type="button" id="saveUpsert" ' + (isBusy('upsert') || blockedByOtherProject ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Stand speichern')) + '</button>'
+            + '<button type="button" id="saveUpsert" ' + (isBusy('upsert') || blockedByOtherProject || status === 'presence_only' || hasOpenWorkTimeCarryover() ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Stand speichern')) + '</button>'
             + '</div>'
             + '</section>'
             + geoSection
@@ -2942,7 +3108,7 @@
         const entry = workEntry();
         const status = currentStatus();
         const blockedByOtherProject = isBlockedByOtherActiveProject();
-        const canCheckIn = !blockedByOtherProject && status !== 'working' && status !== 'paused';
+        const canCheckIn = !blockedByOtherProject && status !== 'working' && status !== 'paused' && status !== 'presence_only' && !hasOpenWorkTimeCarryover();
         const canPause = !blockedByOtherProject && status === 'working';
         const canCheckOut = !blockedByOtherProject && (status === 'working' || status === 'paused');
         const otherProjectHint = blockedByOtherProject
@@ -2983,7 +3149,7 @@
             + (canCheckIn ? '<button type="button" data-action="check_in" ' + (isBusy('check_in') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('check_in', 'Start jetzt')) + '</button>' : '')
             + (canPause ? '<button type="button" data-action="pause" ' + (isBusy('pause') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('pause', 'Pause buchen')) + '</button>' : '')
             + (canCheckOut ? '<button type="button" data-action="check_out" ' + (isBusy('check_out') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('check_out', 'Ende jetzt')) + '</button>' : '')
-            + '<button type="button" id="saveUpsert" ' + (isBusy('upsert') || blockedByOtherProject ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Zeiten speichern')) + '</button>'
+            + '<button type="button" id="saveUpsert" ' + (isBusy('upsert') || blockedByOtherProject || status === 'presence_only' || hasOpenWorkTimeCarryover() ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Zeiten speichern')) + '</button>'
             + '</div>'
             + otherProjectHint
             + '</section>'
@@ -3349,10 +3515,11 @@
 
         return shell(
             '<section class="app-card app-grid app-account-balance-card ' + balance.tone + '" aria-labelledby="employeeBalanceTitle">'
-            + '<div><p class="muted">Mein Zeitkonto</p><h1 id="employeeBalanceTitle">' + escapeHtml(balance.title) + '</h1></div>'
+            + '<div><p class="muted">Mein Zeitkonto</p><h1 id="employeeBalanceTitle">' + escapeHtml((account.balance_is_provisional ? 'Vorläufig: ' : '') + balance.title) + '</h1></div>'
             + balanceValue
             + '<p class="app-account-balance-meta">' + escapeHtml(balance.meta) + '</p>'
             + balanceHint
+            + (account.balance_is_provisional ? '<p role="status">' + escapeHtml(account.window_accounting_message || 'Ungeklärte Arbeitszeitanteile: Der Zeitkontostand ist vorläufig.') + '</p>' : '')
             + '<a class="app-button app-button-secondary app-account-today-link" href="/app/heute" data-app-link="1">Heutige Buchungen ansehen</a>'
             + '</section>'
             + loading
@@ -4166,6 +4333,54 @@
     }
 
     function bindInteractions() {
+        document.querySelectorAll('[data-worktime-end]').forEach(function (input) {
+            bindInteraction(input, 'input', function () { state.workTimeDrafts[input.dataset.worktimeEnd] = input.value; });
+        });
+        const actualStart = document.getElementById('workTimeActualStart');
+        if (actualStart) bindInteraction(actualStart, 'input', function () { state.workTimeDrafts.start = actualStart.value; });
+        document.querySelectorAll('[data-worktime-previous]').forEach(function (button) {
+            bindInteraction(button, 'click', async function () {
+                const entry = previousWorkTimeEntry();
+                if (!entry) return;
+                const actualEnd = workTimeNowLocal();
+                const action = button.dataset.worktimePrevious;
+                if (action === 'check_out' && !canEndPreviousWorkTimeEntry(entry)) {
+                    showFeedback('error', 'Bitte diesen Einsatz im Büro anhand der tatsächlichen Zeitangaben klären.');
+                    return;
+                }
+                await workTimeMutation('/api/v1/app/timesheets/sync', {
+                    action, work_date: entry.work_date, project_id: entry.project_id,
+                    expected_timesheet_id: Number(entry.id), expected_start_time: entry.start_time,
+                    ...(action === 'pause_end' ? { break_ended_at: actualEnd + ':00' } : { end_time: actualEnd.slice(11, 16), actual_end_at: actualEnd }),
+                    client_request_id: createClientId()
+                });
+            });
+        });
+        document.querySelectorAll('[data-worktime-response]').forEach(function (button) {
+            bindInteraction(button, 'click', async function () {
+                const id = button.dataset.worktimeProposal;
+                const action = button.dataset.worktimeResponse;
+                const end = state.workTimeDrafts[id] || '';
+                if (action === 'correct' && !end) { showFeedback('error', 'Bitte Ihre tatsächliche Endzeit eingeben.'); return; }
+                await workTimeMutation('/api/v1/app/work-time/proposals/' + id + '/respond', { action, actual_end_at: end || null, request_id: createClientId() });
+            });
+        });
+        document.querySelectorAll('[data-worktime-presence]').forEach(function (button) {
+            bindInteraction(button, 'click', async function () {
+                const presence = state.workTime && state.workTime.presence_session;
+                if (!presence) return;
+                const action = button.dataset.worktimePresence;
+                const start = actualStart && actualStart.value || '';
+                if (action === 'work_start' && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(start)) {
+                    showFeedback('error', 'Bitte Datum und tatsächlichen Arbeitsbeginn eingeben.');
+                    return;
+                }
+                await workTimeMutation('/api/v1/app/timesheets/sync', { action,
+                    work_date: action === 'work_start' ? start.slice(0, 10) : presence.work_date,
+                    start_time: action === 'work_start' ? start.slice(11, 16) : undefined,
+                    project_id: presence.project_id, client_request_id: createClientId() });
+            });
+        });
         const timeAccountDetails = document.querySelector('.app-account-details');
 
         if (timeAccountDetails) {
@@ -4833,6 +5048,8 @@
 
             if (dayResult.status === 'fulfilled') {
                 state.today = dayResult.value.data;
+                await loadWorkTime(context);
+                if (!current()) return;
                 syncTodayStateStatus();
                 normalizeProjectSelectionAgainstToday();
                 normalizeTimesheetFilterAgainstToday();
@@ -6216,6 +6433,27 @@
             return false;
         }
 
+        if (hasOpenWorkTimePresence() && ['check_in', 'upsert', 'pause', 'check_out', 'day_close'].includes(action)) {
+            showFeedback('error', 'Ihre Anwesenheit ist erfasst. Bitte bestätigen Sie zuerst den tatsächlichen Arbeitsbeginn oben.');
+            return false;
+        }
+        if (hasOpenWorkTimeCarryover() && ['check_in', 'upsert', 'pause', 'check_out', 'day_close'].includes(action)) {
+            showFeedback('error', 'Bitte prüfen und beenden Sie zuerst den noch offenen Einsatz aus einem früheren Tag oben.');
+            return false;
+        }
+
+        if (state.today && state.today.work_time_windows_enabled && action === 'check_in') {
+            if (!state.workTime) {
+                showFeedback('error', 'Bitte zuerst den aktuellen Stand der Kernarbeitszeit laden.');
+                return false;
+            }
+            if (state.workTime.policy && state.workTime.policy.early_check_in_mode === 'presence_only') {
+                const selection = document.getElementById('projectSelect');
+                const note = document.getElementById('timesheetNote');
+                return workTimeMutation('/api/v1/app/timesheets/sync', { action: 'check_in', work_date: state.today.today, start_time: manualTimesOverride().start_time || nowTime(), project_id: selection ? selection.value || null : preferredProjectId(), note: note ? note.value : '', ...(overrides || {}), client_request_id: createClientId() });
+            }
+        }
+
         const allowProjectlessReassignment = action === 'select_project' && activeProjectlessWorkEntry() !== null;
 
         if (isBlockedByOtherActiveProject() && !allowProjectlessReassignment) {
@@ -6254,6 +6492,13 @@
         }
 
         Object.assign(payload, overrides || {});
+
+        if (state.today && state.today.work_time_windows_enabled && entry && entry.start_time && action !== 'check_in') {
+            // Bind delayed/offline changes to the session the employee actually saw.
+            // A later confirmed proposal and new check-in must not redirect this action.
+            if (Number(entry.id) > 0) payload.expected_timesheet_id = Number(entry.id);
+            payload.expected_start_time = entry.start_time;
+        }
 
         const geo = await currentGeoPayload();
 

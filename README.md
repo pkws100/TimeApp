@@ -1,5 +1,9 @@
 # Baustellen- und Zeiterfassungs-App
 
+Optionale Kernarbeitszeit und separater Ereignisworker:
+[WORK_TIME_WINDOWS.md](WORK_TIME_WINDOWS.md). Standardmaessig deaktiviert;
+abweichende Anrechnung bleibt eine ausdrueckliche Vorschau.
+
 ## Ueberblick
 Monolithische PHP-Anwendung fuer Admin-Backend, API und mobile Mitarbeiter-WebApp.
 

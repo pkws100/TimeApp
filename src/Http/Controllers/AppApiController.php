@@ -6,6 +6,8 @@ namespace App\Http\Controllers;
 
 use App\Domain\App\MobileAppService;
 use App\Domain\Auth\AuthService;
+use App\Domain\WorkTime\WorkTimePolicyService;
+use App\Domain\WorkTime\WorkTimeEventService;
 use App\Http\Request;
 use App\Http\Response;
 use InvalidArgumentException;
@@ -14,7 +16,9 @@ final class AppApiController
 {
     public function __construct(
         private MobileAppService $mobileAppService,
-        private AuthService $authService
+        private AuthService $authService,
+        private ?WorkTimePolicyService $workTimePolicies = null,
+        private ?WorkTimeEventService $workTimeEvents = null
     ) {
     }
 
@@ -30,9 +34,21 @@ final class AppApiController
             ], 401);
         }
 
+        $day = $this->mobileAppService->dayContext($user);
+        $assigned = false;
+        if ($this->workTimePolicies?->enabled()) {
+            $events = $this->workTimeEvents?->statusForUser((int) $user['id']) ?? [];
+            $assigned = $this->workTimePolicies->policyFor((int) $user['id'], $day['today']) !== null
+                || !empty($events['presence_session']) || !empty($events['checkout_proposals'])
+                || !empty($events['active_work_entry']) || !empty($events['active_work_entry_conflict']);
+        }
+
         return Response::json([
             'ok' => true,
-            'data' => $this->mobileAppService->dayContext($user),
+            'data' => [
+                ...$day,
+                ...($assigned ? ['work_time_windows_enabled' => true] : []),
+            ],
         ]);
     }
 

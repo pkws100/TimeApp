@@ -9,6 +9,7 @@ use App\Domain\Timesheets\AppTimesheetSyncService;
 use App\Http\Request;
 use App\Http\Response;
 use RuntimeException;
+use InvalidArgumentException;
 
 final class AppTimesheetController
 {
@@ -38,7 +39,7 @@ final class AppTimesheetController
                 'message' => (string) ($result['message'] ?? 'Aenderung erfolgreich gespeichert.'),
                 'data' => $result,
             ]);
-        } catch (RuntimeException $exception) {
+        } catch (RuntimeException|InvalidArgumentException $exception) {
             return Response::json([
                 'ok' => false,
                 'error' => $exception->getMessage(),

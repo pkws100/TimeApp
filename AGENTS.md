@@ -390,6 +390,8 @@ Die vollstaendige offene Aufgabenliste steht in `PROJECTS.md`.
 - spaetere GEO-Auswertung und Datenschutzfinalisierung
 
 ## 17. Kurzfazit fuer neue Laeufe
+
+- Optionale Arbeitszeitfenster: `WORK_TIME_WINDOWS_ENABLED=false` plus kuenftige Mitarbeiterzuordnung; Anrechnung bleibt separate Vorschau. Anwesenheit und Endvorschlaege sind keine echten Stempelungen. Details stehen in `WORK_TIME_WINDOWS.md`.
 Wenn ein neuer Agentenlauf startet, gilt:
 
 - Das Backend-Grundgeruest und die MVP-nahe mobile PWA sind bereits vorhanden.

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\TimeAccounts;
 
 use App\Domain\Calendar\CalendarPolicyService;
+use App\Domain\WorkTime\WorkTimePreviewService;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateInterval;
 use DatePeriod;
@@ -19,6 +20,8 @@ final class TimeAccountService
     private const DEFAULT_PER_PAGE = 50;
     private const PER_PAGE_OPTIONS = [25, 50, 75, 100];
 
+    private ?WorkTimePreviewService $workTimePreviewService = null;
+
     public function __construct(
         private DatabaseConnection $connection,
         private CalendarPolicyService $calendarPolicyService,
@@ -29,6 +32,11 @@ final class TimeAccountService
         $this->dailyTargetService ??= new DailyTargetService($calendarPolicyService);
         $this->journalService ??= new AccountJournalService($connection);
         $this->cutoverService ??= new EmployeeAccountCutoverService($connection, $this->journalService);
+    }
+
+    public function setWorkTimePreviewService(WorkTimePreviewService $service): void
+    {
+        $this->workTimePreviewService = $service;
     }
 
     public function monthlyAccount(int $userId, int $year, int $month, ?string $asOfDate = null, bool $includeEntries = false): array
@@ -81,7 +89,7 @@ final class TimeAccountService
         $saldoMinutes = $periodDelta;
         $vacation = $this->vacationYearForCutover($userId, $year, $user, $cutover);
 
-        return [
+        $account = [
             'user_id' => $userId,
             'user' => $this->userLabel($user),
             'year' => $year,
@@ -126,6 +134,13 @@ final class TimeAccountService
             'time_entries' => $includeEntries ? ($this->journalService?->timeEntriesForUser($userId, null, $standDate, $cutoverId, 50) ?? []) : [],
             'vacation_entries' => $includeEntries ? ($this->journalService?->vacationEntriesForUser($userId, $year, $cutoverId, 50) ?? []) : [],
         ];
+
+        if ($this->workTimePreviewService?->enabled()) {
+            $previewEnd = $targetEnd?->format('Y-m-d') ?? $calculationStart->modify('-1 day')->format('Y-m-d');
+            $account = $this->withWorkTimePreview($account, $calculationStart->format('Y-m-d'), $previewEnd, $cutoverDate);
+        }
+
+        return $account;
     }
 
     public function employeeMonthlyAccount(int $userId, int $year, int $month, ?string $today = null): array
@@ -169,6 +184,11 @@ final class TimeAccountService
             'calculation_basis' => 'completed_calendar_days',
             'current_day_included' => false,
         ];
+
+        if (isset($account['work_time_window_preview'])) {
+            $account['employee_balance']['is_provisional'] = (bool) ($account['balance_is_provisional'] ?? false);
+            $account['employee_balance']['work_time_window_message'] = $account['window_accounting_message'];
+        }
 
         return $account;
     }
@@ -458,11 +478,12 @@ final class TimeAccountService
     {
         $filters = $this->normalizeAdminFilters($filters);
         $rows = $this->adminRows($year, $month, $filters);
+        $includeWindow = (bool) array_filter($rows, static fn (array $row): bool => isset($row['work_time_window_preview']));
 
-        return array_map(static function (array $row): array {
+        return array_map(function (array $row) use ($includeWindow): array {
             $vacation = $row['vacation'] ?? [];
 
-            return [
+            $export = [
                 'Mitarbeiter' => (string) ($row['user'] ?? ''),
                 'Jahr' => (int) ($row['year'] ?? 0),
                 'Monat' => (int) ($row['month'] ?? 0),
@@ -493,7 +514,80 @@ final class TimeAccountService
                 'Feiertage' => (float) ($row['holiday_days'] ?? 0),
                 'Betriebsurlaub' => (float) ($row['company_closure_days'] ?? 0),
             ];
+
+            if ($includeWindow) {
+                $preview = $row['work_time_window_preview'] ?? [];
+                $export += [
+                    'Arbeitszeitfenster Status' => (string) ($row['window_accounting_message'] ?? ''),
+                    'Fenster Tatsaechliche Arbeitszeit (Min)' => $preview['actual_work_minutes'] ?? '',
+                    'Fenster Innenzeit (Min)' => $preview['inside_window_minutes'] ?? '',
+                    'Fenster Aussenzeit davor (Min)' => $preview['outside_before_minutes'] ?? '',
+                    'Fenster Aussenzeit danach (Min)' => $preview['outside_after_minutes'] ?? '',
+                    'Fenster Aussenzeit zwischen Fenstern (Min)' => $preview['outside_gap_minutes'] ?? '',
+                    'Fenster Anrechnung Vorschau (Min)' => $preview['accountable_work_minutes'] ?? '',
+                    'Fenster Aussenzeit offen (Min)' => $preview['outside_pending_minutes'] ?? '',
+                    'Fenster Aussenzeit genehmigt (Min)' => $preview['outside_approved_minutes'] ?? '',
+                    'Fenster Aussenzeit abgelehnt (Min)' => $preview['outside_rejected_minutes'] ?? '',
+                    'Fenster Aussenzeit strittig (Min)' => $preview['outside_disputed_minutes'] ?? '',
+                    'Fenster Monatsveraenderung Vorschau' => (string) ($preview['period_delta_label'] ?? ''),
+                    'Fenster Gesamtstand Vorschau' => (string) ($preview['closing_balance_label'] ?? ''),
+                    'Saldo vorlaeufig' => isset($row['work_time_window_preview']) ? (!empty($row['balance_is_provisional']) ? 'Ja' : 'Nein') : '',
+                ];
+            }
+
+            return $export;
         }, $rows);
+    }
+
+    private function withWorkTimePreview(array $account, string $dateFrom, string $dateTo, ?string $cutoverDate): array
+    {
+        $preview = $dateFrom <= $dateTo
+            ? $this->workTimePreviewService->forUserPeriod((int) $account['user_id'], $dateFrom, $dateTo)
+            : [
+                'enabled' => true, 'preview_only' => true, 'unresolved' => false,
+                'actual_work_minutes' => 0, 'recorded_net_minutes' => 0, 'accountable_work_minutes' => 0,
+                'outside_pending_minutes' => 0, 'outside_approved_minutes' => 0,
+                'calculation_status' => 'no_policy', 'rows' => [],
+            ];
+        $cumulative = $cutoverDate !== null && $cutoverDate <= $dateTo && $cutoverDate < $dateFrom
+            ? $this->workTimePreviewService->forUserPeriod((int) $account['user_id'], $cutoverDate, $dateTo)
+            : $preview;
+        $unresolved = (bool) ($preview['unresolved'] ?? false) || (bool) ($cumulative['unresolved'] ?? false);
+        $hasPolicy = (bool) array_filter($cumulative['rows'] ?? [], static fn (array $row): bool => !empty($row['policy']));
+        if (!$hasPolicy) {
+            return $account;
+        }
+
+        // The window model has no approved accounting effect yet. Existing balances
+        // remain the actual-work calculation; every separate window value is a preview.
+        $preview['preview_only'] = true;
+        $preview['cumulative_unresolved'] = $unresolved;
+        $preview['cumulative_calculation_status'] = $cumulative['calculation_status'] ?? 'no_policy';
+        $preview['cumulative_outside_pending_minutes'] = $cumulative['outside_pending_minutes'] ?? null;
+        $preview['period_delta_minutes'] = null;
+        $preview['period_delta_label'] = null;
+        $preview['closing_balance_minutes'] = null;
+        $preview['closing_balance_label'] = null;
+
+        if (isset($preview['accountable_work_minutes'], $preview['recorded_net_minutes'])) {
+            $delta = (int) $account['period_delta_minutes'] + (int) $preview['accountable_work_minutes'] - (int) $preview['recorded_net_minutes'];
+            $preview['period_delta_minutes'] = $delta;
+            $preview['period_delta_label'] = $this->signedDurationLabel($delta);
+        }
+
+        if ($account['closing_balance_minutes'] !== null && isset($cumulative['accountable_work_minutes'], $cumulative['recorded_net_minutes'])) {
+            $closing = (int) $account['closing_balance_minutes'] + (int) $cumulative['accountable_work_minutes'] - (int) $cumulative['recorded_net_minutes'];
+            $preview['closing_balance_minutes'] = $closing;
+            $preview['closing_balance_label'] = $this->signedDurationLabel($closing);
+        }
+
+        $account['work_time_window_preview'] = $preview;
+        $account['balance_is_provisional'] = $unresolved;
+        $account['window_accounting_message'] = $unresolved
+            ? 'Vorlaeufig: Aussenzeiten oder Pausenzuordnung sind noch zu klaeren. Die Fensteranrechnung ist eine Vorschau; der bestehende Saldo verwendet weiterhin die erfasste Arbeitszeit.'
+            : 'Fensteranrechnung nur als Vorschau; die fachliche Freigabe fuer eine verbindliche Anrechnung steht aus. Der bestehende Saldo verwendet weiterhin die erfasste Arbeitszeit.';
+
+        return $account;
     }
 
     /**

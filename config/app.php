@@ -12,4 +12,5 @@ return [
     'fallback_locale' => (string) env('APP_FALLBACK_LOCALE', 'de'),
     'storage_root' => storage_path(),
     'settings_encryption_key' => (string) env('SETTINGS_ENCRYPTION_KEY', (string) env('APP_SECRET', '')),
+    'work_time_windows_enabled' => (bool) env('WORK_TIME_WINDOWS_ENABLED', false),
 ];

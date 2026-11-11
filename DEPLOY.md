@@ -1,5 +1,11 @@
 # Produktions-Deploy auf einem Ionos VPS
 
+Arbeitszeitfenster werden standardmaessig mit `WORK_TIME_WINDOWS_ENABLED=false`
+ausgeliefert. Zusaetzlich ist eine kuenftige Zuordnung pro Mitarbeiter erforderlich.
+`timeapp-worktime-scheduler` fuehrt den separaten Worker minuetlich aus; das
+bisherige Push-Reminder-Intervall bleibt erhalten. Dry-Run, Betriebsgrenzen und
+gesonderte fachliche Freigabe: [WORK_TIME_WINDOWS.md](WORK_TIME_WINDOWS.md).
+
 Diese Anleitung beschreibt den Docker-Compose-Betrieb fuer die TimeApp hinter
 einem Reverse Proxy. Sie enthaelt nur Platzhalter und keine produktiven Secrets.
 

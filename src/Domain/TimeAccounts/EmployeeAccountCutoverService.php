@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\TimeAccounts;
 
 use App\Domain\Timesheets\TimesheetWriteGuard;
+use App\Domain\WorkTime\WorkTimePreviewService;
 use App\Infrastructure\Database\DatabaseConnection;
 use App\Support\MpdfFactory;
 use DateTimeImmutable;
@@ -22,10 +23,16 @@ final class EmployeeAccountCutoverService
     }
 
     private ?VacationAccountYearService $vacationYearService = null;
+    private ?WorkTimePreviewService $workTimePreviewService = null;
 
     public function setVacationYearService(VacationAccountYearService $vacationYearService): void
     {
         $this->vacationYearService = $vacationYearService;
+    }
+
+    public function setWorkTimePreviewService(WorkTimePreviewService $service): void
+    {
+        $this->workTimePreviewService = $service;
     }
 
     public function preview(array $payload): array
@@ -95,6 +102,7 @@ final class EmployeeAccountCutoverService
 
         return $this->withUserAndAccountingLocks($userId, function () use ($payload, $adminUserId): array {
             $preview = $this->preview($payload);
+            $this->assertWorkTimeWindowsResolved((int) $preview['user_id'], (string) $preview['effective_from']);
 
             return $this->connection->transaction(function () use ($preview, $adminUserId): array {
                 $userId = (int) $preview['user_id'];
@@ -135,6 +143,25 @@ final class EmployeeAccountCutoverService
                 return $this->find($cutoverId) ?? [];
             });
         });
+    }
+
+    private function assertWorkTimeWindowsResolved(int $userId, string $effectiveFrom): void
+    {
+        if (!$this->workTimePreviewService?->enabled()) {
+            return;
+        }
+        $firstAssignment = $this->connection->fetchColumn(
+            'SELECT MIN(effective_from) FROM employee_work_time_assignments WHERE user_id = :user_id AND effective_from < :effective_from',
+            ['user_id' => $userId, 'effective_from' => $effectiveFrom]
+        );
+        if (!is_string($firstAssignment) || $firstAssignment === '') {
+            return;
+        }
+        $until = (new DateTimeImmutable($effectiveFrom))->modify('-1 day')->format('Y-m-d');
+        $windowPreview = $this->workTimePreviewService->forUserPeriod($userId, $firstAssignment, $until);
+        if (!empty($windowPreview['unresolved'])) {
+            throw new InvalidArgumentException('Vor der Stichtagsfinalisierung muessen ungeklärte Aussenzeiten und Pausenzuordnungen im Altzeitraum dokumentiert geklaert werden.');
+        }
     }
 
     public function reverse(int $cutoverId, int $adminUserId, string $reason): array

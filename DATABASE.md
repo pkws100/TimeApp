@@ -78,6 +78,13 @@
 - Die feste Sperrreihenfolge fuer Anlage, Korrektur und Archivierung eines Abwesenheitszeitraums lautet: `employee-absence-user-{id}`, globaler `accounting-timesheet-write`-Lock, erneute Vorschau und Pruefung aller alten und neuen Tage, DB-Transaktion, Freigabe in umgekehrter Reihenfolge. Konflikte, Abrechnungssperren, Stichtage und veraltete `lock_version` brechen den gesamten Vorgang ab.
 - Anlage und Korrektur vergleichen ausserdem ein Vorschau-Token mit der unter den Schreiblocks neu berechneten Vorschau. Aendern sich Buchungstage, Warnungen, Kalenderpolicy oder Urlaubsauswirkung zwischen Vorschau und Speichern, muss der Admin den neuen Stand erneut pruefen.
 
+## Optionale Arbeitszeitfenster
+
+- Additive Tabellen: `work_time_policy_templates`, `work_time_policy_versions`, `employee_work_time_assignments`, `employee_work_time_supervisors`, `work_time_policy_audit`, `work_time_deviations`, `work_time_deviation_decisions`, `work_time_checkout_proposals`, `work_time_checkout_proposal_actions`, `work_time_presence_sessions`, `work_time_notification_events`.
+- Standardmaessig global aus; pro Mitarbeiter nur mit kuenftig gueltiger Zuordnung. Historische FKs verwenden `RESTRICT`.
+- Fensterwerte sind separate Vorschauen. `net_minutes`, Gutschriften, vorhandene Stichtage und Journale bleiben erhalten. Ungeklaerte Anteile markieren betroffene Salden als vorlaeufig und sichern neue Abschluesse ab.
+- Anwesenheit und unbestaetigte Vorschlaege erfinden keine Arbeitszeit. Bestaetigung und Abschluss laufen atomar unter dem zentralen Schreiblock. Details: [WORK_TIME_WINDOWS.md](WORK_TIME_WINDOWS.md).
+
 ## Seeder-Startpunkt
 - Standard-Seeds liefern Rollen, Rechte und notwendige Referenzdaten.
 - Der erste Administrator wird anschliessend per CLI angelegt:

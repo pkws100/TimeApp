@@ -5,9 +5,17 @@ declare(strict_types=1);
 
 use App\Infrastructure\Database\DatabaseConnection;
 use App\Domain\Calendar\CalendarPolicyService;
+use App\Domain\Settings\CompanySettingsService;
+use App\Domain\Timesheets\AppTimesheetSyncService;
+use App\Domain\Timesheets\TimesheetCalculator;
+use App\Domain\Timesheets\WorkdayStateCalculator;
+use App\Domain\WorkTime\WorkTimeEventService;
+use App\Domain\WorkTime\WorkTimePolicyService;
+use App\Domain\WorkTime\WorkTimePresenceService;
 use Tests\Support\MariaDbScratchConfig;
 
 require_once __DIR__ . '/../bootstrap/autoload.php';
+date_default_timezone_set('Europe/Berlin');
 
 $databaseName = 'timeapp_ui_' . bin2hex(random_bytes(6));
 $temporaryPrefix = sys_get_temp_dir() . '/timeapp-ui-' . bin2hex(random_bytes(6));
@@ -116,6 +124,8 @@ try {
         ['UI-ADMIN', 'UI', 'Administrator', 'ui-admin@example.test', 'administrator'],
         ['UI-EMPLOYEE', 'UI', 'Mitarbeiter', 'ui-employee@example.test', 'mitarbeiter'],
         ['UI-PAGINATION', 'UI', 'Pagination', 'ui-pagination@example.test', 'mitarbeiter'],
+        ['UI-WORKTIME-CONTINUE', 'UI', 'Weiterarbeit', 'ui-worktime-continue@example.test', 'mitarbeiter'],
+        ['UI-WORKTIME-CONFIRM', 'UI', 'Endbestaetigung', 'ui-worktime-confirm@example.test', 'mitarbeiter'],
     ] as [$number, $firstName, $lastName, $email, $role]) {
         $connection->execute(
             'INSERT INTO users (
@@ -147,6 +157,31 @@ try {
     $adminId = $userIds['ui-admin@example.test'];
     $employeeId = $userIds['ui-employee@example.test'];
     $paginationUserId = $userIds['ui-pagination@example.test'];
+    // This feature-enabled server contains only synthetic data. Existing UI users
+    // deliberately receive no assignment, exercising their unchanged workflows.
+    $workTimeNow = new DateTimeImmutable('now', new DateTimeZone('Europe/Berlin'));
+    $workTimeStart = $workTimeNow->modify('-3 hours')->setTime((int) $workTimeNow->modify('-3 hours')->format('H'), (int) $workTimeNow->format('i'));
+    $workTimeEnd = $workTimeStart->modify('+2 hours');
+    $workTimePolicies = new WorkTimePolicyService($connection, true);
+    $workTimeTemplate = $workTimePolicies->createTemplate(['name' => 'UI Kernarbeitszeit', 'policy' => [
+        'windows' => array_fill(1, 7, [['start' => $workTimeStart->format('H:i'), 'end' => $workTimeEnd->format('H:i')]]),
+        'early_check_in_mode' => 'work_started', 'checkout_proposals_enabled' => true,
+    ]], $adminId);
+    $workTimeSync = new AppTimesheetSyncService($connection, new TimesheetCalculator(), new CompanySettingsService($connection, []), new WorkdayStateCalculator());
+    $workTimeSync->setWorkTimePresenceService(new WorkTimePresenceService($connection, $workTimePolicies));
+    $workTimeIds = [];
+    foreach (['continue', 'confirm'] as $flow) {
+        $workTimeUserId = $userIds['ui-worktime-' . $flow . '@example.test'];
+        $assignment = $workTimePolicies->assign(['user_id' => $workTimeUserId, 'policy_version_id' => $workTimeTemplate['version']['id'], 'effective_from' => $workTimeNow->modify('+1 day')->format('Y-m-d')], $adminId);
+        // Backdate only this random scratch DB's fixture to exercise real current UI.
+        $connection->execute('UPDATE employee_work_time_assignments SET effective_from = :fixture_date WHERE id = :id', ['fixture_date' => $workTimeStart->format('Y-m-d'), 'id' => $assignment['id']]);
+        $in = $workTimeSync->sync($workTimeUserId, ['client_request_id' => 'ui-worktime-' . $flow, 'action' => 'check_in', 'work_date' => $workTimeStart->format('Y-m-d'), 'start_time' => $workTimeStart->format('H:i'), 'note' => 'Isolierter Worktime-Browserworkflow']);
+        $workTimeIds[$flow] = $in['timesheet']['id'];
+    }
+    $workTimeSummary = (new WorkTimeEventService($connection, new WorkTimePolicyService($connection, true), $workTimeSync))->process(false, $workTimeNow);
+    if ($workTimeSummary['proposals'] !== 2 || $workTimeSummary['errors'] !== 0) {
+        throw new RuntimeException('Arbeitszeitfenster-UI-Fixture konnte keine zwei offenen Vorschlaege erzeugen.');
+    }
     $calendarPolicy = new CalendarPolicyService($connection);
     $vacationDateValue = new DateTimeImmutable('+14 days');
     while ((int) $vacationDateValue->format('N') > 5
@@ -266,6 +301,7 @@ try {
         'APP_ENV' => 'test',
         'DB_OVERRIDE_FILE' => $overrideFile,
         'SESSION_SECURE_COOKIE' => 'false',
+        'WORK_TIME_WINDOWS_ENABLED' => 'true',
     ]);
     $serverProcess = proc_open(
         [PHP_BINARY, '-S', '127.0.0.1:' . $port, base_path('tests/Support/php-server-router.php')],
@@ -316,9 +352,15 @@ try {
         'UI_TEST_ABSENCE_DATE_TO' => $absenceDateTo,
         'UI_TEST_ABSENCE_DATE_EXTENDED_TO' => $absenceDateExtendedTo,
         'UI_TEST_ABSENCE_CONFLICT_DATE' => $absenceConflictDate,
+        'UI_TEST_WORKTIME_PASSWORD' => $password,
+        'UI_TEST_WORKTIME_CONTINUE_ID' => (string) $workTimeIds['continue'],
+        'UI_TEST_WORKTIME_CONFIRM_ID' => (string) $workTimeIds['confirm'],
+        'UI_TEST_WORKTIME_WORK_DATE' => $workTimeStart->format('Y-m-d'),
+        'UI_TEST_WORKTIME_END' => $workTimeEnd->format('H:i:s'),
+        'UI_TEST_WORKTIME_NOW_END' => $workTimeNow->format('H:i'),
     ]);
     $playwright = base_path('node_modules/.bin/playwright');
-    fwrite(STDOUT, $run([$playwright, 'test', 'tests/e2e/revisable-accounts.real.spec.js', '--output=' . $outputDirectory], $playwrightEnvironment));
+    fwrite(STDOUT, $run([$playwright, 'test', 'tests/e2e/revisable-accounts.real.spec.js', 'tests/e2e/work-time.real.spec.js', '--output=' . $outputDirectory], $playwrightEnvironment));
     $exitCode = 0;
 } catch (Throwable $exception) {
     fwrite(STDERR, $exception->getMessage() . PHP_EOL);

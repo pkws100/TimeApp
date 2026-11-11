@@ -52,6 +52,7 @@ final class AdminContextService
     {
         $items = [
             ['href' => '/admin', 'label' => 'Dashboard', 'active_prefix' => '/admin', 'permission' => 'dashboard.view'],
+            ['href' => '/admin/work-time', 'label' => 'Kernarbeitszeit', 'active_prefix' => '/admin/work-time', 'any_permissions' => ['work_time_policies.view', 'work_time_deviations.view', 'work_time_notifications.manage']],
             [
                 'href' => '/admin/calendar',
                 'label' => 'Kalender',
@@ -139,7 +140,10 @@ final class AdminContextService
 
         return array_values(array_filter(
             $items,
-            fn (array $item): bool => (bool) ($item['enabled'] ?? true) && $this->authService->hasPermission((string) ($item['permission'] ?? ''))
+            fn (array $item): bool => (bool) ($item['enabled'] ?? true)
+                && (isset($item['any_permissions'])
+                    ? array_filter($item['any_permissions'], fn (string $permission): bool => $this->authService->hasPermission($permission)) !== []
+                    : $this->authService->hasPermission((string) ($item['permission'] ?? '')))
         ));
     }
 }

@@ -95,6 +95,11 @@ return [
         ],
     ],
     'available' => [
+        'work_time_policies.view',
+        'work_time_policies.manage',
+        'work_time_deviations.view',
+        'work_time_deviations.manage',
+        'work_time_notifications.manage',
         'dashboard.view',
         'attendance.view',
         'users.manage',

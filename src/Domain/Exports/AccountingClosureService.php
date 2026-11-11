@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Exports;
 
 use App\Domain\Timesheets\AdminBookingService;
+use App\Domain\WorkTime\WorkTimePreviewService;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
 use InvalidArgumentException;
@@ -14,10 +15,17 @@ final class AccountingClosureService
 {
     private const ACCOUNTING_WRITE_LOCK = 'accounting-timesheet-write';
 
+    private ?WorkTimePreviewService $workTimePreviewService = null;
+
     public function __construct(
         private DatabaseConnection $connection,
         private AdminBookingService $bookingService
     ) {
+    }
+
+    public function setWorkTimePreviewService(WorkTimePreviewService $service): void
+    {
+        $this->workTimePreviewService = $service;
     }
 
     public function selectionFromInput(array $input): array
@@ -216,10 +224,49 @@ final class AccountingClosureService
             }
         }
 
+        if ($this->hasUnresolvedWindowTimes($activeRows)) {
+            $errors[] = 'Arbeitszeitfenster: Aussenzeiten oder Pausenzuordnungen sind noch ungeklärt. Ein verbindlicher Abschluss ist erst nach dokumentierter Klaerung moeglich.';
+        }
+
         return [
             'ok' => $errors === [],
             'errors' => array_values(array_unique($errors)),
         ];
+    }
+
+    private function hasUnresolvedWindowTimes(array $rows): bool
+    {
+        if (!$this->workTimePreviewService?->enabled()) {
+            return false;
+        }
+
+        $groups = [];
+        foreach ($rows as $row) {
+            if (($row['entry_type'] ?? '') !== 'work' || (int) ($row['user_id'] ?? 0) <= 0) {
+                continue;
+            }
+            $userId = (int) $row['user_id'];
+            $date = (string) $row['work_date'];
+            $groups[$userId]['ids'][(int) ($row['id'] ?? 0)] = true;
+            $groups[$userId]['from'] = min($groups[$userId]['from'] ?? $date, $date);
+            $groups[$userId]['to'] = max($groups[$userId]['to'] ?? $date, $date);
+        }
+
+        foreach ($groups as $userId => $group) {
+            $preview = $this->workTimePreviewService->forUserPeriod($userId, $group['from'], $group['to']);
+            foreach ($preview['rows'] ?? [] as $row) {
+                if (!isset($group['ids'][(int) ($row['timesheet_id'] ?? 0)])) {
+                    continue;
+                }
+                $calculation = $row['calculation'] ?? [];
+                if (!empty($calculation['unresolved'])
+                    || in_array($calculation['calculation_status'] ?? '', ['pending', 'needs_clarification', 'disputed', 'open'], true)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     public function listClosures(array $filters = []): array

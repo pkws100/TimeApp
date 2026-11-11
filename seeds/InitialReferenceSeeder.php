@@ -12,6 +12,11 @@ final class InitialReferenceSeeder extends AbstractSeed
     public static function permissions(): array
     {
         return [
+            ['code' => 'work_time_policies.view', 'label' => 'Arbeitszeitfenster ansehen', 'scope' => 'timesheets'],
+            ['code' => 'work_time_policies.manage', 'label' => 'Arbeitszeitfenster verwalten', 'scope' => 'timesheets'],
+            ['code' => 'work_time_deviations.view', 'label' => 'Arbeitszeitabweichungen ansehen', 'scope' => 'timesheets'],
+            ['code' => 'work_time_deviations.manage', 'label' => 'Arbeitszeitabweichungen pruefen', 'scope' => 'timesheets'],
+            ['code' => 'work_time_notifications.manage', 'label' => 'Arbeitszeitbenachrichtigungen verwalten', 'scope' => 'timesheets'],
             ['code' => 'dashboard.view', 'label' => 'Dashboard ansehen', 'scope' => 'backend'],
             ['code' => 'attendance.view', 'label' => 'Anwesenheit ansehen', 'scope' => 'backend'],
             ['code' => 'users.manage', 'label' => 'Benutzer verwalten', 'scope' => 'backend'],

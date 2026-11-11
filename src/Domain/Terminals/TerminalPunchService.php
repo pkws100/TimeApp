@@ -7,8 +7,10 @@ namespace App\Domain\Terminals;
 use App\Domain\Calendar\CalendarPolicyService;
 use App\Domain\TimeAccounts\TimeAccountService;
 use App\Domain\Timesheets\AppTimesheetSyncService;
+use App\Domain\Timesheets\TimesheetWriteGuard;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
+use InvalidArgumentException;
 use RuntimeException;
 
 final class TerminalPunchService
@@ -55,6 +57,14 @@ final class TerminalPunchService
     }
 
     public function scan(array $terminal, array $payload): array
+    {
+        if ($this->syncService->workTimeWindowsEnabled()) {
+            return (new TimesheetWriteGuard($this->connection))->withAccountingWriteLock(fn (): array => $this->performScan($terminal, $payload));
+        }
+        return $this->performScan($terminal, $payload);
+    }
+
+    private function performScan(array $terminal, array $payload): array
     {
         $this->terminalService->assertFeatureEnabled();
 
@@ -118,7 +128,25 @@ final class TerminalPunchService
         }
 
         $workDate = (new DateTimeImmutable('today'))->format('Y-m-d');
+        if ($this->syncService->workTimeWindowsEnabled()) {
+            $presence = $this->syncService->openPresenceForUser((int) $user['id']);
+            if ($presence !== null) {
+                $workDate = (string) $presence['work_date'];
+            } else {
+                $activeEntries = $this->connection->fetchAll('SELECT id, work_date FROM timesheets WHERE user_id = :user_id AND entry_type = "work" AND start_time IS NOT NULL AND end_time IS NULL AND COALESCE(is_deleted, 0) = 0 ORDER BY work_date, id LIMIT 2', ['user_id' => (int) $user['id']]);
+                if ($activeEntries !== [] && ($this->syncService->workTimeAppliesToUser((int) $user['id'], $workDate) || $this->syncService->workTimeAppliesToUser((int) $user['id'], (string) $activeEntries[0]['work_date']))) {
+                    if (count($activeEntries) > 1) {
+                        return $this->failure('ambiguous_work_session', 'Mehrere Arbeitseinsaetze sind offen. Bitte im Admin pruefen.', 409, $terminal, $tag, $user, $projectId, null, $payload);
+                    }
+                    $workDate = (string) $activeEntries[0]['work_date'];
+                }
+            }
+        }
         $action = $this->nextAction((int) $user['id'], $workDate);
+        $expectedTimesheetId = null;
+        if ($action === 'check_out' && $this->syncService->workTimeWindowsEnabled()) {
+            $expectedTimesheetId = $this->connection->fetchColumn('SELECT id FROM timesheets WHERE user_id = :user_id AND work_date = :work_date AND entry_type = "work" AND start_time IS NOT NULL AND end_time IS NULL AND COALESCE(is_deleted, 0) = 0 ORDER BY id DESC LIMIT 1', ['user_id' => (int) $user['id'], 'work_date' => $workDate]);
+        }
 
         try {
             $sync = $this->syncService->sync(
@@ -133,9 +161,11 @@ final class TerminalPunchService
                     'project_id' => $action === 'check_in' ? $projectId : null,
                     'source' => 'terminal',
                     'note' => 'Terminal: ' . (string) ($terminal['name'] ?? ''),
+                    ...($expectedTimesheetId !== null ? ['expected_timesheet_id' => (int) $expectedTimesheetId] : []),
+                    ...($expectedTimesheetId !== null && $workDate < (new DateTimeImmutable('today'))->format('Y-m-d') ? ['actual_end_at' => (new DateTimeImmutable())->format('Y-m-d H:i:00')] : []),
                 ]
             );
-        } catch (RuntimeException $exception) {
+        } catch (RuntimeException|InvalidArgumentException $exception) {
             return $this->failure('booking_failed', $exception->getMessage(), 422, $terminal, $tag, $user, $projectId, $action, $payload);
         }
 
@@ -201,6 +231,14 @@ final class TerminalPunchService
 
     private function successResponse(array $terminal, array $user, string $action, array $sync, array $monthly): array
     {
+        if (in_array($sync['status'] ?? '', ['presence_only', 'presence_ended'], true)) {
+            return ['ok' => true, 'action' => $sync['status'], 'message' => $sync['message'],
+                'display' => ['lines' => $this->lcdLines(($sync['status'] === 'presence_only')
+                    ? ['Anwesend', 'Ausserhalb Kernzeit', 'Arbeitsbeginn in', 'App bestaetigen']
+                    : ['Anwesenheit beendet', '', '', '']), 'hold_ms' => 7000],
+                'signal' => ['led' => 'yellow', 'beep' => 'ready'], 'sync' => $sync,
+                'server_time' => $this->serverTime()];
+        }
         $firstName = trim((string) ($user['first_name'] ?? ''));
         $time = (new DateTimeImmutable())->format('H:i:s');
         $displaySettings = $this->displaySettings($terminal);
@@ -317,6 +355,9 @@ final class TerminalPunchService
 
     private function nextAction(int $userId, string $workDate): string
     {
+        if ($this->syncService->openPresenceForUser($userId) !== null) {
+            return 'presence_end';
+        }
         if (!$this->connection->tableExists('timesheets')) {
             return 'check_in';
         }
@@ -360,6 +401,7 @@ final class TerminalPunchService
         $creditedMinutes = (int) ($monthly['credited_absence_minutes'] ?? 0);
         $manualAdjustmentMinutes = (int) ($monthly['manual_adjustment_minutes'] ?? 0);
         $balanceMinutes = (int) ($monthly['period_delta_minutes'] ?? 0);
+        $provisional = (bool) ($monthly['balance_is_provisional'] ?? false);
 
         return [
             'target_minutes' => $targetMinutes,
@@ -371,7 +413,8 @@ final class TerminalPunchService
             'tracked_label' => $this->minutesToHours($tracked),
             'credited_label' => $this->minutesToHours($creditedMinutes),
             'manual_adjustment_label' => $this->signedMinutesToHours($manualAdjustmentMinutes),
-            'balance_label' => $this->signedMinutesToHours($balanceMinutes),
+            'balance_label' => $this->signedMinutesToHours($balanceMinutes) . ($provisional ? ' (vorlaeufig)' : ''),
+            ...(isset($monthly['work_time_window_preview']) ? ['balance_is_provisional' => $provisional, 'window_accounting_message' => $monthly['window_accounting_message'] ?? ''] : []),
         ];
     }
 
