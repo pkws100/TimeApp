@@ -29,10 +29,10 @@
                 for (let day = 1; day <= 7; day += 1) {
                     form.elements['window_' + day].value = (policy.windows[day] || []).map((window) => window.start + '-' + window.end).join(', ');
                 }
-                ['early_check_in_mode', 'checkout_delay_minutes'].forEach((key) => {
+                ['early_check_in_mode', 'checkout_delay_minutes', 'outside_window_delay_minutes'].forEach((key) => {
                     if (policy[key] !== undefined) form.elements[key].value = policy[key];
                 });
-                ['checkout_proposals_enabled', 'notify_employee_push', 'notify_employee_sms', 'notify_supervisor_push', 'notify_supervisor_sms'].forEach((key) => {
+                ['checkout_proposals_enabled', 'outside_window_notifications_enabled', 'notify_employee_push', 'notify_employee_sms', 'notify_supervisor_push', 'notify_supervisor_sms'].forEach((key) => {
                     form.elements[key].checked = !!policy[key];
                 });
             });
@@ -62,6 +62,35 @@
                 output.textContent = error.message;
                 token.value = '';
             }
+        });
+    });
+
+    document.querySelectorAll('[data-pause-evidence-form]').forEach(function (form) {
+        const list = form.querySelector('[data-pause-intervals]');
+        const first = list.querySelector('[data-pause-interval]');
+        const refresh = () => {
+            const rows = list.querySelectorAll('[data-pause-interval]');
+            rows.forEach((row) => { row.querySelector('[data-pause-remove]').hidden = rows.length === 1; });
+            form.querySelector('[data-pause-add]').disabled = rows.length >= 12;
+        };
+        form.querySelector('[data-pause-add]').addEventListener('click', function () {
+            if (list.querySelectorAll('[data-pause-interval]').length >= 12) return;
+            const row = first.cloneNode(true);
+            row.querySelectorAll('input').forEach((input) => { input.value = ''; });
+            list.appendChild(row);
+            refresh();
+        });
+        list.addEventListener('click', function (event) {
+            const remove = event.target.closest('[data-pause-remove]');
+            if (remove && list.querySelectorAll('[data-pause-interval]').length > 1) {
+                remove.closest('[data-pause-interval]').remove();
+                refresh();
+            }
+        });
+        form.addEventListener('submit', function () {
+            const button = form.querySelector('button[type="submit"]');
+            button.disabled = true;
+            button.textContent = 'Nachweis wird gespeichert …';
         });
     });
 }());

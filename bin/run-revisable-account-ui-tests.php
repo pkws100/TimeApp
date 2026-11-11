@@ -22,8 +22,10 @@ $temporaryPrefix = sys_get_temp_dir() . '/timeapp-ui-' . bin2hex(random_bytes(6)
 $phinxFile = $temporaryPrefix . '-phinx.php';
 $overrideFile = $temporaryPrefix . '-database.php';
 $serverLog = $temporaryPrefix . '-server.log';
+$disabledServerLog = $temporaryPrefix . '-server-disabled.log';
 $outputDirectory = $temporaryPrefix . '-playwright';
 $serverProcess = null;
+$disabledServerProcess = null;
 $serverPdo = null;
 $exitCode = 1;
 $accountYear = (int) date('Y');
@@ -126,6 +128,9 @@ try {
         ['UI-PAGINATION', 'UI', 'Pagination', 'ui-pagination@example.test', 'mitarbeiter'],
         ['UI-WORKTIME-CONTINUE', 'UI', 'Weiterarbeit', 'ui-worktime-continue@example.test', 'mitarbeiter'],
         ['UI-WORKTIME-CONFIRM', 'UI', 'Endbestaetigung', 'ui-worktime-confirm@example.test', 'mitarbeiter'],
+        ['UI-HARDENING-EMPLOYEE', 'UI', 'Hardening Ablauf', 'ui-hardening-employee@example.test', 'mitarbeiter'],
+        ['UI-HARDENING-PAUSE', 'UI', 'Hardening Pausennachweis', 'ui-hardening-pause@example.test', 'mitarbeiter'],
+        ['UI-HARDENING-OFF', 'UI', 'Hardening Deaktiviert', 'ui-hardening-off@example.test', 'mitarbeiter'],
     ] as [$number, $firstName, $lastName, $email, $role]) {
         $connection->execute(
             'INSERT INTO users (
@@ -182,6 +187,19 @@ try {
     if ($workTimeSummary['proposals'] !== 2 || $workTimeSummary['errors'] !== 0) {
         throw new RuntimeException('Arbeitszeitfenster-UI-Fixture konnte keine zwei offenen Vorschlaege erzeugen.');
     }
+    $hardeningDate = (new DateTimeImmutable('yesterday'))->format('Y-m-d');
+    $hardeningTemplate = $workTimePolicies->createTemplate(['name' => 'UI Hardening 08 bis 16', 'policy' => [
+        'windows' => array_fill(1, 7, [['start' => '08:00', 'end' => '16:00']]),
+        'early_check_in_mode' => 'presence_only', 'checkout_proposals_enabled' => true,
+        'notify_employee_push' => true, 'outside_window_notifications_enabled' => true, 'outside_window_delay_minutes' => 5,
+    ]], $adminId);
+    foreach (['pause', 'off'] as $flow) {
+        $hardeningUser = $userIds['ui-hardening-' . $flow . '@example.test'];
+        $assignment = $workTimePolicies->assign(['user_id' => $hardeningUser, 'policy_version_id' => $hardeningTemplate['version']['id'], 'effective_from' => (new DateTimeImmutable('tomorrow'))->format('Y-m-d')], $adminId);
+        $connection->execute('UPDATE employee_work_time_assignments SET effective_from = :fixture_date WHERE id = :id', ['fixture_date' => $hardeningDate, 'id' => $assignment['id']]);
+    }
+    $connection->execute('INSERT INTO timesheets (user_id, work_date, start_time, end_time, entry_type, source, gross_minutes, break_minutes, net_minutes) VALUES (:user_id, :work_date, "07:42:00", "16:35:00", "work", "app", 533, 30, 503)', ['user_id' => $userIds['ui-hardening-pause@example.test'], 'work_date' => $hardeningDate]);
+    $hardeningPauseId = $connection->lastInsertId();
     $calendarPolicy = new CalendarPolicyService($connection);
     $vacationDateValue = new DateTimeImmutable('+14 days');
     while ((int) $vacationDateValue->format('N') > 5
@@ -330,6 +348,33 @@ try {
         throw new RuntimeException('Der isolierte PHP-UI-Testserver wurde nicht rechtzeitig erreichbar.');
     }
 
+    $disabledListener = stream_socket_server('tcp://127.0.0.1:0', $disabledErrorCode, $disabledErrorMessage);
+    if (!is_resource($disabledListener)) {
+        throw new RuntimeException('Freier deaktivierter UI-Testport fehlt: ' . $disabledErrorMessage);
+    }
+    $disabledAddress = stream_socket_get_name($disabledListener, false);
+    fclose($disabledListener);
+    $disabledPort = (int) substr((string) $disabledAddress, strrpos((string) $disabledAddress, ':') + 1);
+    $disabledBaseUrl = 'http://127.0.0.1:' . $disabledPort;
+    $disabledEnvironment = array_merge($environment, ['WORK_TIME_WINDOWS_ENABLED' => 'false']);
+    $disabledServerProcess = proc_open([PHP_BINARY, '-S', '127.0.0.1:' . $disabledPort, base_path('tests/Support/php-server-router.php')], [1 => ['file', $disabledServerLog, 'a'], 2 => ['file', $disabledServerLog, 'a']], $disabledServerPipes, base_path(), $disabledEnvironment);
+    if (!is_resource($disabledServerProcess)) {
+        throw new RuntimeException('Der deaktivierte PHP-Testserver konnte nicht gestartet werden.');
+    }
+    $disabledReady = false;
+    for ($attempt = 0; $attempt < 50; $attempt++) {
+        $curl = curl_init($disabledBaseUrl . '/admin/login');
+        curl_setopt_array($curl, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT_MS => 500]);
+        curl_exec($curl);
+        $disabledReady = curl_getinfo($curl, CURLINFO_RESPONSE_CODE) === 200;
+        curl_close($curl);
+        if ($disabledReady) { break; }
+        usleep(100000);
+    }
+    if (!$disabledReady) {
+        throw new RuntimeException('Der deaktivierte PHP-Testserver ist nicht erreichbar.');
+    }
+
     $playwrightEnvironment = array_merge($environment, [
         'REAL_ACCOUNT_UI' => '1',
         'UI_ISOLATED_ACCOUNT_RUNNER' => '1',
@@ -358,9 +403,17 @@ try {
         'UI_TEST_WORKTIME_WORK_DATE' => $workTimeStart->format('Y-m-d'),
         'UI_TEST_WORKTIME_END' => $workTimeEnd->format('H:i:s'),
         'UI_TEST_WORKTIME_NOW_END' => $workTimeNow->format('H:i'),
+        'UI_TEST_HARDENING_DATE' => $hardeningDate,
+        'UI_TEST_HARDENING_FUTURE_DATE' => (new DateTimeImmutable('tomorrow'))->format('Y-m-d'),
+        'UI_TEST_HARDENING_VERSION_ID' => (string) $hardeningTemplate['version']['id'],
+        'UI_TEST_HARDENING_EMPLOYEE_ID' => (string) $userIds['ui-hardening-employee@example.test'],
+        'UI_TEST_HARDENING_PAUSE_USER_ID' => (string) $userIds['ui-hardening-pause@example.test'],
+        'UI_TEST_HARDENING_PAUSE_ID' => (string) $hardeningPauseId,
+        'UI_TEST_HARDENING_OFF_ID' => (string) $userIds['ui-hardening-off@example.test'],
+        'UI_TEST_HARDENING_DISABLED_URL' => $disabledBaseUrl,
     ]);
     $playwright = base_path('node_modules/.bin/playwright');
-    fwrite(STDOUT, $run([$playwright, 'test', 'tests/e2e/revisable-accounts.real.spec.js', 'tests/e2e/work-time.real.spec.js', '--output=' . $outputDirectory], $playwrightEnvironment));
+    fwrite(STDOUT, $run([$playwright, 'test', 'tests/e2e/revisable-accounts.real.spec.js', 'tests/e2e/work-time.real.spec.js', 'tests/e2e/work-time-hardening.real.spec.js', '--output=' . $outputDirectory], $playwrightEnvironment));
     $exitCode = 0;
 } catch (Throwable $exception) {
     fwrite(STDERR, $exception->getMessage() . PHP_EOL);
@@ -376,6 +429,10 @@ try {
         proc_terminate($serverProcess);
         proc_close($serverProcess);
     }
+    if (is_resource($disabledServerProcess)) {
+        proc_terminate($disabledServerProcess);
+        proc_close($disabledServerProcess);
+    }
 
     try {
         if ($serverPdo instanceof PDO && str_starts_with($databaseName, 'timeapp_ui_')) {
@@ -385,7 +442,7 @@ try {
         fwrite(STDERR, 'Scratch-Datenbank konnte nicht entfernt werden: ' . $exception->getMessage() . PHP_EOL);
         $exitCode = 1;
     } finally {
-        foreach ([$phinxFile, $overrideFile, $serverLog] as $file) {
+        foreach ([$phinxFile, $overrideFile, $serverLog, $disabledServerLog] as $file) {
             if (is_file($file)) {
                 unlink($file);
             }

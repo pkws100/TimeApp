@@ -346,8 +346,9 @@ final class WorkTimeEventsDatabaseTest extends MariaDbTestCase
         $this->checkIn($sync, $user, $date);
         $now = new DateTimeImmutable($date . ' 16:30');
         $result = $events->process(false, $now);
-        self::assertSame(1, $result['sent']);
-        self::assertSame(1, $result['failed']);
+        self::assertSame(0, $result['provider_accepted']);
+        self::assertSame(1, $result['test_simulated']);
+        self::assertSame(1, $result['uncertain']);
         $events->process(false, $now);
         self::assertSame(1, $calls);
         self::assertCount(1, $sms->messages());

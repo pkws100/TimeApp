@@ -17,6 +17,8 @@ final class WorkTimeEventService
 {
     private ?Closure $pushSender;
     private SmsProvider $smsProvider;
+    private WorkTimeNotificationService $notifications;
+    private ?WorkTimeReconciliationQueue $reconciliationQueue = null;
 
     public function __construct(
         private DatabaseConnection $connection,
@@ -28,7 +30,12 @@ final class WorkTimeEventService
     ) {
         $this->pushSender = $pushSender === null ? null : Closure::fromCallable($pushSender);
         $this->smsProvider = $smsProvider ?? new MockSmsProvider();
+        $this->notifications = new WorkTimeNotificationService($connection, $policies, $pushSender, $this->smsProvider);
     }
+
+    public function notifications(): WorkTimeNotificationService { return $this->notifications; }
+
+    public function setReconciliationQueue(WorkTimeReconciliationQueue $queue): void { $this->reconciliationQueue = $queue; }
 
     public function statusForUser(int $userId): array
     {
@@ -57,7 +64,7 @@ final class WorkTimeEventService
         if (!$this->policies->enabled()) {
             return [];
         }
-        return $this->connection->fetchAll('SELECT e.*, CONCAT(u.first_name, " ", u.last_name) AS recipient_name FROM work_time_notification_events e JOIN work_time_checkout_proposals p ON e.event_key = CONCAT("checkout-proposal:", p.id) JOIN users u ON u.id = e.recipient_user_id WHERE p.user_id = :user_id ORDER BY e.id DESC LIMIT 100', ['user_id' => $userId]);
+        return $this->notifications->list($userId);
     }
 
     public function workerLockName(): string
@@ -140,9 +147,9 @@ final class WorkTimeEventService
         });
     }
 
-    public function process(bool $dryRun = false, ?DateTimeImmutable $now = null): array
+    public function process(bool $dryRun = false, ?DateTimeImmutable $now = null, int $batchSize = 100): array
     {
-        $summary = ['enabled' => $this->policies->enabled(), 'dry_run' => $dryRun, 'proposals' => 0, 'stale' => 0, 'sent' => 0, 'failed' => 0, 'disabled' => 0, 'uncertain' => 0, 'errors' => 0, 'locked' => false];
+        $summary = ['enabled' => $this->policies->enabled(), 'dry_run' => $dryRun, 'proposals' => 0, 'stale' => 0, 'outside_notifications_queued' => 0, 'provider_accepted' => 0, 'sent' => 0, 'failed' => 0, 'disabled' => 0, 'not_configured' => 0, 'test_simulated' => 0, 'cancelled' => 0, 'uncertain' => 0, 'errors' => 0, 'locked' => false];
         if (!$summary['enabled']) {
             return $summary;
         }
@@ -165,7 +172,7 @@ final class WorkTimeEventService
                         });
                     }
                 }
-                $entries = $this->connection->fetchAll('SELECT t.* FROM timesheets t JOIN users u ON u.id = t.user_id WHERE t.entry_type = "work" AND t.start_time IS NOT NULL AND t.end_time IS NULL AND COALESCE(t.is_deleted, 0) = 0 AND u.employment_status = "active" AND COALESCE(u.is_deleted, 0) = 0 AND t.work_date <= :today ORDER BY t.id', ['today' => $now->format('Y-m-d')]);
+                $entries = $this->connection->fetchAll('SELECT t.* FROM timesheets t JOIN users u ON u.id = t.user_id WHERE t.entry_type = "work" AND t.start_time IS NOT NULL AND t.end_time IS NULL AND t.is_deleted = 0 AND u.employment_status = "active" AND COALESCE(u.is_deleted, 0) = 0 AND t.work_date <= :today ORDER BY t.id', ['today' => $now->format('Y-m-d')]);
                 foreach ($entries as $entry) {
                     try {
                         try {
@@ -174,11 +181,20 @@ final class WorkTimeEventService
                             continue;
                         }
                         $policy = $this->policies->policyFor((int) $entry['user_id'], $entry['work_date']);
-                        if ($policy === null || empty($policy['checkout_proposals_enabled'])) {
+                        if ($policy === null) {
                             continue;
                         }
-                        $startedAt = new DateTimeImmutable($entry['work_date'] . ' ' . $entry['start_time'], new DateTimeZone('Europe/Berlin'));
-                        $proposedEnd = $this->windowEnd($policy, $entry['work_date'], $startedAt);
+                        $startedAt = WorkTimeLocalTime::parse($entry['work_date'] . ' ' . $entry['start_time']);
+                        if (!empty($policy['outside_window_notifications_enabled'])
+                            && WorkTimeEventWindows::startedOutsideAfterWindow($policy, $startedAt)
+                            && $startedAt->modify('+' . (int) ($policy['outside_window_delay_minutes'] ?? 5) . ' minutes') <= $now) {
+                            $queued = $dryRun
+                                ? $this->notifications->queue('work_time_outside_window_started', $entry, $policy, $startedAt, null, true)
+                                : $this->connection->transaction(fn (): int => $this->notifications->queue('work_time_outside_window_started', $entry, $policy, $startedAt));
+                            $summary['outside_notifications_queued'] += $queued;
+                        }
+                        if (empty($policy['checkout_proposals_enabled'])) { continue; }
+                        $proposedEnd = WorkTimeEventWindows::windowEnd($policy, $entry['work_date'], $startedAt);
                         if ($proposedEnd === null || $proposedEnd <= $startedAt || $proposedEnd->modify('+' . (int) ($policy['checkout_delay_minutes'] ?? 0) . ' minutes') > $now || $this->connection->fetchOne('SELECT id FROM work_time_checkout_proposals WHERE timesheet_id = :id', ['id' => $entry['id']]) !== null) {
                             continue;
                         }
@@ -189,27 +205,25 @@ final class WorkTimeEventService
                         $this->connection->transaction(function () use ($entry, $policy, $proposedEnd): void {
                             $this->connection->execute('INSERT INTO work_time_checkout_proposals (user_id, timesheet_id, policy_version_id, proposed_end_at, status, created_at) VALUES (:user_id, :timesheet_id, :version_id, :end_at, "pending", NOW())', ['user_id' => $entry['user_id'], 'timesheet_id' => $entry['id'], 'version_id' => $policy['policy_version_id'], 'end_at' => $proposedEnd->format('Y-m-d H:i:s')]);
                             $proposalId = $this->connection->lastInsertId();
-                            $this->queueNotifications($proposalId, (int) $entry['user_id'], $policy, $proposedEnd);
+                            $this->notifications->queue('work_time_checkout_proposal', $entry, $policy, $proposedEnd, $proposalId);
                         });
                     } catch (Throwable $exception) {
                         $summary['errors']++;
-                        error_log('Work-time proposal failed for timesheet ' . (int) $entry['id'] . ': ' . get_class($exception));
+                        error_log('Work-time event processing failed: ' . get_class($exception));
                     }
                 }
             });
-            if (!$dryRun && $this->previews !== null) {
-                $dates = $this->connection->fetchAll('SELECT t.user_id, MIN(t.work_date) AS date_from, MAX(t.work_date) AS date_to FROM timesheets t JOIN users u ON u.id = t.user_id WHERE t.entry_type = "work" AND t.end_time IS NOT NULL AND COALESCE(t.is_deleted, 0) = 0 AND u.employment_status = "active" AND COALESCE(u.is_deleted, 0) = 0 AND t.work_date <= :date_to AND EXISTS (SELECT 1 FROM employee_work_time_assignments a WHERE a.user_id = t.user_id AND a.effective_from <= t.work_date AND (a.effective_to IS NULL OR a.effective_to >= t.work_date)) GROUP BY t.user_id', ['date_to' => $now->format('Y-m-d')]);
-                foreach ($dates as $date) {
-                    try {
-                        $this->previews->reconcileUser((int) $date['user_id'], $date['date_from'], $date['date_to']);
-                    } catch (Throwable $exception) {
-                        $summary['errors']++;
-                        error_log('Work-time reconciliation failed for user ' . (int) $date['user_id'] . ': ' . get_class($exception));
-                    }
-                }
+            if ($this->previews !== null || $this->reconciliationQueue !== null) {
+                $queue = $this->reconciliationQueue ??= new WorkTimeReconciliationQueue($this->connection, $this->previews, $this->policies);
+                $summary['reconciliation'] = $queue->processBatch($dryRun, $now, $batchSize);
+                $summary['errors'] += (int) ($summary['reconciliation']['failed'] ?? 0);
             }
             if (!$dryRun) {
-                $this->dispatchNotifications($summary);
+                $notifications = $this->notifications->dispatch($now);
+                foreach (['provider_accepted', 'failed', 'not_configured', 'test_simulated', 'cancelled'] as $key) { $summary[$key] += (int) ($notifications[$key] ?? 0); }
+                // Compatibility counters; "sent" means provider acceptance, not delivery.
+                $summary['sent'] = $summary['provider_accepted'];
+                $summary['disabled'] = $summary['not_configured'] + $summary['cancelled'];
             }
             $summary['uncertain'] = (int) $this->connection->fetchColumn('SELECT COUNT(*) FROM work_time_notification_events WHERE status = "uncertain"');
         } finally {
@@ -264,82 +278,4 @@ final class WorkTimeEventService
         return WorkTimeLocalTime::parse($end->format('Y-m-d H:i:s'));
     }
 
-    private function windowEnd(array $policy, string $date, DateTimeImmutable $startedAt): ?DateTimeImmutable
-    {
-        $day = new DateTimeImmutable($date, new DateTimeZone('Europe/Berlin'));
-        $previous = $day->modify('-1 day');
-        foreach ($policy['windows'][(int) $previous->format('N')] ?? [] as $window) {
-            if ($window['end'] <= $window['start']) {
-                $carriedEnd = WorkTimeLocalTime::parse($date . ' ' . $window['end'] . ':00');
-                if ($startedAt < $carriedEnd) {
-                    return $carriedEnd;
-                }
-            }
-        }
-        $windows = $policy['windows'][(int) $day->format('N')] ?? [];
-        $end = null;
-        foreach ($windows as $window) {
-            $endDate = $window['end'] <= $window['start'] ? $day->modify('+1 day')->format('Y-m-d') : $date;
-            $candidate = WorkTimeLocalTime::parse($endDate . ' ' . $window['end'] . ':00');
-            if ($end === null || $candidate > $end) {
-                $end = $candidate;
-            }
-        }
-        return $end;
-    }
-
-    private function queueNotifications(int $proposalId, int $employeeId, array $policy, DateTimeImmutable $end): void
-    {
-        $recipients = [$employeeId => ['push' => !empty($policy['notify_employee_push']), 'sms' => !empty($policy['notify_employee_sms'])]];
-        foreach ($policy['supervisor_user_ids'] ?? [] as $id) {
-            $id = (int) $id;
-            $recipients[$id] = ['push' => !empty($recipients[$id]['push']) || !empty($policy['notify_supervisor_push']), 'sms' => !empty($recipients[$id]['sms']) || !empty($policy['notify_supervisor_sms'])];
-        }
-        foreach ($recipients as $id => $channels) {
-            foreach ($channels as $channel => $selected) {
-                if (!$selected) {
-                    continue;
-                }
-                $message = ['title' => 'Arbeitszeitfenster beendet', 'body' => ($id === $employeeId ? '' : 'Mitarbeiter #' . $employeeId . ': ') . 'Das Arbeitszeitfenster endete um ' . $end->format('H:i') . ' Uhr. Der tatsaechliche Arbeitsabschluss ist noch zu bestaetigen.', 'url' => $id === $employeeId ? '/app/zeiten' : '/admin/work-time?user_id=' . $employeeId, 'type' => 'work_time_checkout_proposal', 'proposal_id' => $proposalId, 'employee_user_id' => $employeeId, 'tag' => 'work-time-proposal-' . $proposalId];
-                $this->connection->execute('INSERT INTO work_time_notification_events (event_key, recipient_user_id, channel, status, payload_json, created_at, updated_at) VALUES (:event_key, :recipient_id, :channel, "pending", :payload, NOW(), NOW()) ON DUPLICATE KEY UPDATE event_key = VALUES(event_key)', ['event_key' => 'checkout-proposal:' . $proposalId, 'recipient_id' => $id, 'channel' => $channel, 'payload' => json_encode($message, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)]);
-            }
-        }
-    }
-
-    private function dispatchNotifications(array &$summary): void
-    {
-        // Holding the worker lock proves that no previous sender is still running.
-        // A previous crash cannot tell us whether a provider received its request.
-        $this->connection->execute('UPDATE work_time_notification_events SET status = "uncertain", error_message = "Versandstatus nach Unterbrechung ungeklaert; kein automatischer Neuversand.", updated_at = NOW() WHERE status = "sending"');
-        $events = $this->connection->fetchAll('SELECT e.*, u.phone, u.employment_status, u.is_deleted AS user_deleted FROM work_time_notification_events e JOIN users u ON u.id = e.recipient_user_id WHERE e.status = "pending" AND e.attempts = 0 ORDER BY e.id LIMIT 500');
-        foreach ($events as $event) {
-            $status = 'failed';
-            $error = null;
-            $payload = json_decode($event['payload_json'], true) ?: [];
-            $proposal = $this->connection->fetchOne('SELECT status FROM work_time_checkout_proposals WHERE id = :id', ['id' => (int) ($payload['proposal_id'] ?? 0)]);
-            if ($event['employment_status'] !== 'active' || (int) $event['user_deleted'] === 1 || ($proposal['status'] ?? '') !== 'pending') {
-                $status = 'disabled';
-                $error = 'Empfaenger oder fachliches Ereignis ist nicht mehr aktiv.';
-            } elseif (($event['channel'] === 'sms' && !$this->smsProvider->enabled()) || ($event['channel'] === 'push' && $this->pushSender === null)) {
-                $status = 'disabled';
-                $error = 'Der Versandkanal ist deaktiviert oder nicht konfiguriert.';
-            } else {
-                // Persist the attempt before any external I/O. A crash leaves sending/uncertain;
-                // automatic retries could send a second message after a successful first send.
-                $this->connection->execute('UPDATE work_time_notification_events SET status = "sending", attempts = attempts + 1, last_attempt_at = NOW(), updated_at = NOW() WHERE id = :id AND status = "pending" AND attempts = 0', ['id' => $event['id']]);
-                try {
-                    $key = $event['event_key'] . ':' . $event['recipient_user_id'] . ':' . $event['channel'];
-                    $result = $event['channel'] === 'sms'
-                        ? $this->smsProvider->send(PhoneNumber::normalize((string) $event['phone']), $payload['body'] ?? '', $key)
-                        : ($this->pushSender)((int) $event['recipient_user_id'], $payload, $key);
-                    $status = !empty($result['ok']) ? 'sent' : 'failed';
-                    $error = $status === 'sent' ? null : 'Der Versandkanal hat den Versand nicht bestaetigt.';
-                } catch (Throwable) {
-                    $error = 'Versand fehlgeschlagen; bitte Kanal und Empfaenger pruefen.';
-                }
-            }
-            $this->connection->execute('UPDATE work_time_notification_events SET status = :status, error_message = :error, sent_at = CASE WHEN :is_sent = 1 THEN NOW() ELSE NULL END, updated_at = NOW() WHERE id = :id', ['status' => $status, 'error' => $error, 'is_sent' => $status === 'sent' ? 1 : 0, 'id' => $event['id']]);
-            $summary[$status]++;
-        }
-    }
 }

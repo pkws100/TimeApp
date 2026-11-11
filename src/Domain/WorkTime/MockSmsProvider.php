@@ -21,14 +21,14 @@ final class MockSmsProvider implements SmsProvider
     public function send(string $e164PhoneNumber, string $message, string $eventKey): array
     {
         if (!$this->isEnabled) {
-            return ['ok' => false, 'message' => 'SMS ist deaktiviert.'];
+            return ['ok' => false, 'not_configured' => true, 'message' => 'SMS ist deaktiviert.'];
         }
         if ($this->shouldFail) {
-            return ['ok' => false, 'message' => 'SMS-Testfehler.'];
+            return ['ok' => false, 'simulated' => true, 'simulation_failed' => true, 'message' => 'SMS-Testfehler ohne echten Versand.'];
         }
         $this->messages[$eventKey] = ['phone' => $e164PhoneNumber, 'message' => $message];
 
-        return ['ok' => true];
+        return ['ok' => true, 'simulated' => true];
     }
 
     public function messages(): array

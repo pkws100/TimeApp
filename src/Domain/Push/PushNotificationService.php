@@ -41,7 +41,7 @@ final class PushNotificationService implements PushSender
         if (!$this->isConfigured()) {
             $this->log($userId, $subscriptionId, $notificationType, $workDate, $dedupeKey, $title, $body, $payload, 'error', 'VAPID ist nicht vollstaendig konfiguriert.');
 
-            return ['ok' => false, 'message' => 'VAPID ist nicht vollstaendig konfiguriert.'];
+            return ['ok' => false, 'not_configured' => true, 'definitive_not_accepted' => true, 'retryable' => false, 'message' => 'VAPID ist nicht vollstaendig konfiguriert.'];
         }
 
         try {
@@ -74,7 +74,9 @@ final class PushNotificationService implements PushSender
             $this->subscriptionService->markFailure($subscriptionId, $reason, $report->isSubscriptionExpired());
             $this->log($userId, $subscriptionId, $notificationType, $workDate, $dedupeKey, $title, $body, $payload, 'error', $reason);
 
-            return ['ok' => false, 'message' => $reason];
+            $httpStatus = $report->getResponse()?->getStatusCode();
+            $rejected = in_array($httpStatus, [400, 401, 403, 404, 405, 406, 409, 410, 413, 415, 422, 429], true);
+            return ['ok' => false, 'message' => $reason, 'definitive_not_accepted' => $rejected, 'retryable' => $httpStatus === 429];
         } catch (Throwable $throwable) {
             $messageText = $throwable->getMessage();
             $this->subscriptionService->markFailure($subscriptionId, $messageText);

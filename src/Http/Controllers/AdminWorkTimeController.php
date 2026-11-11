@@ -10,7 +10,9 @@ use App\Domain\Users\UserService;
 use App\Domain\WorkTime\WorkTimeAccessService;
 use App\Domain\WorkTime\WorkTimeDeviationService;
 use App\Domain\WorkTime\WorkTimeEventService;
+use App\Domain\WorkTime\WorkTimeNotificationService;
 use App\Domain\WorkTime\WorkTimePolicyService;
+use App\Domain\WorkTime\WorkTimePauseCorrectionService;
 use App\Domain\WorkTime\WorkTimePreviewService;
 use App\Http\Request;
 use App\Http\Response;
@@ -30,7 +32,8 @@ final class AdminWorkTimeController
         private WorkTimePreviewService $preview,
         private WorkTimeDeviationService $deviations,
         private WorkTimeAccessService $access,
-        private WorkTimeEventService $events
+        private WorkTimeEventService $events,
+        private ?WorkTimePauseCorrectionService $pauseCorrections = null
     ) {
     }
 
@@ -51,6 +54,9 @@ final class AdminWorkTimeController
         }
         $content = '<header class="page-header"><div><p class="eyebrow">Optionale Mitarbeiterregeln</p><h1>Kernarbeitszeit</h1><p>' . $enabled . '</p></div></header>' . $notice
             . '<section class="card stack"><h2>Anwesenheit und Arbeit getrennt erfassen</h2><p>Das Fenster ist eine zeitliche Orientierung, keine Zusage über Nettoarbeitsstunden. Tatsächliche Arbeit außerhalb des Fensters bleibt dokumentiert. Die abweichende Anrechnung ist eine vorläufige Vorschau; bestehende Zeitkontowerte werden weiterhin nach der bisherigen Berechnung geführt.</p><p>„Nur anwesend“ setzt voraus, dass tatsächlich noch nicht gearbeitet wird. Bereits geleistete Arbeit muss als Arbeitsbeginn bestätigt werden. Ein Vorschlag zum Arbeitsende beendet keine Buchung automatisch.</p></section>';
+        if ($this->auth->hasPermission('work_time_notifications.manage')) {
+            $content .= '<p><a class="button button-secondary" href="/admin/work-time/notifications">Versandübersicht und berechtigte Wiederholungen</a></p>';
+        }
         $templateOptions = '<option value="">Neue Vorlage</option>';
         $versionOptions = '<option value="">Bitte Regelversion wählen</option>';
         $templateRows = '';
@@ -93,6 +99,7 @@ final class AdminWorkTimeController
         $content .= '<section class="card stack"><h2>Mitarbeiterzuordnungen</h2><div class="table-scroll"><table><thead><tr><th>Mitarbeiter-ID</th><th>Regelversion</th><th>Ab</th><th>Bis</th></tr></thead><tbody>' . ($assignmentRows ?: '<tr><td colspan="4">Keine zugeordneten Mitarbeiter.</td></tr>') . '</tbody></table></div></section>';
         $content .= '<section class="card stack"><h2>Mitarbeiter prüfen</h2><form method="get" class="form-grid"><label><span>Mitarbeiter</span><select name="user_id" required><option value="">Bitte wählen</option>' . $this->userOptions($users, (int) $request->query('user_id', 0)) . '</select></label><button class="button button-secondary">Informationen laden</button></form></section>';
         $content .= $this->employeePreviewPanel($request, $actor);
+        $content .= $this->pauseClarificationPanel($request, $actor, $csrf);
         $content .= $this->deviationPanel($request, $actor, $csrf);
         $content .= $this->notificationPanel($request, $actor);
         return Response::html($this->view->render('Kernarbeitszeit', $content, '<script src="/assets/js/admin-work-time.js"></script>'));
@@ -195,6 +202,94 @@ final class AdminWorkTimeController
         }
     }
 
+    public function documentPauses(Request $request, array $params): Response
+    {
+        if (!$this->auth->hasPermission('timesheets.manage') || !$this->auth->hasPermission('work_time_deviations.manage')) {
+            return Response::html('Für Pausennachweise werden Buchungs- und Abweichungsverwaltung benötigt.', 403);
+        }
+        if (!$this->validCsrf($request)) {
+            return $this->error('Bitte die Seite neu laden.');
+        }
+        if ($this->pauseCorrections === null) {
+            return $this->error('Pausennachweise sind noch nicht verfügbar.');
+        }
+        try {
+            $id = (int) ($params['id'] ?? 0);
+            $details = $this->pauseCorrections->details($id);
+            $actor = $this->auth->currentUser() ?? [];
+            if (!$this->access->canManageUser($actor, (int) $details['timesheet']['user_id'], (string) $details['timesheet']['work_date'])) {
+                return Response::html('Keine Berechtigung für diese Mitarbeiterbuchung.', 403);
+            }
+            foreach (['reason', 'request_id', 'source_token', 'actual_break_attestation'] as $key) {
+                if (!is_string($request->input($key))) {
+                    throw new InvalidArgumentException('Bitte den Pausennachweis vollständig prüfen und bestätigen.');
+                }
+            }
+            if ($request->input('actual_break_attestation') !== '1') {
+                throw new InvalidArgumentException('Bitte ausdrücklich bestätigen, dass die eingetragenen Pausen tatsächlich genommen wurden.');
+            }
+            $starts = $request->input('pause_start', []);
+            $ends = $request->input('pause_end', []);
+            if (!is_array($starts) || !is_array($ends) || count($starts) !== count($ends)) {
+                throw new InvalidArgumentException('Jede Pause benötigt Beginn und Ende.');
+            }
+            $intervals = [];
+            foreach (array_values($starts) as $index => $start) {
+                $intervals[] = ['start' => $start, 'end' => array_values($ends)[$index]];
+            }
+            $this->pauseCorrections->document($id, $intervals, (int) $actor['id'], $request->input('reason'), $request->input('request_id'), $request->input('source_token'));
+            return Response::redirect('/admin/work-time?user_id=' . (int) $details['timesheet']['user_id'] . '&pause_month=' . substr($details['timesheet']['work_date'], 0, 7) . '&saved=1');
+        } catch (InvalidArgumentException $exception) {
+            return $this->error($exception->getMessage());
+        }
+    }
+
+    private function pauseClarificationPanel(Request $request, array $actor, string $csrf): string
+    {
+        $userId = (int) $request->query('user_id', 0);
+        if ($this->pauseCorrections === null || !$this->policies->enabled() || !$this->auth->hasPermission('work_time_deviations.view') || $userId <= 0 || !$this->access->canManageUser($actor, $userId)) {
+            return '';
+        }
+        $monthInput = $request->query('pause_month', date('Y-m'));
+        $month = is_string($monthInput) ? $monthInput : date('Y-m');
+        if (!preg_match('/^(20\d{2})-(0[1-9]|1[0-2])$/D', $month)) {
+            $month = date('Y-m');
+        }
+        $firstDay = new DateTimeImmutable($month . '-01', new DateTimeZone('Europe/Berlin'));
+        $html = '<section class="card stack" aria-label="Pausenlage klären"><h2>Pausenlage klären</h2><p>Gespeicherte Pausendauer ist kein Nachweis ihrer tatsächlichen Lage. Hier werden ausschließlich belegte, bislang fehlende Intervalle ergänzt. Vorhandene Intervalle sowie Beginn, Ende und Nettoarbeitszeit bleiben erhalten.</p><form method="get" class="form-grid"><input type="hidden" name="user_id" value="' . $userId . '"><label><span>Prüfmonat</span><input type="month" name="pause_month" value="' . $month . '" required></label><button class="button button-secondary">Pausen prüfen</button></form>';
+        $rows = $this->pauseCorrections->listForUser($userId, $firstDay->format('Y-m-d'), $firstDay->modify('last day of this month')->format('Y-m-d'));
+        if ($rows === []) {
+            return $html . '<p>Keine klärungsbedürftigen Pausen oder Nachträge unter den letzten 100 Arbeitsbuchungen dieses Monats.</p></section>';
+        }
+        foreach ($rows as $details) {
+            $entry = $details['timesheet'];
+            $id = (int) $entry['id'];
+            $html .= '<article class="card stack" data-pause-evidence="' . $id . '"><h3>Arbeitsbuchung #' . $id . ' · ' . $this->e((string) $entry['work_date']) . '</h3><p>' . $this->e((string) $entry['start_time']) . '–' . $this->e((string) $entry['end_time']) . ' · Gespeicherte Pause: <strong>' . (int) $details['stored_break_minutes'] . ' Min.</strong> · Dokumentiert: ' . $this->e((string) $details['documented_break_minutes']) . ' Min. · Fehlende Lage: ' . $this->e((string) $details['missing_break_minutes']) . ' Min.</p><p>' . $this->e((string) $details['clarification_reason']) . '</p><ul>';
+            foreach ($details['breaks'] as $break) {
+                $html .= '<li>Bestehender Nachweis #' . (int) $break['id'] . ': ' . $this->e((string) $break['break_started_at']) . ' bis ' . $this->e((string) ($break['break_ended_at'] ?? 'offen')) . '</li>';
+            }
+            if ($details['breaks'] === []) {
+                $html .= '<li>Keine konkreten Pausenintervalle dokumentiert.</li>';
+            }
+            $html .= '</ul>';
+            if ($details['can_document'] && $this->auth->hasPermission('timesheets.manage') && $this->auth->hasPermission('work_time_deviations.manage')) {
+                $source = $this->e((string) $details['source_token']);
+                $requestId = bin2hex(random_bytes(16));
+                $html .= '<form method="post" action="/admin/work-time/timesheets/' . $id . '/pauses" class="form-grid" data-pause-evidence-form><input type="hidden" name="csrf_token" value="' . $csrf . '"><input type="hidden" name="source_token" value="' . $source . '"><input type="hidden" name="request_id" value="' . $requestId . '"><div class="full-span stack" data-pause-intervals><div class="form-grid" data-pause-interval><label><span>Tatsächlich Pause ab</span><input type="datetime-local" name="pause_start[]" required></label><label><span>Tatsächlich Pause bis</span><input type="datetime-local" name="pause_end[]" required></label><button class="button button-secondary" type="button" data-pause-remove hidden>Intervall entfernen</button></div></div><button class="button button-secondary" type="button" data-pause-add>Weiteres tatsächliches Intervall</button><label class="full-span"><span>Pflichtbegründung und Herkunft des Nachweises</span><textarea name="reason" minlength="5" maxlength="2000" required></textarea></label><label class="full-span"><span><input type="checkbox" name="actual_break_attestation" value="1" required> Ich bestätige, dass diese Pausen tatsächlich genommen wurden. Ein rechnerischer Abzug allein ist kein Nachweis.</span></label><button class="button" type="submit">Tatsächliche Pausen dokumentieren</button></form>';
+            } elseif ($details['blocked_reason'] !== '') {
+                $html .= '<p class="notice notice-error">' . $this->e((string) $details['blocked_reason']) . '</p>';
+            }
+            $html .= '<details><summary>Nachweis- und Berechnungshistorie</summary><ul>';
+            foreach ($details['history'] as $audit) {
+                $before = json_decode((string) $audit['before_json'], true) ?: [];
+                $after = json_decode((string) $audit['after_json'], true) ?: [];
+                $html .= '<li>' . $this->e((string) $audit['created_at']) . ' · ' . $this->e((string) $audit['actor_name']) . ' · ' . $this->e((string) $audit['reason']) . ' · Berechnung ' . $this->calculationStatusLabel((string) ($before['calculation']['calculation_status'] ?? '')) . ' → ' . $this->calculationStatusLabel((string) ($after['calculation']['calculation_status'] ?? '')) . '</li>';
+            }
+            $html .= '</ul></details></article>';
+        }
+        return $html . '</section>';
+    }
+
     private function deviationPanel(Request $request, array $actor, string $csrf): string
     {
         if (!$this->auth->hasPermission('work_time_deviations.view')) {
@@ -259,10 +354,13 @@ final class AdminWorkTimeController
             }
         }
         if (!$this->auth->hasPermission('work_time_notifications.manage')) {
-            foreach (['notify_employee_push', 'notify_employee_sms', 'notify_supervisor_push', 'notify_supervisor_sms'] as $key) {
+            foreach (['notify_employee_push', 'notify_employee_sms', 'notify_supervisor_push', 'notify_supervisor_sms', 'outside_window_notifications_enabled'] as $key) {
                 if ((bool) ($payload['policy'][$key] ?? false) !== (bool) ($notificationReference[$key] ?? false)) {
                     throw new InvalidArgumentException('Für Benachrichtigungsoptionen fehlt die Berechtigung.');
                 }
+            }
+            if ((int) ($payload['policy']['outside_window_delay_minutes'] ?? 5) !== (int) ($notificationReference['outside_window_delay_minutes'] ?? 5)) {
+                throw new InvalidArgumentException('Für die Benachrichtigungsverzögerung fehlt die Berechtigung.');
             }
         }
         return $payload;
@@ -276,9 +374,9 @@ final class AdminWorkTimeController
         }
         $rows = '';
         foreach ($this->events->notificationEventsForEmployee($userId) as $event) {
-            $rows .= '<tr><td>' . $this->e((string) $event['event_key']) . '</td><td>' . $this->e((string) $event['recipient_name']) . '</td><td>' . $this->e((string) $event['channel']) . '</td><td>' . $this->e((string) $event['status']) . '</td><td>' . (int) $event['attempts'] . '</td><td>' . $this->e((string) ($event['error_message'] ?? '')) . '</td></tr>';
+            $rows .= '<tr><td>' . $this->e((string) $event['event_key']) . '</td><td>' . $this->e((string) $event['recipient_name']) . '</td><td>' . $this->e((string) $event['channel']) . '</td><td>' . $this->e(WorkTimeNotificationService::statusLabel((string) $event['status'])) . '</td><td>' . (int) $event['attempts'] . '</td><td>' . $this->e((string) ($event['error_message'] ?? '')) . '</td></tr>';
         }
-        return '<section class="card stack"><h2>Benachrichtigungsstatus</h2><p>sending bedeutet nach einem Abbruch einen ungeklärten Versand. Kein automatischer Neuversand.</p><div class="table-scroll"><table><thead><tr><th>Ereignis</th><th>Empfänger</th><th>Kanal</th><th>Status</th><th>Versuche</th><th>Fehler</th></tr></thead><tbody>' . ($rows ?: '<tr><td colspan="6">Keine Versandereignisse.</td></tr>') . '</tbody></table></div></section>';
+        return '<section class="card stack"><h2>Benachrichtigungsstatus</h2><p>Provider-Annahme ist kein Nachweis der Zustellung auf dem Empfängergerät. Ein nach Abbruch ungeklärter Versand wird nicht automatisch wiederholt.</p><p><a class="button button-secondary" href="/admin/work-time/notifications?user_id=' . $userId . '">Vollständige Versandereignisse und Wiederholungen</a></p><div class="table-scroll"><table><thead><tr><th>Ereignis</th><th>Empfänger</th><th>Kanal</th><th>Status</th><th>Versuche</th><th>Fehler</th></tr></thead><tbody>' . ($rows ?: '<tr><td colspan="6">Keine Versandereignisse.</td></tr>') . '</tbody></table></div></section>';
     }
 
     private function employeePreviewPanel(Request $request, array $actor): string
@@ -312,6 +410,7 @@ final class AdminWorkTimeController
         }
         return ['windows' => $windows, 'timezone' => 'Europe/Berlin', 'early_check_in_mode' => (string) $request->input('early_check_in_mode', 'work_started'),
             'checkout_proposals_enabled' => (bool) $request->input('checkout_proposals_enabled', false), 'checkout_delay_minutes' => (int) $request->input('checkout_delay_minutes', 0),
+            'outside_window_notifications_enabled' => (bool) $request->input('outside_window_notifications_enabled', false), 'outside_window_delay_minutes' => $request->input('outside_window_delay_minutes', 5),
             'notify_employee_push' => (bool) $request->input('notify_employee_push', false), 'notify_employee_sms' => (bool) $request->input('notify_employee_sms', false),
             'notify_supervisor_push' => (bool) $request->input('notify_supervisor_push', false), 'notify_supervisor_sms' => (bool) $request->input('notify_supervisor_sms', false)];
     }
@@ -336,7 +435,8 @@ final class AdminWorkTimeController
             $html .= '<label><span>' . $name . '</span><input name="window_' . $day . '" value="' . ($day < 6 ? '08:00-16:00' : '') . '" placeholder="08:00-16:00"></label>';
         }
         $html .= '<label><span>Früher Check-in</span><select name="early_check_in_mode"><option value="work_started">Arbeit beginnt tatsächlich</option><option value="presence_only">Nur anwesend; Arbeitsbeginn separat bestätigen</option></select></label><label><span>Verzögerung Endvorschlag (Minuten)</span><input name="checkout_delay_minutes" type="number" min="0" max="1440" value="0"></label>';
-        foreach (['checkout_proposals_enabled' => 'Arbeitsende zur Bestätigung vorschlagen', 'notify_employee_push' => 'Mitarbeiter: PWA-Push', 'notify_supervisor_push' => 'Zugeordnete Vorgesetzte: PWA-Push', 'notify_employee_sms' => 'Mitarbeiter: SMS (Testkanal)', 'notify_supervisor_sms' => 'Vorgesetzte: SMS (Testkanal)'] as $key => $label) {
+        $html .= '<label><span>Verzögerung bei Arbeitsbeginn nach Fensterende (Minuten)</span><input name="outside_window_delay_minutes" type="number" min="0" max="1440" value="5"></label>';
+        foreach (['checkout_proposals_enabled' => 'Arbeitsende zur Bestätigung vorschlagen', 'outside_window_notifications_enabled' => 'Arbeitsbeginn nach Fensterende unabhängig melden', 'notify_employee_push' => 'Mitarbeiter: PWA-Push', 'notify_supervisor_push' => 'Zugeordnete Vorgesetzte: PWA-Push', 'notify_employee_sms' => 'Mitarbeiter: SMS (Testkanal)', 'notify_supervisor_sms' => 'Vorgesetzte: SMS (Testkanal)'] as $key => $label) {
             $html .= '<label><span><input type="checkbox" name="' . $key . '" value="1"> ' . $label . '</span></label>';
         }
         return $html;
@@ -362,6 +462,20 @@ final class AdminWorkTimeController
     private function userOptions(array $users, ?int $selectedId = null): string
     {
         return implode('', array_map(fn (array $u): string => '<option value="' . (int) $u['id'] . '"' . ((int) $u['id'] === $selectedId ? ' selected' : '') . '>' . $this->e(trim((string) ($u['first_name'] ?? '') . ' ' . (string) ($u['last_name'] ?? ''))) . ' (#' . (int) $u['id'] . ')</option>', $users));
+    }
+
+    private function calculationStatusLabel(string $status): string
+    {
+        return match ($status) {
+            'needs_clarification' => 'Klärungsbedürftig',
+            'open' => 'Einsatz läuft',
+            'pending' => 'Außenzeiten offen',
+            'disputed' => 'Außenzeiten strittig',
+            'complete' => 'Berechnet (Vorschau)',
+            'no_policy' => 'Keine Regel zugeordnet',
+            'disabled' => 'Deaktiviert',
+            default => 'Noch nicht berechnet',
+        };
     }
 
     private function error(string $message): Response

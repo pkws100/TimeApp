@@ -392,6 +392,7 @@ Die vollstaendige offene Aufgabenliste steht in `PROJECTS.md`.
 ## 17. Kurzfazit fuer neue Laeufe
 
 - Optionale Arbeitszeitfenster: `WORK_TIME_WINDOWS_ENABLED=false` plus kuenftige Mitarbeiterzuordnung; Anrechnung bleibt separate Vorschau. Anwesenheit und Endvorschlaege sind keine echten Stempelungen. Details stehen in `WORK_TIME_WINDOWS.md`.
+- WorkTime-Hardening: Minutenworker verarbeitet eine persistente, triggerbasierte Revisionswarteschlange in begrenzten Batches; keinen historischen Vollabgleich im normalen Lauf wiedereinfuehren. Vollabgleich nur explizit per `--full-reconcile`. Zuordnungen halten Mitarbeiter-Zuordnungslock vor Accounting-Lock vor DB-Transaktion. Versand-I/O liegt ausserhalb des Accounting-Locks. Unklare Versandzustaende werden nicht wiederholt; Providerannahme ist keine Geraetezustellung. Pausennachtraege dokumentieren nur belegte Intervalle und respektieren Signaturen/Abschluesse. Pruefnachweise: `WORK_TIME_HARDENING_RC.md`.
 Wenn ein neuer Agentenlauf startet, gilt:
 
 - Das Backend-Grundgeruest und die MVP-nahe mobile PWA sind bereits vorhanden.

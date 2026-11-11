@@ -30,13 +30,33 @@ final class WorkTimeMigrationDatabaseTest extends TestCase
             $connection->execute('UPDATE timesheets SET end_time = "13:00:00", net_minutes = 300 WHERE id = :id', ['id' => $timesheet]);
             $before = $connection->fetchAll('SELECT * FROM timesheets FOR SYSTEM_TIME ALL ORDER BY row_start');
             self::assertCount(2, $before);
+            $this->phinx($configFile, 'migrate', '20261111130000');
+            $legacySentAt = '2026-11-10 16:05:00';
+            foreach (['push', 'sms'] as $channel) {
+                $connection->execute('INSERT INTO work_time_notification_events (event_key, recipient_user_id, channel, status, payload_json, attempts, sent_at) VALUES (:event_key, :recipient, :channel, "sent", "{}", 1, :sent_at)', ['event_key' => 'legacy-notification:' . $channel, 'recipient' => $user, 'channel' => $channel, 'sent_at' => $legacySentAt]);
+            }
             $this->phinx($configFile, 'migrate');
+            $notificationQuery = 'SELECT channel, status, accepted_at, sent_at, legacy_status FROM work_time_notification_events WHERE event_key LIKE "legacy-notification:%" ORDER BY channel';
+            $notifications = [
+                ['channel' => 'push', 'status' => 'provider_accepted', 'accepted_at' => $legacySentAt, 'sent_at' => $legacySentAt, 'legacy_status' => 'sent'],
+                ['channel' => 'sms', 'status' => 'test_simulated', 'accepted_at' => null, 'sent_at' => $legacySentAt, 'legacy_status' => 'sent'],
+            ];
+            self::assertSame($notifications, $connection->fetchAll($notificationQuery));
             self::assertSame($before, $connection->fetchAll('SELECT * FROM timesheets FOR SYSTEM_TIME ALL ORDER BY row_start'));
             foreach (['work_time_policy_templates', 'work_time_checkout_proposals', 'work_time_deviation_decisions', 'work_time_presence_sessions', 'work_time_notification_events'] as $table) { self::assertTrue($connection->tableExists($table)); }
             // Simulate a retry after nontransactional DDL committed before Phinx recorded completion.
-            $connection->execute('DELETE FROM phinxlog WHERE version = 20261111120000');
+            $connection->execute('DELETE FROM phinxlog WHERE version IN (20261111120000, 20261111140000)');
             $this->phinx($configFile, 'migrate');
             self::assertSame($before, $connection->fetchAll('SELECT * FROM timesheets FOR SYSTEM_TIME ALL ORDER BY row_start'));
+            self::assertSame($notifications, $connection->fetchAll($notificationQuery));
+            $this->phinx($configFile, 'rollback', '20261111130000');
+            self::assertSame([
+                ['channel' => 'push', 'status' => 'sent', 'sent_at' => $legacySentAt],
+                ['channel' => 'sms', 'status' => 'sent', 'sent_at' => $legacySentAt],
+            ], $connection->fetchAll('SELECT channel, status, sent_at FROM work_time_notification_events WHERE event_key LIKE "legacy-notification:%" ORDER BY channel'));
+            self::assertFalse($connection->columnExists('work_time_notification_events', 'accepted_at'));
+            $this->phinx($configFile, 'migrate');
+            self::assertSame($notifications, $connection->fetchAll($notificationQuery));
             $this->phinx($configFile, 'rollback', '20261106120000');
             self::assertFalse($connection->tableExists('work_time_policy_templates'));
             self::assertSame($before, $connection->fetchAll('SELECT * FROM timesheets FOR SYSTEM_TIME ALL ORDER BY row_start'));

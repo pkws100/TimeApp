@@ -15,6 +15,8 @@ module.exports = defineConfig({
   retries: process.env.CI ? 1 : 0,
   use: {
     baseURL: process.env.UI_BASE_URL || 'http://127.0.0.1',
+    // App fixtures and server-side work dates use the company's Berlin timezone.
+    timezoneId: 'Europe/Berlin',
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'off'

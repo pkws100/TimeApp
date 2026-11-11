@@ -15,12 +15,21 @@ final class WorkTimePushChannel
 
     public function __invoke(int $userId, array $message, string $key): array
     {
+        if (!$this->sender->isConfigured()) { return ['ok' => false, 'not_configured' => true]; }
         $devices = $this->subscriptions->activeSubscriptionsForUser($userId);
-        $ok = $devices !== [];
+        if ($devices === []) { return ['ok' => false, 'not_configured' => true]; }
+        $accepted = $rejected = $unknown = 0;
+        $retryable = false;
         foreach ($devices as $device) {
-            $result = $this->sender->send($device, $message, $key . ':' . $device['id']);
-            $ok = !empty($result['ok']) && $ok;
+            try { $result = $this->sender->send($device, $message, $key . ':' . $device['id']); }
+            catch (\Throwable) { $result = ['ok' => false]; }
+            if (!empty($result['ok'])) { ++$accepted; }
+            elseif (!empty($result['definitive_not_accepted'])) { ++$rejected; $retryable = !empty($result['retryable']) || $retryable; }
+            else { ++$unknown; }
         }
-        return ['ok' => $ok];
+        if ($accepted === count($devices)) { return ['ok' => true]; }
+        // A partial success must never retry devices which already accepted it.
+        if ($accepted > 0 || $unknown > 0) { return ['ok' => false]; }
+        return ['ok' => false, 'definitive_not_accepted' => $rejected === count($devices), 'retryable' => $retryable];
     }
 }

@@ -170,13 +170,22 @@ abstract class MariaDbTestCase extends TestCase
         }
 
         $tables = $this->connection()->fetchAll(
-            'SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = "BASE TABLE" AND table_name <> "phinxlog"'
+            'SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type IN ("BASE TABLE", "SYSTEM VERSIONED") AND table_name <> "phinxlog"'
         );
         $pdo->exec('SET FOREIGN_KEY_CHECKS = 0');
 
         try {
             foreach ($tables as $table) {
                 $pdo->exec('DELETE FROM ' . MariaDbScratchConfig::quoteIdentifier((string) $table['table_name']));
+            }
+            // Source DELETE triggers can enqueue reconciliation tombstones after
+            // information_schema happened to list the queue earlier. Clear this
+            // synthetic bookkeeping last, after every source fixture is gone.
+            $tableNames = array_column($tables, 'table_name');
+            foreach (['work_time_reconciliation_runs', 'work_time_reconciliation_queue'] as $queueTable) {
+                if (in_array($queueTable, $tableNames, true)) {
+                    $pdo->exec('DELETE FROM ' . MariaDbScratchConfig::quoteIdentifier($queueTable));
+                }
             }
         } finally {
             $pdo->exec('SET FOREIGN_KEY_CHECKS = 1');

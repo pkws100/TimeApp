@@ -74,7 +74,20 @@ UTC-Offset halten. Kalender-/Sollservices bleiben fuer Feiertage/Solltage zustae
 Der Worker materialisiert Abweichungen. Geaenderte Quellen entwerten vorherige
 Entscheidungen fuer die aktuelle Vorschau; historische Nachweise bleiben erhalten.
 Historische FKs verwenden `RESTRICT`; `timesheets` wird nicht strukturell veraendert.
-Migration: `20261111120000_work_time_windows.php`.
+Basismigration: `20261111120000_work_time_windows.php`. Die drei additiven
+Hardening-Migrationen enden auf `reconciliation_queue`, `notification_delivery`
+und `pause_corrections`; Einzelheiten und Pruefnachweise stehen in
+[WORK_TIME_HARDENING_RC.md](WORK_TIME_HARDENING_RC.md).
+
+Im Admin zeigt die Mitarbeiteransicht betroffene Buchungen mit gespeicherter
+Pausendauer, vorhandenen Intervallen und fehlenden Minuten. Mit
+`timesheets.manage` und `work_time_deviations.manage` koennen zustaendige Personen
+nachweislich genommene Intervalle ergaenzen: ausdrueckliche Bestaetigung,
+Pflichtbegruendung, Request-ID und Quelltoken sind erforderlich. Der Nachtrag
+ergaenzt nur die bekannte Lage der gespeicherten Dauer; er aendert weder die
+urspruenglichen Stempelzeiten noch `net_minutes`. Vorhandene Kundenunterschriften,
+Archivierung, Buchhaltungsabschluesse und Stichtagssperren blockieren den Nachtrag.
+Vorher-/Nachher-Snapshots und bisherige Berechnungen bleiben erhalten.
 
 ## Anwesenheit, Endvorschlaege und Offline
 
@@ -101,11 +114,24 @@ Puffer. Request-IDs, eindeutige Schluessel und Locks sichern Doppelanfragen ab.
 
 ```bash
 php bin/process-worktime-events.php --dry-run
-php bin/process-worktime-events.php
+php bin/process-worktime-events.php --batch-size=100
+# Nur fuer einen ausdruecklichen Wartungsabgleich:
+php bin/process-worktime-events.php --full-reconcile --user-id=123 --batch-size=100
 ```
 
-Dry-Run schreibt/versendet nichts. Eigener MariaDB-Advisory-Lock; relevante
-Buchungstage ab Regelzuordnung werden reconciliert. Docker verwendet einen
+Dry-Run schreibt/versendet nichts. Der normale Minutenlauf verarbeitet eine
+persistente Revisionswarteschlange, standardmaessig hoechstens 100 Buchungen
+(konfigurierbar bis 1.000). Datenbanktrigger erfassen Buchungs-, Pausen-,
+Zuordnungs- und Entscheidungswechsel. Ein unveraenderter historischer Bestand
+wird nicht erneut berechnet. Ein abgebrochener Worker wird unter dem
+datenbankspezifischen Advisory-Lock wiederaufgenommen. Wiederholte Aenderungen
+waehrend einer Berechnung entwerten deren Revision und stellen sie erneut an.
+Aufwendige Vorbereitung erfolgt vor dem kurzen Accounting-Schreiblock;
+Quellstand und Sperren werden vor dem Commit erneut geprueft. Zuordnungen nehmen
+den Mitarbeiter-Zuordnungslock vor dem Accounting-Lock und der DB-Transaktion.
+`--full-reconcile` stellt die komplette relevante Historie ausdruecklich erneut
+an; `--user-id` ist ausschliesslich fuer diesen Wartungsmodus erlaubt.
+Docker verwendet einen
 separaten `timeapp-worktime-scheduler` im Minutenintervall. Das bestehende
 Push-Reminder-Intervall bleibt erhalten. Nativ nach Betriebsfreigabe:
 
@@ -113,16 +139,39 @@ Push-Reminder-Intervall bleibt erhalten. Nativ nach Betriebsfreigabe:
 * * * * * cd /var/www/html && /usr/bin/php bin/process-worktime-events.php >> storage/logs/worktime-events.log 2>&1
 ```
 
-Je Ereignis/Empfaenger/Kanal ein Versanddatensatz. Der Versuch wird vor externem
-Versand gespeichert. Fehler oder nach Prozessabbruch ungeklaerte Sendungen werden
-nicht automatisch wiederholt, um Duplikate zu vermeiden. Verbliebenes `sending`
-muss geprueft werden; der Worker kennzeichnet ihn als `uncertain`. Zusaetzliche
-Erinnerungszyklen existieren noch nicht.
+`work_time_outside_window_started` ist vom Endvorschlag unabhaengig. Bei aktivierter
+Option entsteht es fuer einen weiterhin offenen Einsatz ab Fensterende bzw. an
+einem Tag ohne Fenster. Die neue Option ist standardmaessig aus; die Verzoegerung
+ab tatsaechlichem Arbeitsbeginn betraegt standardmaessig fuenf Minuten. Eigene
+und Vorgesetztenkanaele bleiben getrennt schaltbar. Nachtfenster werden ueber
+Mitternacht beruecksichtigt. Das Ereignis erzeugt keine Endzeit und schliesst
+keine Buchung.
+
+Je Ereignis/Empfaenger/Kanal ein Versanddatensatz. Zustaende: `waiting`, `sending`,
+`provider_accepted`, `failed` (nachweislich nicht angenommen), `not_configured`, `uncertain` sowie
+`manual_retry_requested`, `cancelled` und `test_simulated`. Providerannahme ist kein Nachweis
+der Zustellung auf dem Geraet. Nur ausdruecklich als nicht angenommen und
+wiederholbar klassifizierte Fehler erlauben bis zu drei automatische Versuche
+mit Backoff; insgesamt sind maximal fuenf Versuche moeglich. Unklare Ergebnisse,
+Teilannahmen und beim Prozessabbruch verbliebenes `sending` werden `uncertain`
+und nicht automatisch oder manuell erneut versendet. Netzwerkzugriffe finden
+ausserhalb des Accounting-Locks statt.
+
+`/admin/work-time/notifications` bietet Ereignis, Mitarbeiter, Empfaenger, Kanal,
+Zeitpunkt, Versuche, sichere Fehlertexte und Historie. Berechtigte, zustaendige Personen
+koennen bei eindeutig fehlgeschlagenem oder nicht konfiguriertem Versand eine
+erneute Pruefung/Sendung mit Begruendung anfordern. CSRF, Request-ID und Audit
+sichern diese Aktion; angenommene und unklare Sendungen sind gesperrt.
 
 Web-Push bleibt eigenstaendig. SMS verwendet `SmsProvider` und standardmaessig
 einen deaktivierten `MockSmsProvider`: keine echten SMS, keine Provider-Secrets.
 Ein spaeterer Adapter braucht separate Freigabe und Secret-Schutz entsprechend
 SMTP. Telefonnummern werden vor Testversand nach E.164 normalisiert/validiert.
+Die Schnittstelle `SmsProvider::send()` nimmt Telefonnummer, Nachricht und einen
+stabilen Idempotenzschluessel entgegen. Sie liefert neben `ok` gegebenenfalls
+`definitive_not_accepted`, `retryable` und `provider_message_id`. Netzwerkfehler ohne sichere
+Nichtannahme muessen unklar bleiben. Simulationen kennzeichnet
+`simulated=true`; sie gelten ausschliesslich als `test_simulated`.
 
 ## Tests und Einfuehrung
 
@@ -136,10 +185,14 @@ Benutzern testen, dann nur einen Testmitarbeiter kuenftig zuordnen. Anwesenheit,
 Ende, Weiterarbeit, NFC, Offline und Dry-Run pruefen. Verbindliche Anrechnung und
 betriebliche Genehmigungszustaendigkeiten bleiben gesondert freizugeben.
 
-## Technischer Pruefstand
+## Technischer Pruefstand der Basisimplementierung
 
 - PHPUnit: 398 Unit-Tests / 1.689 Assertions erfolgreich. MariaDB: 47 Fenster-/HTTP-/Migrations-/Accounting-Tests / 225 Assertions; nach den Nacht-Ergaenzungen 31 Workflow-/HTTP-Regressionsfaelle / 131 Assertions sowie zwei gezielte Pausen-DST-Datenbanktests erfolgreich. Alle verwenden Scratch-Datenbanken.
 - Playwright: 100 Browser-Smokes und fuenf zusaetzliche Nacht-/Pausen-/Konfliktpruefungen erfolgreich. Sechs reale Browserablaeufe erfolgreich auf einem automatisch erzeugten isolierten PHP-Server und eigener Scratch-Datenbank, einschliesslich bestehender Konten-/Abwesenheitsablaeufe.
 - UI-, Workflow- und Code-Review unabhaengig durchgefuehrt; Findings zu Nachtarbeit, Sitzungsbindung, Quellrevisionen, Berechtigungen und veralteten Antworten behoben.
 - Dockerfile und beide Compose-Dateien geprueft; YAML validiert und bestehendes Push-Intervall erhalten. Ein Docker-Build konnte in dieser Umgebung nicht ausgefuehrt werden, da Docker nicht installiert ist.
 - Merge/Fast-Forward und Push nach `main` erfolgen nur auf ausdruecklichen Folgeauftrag. Produktionsmigration, Produktionsdeployment und Kundenaktivierung benoetigen weiterhin eine separate Freigabe.
+
+Der aktuelle Hardening-Pruefstand mit Benchmark, Migrationen und GitHub-CI ist in
+[WORK_TIME_HARDENING_RC.md](WORK_TIME_HARDENING_RC.md) dokumentiert. Der
+Hardening-Auftrag erlaubt ausschliesslich den Feature-Branch und keinen Merge.

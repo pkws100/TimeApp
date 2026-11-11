@@ -2206,6 +2206,10 @@ html[data-theme="dark"] .badge.error {
         max-width: none;
     }
 
+    .work-time-notifications-page .admin-table-search {
+        flex-basis: auto;
+    }
+
     .admin-table-summary {
         min-height: 0;
     }

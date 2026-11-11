@@ -84,6 +84,10 @@
 - Standardmaessig global aus; pro Mitarbeiter nur mit kuenftig gueltiger Zuordnung. Historische FKs verwenden `RESTRICT`.
 - Fensterwerte sind separate Vorschauen. `net_minutes`, Gutschriften, vorhandene Stichtage und Journale bleiben erhalten. Ungeklaerte Anteile markieren betroffene Salden als vorlaeufig und sichern neue Abschluesse ab.
 - Anwesenheit und unbestaetigte Vorschlaege erfinden keine Arbeitszeit. Bestaetigung und Abschluss laufen atomar unter dem zentralen Schreiblock. Details: [WORK_TIME_WINDOWS.md](WORK_TIME_WINDOWS.md).
+- Hardening ergaenzt `work_time_reconciliation_queue` und `work_time_reconciliation_runs`: Trigger erfassen jede relevante Quellenrevision, der Worker verarbeitet begrenzte Batches und behaelt Berechnungslauf und Quellhash nachvollziehbar. Die Warteschlange hat bewusst keinen kaskadierenden Quellen-FK, damit auch geloeschte Scratch-/Legacy-Quellen als Tombstone abgearbeitet werden koennen. `timesheets` erhaelt weder neue Spalten noch neue Indizes.
+- Berechnungen werden ausserhalb des Accounting-Locks vorbereitet; unter Lock und Transaktion werden Queue-Revision, frische Quellen und Periodensperren erneut geprueft. Mitarbeiter-Zuordnungen verwenden Mitarbeiter-Zuordnungslock, Accounting-Lock, Transaktion in dieser Reihenfolge. Netzwerkversand haelt keinen Accounting-Lock.
+- `work_time_notification_attempts`, `work_time_notification_retry_requests` und `work_time_notification_history` ergaenzen Versandereignisse um Providerannahme, sichere Fehlerklassen und begruendete Wiederholungsanfragen. Unklare/teilweise angenommene Sendungen werden nicht wiederholt. Bestehende Versandzustaende bleiben als Legacy-Snapshot erhalten; alte Fehler werden vorsichtig als unklar eingeordnet.
+- `work_time_pause_corrections` dokumentiert nachgewiesene Intervallnachtraege mit Vorher-/Nachher-Snapshot, Akteur, Begruendung, Quellenbindung und Request-ID. Nettozeit und versionierte Buchungszeile bleiben unveraendert; bestehende Signaturen und Periodensperren blockieren Nachtraege.
 
 ## Seeder-Startpunkt
 - Standard-Seeds liefern Rollen, Rechte und notwendige Referenzdaten.

@@ -49,15 +49,17 @@ final class WorkTimePreviewService
         return $summary;
     }
 
-    public function forTimesheet(array $entry, ?array $policy = null): array
+    public function forTimesheet(array $entry, ?array $policy = null, ?array $sourceData = null): array
     {
-        $policy ??= $this->policies->policyFor((int) $entry['user_id'], (string) $entry['work_date']);
+        if ($sourceData === null) {
+            $policy ??= $this->policies->policyFor((int) $entry['user_id'], (string) $entry['work_date']);
+        }
         $row = ['timesheet_id' => (int) $entry['id'], 'user_id' => (int) $entry['user_id'], 'work_date' => $entry['work_date'], 'policy' => $policy, 'recorded_net_minutes' => (int) ($entry['net_minutes'] ?? 0), 'calculation_hash' => null];
         if ($policy === null) {
             $row['calculation'] = ['actual_work_minutes' => (int) ($entry['net_minutes'] ?? 0), 'inside_window_minutes' => (int) ($entry['net_minutes'] ?? 0), 'outside_before_minutes' => 0, 'outside_after_minutes' => 0, 'outside_gap_minutes' => 0, 'outside_pending_minutes' => 0, 'outside_approved_minutes' => 0, 'outside_rejected_minutes' => 0, 'outside_disputed_minutes' => 0, 'accountable_work_minutes' => (int) ($entry['net_minutes'] ?? 0), 'calculation_status' => 'no_policy', 'unresolved' => false, 'preview_only' => true, 'outside_segments' => []];
             return $row;
         }
-        $breaks = $this->connection->fetchAll('SELECT break_started_at, break_ended_at FROM timesheet_breaks WHERE timesheet_id = :id ORDER BY break_started_at, id', ['id' => $entry['id']]);
+        $breaks = $sourceData['breaks'] ?? $this->connection->fetchAll('SELECT break_started_at, break_ended_at FROM timesheet_breaks WHERE timesheet_id = :id ORDER BY break_started_at, id', ['id' => $entry['id']]);
         $hash = hash('sha256', json_encode(['id' => (int) $entry['id'], 'date' => $entry['work_date'], 'start' => $entry['start_time'], 'end' => $entry['end_time'], 'break_minutes' => (int) $entry['break_minutes'], 'net_minutes' => (int) $entry['net_minutes'], 'breaks' => $breaks, 'source_revision' => $entry['work_time_source_revision'] ?? null, 'policy' => array_intersect_key($policy, array_flip(['windows', 'timezone', 'early_check_in_mode', 'policy_version_id', 'assignment_id']))], JSON_THROW_ON_ERROR));
         $row['calculation_hash'] = $hash;
         $fallback = ['actual_work_minutes' => null, 'inside_window_minutes' => null, 'outside_before_minutes' => null, 'outside_after_minutes' => null, 'outside_gap_minutes' => null, 'outside_pending_minutes' => null, 'outside_approved_minutes' => null, 'outside_rejected_minutes' => null, 'outside_disputed_minutes' => null, 'accountable_work_minutes' => null, 'calculation_status' => 'needs_clarification', 'unresolved' => true, 'preview_only' => true, 'outside_segments' => []];
@@ -70,7 +72,9 @@ final class WorkTimePreviewService
         }
         $date = (string) $entry['work_date'];
         $endDate = (string) $entry['end_time'] < (string) $entry['start_time'] ? (new DateTimeImmutable($date))->modify('+1 day')->format('Y-m-d') : $date;
-        $decisions = $this->connection->tableExists('work_time_deviations') ? $this->connection->fetchAll('SELECT segment_start_at AS start_at, segment_end_at AS end_at, status FROM work_time_deviations WHERE timesheet_id = :id AND calculation_hash = :hash AND superseded_at IS NULL', ['id' => $entry['id'], 'hash' => $hash]) : [];
+        $decisions = $sourceData !== null
+            ? array_map(static fn (array $deviation): array => ['start_at' => $deviation['segment_start_at'], 'end_at' => $deviation['segment_end_at'], 'status' => $deviation['status']], array_values(array_filter($sourceData['deviations'], static fn (array $deviation): bool => $deviation['calculation_hash'] === $hash)))
+            : ($this->connection->tableExists('work_time_deviations') ? $this->connection->fetchAll('SELECT segment_start_at AS start_at, segment_end_at AS end_at, status FROM work_time_deviations WHERE timesheet_id = :id AND calculation_hash = :hash AND superseded_at IS NULL', ['id' => $entry['id'], 'hash' => $hash]) : []);
         try {
             if ((string) $entry['start_time'] === (string) $entry['end_time']) {
                 // Existing zero-duration bookings are not invented as a 24-hour workday.
@@ -89,6 +93,86 @@ final class WorkTimePreviewService
             $row['calculation'] = [...$fallback, 'clarification_reason' => $error->getMessage()];
         }
         return $row;
+    }
+
+    /** Read/compute one source outside the global accounting lock. */
+    public function prepareTimesheet(int $timesheetId): array
+    {
+        $snapshot = $this->snapshotTimesheet($timesheetId);
+        $entry = $snapshot['entry'];
+        $snapshot['row'] = $entry !== null && (string) $entry['entry_type'] === 'work' && (int) ($entry['is_deleted'] ?? 0) === 0
+            ? $this->forTimesheet($entry, $snapshot['policy'], $snapshot)
+            : null;
+
+        return $snapshot;
+    }
+
+    /**
+     * Internal queue commit primitive. The caller must hold the accounting lock
+     * and transaction before locking its queue row; no lock is acquired here.
+     */
+    public function applyPreparedTimesheet(array $prepared): array
+    {
+        if (!$this->connection->pdo()?->inTransaction()
+            || (int) $this->connection->fetchColumn('SELECT IS_USED_LOCK("accounting-timesheet-write") = CONNECTION_ID()') !== 1) {
+            throw new \LogicException('Reconciliation requires the accounting write lock and transaction.');
+        }
+        $current = $this->snapshotTimesheet((int) $prepared['timesheet_id']);
+        $result = ['changed' => false, 'created' => 0, 'superseded' => 0, 'frozen' => false, 'source_hash' => $current['source_hash'], 'calculation_hash' => $prepared['row']['calculation_hash'] ?? null, 'calculation_status' => $prepared['row']['calculation']['calculation_status'] ?? 'no_policy'];
+        if (!hash_equals($prepared['source_hash'], $current['source_hash'])) {
+            return [...$result, 'changed' => true];
+        }
+        $entry = $current['entry'];
+        if ($entry === null) {
+            // A missing source cannot justify modifying historical deviations.
+            return [...$result, 'frozen' => $current['deviations'] !== [], 'calculation_status' => 'source_missing'];
+        }
+        try {
+            (new TimesheetWriteGuard($this->connection))->assertAccountingPeriodOpen((int) $entry['user_id'], $entry['project_id'] !== null ? (int) $entry['project_id'] : null, (string) $entry['work_date']);
+        } catch (InvalidArgumentException) {
+            return [...$result, 'frozen' => true, 'calculation_status' => 'accounting_closed'];
+        }
+        $row = $prepared['row'];
+        foreach ($current['deviations'] as $existing) {
+            if ($row !== null && $row['calculation_hash'] === $existing['calculation_hash']) { continue; }
+            $this->connection->execute('UPDATE work_time_deviations SET superseded_at = NOW() WHERE id = :id AND superseded_at IS NULL', ['id' => $existing['id']]);
+            ++$result['superseded'];
+        }
+        if ($row === null || $row['policy'] === null) { return $result; }
+        foreach ($row['calculation']['outside_segments'] ?? [] as $segment) {
+            if ((int) $segment['minutes'] <= 0) { continue; }
+            $zone = new DateTimeZone($row['policy']['timezone']);
+            $start = (new DateTimeImmutable($segment['start_at']))->setTimezone($zone)->format('Y-m-d H:i:s');
+            $end = (new DateTimeImmutable($segment['end_at']))->setTimezone($zone)->format('Y-m-d H:i:s');
+            $existing = $this->connection->fetchOne('SELECT id FROM work_time_deviations WHERE timesheet_id = :timesheet AND calculation_hash = :hash AND kind = :kind AND segment_start_at = :start AND segment_end_at = :end', ['timesheet' => $row['timesheet_id'], 'hash' => $row['calculation_hash'], 'kind' => $segment['kind'], 'start' => $start, 'end' => $end]);
+            if ($existing !== null) { continue; }
+            $this->connection->execute('INSERT INTO work_time_deviations (timesheet_id, user_id, policy_version_id, assignment_id, segment_start_at, segment_end_at, minutes, kind, status, calculation_hash) VALUES (:timesheet, :user_id, :version, :assignment, :start, :end, :minutes, :kind, "pending", :hash)', ['timesheet' => $row['timesheet_id'], 'user_id' => $row['user_id'], 'version' => $row['policy']['policy_version_id'], 'assignment' => $row['policy']['assignment_id'], 'start' => $start, 'end' => $end, 'minutes' => $segment['minutes'], 'kind' => $segment['kind'], 'hash' => $row['calculation_hash']]);
+            ++$result['created'];
+        }
+
+        return $result;
+    }
+
+    /** Explicit single-item maintenance entry point; reads never call this. */
+    public function reconcileTimesheet(int $timesheetId): array
+    {
+        if (!$this->enabled()) { return ['created' => 0, 'superseded' => 0, 'changed' => false]; }
+        $prepared = $this->prepareTimesheet($timesheetId);
+        return (new TimesheetWriteGuard($this->connection))->withAccountingWriteLock(fn (): array => $this->connection->transaction(fn (): array => $this->applyPreparedTimesheet($prepared)));
+    }
+
+    private function snapshotTimesheet(int $timesheetId): array
+    {
+        $entry = $this->connection->fetchOne('SELECT *, row_start AS work_time_source_revision FROM timesheets WHERE id = :id', ['id' => $timesheetId]);
+        // The worker can process several revisions in one process. Never reuse a
+        // policy cache populated before another connection changed an assignment.
+        $freshPolicies = new WorkTimePolicyService($this->connection, $this->enabled());
+        $policy = $entry !== null ? $freshPolicies->policyFor((int) $entry['user_id'], (string) $entry['work_date']) : null;
+        $breaks = $entry !== null ? $this->connection->fetchAll('SELECT break_started_at, break_ended_at FROM timesheet_breaks WHERE timesheet_id = :id ORDER BY break_started_at, id', ['id' => $timesheetId]) : [];
+        $deviations = $this->connection->fetchAll('SELECT * FROM work_time_deviations WHERE timesheet_id = :id AND superseded_at IS NULL ORDER BY id', ['id' => $timesheetId]);
+        $sourceHash = hash('sha256', json_encode([$entry, $policy, $breaks, $deviations], JSON_THROW_ON_ERROR));
+
+        return ['timesheet_id' => $timesheetId, 'entry' => $entry, 'policy' => $policy, 'breaks' => $breaks, 'deviations' => $deviations, 'source_hash' => $sourceHash];
     }
 
     /** Worker-only materialization. Reading a preview never creates or changes audit records. */

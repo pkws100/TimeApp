@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\WorkTime;
 
+use App\Domain\Timesheets\TimesheetWriteGuard;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
 use DateTimeZone;
@@ -117,7 +118,7 @@ final class WorkTimePolicyService
         $lock = 'work-time-assignment-user-' . $userId;
         if ((int) $this->connection->fetchColumn('SELECT GET_LOCK(:name, 10)', ['name' => $lock]) !== 1) { throw new RuntimeException('Die Arbeitszeitzuordnung wird gerade bearbeitet.'); }
         try {
-            return $this->connection->transaction(function () use ($userId, $versionId, $from, $until, $overrides, $supervisors, $actorId): array {
+            return (new TimesheetWriteGuard($this->connection))->withAccountingWriteLock(fn (): array => $this->connection->transaction(function () use ($userId, $versionId, $from, $until, $overrides, $supervisors, $actorId): array {
                 $this->assertActiveUser($userId);
                 foreach ($supervisors as $supervisor) { $this->assertActiveUser($supervisor); }
                 $version = $this->connection->fetchOne('SELECT v.* FROM work_time_policy_versions v JOIN work_time_policy_templates t ON t.id = v.template_id WHERE v.id = :id AND t.is_active = 1', ['id' => $versionId]);
@@ -141,7 +142,7 @@ final class WorkTimePolicyService
                 $result = ['id' => $id, 'user_id' => $userId, 'policy_version_id' => $versionId, 'effective_from' => $from, 'effective_to' => $until, 'overrides' => $overrides, 'supervisor_user_ids' => $supervisors];
                 $this->audit('assignment_created', $id, $actorId, null, $result);
                 return $result;
-            });
+            }));
         } finally { $this->connection->fetchColumn('SELECT RELEASE_LOCK(:name)', ['name' => $lock]); }
     }
 
@@ -159,14 +160,14 @@ final class WorkTimePolicyService
         $lock = 'work-time-assignment-user-' . $assignment['user_id'];
         if ((int) $this->connection->fetchColumn('SELECT GET_LOCK(:name, 10)', ['name' => $lock]) !== 1) { throw new RuntimeException('Die Arbeitszeitzuordnung wird gerade bearbeitet.'); }
         try {
-            $this->connection->transaction(function () use ($assignmentId, $effectiveTo, $actorId, $reason): void {
+            (new TimesheetWriteGuard($this->connection))->withAccountingWriteLock(fn () => $this->connection->transaction(function () use ($assignmentId, $effectiveTo, $actorId, $reason): void {
                 $before = $this->connection->fetchOne('SELECT * FROM employee_work_time_assignments WHERE id = :id FOR UPDATE', ['id' => $assignmentId]);
                 if ($effectiveTo < $before['effective_from']) { throw new InvalidArgumentException('Das Ende liegt vor dem Zuordnungsbeginn.'); }
                 if ($before['effective_to'] !== null && $effectiveTo > $before['effective_to']) { throw new InvalidArgumentException('Eine beendete Zuordnung darf nicht verlaengert werden.'); }
                 if ($before['effective_to'] === $effectiveTo) { return; }
                 $this->connection->execute('UPDATE employee_work_time_assignments SET effective_to = :end_date WHERE id = :id', ['end_date' => $effectiveTo, 'id' => $assignmentId]);
                 $this->audit('assignment_ended', $assignmentId, $actorId, $before, ['effective_to' => $effectiveTo, 'reason' => $reason]);
-            });
+            }));
         } finally { $this->connection->fetchColumn('SELECT RELEASE_LOCK(:name)', ['name' => $lock]); }
     }
 
@@ -248,7 +249,10 @@ final class WorkTimePolicyService
         $delay = filter_var($input['checkout_delay_minutes'] ?? 0, FILTER_VALIDATE_INT, ['options' => ['min_range' => 0, 'max_range' => 1440]]);
         if ($delay === false) { throw new InvalidArgumentException('Die Verzoegerung muss zwischen 0 und 1440 Minuten liegen.'); }
         $result = ['windows' => $normalizedWindows, 'timezone' => $zone, 'early_check_in_mode' => $mode, 'checkout_delay_minutes' => $delay];
-        foreach (['checkout_proposals_enabled', 'notify_employee_push', 'notify_employee_sms', 'notify_supervisor_push', 'notify_supervisor_sms'] as $key) {
+        $outsideDelay = filter_var($input['outside_window_delay_minutes'] ?? 5, FILTER_VALIDATE_INT, ['options' => ['min_range' => 0, 'max_range' => 1440]]);
+        if ($outsideDelay === false) { throw new InvalidArgumentException('Die Benachrichtigungsverzoegerung muss zwischen 0 und 1440 Minuten liegen.'); }
+        $result['outside_window_delay_minutes'] = $outsideDelay;
+        foreach (['checkout_proposals_enabled', 'outside_window_notifications_enabled', 'notify_employee_push', 'notify_employee_sms', 'notify_supervisor_push', 'notify_supervisor_sms'] as $key) {
             $result[$key] = filter_var($input[$key] ?? false, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
             if ($result[$key] === null) { throw new InvalidArgumentException('Ungueltiger Schalter: ' . $key); }
         }
