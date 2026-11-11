@@ -45,6 +45,19 @@ Browserzeitzone des Hosts. Playwright verwendet jetzt ausdruecklich
 `Europe/Berlin`, entsprechend der betrieblichen Tages-/Stempelzeitzone. Beide
 Tests bestehen anschliessend auch mit UTC-Host; Assertions bleiben unveraendert.
 
+Eine echte Browser-Endkontrolle hatte zusaetzlich einen Login-Navigations-Timeout.
+Seine genaue Ursache ist mangels damals aufbewahrter Fehlerartefakte rueckwirkend
+nicht eindeutig zuzuordnen. Die anschliessende gezielte Untersuchung belegte
+einen separaten, passenden Formularfehler deterministisch: `beforeinstallprompt`
+baute das anonyme Loginformular neu auf und loeschte eingegebene Werte.
+Der enge Fix verwendet bei identischem anonymen Seiten-/Sessionkontext das
+vorhandene DOM-Patching. Eingabeknoten und Fokus bleiben erhalten; Auth-/User-/
+Sessionwechsel ersetzen die Knoten weiterhin vollstaendig. Passwoerter bleiben
+im Input und werden nicht in State/Storage gespeichert. Zwei gezielte
+Regressionen waren vor dem Fix rot und bestehen danach. Der anschliessende
+reale Workflow besteht mit aktivem Service Worker vollstaendig. Fehlertraces,
+Screenshots und Serverlogs bleiben kuenftig auf Fehler privat erhalten.
+
 Bereits ausgefuehrt:
 
 | Befehl | Ergebnis |
@@ -230,16 +243,16 @@ Versandseite wurde mobil in Hell/Dunkel geprueft, ohne Seitenueberbreite.
 | `composer validate --strict` | Exit 0. |
 | `composer audit --locked --no-interaction` | Exit 0, keine Advisories. |
 | `composer check-platform-reqs` | Exit 0 unter PHP 8.2.35. |
-| `composer test` | PHPUnit meldet **633 Tests / 3.065 Assertions erfolgreich**, 18:44 Minuten, 62,5 MB. Die lokale Composer-Prozesshuelle endete jedoch mit **143**; der Gesamtbefehl wird deshalb lokal nicht als Exit-0-Erfolg ausgewiesen. Der vollstaendige Composer-Aufruf wird zusaetzlich unverkuerzt in GitHub-CI ausgefuehrt. |
+| `composer test` | PHPUnit meldet lokal **633 Tests / 3.065 Assertions erfolgreich**, 18:44 Minuten, 62,5 MB. Die lokale Composer-Prozesshuelle endete jedoch mit **143**; der Gesamtbefehl wird deshalb lokal nicht als Exit-0-Erfolg ausgewiesen. Der unverkuerzte Composer-Aufruf bestand anschliessend regulaer in [GitHub-CI fuer den Implementierungscommit](https://github.com/pkws100/TimeApp/actions/runs/43091273048), nach der letzten Alt-SMS-Migrationskorrektur. |
 | `composer test -- --filter testUnconfiguredProviderIsReportedWithoutAnyNetworkAttempt` | Exit 0, 1 Test / 3 Assertions; Kontrolllauf fuer die Prozesshuelle. |
 | `composer test -- --filter 'testKilledWorkerIsRecoveredAndParallelWorkerCannotTakeItsClaim\|testAssignmentWriterWaitsForAccountingBeforeStartingItsTransaction'` | Exit 0, **2 Tests / 16 Assertions**; auch Signal-/Parallelitaetsfaelle enden ueber Composer regulaer. |
 | `php vendor/bin/phpunit tests/Integration/WorkTimeMigrationDatabaseTest.php` | Exit 0, **1 Test / 17 Assertions**, nach der letzten gezielten Alt-SMS-Statuskorrektur: Upgrade, DDL-Retry, Rollback, erneutes Upgrade und unveraenderte systemversionierte Quellen. |
 | `npm ci` | Exit 0. |
 | `npm audit --audit-level=high` | Exit 0, keine Sicherheitsmeldungen. |
-| `TZ=UTC npm run ui:test:smoke` | Exit 0, **107 bestanden / 11 uebersprungen**. Neun reale Tests werden separat ausgefuehrt; zwei optionale Live-Login-Pruefungen benoetigen nicht konfigurierte Zugangsdaten. Synthetische Admin-/Mitarbeiterlogins prueft der reale Runner. |
-| `UI_REVIEW_ARTIFACT_DIR=/tmp/timeapp-hardening-notification-review npm run ui:test:real` | Zwischenstand: 7 bestanden, 1 Login-Navigations-Timeout im bestehenden WorkTime-Ablauf, 1 Folgefall nicht ausgefuehrt. Die drei neuen RC-Ablaeufe einschliesslich der mobilen Versandseite bestanden. Ursache und Wiederholung werden vor Abschluss am PR dokumentiert. |
+| `TZ=UTC npm run ui:test:smoke` | Exit 0, nach dem Loginfix **109 bestanden / 11 uebersprungen**. Neun reale Tests werden separat ausgefuehrt; zwei optionale Live-Login-Pruefungen benoetigen nicht konfigurierte Zugangsdaten. Synthetische Admin-/Mitarbeiterlogins prueft der reale Runner. |
+| `UI_REVIEW_ARTIFACT_DIR=/tmp/timeapp-hardening-notification-review npm run ui:test:real` | Exit 0 nach dem Fix, **9/9 bestanden**, Service Worker unveraendert aktiv. Einschliesslich bestehendem Continue-/Confirm-Login, aller drei neuen RC-Ablaeufe und mobiler Versandseite in Hell/Dunkel. |
 | PHP-Syntax geaenderter/neuer Dateien | Erfolgreich, einschliesslich aller drei Migrationen und des nachtraeglich erweiterten Upgrade-Tests. |
-| JavaScript-Syntax | Erfolgreich fuer 24 Dateien, zuletzt ergaenzten realen Browserfall erneut geprueft. |
+| JavaScript-Syntax | Erfolgreich fuer 24 bisherige Dateien sowie neuen Login-Test; geaendertes App-JS und reale Browserfaelle erneut geprueft. |
 | `git diff --check` | Erfolgreich. |
 
 Der finale GitHub-Lauf und sein Ergebniscommit werden am
@@ -267,6 +280,7 @@ migrations/20261111150000_work_time_pause_corrections.php
 playwright.config.js
 public/assets/css/admin.css
 public/assets/js/admin-work-time.js
+public/assets/js/app.js
 src/Domain/Push/PushNotificationService.php
 src/Domain/WorkTime/MockSmsProvider.php
 src/Domain/WorkTime/SmsProvider.php
@@ -290,8 +304,10 @@ tests/Support/MariaDbTestCase.php
 tests/Support/work-time-hardening-ui.php
 tests/Support/work-time-queue-worker.php
 tests/Unit/WorkTimePushChannelTest.php
+tests/e2e/app-login.spec.js
 tests/e2e/work-time-hardening.real.spec.js
 tests/e2e/work-time-pause-evidence.spec.js
+tests/e2e/work-time.real.spec.js
 ```
 
 ## Entwicklungsserver

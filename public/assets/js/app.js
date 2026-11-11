@@ -4266,6 +4266,10 @@
             && context.route === '/projektwahl'
             && renderedAppContext.projectId === context.projectId
             && renderedAppContext.signatureId === context.signatureId;
+        // Installation and connectivity events can refresh the shell while a
+        // person is signing in. Keep credentials in their existing input nodes;
+        // session or authentication changes still replace the whole subtree.
+        const keepLoginDom = samePage && !context.authenticated;
         const scrollPosition = samePage ? captureAppScrollPosition() : null;
         const restoreTimeAccountDetailsFocus = document.activeElement
             && document.activeElement.id === 'timeAccountDetailsSummary';
@@ -4292,7 +4296,7 @@
             html = todayView();
         }
 
-        if (keepProjectDom) {
+        if (keepProjectDom || keepLoginDom) {
             const desired = document.createElement('template');
             desired.innerHTML = html;
             patchProjectRenderChildren(root, desired.content, false);

@@ -69,6 +69,23 @@ $removeTree = static function (string $path) use (&$removeTree): void {
     rmdir($path);
 };
 
+$copyTree = static function (string $source, string $destination) use (&$copyTree): void {
+    if (!is_dir($destination) && !mkdir($destination, 0700, true) && !is_dir($destination)) {
+        throw new RuntimeException('UI-Diagnoseverzeichnis konnte nicht erstellt werden.');
+    }
+    foreach (new FilesystemIterator($source) as $item) {
+        if ($item->isLink()) { continue; }
+        $target = $destination . '/' . $item->getFilename();
+        if ($item->isDir()) {
+            $copyTree($item->getPathname(), $target);
+        } elseif (!copy($item->getPathname(), $target)) {
+            throw new RuntimeException('UI-Diagnoseartefakt konnte nicht gesichert werden.');
+        } else {
+            chmod($target, 0600);
+        }
+    }
+};
+
 $run = static function (array $command, ?array $environment = null): string {
     $process = proc_open($command, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, base_path(), $environment);
     if (!is_resource($process)) {
@@ -413,7 +430,7 @@ try {
         'UI_TEST_HARDENING_DISABLED_URL' => $disabledBaseUrl,
     ]);
     $playwright = base_path('node_modules/.bin/playwright');
-    fwrite(STDOUT, $run([$playwright, 'test', 'tests/e2e/revisable-accounts.real.spec.js', 'tests/e2e/work-time.real.spec.js', 'tests/e2e/work-time-hardening.real.spec.js', '--output=' . $outputDirectory], $playwrightEnvironment));
+    fwrite(STDOUT, $run([$playwright, 'test', 'tests/e2e/revisable-accounts.real.spec.js', 'tests/e2e/work-time.real.spec.js', 'tests/e2e/work-time-hardening.real.spec.js', '--trace=retain-on-failure', '--output=' . $outputDirectory], $playwrightEnvironment));
     $exitCode = 0;
 } catch (Throwable $exception) {
     fwrite(STDERR, $exception->getMessage() . PHP_EOL);
@@ -442,12 +459,41 @@ try {
         fwrite(STDERR, 'Scratch-Datenbank konnte nicht entfernt werden: ' . $exception->getMessage() . PHP_EOL);
         $exitCode = 1;
     } finally {
+        $retainOutput = false;
+        if ($exitCode !== 0) {
+            // Retain synthetic browser diagnostics and request logs privately.
+            // Database overrides and migration configuration are always removed.
+            $artifactRoot = trim((string) getenv('UI_REVIEW_ARTIFACT_DIR'));
+            $artifactDirectory = $artifactRoot !== '' ? rtrim($artifactRoot, '/') . '/' . basename($temporaryPrefix) . '-failure' : $outputDirectory;
+            try {
+                if ($artifactDirectory !== $outputDirectory && is_dir($outputDirectory)) {
+                    $copyTree($outputDirectory, $artifactDirectory);
+                } elseif (!is_dir($artifactDirectory) && !mkdir($artifactDirectory, 0700, true) && !is_dir($artifactDirectory)) {
+                    throw new RuntimeException('UI-Diagnoseverzeichnis konnte nicht erstellt werden.');
+                }
+                chmod($artifactDirectory, 0700);
+                foreach ([$serverLog, $disabledServerLog] as $logFile) {
+                    if (is_file($logFile)) {
+                        $target = $artifactDirectory . '/' . basename($logFile);
+                        if (!copy($logFile, $target)) { throw new RuntimeException('UI-Serverlog konnte nicht gesichert werden.'); }
+                        chmod($target, 0600);
+                    }
+                }
+                $retainOutput = $artifactDirectory === $outputDirectory;
+                fwrite(STDERR, 'UI-Diagnoseartefakte: ' . $artifactDirectory . PHP_EOL);
+            } catch (Throwable $exception) {
+                // Even if the chosen artifact directory fails, keep the original
+                // Playwright files instead of losing the evidence a second time.
+                $retainOutput = true;
+                fwrite(STDERR, $exception->getMessage() . ' Originale UI-Artefakte: ' . $outputDirectory . PHP_EOL);
+            }
+        }
         foreach ([$phinxFile, $overrideFile, $serverLog, $disabledServerLog] as $file) {
             if (is_file($file)) {
                 unlink($file);
             }
         }
-        $removeTree($outputDirectory);
+        if (!$retainOutput) { $removeTree($outputDirectory); }
     }
 }
 
