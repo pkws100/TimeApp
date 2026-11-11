@@ -53,10 +53,24 @@ baute das anonyme Loginformular neu auf und loeschte eingegebene Werte.
 Der enge Fix verwendet bei identischem anonymen Seiten-/Sessionkontext das
 vorhandene DOM-Patching. Eingabeknoten und Fokus bleiben erhalten; Auth-/User-/
 Sessionwechsel ersetzen die Knoten weiterhin vollstaendig. Passwoerter bleiben
-im Input und werden nicht in State/Storage gespeichert. Zwei gezielte
-Regressionen waren vor dem Fix rot und bestehen danach. Der anschliessende
+im Input und werden nicht in State/Storage gespeichert. Der Formularverlust
+wurde mit einem roten Test vor dem Fix belegt; beide gezielten
+Regressionspruefungen bestehen nach dem Fix. Der anschliessende
 reale Workflow besteht mit aktivem Service Worker vollstaendig. Fehlertraces,
 Screenshots und Serverlogs bleiben kuenftig auf Fehler privat erhalten.
+
+Der erste vollstaendige CI-Lauf des Hardening-Codes bestand Composer, alle
+633 PHP-Tests, Browser-Smokes, Docker und Firmware, scheiterte aber in einem
+bestehenden Urlaubs-UI-Test. Dieser klickte unmittelbar nach asynchronem
+Speichern/Reload auf `:visible`; vor geladener CSS waren die beabsichtigt
+vorhandenen Desktop-/Mobilbuttons derselben Zeitraum-ID gleichzeitig sichtbar.
+Eine kontrolliert zurueckgehaltene echte Stylesheet-Antwort bestaetigte dies.
+Der Test startet nun ausdruecklich im Desktopmodus, wartet auf das vor dem
+Speichern registrierte neue Load-Ereignis und den erfolgreichen POST/PUT und
+bindet Korrekturen an die aus dem vollstaendig geladenen neuen Datensatz
+ausgelesene Zeitraum-ID. Die Anzeigegrenzen
+werden explizit geprueft; die spaetere mobile Modalpruefung bleibt erhalten.
+Keine Produkt-CSS-Aenderung fuer diesen Befund.
 
 Bereits ausgefuehrt:
 
@@ -243,14 +257,14 @@ Versandseite wurde mobil in Hell/Dunkel geprueft, ohne Seitenueberbreite.
 | `composer validate --strict` | Exit 0. |
 | `composer audit --locked --no-interaction` | Exit 0, keine Advisories. |
 | `composer check-platform-reqs` | Exit 0 unter PHP 8.2.35. |
-| `composer test` | PHPUnit meldet lokal **633 Tests / 3.065 Assertions erfolgreich**, 18:44 Minuten, 62,5 MB. Die lokale Composer-Prozesshuelle endete jedoch mit **143**; der Gesamtbefehl wird deshalb lokal nicht als Exit-0-Erfolg ausgewiesen. Der unverkuerzte Composer-Aufruf bestand anschliessend regulaer in [GitHub-CI fuer den Implementierungscommit](https://github.com/pkws100/TimeApp/actions/runs/43091273048), nach der letzten Alt-SMS-Migrationskorrektur. |
+| `composer test` | PHPUnit meldet lokal **633 Tests / 3.065 Assertions erfolgreich**, 18:44 Minuten, 62,5 MB. Die lokale Composer-Prozesshuelle endete jedoch mit **143**; der Gesamtbefehl wird deshalb lokal nicht als Exit-0-Erfolg ausgewiesen. Der unverkuerzte Composer-Aufruf bestand anschliessend regulaer mit **633 Tests / 3.070 Assertions** in [GitHub-CI fuer den Implementierungscommit](https://github.com/pkws100/TimeApp/actions/runs/43091273048), nach der letzten Alt-SMS-Migrationskorrektur. Dieser Zwischenlauf scheiterte spaeter am Urlaubs-UI-Selektor; der finale Head muss alle Jobs bestehen. |
 | `composer test -- --filter testUnconfiguredProviderIsReportedWithoutAnyNetworkAttempt` | Exit 0, 1 Test / 3 Assertions; Kontrolllauf fuer die Prozesshuelle. |
 | `composer test -- --filter 'testKilledWorkerIsRecoveredAndParallelWorkerCannotTakeItsClaim\|testAssignmentWriterWaitsForAccountingBeforeStartingItsTransaction'` | Exit 0, **2 Tests / 16 Assertions**; auch Signal-/Parallelitaetsfaelle enden ueber Composer regulaer. |
 | `php vendor/bin/phpunit tests/Integration/WorkTimeMigrationDatabaseTest.php` | Exit 0, **1 Test / 17 Assertions**, nach der letzten gezielten Alt-SMS-Statuskorrektur: Upgrade, DDL-Retry, Rollback, erneutes Upgrade und unveraenderte systemversionierte Quellen. |
 | `npm ci` | Exit 0. |
 | `npm audit --audit-level=high` | Exit 0, keine Sicherheitsmeldungen. |
 | `TZ=UTC npm run ui:test:smoke` | Exit 0, nach dem Loginfix **109 bestanden / 11 uebersprungen**. Neun reale Tests werden separat ausgefuehrt; zwei optionale Live-Login-Pruefungen benoetigen nicht konfigurierte Zugangsdaten. Synthetische Admin-/Mitarbeiterlogins prueft der reale Runner. |
-| `UI_REVIEW_ARTIFACT_DIR=/tmp/timeapp-hardening-notification-review npm run ui:test:real` | Exit 0 nach dem Fix, **9/9 bestanden**, Service Worker unveraendert aktiv. Einschliesslich bestehendem Continue-/Confirm-Login, aller drei neuen RC-Ablaeufe und mobiler Versandseite in Hell/Dunkel. |
+| `UI_REVIEW_ARTIFACT_DIR=/tmp/timeapp-hardening-notification-review npm run ui:test:real` | Exit 0 nach den Fixes, zuletzt **9/9 bestanden**, Service Worker unveraendert aktiv. Einschliesslich bestehendem Continue-/Confirm-Login, aller drei neuen RC-Ablaeufe, mobiler Versandseite in Hell/Dunkel sowie kompletter Abwesenheitsanlage, Kuerzung, Verlaengerung und mobilem Modal. |
 | PHP-Syntax geaenderter/neuer Dateien | Erfolgreich, einschliesslich aller drei Migrationen und des nachtraeglich erweiterten Upgrade-Tests. |
 | JavaScript-Syntax | Erfolgreich fuer 24 bisherige Dateien sowie neuen Login-Test; geaendertes App-JS und reale Browserfaelle erneut geprueft. |
 | `git diff --check` | Erfolgreich. |
@@ -305,6 +319,7 @@ tests/Support/work-time-hardening-ui.php
 tests/Support/work-time-queue-worker.php
 tests/Unit/WorkTimePushChannelTest.php
 tests/e2e/app-login.spec.js
+tests/e2e/revisable-accounts.real.spec.js
 tests/e2e/work-time-hardening.real.spec.js
 tests/e2e/work-time-pause-evidence.spec.js
 tests/e2e/work-time.real.spec.js

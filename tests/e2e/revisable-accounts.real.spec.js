@@ -273,6 +273,8 @@ test.describe('real revisable account workflow', () => {
   });
 
   test('admin creates, corrects and validates an absence period atomically', async ({ page }) => {
+    // This part checks desktop account columns; the modal is checked on mobile below.
+    await page.setViewportSize({ width: 1440, height: 1000 });
     const employeeId = process.env.UI_TEST_EMPLOYEE_ID;
     const dateFrom = process.env.UI_TEST_ABSENCE_DATE_FROM;
     const dateShortTo = process.env.UI_TEST_ABSENCE_DATE_SHORT_TO;
@@ -288,11 +290,24 @@ test.describe('real revisable account workflow', () => {
     await page.goto('/admin/vacation-requests?year=' + year + '&user_id=' + employeeId);
     const accountRow = page.locator('section.vacation-account-overview .vacation-account-desktop tbody tr')
       .filter({ hasText: 'UI Mitarbeiter' });
+    await expect(accountRow).toBeVisible();
     const parseDays = (value) => Number(String(value).replace(/[^\d,-]/g, '').replace('.', '').replace(',', '.'));
     const remainingBefore = parseDays(await accountRow.locator('td').nth(6).innerText());
 
     await page.getByRole('button', { name: 'Urlaub fuer Mitarbeiter buchen' }).click();
     const modal = page.locator('[data-absence-period-modal]');
+    async function savePeriod() {
+      // The fetch handler reloads the same URL. Arm a fresh load event before
+      // submitting so DOM text alone cannot race the responsive stylesheet.
+      const [response] = await Promise.all([
+        page.waitForResponse((response) => ['POST', 'PUT'].includes(response.request().method())
+          && /^\/admin\/(?:vacation-periods|absence-periods\/\d+)$/.test(new URL(response.url()).pathname)),
+        page.waitForEvent('load'),
+        modal.getByRole('button', { name: 'Verbindlich speichern' }).click()
+      ]);
+      expect(response.ok(), 'Save returned HTTP ' + response.status()).toBeTruthy();
+      await expect(modal).toBeHidden();
+    }
     await expect(modal).toBeVisible();
     await modal.locator('select[name="user_id"]').selectOption(employeeId);
     await modal.locator('input[name="date_from"]').fill(dateFrom);
@@ -302,36 +317,49 @@ test.describe('real revisable account workflow', () => {
     await modal.getByRole('button', { name: 'Zeitraum pruefen' }).click();
     await expect(modal.locator('[data-absence-period-preview]')).toContainText('Buchungstage');
     await expect(modal.locator('[data-absence-period-preview]')).not.toContainText('Blockiert');
-    await modal.getByRole('button', { name: 'Verbindlich speichern' }).click();
+    await savePeriod();
 
     const directSection = page.locator('section').filter({
       has: page.getByRole('heading', { name: 'Direkt gebuchte Urlaubszeitraeume' })
     });
-    const directRow = directSection.locator('tbody tr').filter({ hasText: 'UI Mitarbeiter' });
+    const createdRow = directSection.locator('.vacation-account-desktop tbody tr')
+      .filter({ hasText: 'UI Mitarbeiter' }).filter({ hasText: dateFrom + ' bis ' + dateTo });
+    await expect(createdRow).toHaveCount(1);
+    const periodId = await createdRow.locator('[data-absence-period-edit]').getAttribute('data-absence-period-edit');
+    expect(periodId).toMatch(/^\d+$/);
+    const directRow = directSection.locator('.vacation-account-desktop tbody tr')
+      .filter({ has: page.locator('[data-absence-period-edit="' + periodId + '"]') });
+    async function editCreatedPeriod() {
+      await expect(directSection.locator('.vacation-account-desktop')).toBeVisible();
+      await expect(directSection.locator('.vacation-account-mobile')).toBeHidden();
+      await expect(directRow).toContainText('UI Mitarbeiter');
+      const editButton = directRow.locator('[data-absence-period-edit="' + periodId + '"]');
+      await expect(editButton).toHaveCount(1);
+      await expect(editButton).toBeVisible();
+      await editButton.click();
+      await expect(modal).toBeVisible();
+      await expect(modal.locator('input[name="period_id"]')).toHaveValue(periodId);
+    }
     await expect(directRow).toContainText(dateFrom + ' bis ' + dateTo);
     const remainingAfter = parseDays(await accountRow.locator('td').nth(6).innerText());
     expect(remainingAfter).toBeLessThan(remainingBefore);
 
-    await directSection.locator('[data-absence-period-edit]:visible').click();
-    await expect(modal).toBeVisible();
+    await editCreatedPeriod();
     await expect(modal.locator('select[name="user_id"]')).toBeDisabled();
     await modal.locator('input[name="date_to"]').fill(dateShortTo);
     await modal.locator('textarea[name="change_reason"]').fill('Playwright Verkuerzung');
     await modal.getByRole('button', { name: 'Zeitraum pruefen' }).click();
     await expect(modal.locator('[data-absence-period-preview]')).toContainText('entfaellt');
-    await modal.getByRole('button', { name: 'Verbindlich speichern' }).click();
-    await expect(directSection.locator('tbody tr').filter({ hasText: 'UI Mitarbeiter' }))
-      .toContainText(dateFrom + ' bis ' + dateShortTo);
+    await savePeriod();
+    await expect(directRow).toContainText(dateFrom + ' bis ' + dateShortTo);
 
-    await directSection.locator('[data-absence-period-edit]:visible').click();
-    await expect(modal).toBeVisible();
+    await editCreatedPeriod();
     await modal.locator('input[name="date_to"]').fill(dateExtendedTo);
     await modal.locator('textarea[name="change_reason"]').fill('Playwright Verlaengerung');
     await modal.getByRole('button', { name: 'Zeitraum pruefen' }).click();
     await expect(modal.locator('[data-absence-period-preview]')).toContainText('neu');
-    await modal.getByRole('button', { name: 'Verbindlich speichern' }).click();
-    await expect(directSection.locator('tbody tr').filter({ hasText: 'UI Mitarbeiter' }))
-      .toContainText(dateFrom + ' bis ' + dateExtendedTo);
+    await savePeriod();
+    await expect(directRow).toContainText(dateFrom + ' bis ' + dateExtendedTo);
 
     await page.goto('/admin/calendar?month=' + dateFrom.slice(0, 7) + '&date=' + dateFrom);
     await expect(page.locator('.calendar-bookings-card')).toContainText('Urlaub');
