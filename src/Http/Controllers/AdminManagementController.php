@@ -23,12 +23,14 @@ use App\Domain\Timesheets\AdminBookingService;
 use App\Domain\Timesheets\TimesheetSignatureService;
 use App\Domain\Users\RoleService;
 use App\Domain\Users\UserService;
+use App\Domain\WorkTime\WorkTimeUserSummaryService;
 use App\Http\Request;
 use App\Http\Response;
 use App\Http\UploadSizeGuard;
 use App\Presentation\Admin\AdminView;
 use App\Presentation\Admin\BookingModalRenderer;
 use App\Presentation\Admin\PersonnelIconRenderer;
+use App\Presentation\Admin\WorkTimeUserSummaryRenderer;
 use InvalidArgumentException;
 use RuntimeException;
 
@@ -53,7 +55,8 @@ final class AdminManagementController
         private ?ProjectMaterialService $projectMaterialService = null,
         private ?ProjectDispatchService $projectDispatchService = null,
         private ?ProjectAccessService $projectAccessService = null,
-        private ?ProjectWorkReportService $projectWorkReportService = null
+        private ?ProjectWorkReportService $projectWorkReportService = null,
+        private ?WorkTimeUserSummaryService $workTimeUserSummaryService = null
     ) {
     }
 
@@ -904,6 +907,8 @@ HTML;
             $isEdit ? 'Projekt konnte nicht gespeichert werden.' : 'Projekt konnte nicht angelegt werden.'
         );
         $csrfToken = $this->e($this->csrfService->token());
+        $projectActorId = (int) ($this->currentUserId() ?? 0);
+        $projectMasterInvalid = $formErrors !== [] ? '1' : '0';
 
         return <<<HTML
 <header class="page-header">
@@ -915,8 +920,8 @@ HTML;
     <a class="button" href="/admin/projects">Zur Liste</a>
 </header>
 {$this->noticeFromCurrentQuery()}
-{$errorSummary}
-<form method="post" action="{$this->e($action)}" class="card form-grid" data-project-master-form>
+<div data-project-master-errors>{$errorSummary}</div>
+<form method="post" action="{$this->e($action)}" class="card form-grid" data-project-master-form data-project-actor-id="{$projectActorId}" data-project-master-invalid="{$projectMasterInvalid}">
     {$method}
     <input type="hidden" name="csrf_token" value="{$csrfToken}">
     <div{$this->fieldWrapperClass($formErrors, 'project_number')}><label for="project_number">Projektnummer</label><input id="project_number" name="project_number" value="{$this->field($project, 'project_number')}" maxlength="40" required{$this->fieldInvalidAttribute($formErrors, 'project_number')}>{$this->fieldErrorMarkup($formErrors, 'project_number')}</div>
@@ -1096,6 +1101,11 @@ HTML;
         $targetHoursMode = $targetHoursMode === 'week' ? 'week' : 'month';
         $workdays = $this->workdaysFromMask($user['workdays_mask'] ?? '1,2,3,4,5');
         $workdayCheckboxes = '';
+        $workTimeSummary = $isEdit && isset($this->workTimeUserSummaryService)
+            ? (new WorkTimeUserSummaryRenderer())->render($this->workTimeUserSummaryService->forUser(
+                $this->authService->currentUser() ?? [], (int) $user['id']
+            ))
+            : '';
 
         foreach ($roles as $role) {
             $roleId = (int) ($role['id'] ?? 0);
@@ -1145,9 +1155,10 @@ HTML;
     <div class="form-field"><label for="phone">Telefon</label><input id="phone" name="phone" value="{$this->field($user, 'phone')}"></div>
     <div{$this->fieldWrapperClass($formErrors, 'password')}><label for="password">Passwort</label><input id="password" name="password" type="password" {$this->required(!$isEdit)}{$this->fieldInvalidAttribute($formErrors, 'password')}>{$this->fieldErrorMarkup($formErrors, 'password')}</div>
     <div{$this->fieldWrapperClass($formErrors, 'employment_status')}><label for="employment_status">Status</label>{$this->select('employment_status', ['active' => 'Aktiv', 'inactive' => 'Inaktiv', 'terminated' => 'Ausgeschieden'], (string) ($user['employment_status'] ?? 'active'), $this->fieldInvalidAttribute($formErrors, 'employment_status'))}{$this->fieldErrorMarkup($formErrors, 'employment_status')}</div>
-    <div{$this->fieldWrapperClass($formErrors, 'target_hours_mode')}><label for="target_hours_mode">Arbeitszeitmodell</label>{$this->select('target_hours_mode', ['month' => 'Monatssoll', 'week' => 'Wochensoll'], $targetHoursMode, $this->fieldInvalidAttribute($formErrors, 'target_hours_mode'))}{$this->fieldErrorMarkup($formErrors, 'target_hours_mode')}</div>
+    <div{$this->fieldWrapperClass($formErrors, 'target_hours_mode')}><label for="target_hours_mode">Sollstundenmodell</label>{$this->select('target_hours_mode', ['month' => 'Monatssoll', 'week' => 'Wochensoll'], $targetHoursMode, $this->fieldInvalidAttribute($formErrors, 'target_hours_mode'))}{$this->fieldErrorMarkup($formErrors, 'target_hours_mode')}</div>
     <div{$this->fieldWrapperClass($formErrors, 'target_hours_month')}><label for="target_hours_month">Sollstunden / Monat</label><input id="target_hours_month" name="target_hours_month" type="number" step="0.01" value="{$this->field($user, 'target_hours_month')}"{$this->fieldInvalidAttribute($formErrors, 'target_hours_month')}>{$this->fieldErrorMarkup($formErrors, 'target_hours_month')}</div>
     <div{$this->fieldWrapperClass($formErrors, 'target_hours_week')}><label for="target_hours_week">Sollstunden / Woche</label><input id="target_hours_week" name="target_hours_week" type="number" step="0.01" value="{$this->field($user, 'target_hours_week')}"{$this->fieldInvalidAttribute($formErrors, 'target_hours_week')}><p class="muted">Bei Wochensoll ist ein Wert groesser als 0 erforderlich. Fuer die Zeitkontoberechnung wird dann das Wochensoll verwendet; das Monatssoll bleibt als gueltiger Stammdatenwert gespeichert.</p>{$this->fieldErrorMarkup($formErrors, 'target_hours_week')}</div>
+    {$workTimeSummary}
     <div{$this->fieldWrapperClass($formErrors, 'vacation_days_year')}><label for="vacation_days_year">Jahresurlaub</label><input id="vacation_days_year" name="vacation_days_year" type="number" step="0.5" value="{$this->field($user, 'vacation_days_year')}"{$this->fieldInvalidAttribute($formErrors, 'vacation_days_year')}>{$this->fieldErrorMarkup($formErrors, 'vacation_days_year')}</div>
     <div{$this->fieldWrapperClass($formErrors, 'vacation_carryover_days')}><label for="vacation_carryover_days">Urlaubsuebertrag</label><input id="vacation_carryover_days" name="vacation_carryover_days" type="number" step="0.5" value="{$this->field($user, 'vacation_carryover_days')}"{$this->fieldInvalidAttribute($formErrors, 'vacation_carryover_days')}>{$this->fieldErrorMarkup($formErrors, 'vacation_carryover_days')}</div>
     <div class="full-span field-group{$this->fieldGroupErrorClass($formErrors, 'workdays_mask')}" role="group" aria-labelledby="workdays_mask_label"{$this->fieldInvalidAttribute($formErrors, 'workdays_mask')}>

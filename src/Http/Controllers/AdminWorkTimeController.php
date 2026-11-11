@@ -78,7 +78,7 @@ final class AdminWorkTimeController
         if ($this->auth->hasPermission('work_time_policies.manage')) {
             $content .= '<section class="card stack"><h2>Arbeitszeitvorlage / neue Revision</h2><form method="post" action="/admin/work-time/templates" class="form-grid" data-worktime-form><input type="hidden" name="csrf_token" value="' . $csrf . '"><input type="hidden" name="intent" value="template"><input type="hidden" name="preview_token"><label><span>Vorlage</span><select name="template_id">' . $templateOptions . '</select></label><label><span>Name für neue Vorlage</span><input name="name" maxlength="160"></label><label class="full-span"><span>Beschreibung</span><textarea name="description"></textarea></label>' . $this->ruleFields()
                 . $this->exampleFields() . '</form></section>';
-            $userOptions = $this->userOptions($users);
+            $userOptions = $this->userOptions($users, (int) $request->query('user_id', 0));
             $supervisors = '';
             if ($this->access->isAdministrator($actor)) {
                 $supervisors = '<label class="full-span"><span>Zuständige Vorgesetzte (Mehrfachauswahl)</span><select name="supervisor_user_ids[]" multiple>' . $this->userOptions($this->users->list('active')) . '</select></label>';

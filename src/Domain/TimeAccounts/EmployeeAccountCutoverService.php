@@ -801,7 +801,11 @@ final class EmployeeAccountCutoverService
 
     private function withUserAndAccountingLocks(int $userId, callable $callback): mixed
     {
-        return $this->withUserLock($userId, fn (): mixed => $this->writeGuard?->withAccountingWriteLock($callback) ?? $callback());
+        // Year-opening consumers may return void. Their null result must not
+        // invoke the same writer again outside the accounting lock.
+        return $this->withUserLock($userId, fn (): mixed => $this->writeGuard !== null
+            ? $this->writeGuard->withAccountingWriteLock($callback)
+            : $callback());
     }
 
     public function withAccountWriteLocks(int $userId, callable $callback): mixed

@@ -122,9 +122,10 @@ jobs:
             -name '*.js' -print0 \
             | xargs -0 -n 1 node --check
           node --check playwright.config.js
+          node --check playwright.webkit.config.js
 
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
+      - name: Install Playwright Chromium and WebKit
+        run: npx playwright install --with-deps chromium webkit
 
       - name: Prepare smoke-test database
         run: |
@@ -156,6 +157,7 @@ jobs:
             exit 1
           }
           UI_BASE_URL=http://127.0.0.1:18081 npm run ui:test:smoke
+          UI_BASE_URL=http://127.0.0.1:18081 npm run ui:test:webkit
 
       - name: Run isolated real account workflow
         run: npm run ui:test:real

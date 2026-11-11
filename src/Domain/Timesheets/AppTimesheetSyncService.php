@@ -245,6 +245,13 @@ final class AppTimesheetSyncService
         }
 
         $calculated = $this->calculatedValues($workDate, $startTime, $endTime, $manualBreakMinutes);
+        if ($entry !== null) {
+            (new TimesheetPauseEvidenceGuard($this->connection))->assertChangeAllowed((int) $entry['id'], [
+                'user_id' => $userId, 'work_date' => $workDate, 'start_time' => $startTime, 'end_time' => $endTime,
+                'gross_minutes' => $calculated['gross_minutes'], 'break_minutes' => $calculated['break_minutes'],
+                'net_minutes' => $calculated['net_minutes'], 'entry_type' => 'work', 'source' => $source,
+            ], in_array($action, ['pause_start', 'pause_end'], true) || ($action === 'pause' && array_key_exists('manual_break_minutes', $payload)));
+        }
         $timesheetId = $this->persistTimesheet($entry, $userId, $projectId, $workDate, $startTime, $endTime, $note, $source, $calculated);
         if ($originalAction === 'work_start') {
             $this->workTimePresenceService?->markWorkStarted($userId, $timesheetId, $workDate, (string) $startTime);

@@ -64,6 +64,9 @@
         projectMaterialsOffline: false,
         projectMaterialsUpdatedAt: {},
         projectMaterialDrafts: {},
+        projectMaterialDraftLoads: {},
+        projectMaterialStorageErrors: {},
+        projectMaterialSavingProjectId: null,
         projectWorkReports: {},
         projectWorkReportsLoading: false,
         projectWorkReportsOffline: false,
@@ -116,6 +119,7 @@
     let activeOnlineDataLoad = null;
     let sessionGeneration = 0;
     let workReportStorageQueue = Promise.resolve();
+    let materialDraftStorageQueue = Promise.resolve();
     let revalidateTimer = null;
     let projectSearchSelectionTimer = null;
     let deferredInstallPrompt = null;
@@ -400,6 +404,10 @@
         return 'project_materials_v1_user_' + currentSessionUserCachePart() + '_project_' + String(projectId);
     }
 
+    function projectMaterialDraftKey(projectId, userPart) {
+        return 'project_material_draft_v1_user_' + (userPart || currentSessionUserCachePart()) + '_project_' + projectId;
+    }
+
     function projectWorkReportCacheKey(projectId, userPart) {
         return 'project_work_reports_v1_user_' + (userPart || currentSessionUserCachePart()) + '_project_' + projectId;
     }
@@ -420,6 +428,25 @@
         const result = workReportStorageQueue.then(operation);
         workReportStorageQueue = result.catch(function () {});
         return result;
+    }
+
+    function queueMaterialDraftStorage(operation) {
+        const result = materialDraftStorageQueue.then(operation);
+        materialDraftStorageQueue = result.catch(function () {});
+        return result;
+    }
+
+    async function clearProjectMaterialDraftStorage(userPart, projectId) {
+        await queueMaterialDraftStorage(async function () {
+            if (typeof projectId !== 'undefined') {
+                await cacheDelete(projectMaterialDraftKey(projectId, userPart));
+                return;
+            }
+            const prefix = projectMaterialDraftKey('', userPart);
+            for (const key of await cacheKeys()) {
+                if (String(key).startsWith(prefix)) await cacheDelete(key);
+            }
+        });
     }
 
     async function clearProjectWorkReportStorage(userPart, projectId, keepDrafts) {
@@ -502,6 +529,9 @@
         state.projectMaterialsOffline = false;
         state.projectMaterialsUpdatedAt = {};
         state.projectMaterialDrafts = {};
+        state.projectMaterialDraftLoads = {};
+        state.projectMaterialStorageErrors = {};
+        state.projectMaterialSavingProjectId = null;
         state.projectWorkReports = {};
         state.projectWorkReportsLoading = false;
         state.projectWorkReportsOffline = false;
@@ -743,6 +773,10 @@
 
         const previousTodayCacheKey = todayCacheKey();
         const previousUserPart = currentSessionUserCachePart();
+        captureProjectMaterialDraft();
+        const unsentMaterials = Object.entries(state.projectMaterialDrafts)
+            .filter(([projectId, draft]) => draft.ready && draft.dirty && isCurrentAuthorizedProject(projectId))
+            .map(([projectId, draft]) => [projectId, JSON.parse(JSON.stringify(draft))]);
         captureProjectWorkReportDraft();
         const unsentDrafts = Object.entries(state.projectWorkReportDrafts)
             .filter(([projectId, draft]) => draft.ready && isCurrentAuthorizedProject(projectId))
@@ -758,15 +792,23 @@
         const expiredContext = sessionContext();
         render();
 
+        // Register this preservation before yielding, so a later explicit logout
+        // always queues its deletion after these writes.
+        const preserveMaterials = queueMaterialDraftStorage(async function () {
+            for (const [projectId, draft] of unsentMaterials) {
+                await cacheSet(projectMaterialDraftKey(projectId, previousUserPart), draft);
+            }
+        });
+
         try {
             // Preserve the last local input even if generation invalidation skipped queued writes.
-            await queueWorkReportStorage(async function () {
+            await Promise.all([preserveMaterials, queueWorkReportStorage(async function () {
                 for (const [projectId, draft] of unsentDrafts) {
                     await cacheSet(projectWorkReportDraftKey(projectId, previousUserPart), draft);
                 }
-            });
+            })]);
         } catch (error) {
-            message = 'Ihre Sitzung ist abgelaufen. Der letzte Arbeitsbericht-Entwurf konnte nicht auf diesem Gerät gesichert werden. Bitte prüfen Sie den Gerätespeicher.';
+            message = 'Ihre Sitzung ist abgelaufen. Ein letzter Projektentwurf konnte nicht auf diesem Gerät gesichert werden. Bitte prüfen Sie den Gerätespeicher.';
         }
         if (!isCurrentSessionContext(expiredContext)) return;
         // Session expiry requires reauthentication, not destruction of unsent work.
@@ -2176,7 +2218,7 @@
                 : 'Nur für Sie aktivierte Regel. Tatsächliche Arbeit außerhalb des Fensters bleibt erfasst.') + '</p>';
         if (completedRows.length) {
             html += '<div class="app-stat-list"><div class="app-stat-row"><span>Tatsächliche Arbeit (abgeschlossen)</span><strong>' + escapeHtml(duration(preview.actual_work_minutes)) + '</strong></div>'
-                + '<div class="app-stat-row"><span>Vorläufig anrechenbar</span><strong>' + escapeHtml(duration(preview.accountable_work_minutes)) + '</strong></div>'
+                + '<div class="app-stat-row"><span>Fensteranrechnung (unverbindliche Vorschau)</span><strong>' + escapeHtml(duration(preview.accountable_work_minutes)) + '</strong></div>'
                 + '<div class="app-stat-row"><span>Außenzeit offen</span><strong>' + escapeHtml(duration(preview.outside_pending_minutes)) + '</strong></div></div>'
                 + '<p class="muted">Vorschau zur Prüfung; die bestehende Kontoberechnung bleibt maßgeblich. Bei ungeklärter Pausenlage ist keine genaue Zuordnung möglich.</p>';
         }
@@ -2480,7 +2522,8 @@
                 quantity: '1',
                 unit: '',
                 note: '',
-                work_date: state.today && state.today.today ? state.today.today : new Date().toLocaleDateString('sv-SE')
+                work_date: state.today && state.today.today ? state.today.today : berlinToday(),
+                revision: 0, ready: false, dirty: false, client_request_id: null, submission: null
             };
         }
 
@@ -2510,7 +2553,10 @@
 
         const items = state.projectMaterials[String(projectId)] || [];
         const draft = projectMaterialDraft(projectId);
-        const locked = isBusy('project_material') ? ' readonly' : '';
+        const busy = isBusy('project_material') && state.projectMaterialSavingProjectId === projectId;
+        const uncertain = draft.submission && draft.submission.status !== 'rejected';
+        const locked = !draft.ready || busy || uncertain ? ' readonly' : '';
+        const storageError = state.projectMaterialStorageErrors[String(projectId)];
         const currentUserId = Number(state.session && state.session.user ? state.session.user.id || 0 : 0);
         const canManage = hasPermission('projects.manage');
         const loading = state.projectMaterialsLoading ? '<div class="app-empty">Materialeintraege werden geladen ...</div>' : '';
@@ -2540,15 +2586,19 @@
             + '<div><p class="muted">Material</p><h2>Materialdokumentation</h2><p>Verwendetes oder benoetigtes Material wird getrennt von der Buchungsnotiz dokumentiert.</p></div>'
             + offline
             + loading
+            + '<div id="projectMaterialDraftStatus">'
+            + (storageError ? '<div class="app-empty" role="alert">' + escapeHtml(storageError) + '</div>' : '')
+            + (uncertain && !busy ? '<div class="app-empty" role="status">Die Speicherantwort ist noch nicht bestätigt. Prüfen Sie denselben Eintrag erneut, bevor Sie die Angaben ändern.</div>' : '')
+            + '</div>'
             + rows
-            + '<form id="projectMaterialForm" class="app-grid">'
+            + '<form id="projectMaterialForm" class="app-grid" data-project-id="' + projectId + '">'
             + '<label class="app-field"><span>Material / Artikel</span><input id="projectMaterialDescription" name="description" maxlength="255" required' + locked + ' value="' + escapeHtml(draft.description) + '"></label>'
             + '<label class="app-field"><span>Menge</span><input id="projectMaterialQuantity" name="quantity" inputmode="decimal" required' + locked + ' value="' + escapeHtml(draft.quantity) + '"></label>'
             + '<label class="app-field"><span>Einheit</span><input id="projectMaterialUnit" name="unit" maxlength="40" list="projectMaterialUnits"' + locked + ' value="' + escapeHtml(draft.unit) + '"></label>'
             + '<datalist id="projectMaterialUnits"><option value="Stueck"></option><option value="m"></option><option value="m²"></option><option value="kg"></option><option value="g"></option><option value="l"></option><option value="ml"></option><option value="Rolle"></option><option value="Packung"></option><option value="Satz"></option></datalist>'
             + '<label class="app-field"><span>Bemerkung</span><textarea id="projectMaterialNote" name="note" maxlength="2000" rows="3"' + locked + '>' + escapeHtml(draft.note) + '</textarea></label>'
             + '<label class="app-field"><span>Datum</span><input id="projectMaterialDate" name="work_date" type="date" max="' + escapeHtml(state.today && state.today.today ? state.today.today : '') + '" required' + locked + ' value="' + escapeHtml(draft.work_date) + '"></label>'
-            + '<button type="submit" ' + (isBusy('project_material') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('project_material', 'Material speichern')) + '</button>'
+            + '<button type="submit" ' + (!draft.ready || busy ? 'disabled' : '') + '>' + escapeHtml(busy ? buttonLabel('project_material', 'Material speichern') : (uncertain ? 'Speichern erneut prüfen' : 'Material speichern')) + '</button>'
             + '</form>'
             + '</section>';
     }
@@ -4606,8 +4656,12 @@
         const projectMaterialForm = document.getElementById('projectMaterialForm');
 
         if (projectMaterialForm) {
-            bindInteraction(projectMaterialForm, 'input', captureProjectMaterialDraft);
-            bindInteraction(projectMaterialForm, 'change', captureProjectMaterialDraft);
+            const capture = function () {
+                const draft = captureProjectMaterialDraft();
+                if (draft && draft.dirty) persistProjectMaterialDraft(Number(projectMaterialForm.dataset.projectId), draft);
+            };
+            bindInteraction(projectMaterialForm, 'input', capture);
+            bindInteraction(projectMaterialForm, 'change', capture);
             bindInteraction(projectMaterialForm, 'submit', async function (event) {
                 event.preventDefault();
                 await submitProjectMaterial();
@@ -4826,13 +4880,20 @@
                 resetProjectSelectionState();
                 navigate('/app/login');
                 const logoutContext = sessionContext();
-                const cleanup = (async function () {
-                    await clearProjectWorkReportStorage(previousUserPart);
-                    if (!isCurrentSessionContext(logoutContext)) return;
-                    await cacheSet('session', { authenticated: false, user: null }, () => isCurrentSessionContext(logoutContext));
-                    await cacheDelete(previousTodayCacheKey);
-                    await cacheDelete('today');
-                }());
+                // Queue old-owner deletion before a new login can start draft
+                // loads/writes, even if session-cache I/O is slow or fails.
+                const cleanup = Promise.all([
+                    clearProjectWorkReportStorage(previousUserPart),
+                    clearProjectMaterialDraftStorage(previousUserPart),
+                    (async function () {
+                        if (!isCurrentSessionContext(logoutContext)) return;
+                        await cacheSet('session', { authenticated: false, user: null }, () => isCurrentSessionContext(logoutContext));
+                        if (!isCurrentSessionContext(logoutContext)) return;
+                        await cacheDelete(previousTodayCacheKey);
+                        if (!isCurrentSessionContext(logoutContext)) return;
+                        await cacheDelete('today');
+                    }())
+                ]);
                 let serverConfirmed = false;
                 try {
                     serverConfirmed = (await fetch('/api/v1/auth/logout', { method: 'POST' })).ok;
@@ -5656,10 +5717,7 @@
             }
 
             if (error.httpStatus === 403 || error.httpStatus === 404) {
-                state.projectMaterials[String(projectId)] = [];
-                state.projectMaterialsUpdatedAt[String(projectId)] = null;
-                state.projectMaterialsOffline = false;
-                await cacheDelete(cacheKey);
+                await denyProjectAccess(projectId, context);
                 return;
             }
 
@@ -5925,7 +5983,7 @@
 
         const tasks = [];
 
-        await loadProjectWorkReportDraft(projectId);
+        await Promise.all([loadProjectWorkReportDraft(projectId), loadProjectMaterialDraft(projectId)]);
         if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId) || projectId !== projectFileContextId()) return;
         tasks.push(loadProjectWorkReports(projectId, force));
 
@@ -5954,6 +6012,7 @@
             Object.keys(state.projectOrders)
                 .concat(Object.keys(state.projectFiles))
                 .concat(Object.keys(state.projectMaterials))
+                .concat(Object.keys(state.projectMaterialDrafts))
                 .concat(Object.keys(state.projectWorkReports))
                 .concat(Object.keys(state.projectWorkReportDrafts))
         );
@@ -5964,6 +6023,7 @@
             const prefixes = [
                 'project_order_v1_user_' + userPart + '_project_',
                 'project_materials_v1_user_' + userPart + '_project_',
+                projectMaterialDraftKey('', userPart),
                 projectWorkReportDraftKey('', userPart),
                 projectWorkReportCacheKey('', userPart),
                 'project_files_user_' + userPart + '_'
@@ -6000,6 +6060,8 @@
             delete state.projectMaterials[projectId];
             delete state.projectMaterialsUpdatedAt[projectId];
             delete state.projectMaterialDrafts[projectId];
+            delete state.projectMaterialDraftLoads[projectId];
+            delete state.projectMaterialStorageErrors[projectId];
             delete state.projectWorkReports[projectId];
             delete state.projectWorkReportDrafts[projectId];
             delete state.projectWorkReportDraftLoads[projectId];
@@ -6010,10 +6072,12 @@
                     cacheDelete(projectOrderCacheKey(projectId)),
                     cacheDelete(projectFilesCacheKey(projectId)),
                     cacheDelete(projectMaterialsCacheKey(projectId)),
+                    clearProjectMaterialDraftStorage(userPart, projectId),
                     clearProjectWorkReportStorage(userPart, projectId)
                 ]);
             } catch (error) {
-                console.warn('Nicht mehr autorisierte Projekt-Caches konnten nicht vollstaendig entfernt werden.', error);
+                console.warn('Nicht mehr autorisierte Projekt-Caches konnten nicht vollstaendig entfernt werden.');
+                if (isCurrentSessionContext(context)) showFeedback('error', 'Lokale Projektentwürfe konnten nicht vollständig entfernt werden. Bitte prüfen Sie den Gerätespeicher.', true);
             }
         }));
     }
@@ -6069,62 +6133,174 @@
         showFeedback('error', 'Das angeforderte Projekt ist nicht verfuegbar oder fuer Sie nicht freigegeben.');
     }
 
+    async function loadProjectMaterialDraft(projectId) {
+        const key = String(projectId);
+        const draft = projectMaterialDraft(projectId);
+        if (draft.ready) return;
+        if (state.projectMaterialDraftLoads[key]) return state.projectMaterialDraftLoads[key];
+        const context = sessionContext();
+        const revision = draft.revision;
+        const promise = (async function () {
+            try {
+                const cached = await queueMaterialDraftStorage(() => cacheGet(projectMaterialDraftKey(projectId, context.userPart)));
+                if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return;
+                if (draft.revision === revision && cached && cached.dirty) {
+                    for (const field of ['description', 'quantity', 'unit', 'note', 'work_date']) {
+                        if (typeof cached[field] === 'string') draft[field] = cached[field];
+                    }
+                    draft.dirty = true;
+                    draft.client_request_id = typeof cached.client_request_id === 'string' ? cached.client_request_id : null;
+                    draft.submission = cached.submission && typeof cached.submission.payload === 'object' ? cached.submission : null;
+                }
+            } catch (error) {
+                if (isCurrentSessionContext(context)) {
+                    state.projectMaterialStorageErrors[key] = 'Der lokale Materialentwurf konnte nicht geladen werden. Bitte prüfen Sie den Gerätespeicher.';
+                }
+            } finally {
+                if (isCurrentSessionContext(context) && isCurrentAuthorizedProject(projectId)) {
+                    draft.ready = true;
+                    if (projectFileContextId() === projectId) resetProjectFormAfterSave('projectMaterialForm');
+                    render();
+                }
+            }
+        }());
+        state.projectMaterialDraftLoads[key] = promise;
+        return promise;
+    }
+
     function captureProjectMaterialDraft() {
-        const projectId = projectFileContextId();
-
-        if (projectId === null) {
-            return;
+        const form = document.getElementById('projectMaterialForm');
+        const projectId = Number(form && form.dataset.projectId);
+        if (!isCurrentAuthorizedProject(projectId) || projectId !== projectFileContextId()) return null;
+        const draft = projectMaterialDraft(projectId);
+        if (!draft.ready || (isBusy('project_material') && state.projectMaterialSavingProjectId === projectId)
+            || (draft.submission && draft.submission.status !== 'rejected')) return draft;
+        const values = {};
+        for (const field of ['description', 'quantity', 'unit', 'note', 'work_date']) {
+            values[field] = form.querySelector('[name="' + field + '"]').value;
         }
+        if (Object.keys(values).some((field) => draft[field] !== values[field])) {
+            Object.assign(draft, values);
+            draft.revision += 1;
+            draft.dirty = true;
+            draft.submission = null;
+        }
+        return draft;
+    }
 
-        state.projectMaterialDrafts[String(projectId)] = {
-            description: document.getElementById('projectMaterialDescription')?.value || '',
-            quantity: document.getElementById('projectMaterialQuantity')?.value || '',
-            unit: document.getElementById('projectMaterialUnit')?.value || '',
-            note: document.getElementById('projectMaterialNote')?.value || '',
-            work_date: document.getElementById('projectMaterialDate')?.value || ''
-        };
+    async function persistProjectMaterialDraft(projectId, draft) {
+        if (!draft.dirty) return true;
+        const context = sessionContext();
+        const snapshot = JSON.parse(JSON.stringify(draft));
+        const current = () => isCurrentSessionContext(context) && isCurrentAuthorizedProject(projectId);
+        try {
+            await queueMaterialDraftStorage(async function () {
+                if (current()) await cacheSet(projectMaterialDraftKey(projectId, context.userPart), snapshot, current);
+            });
+            if (!current()) return false;
+            if (state.projectMaterialStorageErrors[String(projectId)]) {
+                delete state.projectMaterialStorageErrors[String(projectId)];
+                render();
+            }
+            return true;
+        } catch (error) {
+            if (current()) {
+                state.projectMaterialStorageErrors[String(projectId)] = 'Ihr Materialentwurf konnte auf diesem Gerät nicht gesichert werden. Bitte prüfen Sie den verfügbaren Speicher. Die Eingaben bleiben geöffnet.';
+                render();
+            }
+            return false;
+        }
     }
 
     async function submitProjectMaterial() {
         if (state.pendingAction) return;
-        const projectId = projectFileContextId();
+        const form = document.getElementById('projectMaterialForm');
+        const projectId = Number(form && form.dataset.projectId);
         const context = sessionContext();
+        const draft = captureProjectMaterialDraft();
 
-        captureProjectMaterialDraft();
-
-        if (projectId === null) {
+        if (!draft || !draft.ready || !isCurrentAuthorizedProject(projectId)) {
             showFeedback('error', 'Bitte zuerst ein Projekt auswaehlen.');
             return;
         }
 
         if (!navigator.onLine) {
+            await persistProjectMaterialDraft(projectId, draft);
             state.projectMaterialsOffline = true;
-            showFeedback('error', 'Material kann nur online gespeichert werden. Ihre Eingaben bleiben erhalten.', true);
+            if (isCurrentSessionContext(context)) showFeedback('error', 'Material kann nur online gespeichert werden. Ihre Eingaben bleiben erhalten.', true);
             return;
         }
 
-        const draft = projectMaterialDraft(projectId);
+        if (!draft.client_request_id) {
+            const requestId = createClientId();
+            draft.client_request_id = /^[0-9a-f-]{36}$/i.test(requestId) ? requestId
+                : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (character) {
+                    const random = Math.floor(Math.random() * 16);
+                    return (character === 'x' ? random : (random & 3) | 8).toString(16);
+                });
+        }
+        if (!draft.submission || draft.submission.status === 'rejected') {
+            draft.submission = { status: 'pending', payload: { client_request_id: draft.client_request_id } };
+            for (const field of ['description', 'quantity', 'unit', 'note', 'work_date']) draft.submission.payload[field] = draft[field];
+        }
+        draft.submission.status = 'pending';
+        const submission = { ...draft.submission.payload };
+        const revision = draft.revision;
         state.pendingAction = 'project_material';
+        state.projectMaterialSavingProjectId = projectId;
         render();
 
+        let accepted = false;
         try {
-            await apiJson('/api/v1/app/projects/' + projectId + '/materials', {
+            if (!await persistProjectMaterialDraft(projectId, draft)) {
+                draft.submission.status = 'rejected';
+                return;
+            }
+            if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return;
+            const payload = await apiJson('/api/v1/app/projects/' + projectId + '/materials', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(draft)
+                body: JSON.stringify(submission)
             });
+            accepted = true;
             if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return;
-            delete state.projectMaterialDrafts[String(projectId)];
-            if (projectFileContextId() === projectId) resetProjectFormAfterSave('projectMaterialForm');
-            showFeedback('success', 'Materialeintrag wurde gespeichert.');
-            await loadProjectMaterials(projectId, true);
+            if (state.projectMaterialDrafts[String(projectId)] === draft && draft.revision === revision) {
+                await queueMaterialDraftStorage(() => cacheDelete(projectMaterialDraftKey(projectId, context.userPart)));
+                if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return;
+                delete state.projectMaterialDrafts[String(projectId)];
+                projectMaterialDraft(projectId).ready = true;
+                delete state.projectMaterialStorageErrors[String(projectId)];
+                if (projectFileContextId() === projectId) resetProjectFormAfterSave('projectMaterialForm');
+            }
+            if (projectFileContextId() === projectId) {
+                showFeedback('success', payload.data && payload.data.is_deleted
+                    ? 'Dieser Materialeintrag wurde bereits gespeichert und inzwischen archiviert.' : 'Materialeintrag wurde gespeichert.');
+                await loadProjectMaterials(projectId, true);
+            }
         } catch (error) {
-            if (!isSessionExpiredError(error)) {
-                showFeedback('error', friendlyMessage(error.message, 'Materialeintrag konnte nicht gespeichert werden.'), true);
+            if (!isSessionExpiredError(error) && isCurrentSessionContext(context) && isCurrentAuthorizedProject(projectId)) {
+                if (state.projectMaterialDrafts[String(projectId)] !== draft) {
+                    showFeedback('error', 'Der Materialeintrag wurde gespeichert. Die Materialliste konnte noch nicht aktualisiert werden.', true);
+                    return;
+                }
+                if (error.httpStatus === 403 || error.httpStatus === 404) {
+                    await denyProjectAccess(projectId, context);
+                    showFeedback('error', 'Dieses Projekt ist nicht mehr für Sie freigegeben.', true);
+                    return;
+                }
+                draft.submission.status = [400, 422].includes(error.httpStatus) ? 'rejected' : 'uncertain';
+                await persistProjectMaterialDraft(projectId, draft);
+                if (accepted) {
+                    state.projectMaterialStorageErrors[String(projectId)] = 'Der Materialeintrag wurde gespeichert, der lokale Entwurf konnte aber nicht bereinigt werden. Prüfen Sie denselben Eintrag erneut.';
+                }
+                showFeedback('error', accepted ? state.projectMaterialStorageErrors[String(projectId)] : error.httpStatus === 409
+                    ? 'Der Speicherstand ist widersprüchlich. Der Entwurf bleibt erhalten. Bitte im Büro prüfen, bevor Sie einen neuen Eintrag anlegen.'
+                    : friendlyMessage(error.message, 'Materialeintrag konnte nicht bestätigt werden. Ihr Entwurf bleibt erhalten.'), true);
             }
         } finally {
             if (isCurrentSessionContext(context)) {
                 state.pendingAction = null;
+                state.projectMaterialSavingProjectId = null;
                 render();
             }
         }
@@ -6133,7 +6309,7 @@
     async function archiveProjectMaterial(materialId) {
         const projectId = projectFileContextId();
 
-        if (projectId === null || materialId <= 0) {
+        if (state.pendingAction || !isCurrentAuthorizedProject(projectId) || materialId <= 0) {
             return;
         }
 
@@ -6142,20 +6318,28 @@
             return;
         }
 
+        const context = sessionContext();
         state.pendingAction = 'project_material';
+        state.projectMaterialSavingProjectId = projectId;
         render();
 
         try {
             await apiJson('/api/v1/app/project-materials/' + materialId, { method: 'DELETE' });
-            showFeedback('success', 'Materialeintrag wurde archiviert.');
-            await loadProjectMaterials(projectId, true);
+            if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return;
+            if (projectFileContextId() === projectId) {
+                showFeedback('success', 'Materialeintrag wurde archiviert.');
+                await loadProjectMaterials(projectId, true);
+            }
         } catch (error) {
-            if (!isSessionExpiredError(error)) {
+            if (!isSessionExpiredError(error) && isCurrentSessionContext(context)) {
                 showFeedback('error', friendlyMessage(error.message, 'Materialeintrag konnte nicht archiviert werden.'), true);
             }
         } finally {
-            state.pendingAction = null;
-            render();
+            if (isCurrentSessionContext(context)) {
+                state.pendingAction = null;
+                state.projectMaterialSavingProjectId = null;
+                render();
+            }
         }
     }
 

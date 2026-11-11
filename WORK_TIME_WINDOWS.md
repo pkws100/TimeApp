@@ -89,6 +89,13 @@ urspruenglichen Stempelzeiten noch `net_minutes`. Vorhandene Kundenunterschrifte
 Archivierung, Buchhaltungsabschluesse und Stichtagssperren blockieren den Nachtrag.
 Vorher-/Nachher-Snapshots und bisherige Berechnungen bleiben erhalten.
 
+Belegte Pausen sind zusaetzlich gegen alte manuelle App-/Admin-Schreibwege
+geschuetzt: Auditmarker und `admin_evidence` verhindern dort Aenderungen an
+Intervallen, Stempeln und Dauer, auch nach Abschalten des Features. Normale
+unbelegte Pausen bleiben nutzbar. Die Benutzerbearbeitung zeigt Sollstundenmodell
+und individuell gueltige Arbeitszeitfenster getrennt mit berechtigtem Direktlink.
+Details und neue Pruefnachweise: [WORK_TIME_PAUSE_FORM_STABILITY.md](WORK_TIME_PAUSE_FORM_STABILITY.md).
+
 ## Anwesenheit, Endvorschlaege und Offline
 
 `work_time_presence_sessions` dokumentiert Anwesenheit ohne Arbeitsminuten.

@@ -393,6 +393,8 @@ Die vollstaendige offene Aufgabenliste steht in `PROJECTS.md`.
 
 - Optionale Arbeitszeitfenster: `WORK_TIME_WINDOWS_ENABLED=false` plus kuenftige Mitarbeiterzuordnung; Anrechnung bleibt separate Vorschau. Anwesenheit und Endvorschlaege sind keine echten Stempelungen. Details stehen in `WORK_TIME_WINDOWS.md`.
 - WorkTime-Hardening: Minutenworker verarbeitet eine persistente, triggerbasierte Revisionswarteschlange in begrenzten Batches; keinen historischen Vollabgleich im normalen Lauf wiedereinfuehren. Vollabgleich nur explizit per `--full-reconcile`. Zuordnungen halten Mitarbeiter-Zuordnungslock vor Accounting-Lock vor DB-Transaktion. Versand-I/O liegt ausserhalb des Accounting-Locks. Unklare Versandzustaende werden nicht wiederholt; Providerannahme ist keine Geraetezustellung. Pausennachtraege dokumentieren nur belegte Intervalle und respektieren Signaturen/Abschluesse. Pruefnachweise: `WORK_TIME_HARDENING_RC.md`.
+- Pausennachweise: `TimesheetPauseEvidenceGuard` schuetzt Auditmarker und `admin_evidence` unabhaengig vom Featureflag vor aelteren Zeit-/Pausenschreibwegen. Pruefung vor Writes unter Accounting-Lock/Transaktion; void-Callbacks nie per Null-Coalescing erneut ausfuehren.
+- Projektstammdaten besitzen einen Dirty-Guard fuer Fremdaktionen und explizites Save/Discard; es gibt keinen belegten regelmaessigen Admin-Reload. Materialentwuerfe nutzen benutzer-/projektbezogenen IndexedDB-Cache und stabile Anfrage-IDs; Logout und bestaetigter Berechtigungsentzug bereinigen Entwuerfe. `npm run ui:test:webkit` ergaenzt die Chromiumgruppen gezielt. Details: `WORK_TIME_PAUSE_FORM_STABILITY.md`.
 Wenn ein neuer Agentenlauf startet, gilt:
 
 - Das Backend-Grundgeruest und die MVP-nahe mobile PWA sind bereits vorhanden.

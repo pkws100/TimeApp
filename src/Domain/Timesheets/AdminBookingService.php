@@ -427,7 +427,14 @@ final class AdminBookingService
         }
         $this->assertStandaloneBooking($before);
 
-        return $this->withAccountingWriteLock(function () use ($id, $payload, $changedByUserId, $reason, $before): ?array {
+        return $this->withAccountingWriteLock(function () use ($id, $payload, $changedByUserId, $reason): ?array {
+            // A pause attestation or another writer may have committed while this
+            // request was waiting for the global accounting lock.
+            $before = $this->find($id);
+            if ($before === null) {
+                throw new InvalidArgumentException('Die Buchung wurde nicht gefunden.');
+            }
+            $this->assertStandaloneBooking($before);
             $this->assertNotLockedByAccountingClosure($id);
 
             $normalized = $this->normalizeBookingPayload($payload, $before);
@@ -439,6 +446,7 @@ final class AdminBookingService
             $this->assertDayConflictFree(['user_id' => (int) ($before['user_id'] ?? 0)] + $normalized, $id);
 
             $this->connection->transaction(function () use ($id, $normalized, $changedByUserId, $reason, $before): void {
+                (new TimesheetPauseEvidenceGuard($this->connection))->assertChangeAllowed($id, $normalized);
                 if ($this->signatureRelevantChanges($before, $normalized)) {
                     $this->signatureService?->archiveActiveForTimesheet($id, $changedByUserId);
                 }
@@ -932,7 +940,11 @@ final class AdminBookingService
      */
     private function withAccountingWriteLock(callable $callback): mixed
     {
-        return $this->writeGuard?->withAccountingWriteLock($callback) ?? $callback();
+        // A legitimate void result must not run the mutation a second time
+        // after the accounting lock has already been released.
+        return $this->writeGuard !== null
+            ? $this->writeGuard->withAccountingWriteLock($callback)
+            : $callback();
     }
 
     private function normalizeBookingPayload(array $payload, array $before): array

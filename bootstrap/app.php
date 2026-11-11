@@ -68,6 +68,7 @@ use App\Domain\WorkTime\WorkTimeDeviationService;
 use App\Domain\WorkTime\WorkTimeAccessService;
 use App\Domain\WorkTime\WorkTimePushChannel;
 use App\Domain\WorkTime\WorkTimePauseCorrectionService;
+use App\Domain\WorkTime\WorkTimeUserSummaryService;
 use App\Domain\Users\PermissionMatrix;
 use App\Domain\Users\RoleService;
 use App\Domain\Users\StorageUsageService;
@@ -278,6 +279,7 @@ $appTimesheetSyncService->setWorkTimePresenceService($workTimePresence);
 $workTimeEvents = new WorkTimeEventService($connection, $workTimePolicies, $appTimesheetSyncService, new WorkTimePushChannel($pushSubscriptionService, $pushNotificationService), null, $workTimePreview);
 $workTimeDeviations = new WorkTimeDeviationService($connection, $workTimePolicies);
 $workTimePauseCorrections = new WorkTimePauseCorrectionService($connection, $workTimePolicies, $workTimePreview, $timesheetWriteGuard);
+$workTimeUserSummary = new WorkTimeUserSummaryService($connection, $workTimePolicies);
 $timeAccountService->setWorkTimePreviewService($workTimePreview);
 $accountingClosureService->setWorkTimePreviewService($workTimePreview);
 $employeeAccountCutoverService->setWorkTimePreviewService($workTimePreview);
@@ -350,7 +352,8 @@ $adminManagementController = new AdminManagementController(
     $projectMaterialService,
     $projectDispatchService,
     $projectAccessService,
-    $projectWorkReportService
+    $projectWorkReportService,
+    $workTimeUserSummary
 );
 $adminBookingController = new AdminBookingController(
     $adminView,

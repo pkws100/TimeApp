@@ -88,6 +88,12 @@
 - Berechnungen werden ausserhalb des Accounting-Locks vorbereitet; unter Lock und Transaktion werden Queue-Revision, frische Quellen und Periodensperren erneut geprueft. Mitarbeiter-Zuordnungen verwenden Mitarbeiter-Zuordnungslock, Accounting-Lock, Transaktion in dieser Reihenfolge. Netzwerkversand haelt keinen Accounting-Lock.
 - `work_time_notification_attempts`, `work_time_notification_retry_requests` und `work_time_notification_history` ergaenzen Versandereignisse um Providerannahme, sichere Fehlerklassen und begruendete Wiederholungsanfragen. Unklare/teilweise angenommene Sendungen werden nicht wiederholt. Bestehende Versandzustaende bleiben als Legacy-Snapshot erhalten; alte Fehler werden vorsichtig als unklar eingeordnet.
 - `work_time_pause_corrections` dokumentiert nachgewiesene Intervallnachtraege mit Vorher-/Nachher-Snapshot, Akteur, Begruendung, Quellenbindung und Request-ID. Nettozeit und versionierte Buchungszeile bleiben unveraendert; bestehende Signaturen und Periodensperren blockieren Nachtraege.
+- Aeltere Buchungswege pruefen einen vorhandenen Pausenauditmarker bzw. `timesheet_breaks.source = admin_evidence` vor Writes innerhalb Accounting-Lock und Transaktion. Geschuetzte Stempel-/Dauer-/Herkunftsdaten und Intervalle sind dort nicht veraenderbar; der Schutz gilt auch bei deaktiviertem WorkTime. Metadaten und logisch archivierte Nachweise behalten ihre Historie.
+
+## Material-Anfrage-IDs
+
+- Die additive Migration `20261111220000_project_material_request_ids.php` ergaenzt nullable `client_request_id` und `request_payload_hash` an `project_material_entries`; ein Unique-Index je Autor/Anfrage serialisiert parallele Wiederholungen.
+- Altclients ohne ID bleiben kompatibel. Replays pruefen zuerst die aktuelle Projektberechtigung, aendern keine gespeicherten Daten und legen archivierte Buchungen nicht erneut an. Geaenderte normalisierte Angaben unter derselben ID ergeben einen Konflikt statt einer zweiten Buchung.
 
 ## Seeder-Startpunkt
 - Standard-Seeds liefern Rollen, Rechte und notwendige Referenzdaten.

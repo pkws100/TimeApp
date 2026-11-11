@@ -6,6 +6,7 @@ namespace App\Domain\Projects;
 
 use App\Infrastructure\Database\DatabaseConnection;
 use InvalidArgumentException;
+use PDOException;
 use RuntimeException;
 
 final class ProjectMaterialService
@@ -48,6 +49,13 @@ final class ProjectMaterialService
 
     public function create(array $user, int $projectId, array $input): array
     {
+        return $this->createWithResult($user, $projectId, $input)['entry'];
+    }
+
+    /** @return array{entry: array, replayed: bool} */
+    public function createWithResult(array $user, int $projectId, array $input): array
+    {
+        // Replays must still be authorized after a session or membership change.
         $this->assertProjectAccess($user, $projectId);
 
         if (!$this->connection->tableExists('project_material_entries')) {
@@ -55,28 +63,75 @@ final class ProjectMaterialService
         }
 
         $record = $this->normalize($input);
-        $this->connection->execute(
+        $userId = (int) ($user['id'] ?? 0);
+        $requestId = $input['client_request_id'] ?? null;
+        if (array_key_exists('client_request_id', $input)) {
+            if (!is_string($requestId)
+                || preg_match('/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/i', $requestId) !== 1) {
+                throw new InvalidArgumentException('Bitte uebermitteln Sie eine gueltige Anfrage-ID fuer die Materialbuchung.');
+            }
+            $requestId = strtolower($requestId);
+            if (!$this->connection->columnExists('project_material_entries', 'client_request_id')) {
+                throw new RuntimeException('Die Absicherung wiederholter Materialbuchungen ist noch nicht migriert.');
+            }
+        }
+        $payloadHash = hash('sha256', json_encode($record, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE));
+
+        try {
+            $this->connection->execute(
             'INSERT INTO project_material_entries (
                 project_id, created_by_user_id, work_date, description, quantity, unit, note,
+                ' . ($requestId !== null ? 'client_request_id, request_payload_hash,' : '') . '
                 is_deleted, deleted_at, deleted_by_user_id, created_at, updated_at
              ) VALUES (
                 :project_id, :created_by_user_id, :work_date, :description, :quantity, :unit, :note,
+                ' . ($requestId !== null ? ':client_request_id, :request_payload_hash,' : '') . '
                 0, NULL, NULL, NOW(), NOW()
              )',
             [
                 'project_id' => $projectId,
-                'created_by_user_id' => (int) ($user['id'] ?? 0),
+                'created_by_user_id' => $userId,
                 ...$record,
+                ...($requestId !== null ? ['client_request_id' => $requestId, 'request_payload_hash' => $payloadHash] : []),
             ]
-        );
+            );
 
-        $entry = $this->find($this->connection->lastInsertId());
+            $entry = $this->find($this->connection->lastInsertId());
 
-        if ($entry === null) {
-            throw new RuntimeException('Der Materialeintrag konnte nicht geladen werden.');
+            if ($entry === null) {
+                throw new RuntimeException('Der Materialeintrag konnte nicht geladen werden.');
+            }
+
+            return ['entry' => $this->publicEntry($entry), 'replayed' => false];
+        } catch (PDOException $exception) {
+            if ($requestId === null || (int) ($exception->errorInfo[1] ?? 0) !== 1062) {
+                throw $exception;
+            }
         }
 
-        return $this->publicEntry($entry);
+        // The author/request unique index serializes simultaneous requests. An
+        // archived booking retains its key and is never recreated by a retry.
+        $existing = $this->connection->fetchOne(
+            'SELECT id, project_id, request_payload_hash FROM project_material_entries
+             WHERE created_by_user_id = :author AND client_request_id = :request_id LIMIT 1',
+            ['author' => $userId, 'request_id' => $requestId]
+        );
+        if ($existing === null) {
+            throw new RuntimeException('Der bereits gespeicherte Materialeintrag konnte nicht geladen werden.');
+        }
+        if ((int) $existing['project_id'] !== $projectId
+            || !hash_equals((string) $existing['request_payload_hash'], $payloadHash)) {
+            throw new ProjectMaterialConflictException(
+                'Diese Materialanfrage wurde bereits mit anderen Angaben gespeichert. Ihr Entwurf bleibt erhalten. '
+                . 'Bitte pruefen Sie den gespeicherten Materialeintrag, bevor Sie eine neue Buchung anlegen.'
+            );
+        }
+        $entry = $this->find((int) $existing['id']);
+        if ($entry === null) {
+            throw new RuntimeException('Der bereits gespeicherte Materialeintrag konnte nicht geladen werden.');
+        }
+
+        return ['entry' => $this->publicEntry($entry), 'replayed' => true];
     }
 
     public function archive(array $user, int $entryId): array

@@ -672,6 +672,12 @@ final class AbsencePeriodService
                 continue;
             }
 
+            // Even an incorrectly linked legacy work row must not lose attested
+            // work/pause evidence through an absence correction.
+            (new TimesheetPauseEvidenceGuard($this->connection))->assertChangeAllowed((int) $before['id'], [
+                'entry_type' => $preview['entry_type'], 'start_time' => null, 'end_time' => null,
+                'gross_minutes' => 0, 'break_minutes' => 0, 'net_minutes' => 0,
+            ]);
             $this->connection->execute(
                 'UPDATE timesheets
                  SET project_id = NULL,

@@ -107,7 +107,7 @@ test('disabled feature leaves the app unchanged and makes no work-time API reque
 test('employees without an assignment get no new workflow or provisional labels', async ({ page }) => {
   const app = await mockWorkTimeApp(page, { noPolicy: true });
   await expect(page.getByRole('heading', { name: 'Kernarbeitszeit', exact: true })).toHaveCount(0);
-  await expect(page.getByText('Vorläufig anrechenbar', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Fensteranrechnung (unverbindliche Vorschau)', { exact: true })).toHaveCount(0);
   expect(app.mutations).toEqual([]);
 });
 
@@ -250,7 +250,7 @@ test('unplaced pauses are clearly unresolved and never rendered as zero accounta
   const app = await mockWorkTimeApp(page);
   app.workTime.preview = { actual_work_minutes: 503, accountable_work_minutes: null, outside_pending_minutes: null, rows: [{ timesheet_id: 9 }], calculation_status: 'needs_clarification' };
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-  await expect(page.locator('.app-worktime .app-stat-row').filter({ hasText: 'Vorläufig anrechenbar' }).locator('strong')).toHaveText('klärungsbedürftig');
+  await expect(page.locator('.app-worktime .app-stat-row').filter({ hasText: 'Fensteranrechnung (unverbindliche Vorschau)' }).locator('strong')).toHaveText('klärungsbedürftig');
   await expect(page.locator('.app-worktime')).toContainText('keine genaue Zuordnung möglich');
   expect(app.mutations).toEqual([]);
 });
@@ -264,7 +264,7 @@ test('a running session is kept separate from completed work in the window previ
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await expect(page.locator('.app-worktime')).toContainText('Laufender Einsatz: siehe Timer.');
   await expect(page.locator('.app-worktime .app-stat-row').filter({ hasText: 'Tatsächliche Arbeit (abgeschlossen)' }).locator('strong')).toHaveText('00:20');
-  await expect(page.locator('.app-worktime .app-stat-row').filter({ hasText: 'Vorläufig anrechenbar' }).locator('strong')).toHaveText('00:10');
+  await expect(page.locator('.app-worktime .app-stat-row').filter({ hasText: 'Fensteranrechnung (unverbindliche Vorschau)' }).locator('strong')).toHaveText('00:10');
   await expect(page.locator('[data-action="check_out"]')).toBeVisible();
 });
 

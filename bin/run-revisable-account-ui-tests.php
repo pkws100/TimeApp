@@ -283,6 +283,15 @@ try {
     );
     $projectId = $connection->lastInsertId();
     $connection->execute(
+        'INSERT INTO projects (project_number, name, customer_name, work_instructions, status, created_at, updated_at, is_deleted)
+         VALUES ("UI-FORM-STABILITY", "UI Formularstabilitaet", "UI Ausgangskunde", "Urspruengliche Arbeitsanweisung", "active", NOW(), NOW(), 0)'
+    );
+    $formProjectId = $connection->lastInsertId();
+    $connection->execute('INSERT INTO project_memberships (project_id, user_id, assignment_role, assigned_from, assigned_until) VALUES (:project, :user, NULL, NULL, NULL)', ['project' => $formProjectId, 'user' => $employeeId]);
+    $connection->execute('INSERT INTO projects (project_number, name, status, created_at, updated_at, is_deleted) VALUES ("UI-FORM-COLLISION", "UI Formularnummer bereits vergeben", "active", NOW(), NOW(), 0)');
+    $connection->execute('INSERT INTO project_material_entries (project_id, created_by_user_id, work_date, description, quantity, unit, note) VALUES (:project, :actor, :work_date, "UI Formular Material", 1.5, "Stk", "Synthetischer Navigationstest")', ['project' => $formProjectId, 'actor' => $employeeId, 'work_date' => date('Y-m-d')]);
+    $formMaterialId = $connection->lastInsertId();
+    $connection->execute(
         'INSERT INTO timesheets (
             user_id, project_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes,
             credited_minutes, entry_type, source, note, updated_at, is_deleted
@@ -398,6 +407,9 @@ try {
         'UI_BASE_URL' => $baseUrl,
         'UI_TEST_ADMIN_EMAIL' => 'ui-admin@example.test',
         'UI_TEST_ADMIN_PASSWORD' => $password,
+        'UI_TEST_FORM_PROJECT_ID' => (string) $formProjectId,
+        'UI_TEST_FORM_MATERIAL_ID' => (string) $formMaterialId,
+        'UI_TEST_FORM_OTHER_USER_ID' => (string) $paginationUserId,
         'UI_TEST_EMPLOYEE_EMAIL' => 'ui-employee@example.test',
         'UI_TEST_EMPLOYEE_PASSWORD' => $password,
         'UI_TEST_EMPLOYEE_ID' => (string) $employeeId,
@@ -430,7 +442,13 @@ try {
         'UI_TEST_HARDENING_DISABLED_URL' => $disabledBaseUrl,
     ]);
     $playwright = base_path('node_modules/.bin/playwright');
-    fwrite(STDOUT, $run([$playwright, 'test', 'tests/e2e/revisable-accounts.real.spec.js', 'tests/e2e/work-time.real.spec.js', 'tests/e2e/work-time-hardening.real.spec.js', '--trace=retain-on-failure', '--output=' . $outputDirectory], $playwrightEnvironment));
+    $realSpecs = ['tests/e2e/revisable-accounts.real.spec.js', 'tests/e2e/work-time.real.spec.js', 'tests/e2e/work-time-hardening.real.spec.js', 'tests/e2e/admin-project-forms.real.spec.js'];
+    $selectedSpec = trim((string) getenv('UI_REAL_TEST_SPEC'));
+    if ($selectedSpec !== '') {
+        if (!in_array($selectedSpec, $realSpecs, true)) { throw new RuntimeException('Unbekannte isolierte Browser-Testdatei.'); }
+        $realSpecs = [$selectedSpec];
+    }
+    fwrite(STDOUT, $run([$playwright, 'test', ...$realSpecs, '--trace=retain-on-failure', '--output=' . $outputDirectory], $playwrightEnvironment));
     $exitCode = 0;
 } catch (Throwable $exception) {
     fwrite(STDERR, $exception->getMessage() . PHP_EOL);
