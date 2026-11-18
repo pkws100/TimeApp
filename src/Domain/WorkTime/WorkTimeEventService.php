@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\WorkTime;
 
 use App\Domain\Timesheets\AppTimesheetSyncService;
+use App\Domain\Timesheets\TimesheetPauseIntervals;
 use App\Domain\Timesheets\TimesheetWriteGuard;
 use App\Infrastructure\Database\DatabaseConnection;
 use Closure;
@@ -53,7 +54,7 @@ final class WorkTimeEventService
             $activeEntry = $activeEntries[0];
             foreach (['id', 'user_id'] as $field) { $activeEntry[$field] = (int) $activeEntry[$field]; }
             $activeEntry['project_id'] = $activeEntry['project_id'] !== null ? (int) $activeEntry['project_id'] : null;
-            $activeEntry['current_break'] = $this->connection->fetchOne('SELECT id, break_started_at, break_ended_at FROM timesheet_breaks WHERE timesheet_id = :id AND break_ended_at IS NULL ORDER BY id DESC LIMIT 1', ['id' => $activeEntry['id']]);
+            $activeEntry['current_break'] = (new TimesheetPauseIntervals($this->connection))->currentForTimesheet($activeEntry['id']);
         }
 
         return ['enabled' => true, 'checkout_proposals' => $proposals, 'presence_session' => $this->sync->openPresenceForUser($userId), 'active_work_entry' => $activeEntry, 'active_work_entry_conflict' => $conflict];

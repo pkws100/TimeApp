@@ -14,8 +14,9 @@ final class WorkTimeWindowCalculator
     /**
      * Intervals accept start/end (ISO-8601 with offset is preferred), or start_at/end_at.
      * Unknown placement of duration-only breaks is deliberately not distributed over a window.
+     * Calendar windows override the weekly template on their local start date.
      */
-    public function calculate(array $workIntervals, array $breakIntervals, array $policy, string $workDate, array $decisions = [], ?int $recordedBreakMinutes = null): array
+    public function calculate(array $workIntervals, array $breakIntervals, array $policy, string $workDate, array $decisions = [], ?int $recordedBreakMinutes = null, array $calendarWindows = []): array
     {
         $zone = new DateTimeZone((string) ($policy['timezone'] ?? 'Europe/Berlin'));
         $work = $this->intervals($workIntervals, $zone);
@@ -26,7 +27,7 @@ final class WorkTimeWindowCalculator
         $documentedMinutes = (int) floor($documentedBreakSeconds / 60);
         $unknownBreak = max(0, ($recordedBreakMinutes ?? $documentedMinutes) - $documentedMinutes);
         $actual = max(0, (int) floor($this->seconds($effective) / 60) - $unknownBreak);
-        $windows = $this->windows($policy, $workDate, $work, $zone);
+        $windows = $this->windows($policy, $workDate, $work, $zone, $calendarWindows);
         $inside = $this->intersect($effective, $windows);
         $outside = $this->subtract($effective, $windows);
         $before = $after = $gap = 0;
@@ -116,7 +117,7 @@ final class WorkTimeWindowCalculator
         return $this->merge($intervals);
     }
 
-    private function windows(array $policy, string $workDate, array $work, DateTimeZone $zone): array
+    private function windows(array $policy, string $workDate, array $work, DateTimeZone $zone, array $calendarWindows): array
     {
         $anchor = new DateTimeImmutable($workDate . ' 00:00:00', $zone);
         $first = $work === [] ? $anchor : (new DateTimeImmutable('@' . $work[0][0]))->setTimezone($zone)->setTime(0, 0);
@@ -125,10 +126,11 @@ final class WorkTimeWindowCalculator
         $windows = [];
         // Previous-day windows can extend into a night shift's first day.
         for ($day = $first->modify('-1 day'); $day <= $last; $day = $day->modify('+1 day')) {
-            foreach (($policy['windows'][(int) $day->format('N')] ?? []) as $window) {
+            $date = $day->format('Y-m-d');
+            foreach (($calendarWindows[$date] ?? $policy['windows'][(int) $day->format('N')] ?? []) as $window) {
                 $startTime = (string) $window['start']; $endTime = (string) $window['end'];
                 $endDay = $endTime <= $startTime ? $day->modify('+1 day') : $day;
-                $start = $this->timestamp($day->format('Y-m-d') . ' ' . $startTime . ':00', $zone);
+                $start = $this->timestamp($date . ' ' . $startTime . ':00', $zone);
                 $end = $this->timestamp($endDay->format('Y-m-d') . ' ' . $endTime . ':00', $zone);
                 if ($day < $first && $work !== [] && $end <= $work[0][0]) { continue; }
                 if ($day > $first && $work !== [] && $start >= $work[count($work) - 1][1]) { continue; }

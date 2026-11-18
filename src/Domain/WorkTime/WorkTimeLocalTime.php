@@ -8,7 +8,6 @@ use DateTimeImmutable;
 use DateTimeZone;
 use InvalidArgumentException;
 
-/** Legacy TIME/DATETIME columns cannot preserve a DST fold's UTC offset. */
 final class WorkTimeLocalTime
 {
     /** Normalize explicit API input before PHP can repair an invalid wall clock. */
@@ -33,12 +32,27 @@ final class WorkTimeLocalTime
             return self::parse($wall);
         }
         $instant = new DateTimeImmutable(str_replace(' ', 'T', $wall) . ($fraction === '' ? '' : '.' . $fraction) . $offset);
-        // Existing DATETIME columns retain seconds, but cannot retain a DST fold's
-        // offset. Reject such an instant even when its API representation was clear.
-        return self::parse($instant->setTimezone(new DateTimeZone('Europe/Berlin'))->format('Y-m-d H:i:s'));
+        return $instant->setTimezone(new DateTimeZone('Europe/Berlin'));
+    }
+
+    /** Keep the historical wall-clock representation whenever it identifies one instant. */
+    public static function formatForStorage(DateTimeImmutable $instant): string
+    {
+        $instant = $instant->setTimezone(new DateTimeZone('Europe/Berlin'));
+        $local = $instant->format('Y-m-d H:i:s');
+        return count(self::matchingInstants($local)) === 1 ? $local : $instant->format(DATE_ATOM);
     }
 
     public static function parse(string $local): DateTimeImmutable
+    {
+        $matches = self::matchingInstants($local);
+        if (count($matches) !== 1) {
+            throw new InvalidArgumentException('Dieser lokale Zeitpunkt ist wegen der Zeitumstellung unklar. Bitte den Arbeitszeitnachweis im Admin pruefen.');
+        }
+        return reset($matches);
+    }
+
+    private static function matchingInstants(string $local): array
     {
         $zone = new DateTimeZone('Europe/Berlin');
         $naive = DateTimeImmutable::createFromFormat('!Y-m-d H:i:s', $local, new DateTimeZone('UTC'));
@@ -52,9 +66,6 @@ final class WorkTimeLocalTime
                 $matches[$candidate->getTimestamp()] = $candidate;
             }
         }
-        if (count($matches) !== 1) {
-            throw new InvalidArgumentException('Dieser lokale Zeitpunkt ist wegen der Zeitumstellung unklar. Bitte den Arbeitszeitnachweis im Admin pruefen.');
-        }
-        return array_values($matches)[0];
+        return $matches;
     }
 }

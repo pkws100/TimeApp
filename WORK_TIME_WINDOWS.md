@@ -68,10 +68,16 @@ ausschliesslich die separate Vorschau.
 Reine Pausendauer/rechnerischer Zusatzabzug ohne bekannte Lage fuehrt zu
 `needs_clarification` und `null` bei betroffenen Fensterwerten. Es wird keine
 Pause willkuerlich verteilt. Laufende Einsaetze haben noch keine abschliessende
-Anrechnung; ihre Quelle bleibt der vorhandene Timer. Nachtfenster und Tageswechsel
-werden geschnitten. Mehrdeutige/nicht existierende Ortszeiten bei Zeitumstellung
-werden zur Klaerung abgewiesen, weil bestehende Timesheet-Uhrzeiten keinen
-UTC-Offset halten. Kalender-/Sollservices bleiben fuer Feiertage/Solltage zustaendig.
+Anrechnung; ihre Quelle bleibt der vorhandene Timer. Die Fenstervorschau verwendet
+bei Nachtfenstern die am jeweiligen Fensterbeginn gültige Regelversion. Ein
+Fenster vom Vortag kann über Mitternacht reichen, und bei einer über Mitternacht
+laufenden Buchung kommen Fenster aus der gültigen Folgezuordnung hinzu.
+Die Auswirkungsvorschau berücksichtigt auch betroffene Buchungen an den Grenzen
+des gewählten Zuordnungszeitraums. Mehrdeutige oder nicht existierende Ortszeiten ohne eindeutigen
+Offset brauchen eine Klaerung. Die Arbeitsbuchung haelt weiterhin lokale Beginn- und
+Endzeiten. Pausenstempel mit eindeutigem Zeitbezug in der doppelten Herbststunde
+behalten zusaetzlich ihren absoluten Zeitpunkt. Kalender-/Sollservices bleiben fuer
+Feiertage/Solltage zustaendig.
 
 Der Worker materialisiert Abweichungen. Geaenderte Quellen entwerten vorherige
 Entscheidungen fuer die aktuelle Vorschau; historische Nachweise bleiben erhalten.
@@ -133,7 +139,7 @@ in der Historie. Signatur- und Abschlussschutz sowie die vorhandene Versionierun
 greifen ebenfalls bei ausgeschalteten Arbeitszeitfenstern.
 
 Vor einer spaeteren Freigabe einen konsistenten Sicherungspunkt fuer Datenbank
-und Uploads erstellen und die drei additiven Migrationen aus `DATABASE.md`
+und Uploads erstellen und die additiven Migrationen aus `DATABASE.md`
 anwenden. `pause_policies.view` und `pause_policies.manage` gezielt an die
 zuständigen Rollen vergeben. Vor einem Betriebsstandard zuerst einzelne
 Mitarbeiter ab einem festgelegten Datum zuordnen und Zeitkonto und Exporte

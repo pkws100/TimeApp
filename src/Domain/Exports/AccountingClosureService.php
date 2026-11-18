@@ -357,6 +357,13 @@ final class AccountingClosureService
             'SELECT * FROM accounting_closure_items WHERE closure_id = :id ORDER BY work_date ASC, employee_name ASC, start_time ASC, id ASC',
             ['id' => $id]
         );
+        foreach ($items as &$item) {
+            if (isset($item['pause_assessment_json'])) {
+                $item['pause_assessment'] = json_decode((string) $item['pause_assessment_json'], true, flags: JSON_THROW_ON_ERROR);
+            }
+            unset($item['pause_assessment_json']);
+        }
+        unset($item);
 
         return $this->package($this->hydrateClosure($closure), $items);
     }
@@ -464,6 +471,9 @@ final class AccountingClosureService
     private function snapshotRows(array $rows): array
     {
         $items = [];
+        $assessments = $this->pauses !== null && $this->connection->columnExists('accounting_closure_items', 'pause_assessment_json')
+            ? $this->pauses->assessmentsForEntries($rows)
+            : [];
 
         foreach ($rows as $row) {
             $item = [
@@ -489,6 +499,9 @@ final class AccountingClosureService
                 'version_hint' => (string) ($row['version_hint'] ?? ''),
                 'booking_updated_at' => (string) ($row['updated_at'] ?? ''),
             ];
+            if (isset($assessments[$item['timesheet_id']])) {
+                $item['pause_assessment'] = $assessments[$item['timesheet_id']];
+            }
             $item['row_hash'] = $this->snapshotHash($item);
             $items[] = $item;
         }
@@ -498,15 +511,22 @@ final class AccountingClosureService
 
     private function insertItem(int $closureId, array $item): void
     {
+        $assessment = $item['pause_assessment'] ?? null;
+        unset($item['pause_assessment']);
+        $assessmentColumn = $assessment !== null ? ', pause_assessment_json' : '';
+        $assessmentPlaceholder = $assessment !== null ? ', :pause_assessment_json' : '';
+        if ($assessment !== null) {
+            $item['pause_assessment_json'] = json_encode($assessment, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
+        }
         $this->connection->execute(
             'INSERT INTO accounting_closure_items (
                 closure_id, timesheet_id, work_date, user_id, employee_number, employee_name, project_id, project_number, project_name,
                 entry_type, source, source_label, start_time, end_time, gross_minutes, break_minutes, net_minutes, expenses_amount,
-                note, change_count, version_hint, booking_updated_at, row_hash, created_at
+                note, change_count, version_hint, booking_updated_at, row_hash, created_at' . $assessmentColumn . '
              ) VALUES (
                 :closure_id, :timesheet_id, :work_date, :user_id, :employee_number, :employee_name, :project_id, :project_number, :project_name,
                 :entry_type, :source, :source_label, :start_time, :end_time, :gross_minutes, :break_minutes, :net_minutes, :expenses_amount,
-                :note, :change_count, :version_hint, :booking_updated_at, :row_hash, NOW()
+                :note, :change_count, :version_hint, :booking_updated_at, :row_hash, NOW()' . $assessmentPlaceholder . '
              )',
             ['closure_id' => $closureId, ...$item]
         );

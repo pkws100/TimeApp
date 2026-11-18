@@ -7,6 +7,7 @@ namespace App\Domain\WorkTime;
 use App\Domain\Timesheets\TimesheetWriteGuard;
 use App\Domain\Timesheets\TimesheetPauseService;
 use App\Domain\Timesheets\PauseAssessmentCalculator;
+use App\Domain\Timesheets\TimesheetPauseIntervals;
 use App\Domain\Timesheets\WorkdayStateCalculator;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
@@ -17,11 +18,13 @@ use InvalidArgumentException;
 final class WorkTimePreviewService
 {
     private WorkTimeWindowCalculator $calculator;
+    private TimesheetPauseIntervals $breakIntervals;
     private ?TimesheetPauseService $pauses = null;
 
     public function __construct(private DatabaseConnection $connection, private WorkTimePolicyService $policies, ?WorkTimeWindowCalculator $calculator = null)
     {
         $this->calculator = $calculator ?? new WorkTimeWindowCalculator();
+        $this->breakIntervals = new TimesheetPauseIntervals($this->connection);
     }
 
     public function enabled(): bool { return $this->policies->enabled(); }
@@ -64,7 +67,7 @@ final class WorkTimePreviewService
             $policy ??= $this->policies->policyFor((int) $entry['user_id'], (string) $entry['work_date']);
         }
         $row = ['timesheet_id' => (int) $entry['id'], 'user_id' => (int) $entry['user_id'], 'work_date' => $entry['work_date'], 'policy' => $policy, 'recorded_net_minutes' => (int) ($entry['net_minutes'] ?? 0), 'calculation_hash' => null];
-        $breaks = $sourceData['breaks'] ?? $this->connection->fetchAll('SELECT break_started_at, break_ended_at FROM timesheet_breaks WHERE timesheet_id = :id ORDER BY break_started_at, id', ['id' => $entry['id']]);
+        $breaks = $sourceData['breaks'] ?? $this->breakIntervals->forTimesheet((int) $entry['id']);
         $durationRecords = $sourceData['duration_breaks'] ?? $this->pauses?->unplacedDurations((int) $entry['id']) ?? [];
         $pauseModel = $sourceData['pause_model'] ?? $this->pauses?->snapshot((int) $entry['id']);
         if ($policy === null) {
@@ -80,7 +83,12 @@ final class WorkTimePreviewService
             // A temporary override leaves the resumed policy and existing decisions intact.
             $calculationPolicy['assignment_id'] = $policy['carried_from_assignment_id'];
         }
-        $hash = hash('sha256', json_encode(['id' => (int) $entry['id'], 'date' => $entry['work_date'], 'start' => $entry['start_time'], 'end' => $entry['end_time'], 'break_minutes' => (int) $entry['break_minutes'], 'net_minutes' => (int) $entry['net_minutes'], 'breaks' => $breaks, 'source_revision' => $entry['work_time_source_revision'] ?? null, 'policy' => $calculationPolicy, ...($durationRecords === [] ? [] : ['duration_breaks' => $durationRecords])], JSON_THROW_ON_ERROR));
+        $calendarWindows = $sourceData['calendar_windows'] ?? $this->windowOverrides(
+            $entry,
+            $policy,
+            fn (string $date): ?array => $this->policies->policyFor((int) $entry['user_id'], $date)
+        );
+        $hash = hash('sha256', json_encode(['id' => (int) $entry['id'], 'date' => $entry['work_date'], 'start' => $entry['start_time'], 'end' => $entry['end_time'], 'break_minutes' => (int) $entry['break_minutes'], 'net_minutes' => (int) $entry['net_minutes'], 'breaks' => $breaks, 'source_revision' => $entry['work_time_source_revision'] ?? null, 'policy' => $calculationPolicy, ...($durationRecords === [] ? [] : ['duration_breaks' => $durationRecords]), ...($calendarWindows === [] ? [] : ['calendar_windows' => $calendarWindows])], JSON_THROW_ON_ERROR));
         $row['calculation_hash'] = $hash;
         $fallback = ['actual_work_minutes' => null, 'inside_window_minutes' => null, 'outside_before_minutes' => null, 'outside_after_minutes' => null, 'outside_gap_minutes' => null, 'outside_pending_minutes' => null, 'outside_approved_minutes' => null, 'outside_rejected_minutes' => null, 'outside_disputed_minutes' => null, 'accountable_work_minutes' => null, 'calculation_status' => 'needs_clarification', 'unresolved' => true, 'preview_only' => true, 'outside_segments' => []];
         if (empty($entry['start_time']) || empty($entry['end_time'])) {
@@ -100,7 +108,15 @@ final class WorkTimePreviewService
                 // Existing zero-duration bookings are not invented as a 24-hour workday.
                 $row['calculation'] = [...$fallback, 'actual_work_minutes' => 0, 'inside_window_minutes' => 0, 'outside_before_minutes' => 0, 'outside_after_minutes' => 0, 'outside_gap_minutes' => 0, 'outside_pending_minutes' => 0, 'outside_approved_minutes' => 0, 'outside_rejected_minutes' => 0, 'outside_disputed_minutes' => 0, 'accountable_work_minutes' => 0, 'calculation_status' => 'complete', 'unresolved' => false];
             } else {
-                $row['calculation'] = $this->calculator->calculate([['start' => $date . ' ' . $entry['start_time'], 'end' => $endDate . ' ' . $entry['end_time']]], array_map(static fn (array $b): array => ['start' => $b['break_started_at'], 'end' => $b['break_ended_at']], $breaks), $policy, $date, $decisions, max(0, (int) $entry['break_minutes']));
+                $row['calculation'] = $this->calculator->calculate(
+                    [['start' => $date . ' ' . $entry['start_time'], 'end' => $endDate . ' ' . $entry['end_time']]],
+                    array_map(static fn (array $b): array => ['start' => $b['break_started_at'], 'end' => $b['break_ended_at']], $breaks),
+                    $policy,
+                    $date,
+                    $decisions,
+                    max(0, (int) $entry['break_minutes']),
+                    $calendarWindows
+                );
                 if ($row['calculation']['unplaced_break_minutes'] > 0) {
                     // Legacy break_minutes also includes automatic legal deductions. Without
                     // interval evidence we cannot label the resulting net as proven actual work.
@@ -116,6 +132,41 @@ final class WorkTimePreviewService
             $row['calculation'] = [...$fallback, 'clarification_reason' => $error->getMessage()];
         }
         return $row;
+    }
+
+    /**
+     * Resolve only neighboring windows that can reach this booking. Keeping the
+     * unchanged window representation preserves approvals for unaffected bookings.
+     */
+    public function windowOverrides(array $entry, ?array $anchor, callable $policyForDate): array
+    {
+        if ($anchor === null || empty($entry['start_time']) || empty($entry['end_time'])
+            || $entry['start_time'] === $entry['end_time']) {
+            return [];
+        }
+        $day = new DateTimeImmutable($entry['work_date']);
+        $start = $entry['start_time'];
+        $end = $entry['end_time'];
+        $filters = [
+            '-1 day' => static fn (array $window): bool => $window['end'] <= $window['start'] && $window['end'] . ':00' > $start,
+        ];
+        if ($end < $start && $end !== '00:00:00') {
+            $filters['+1 day'] = static fn (array $window): bool => $window['start'] . ':00' < $end;
+        }
+        $overrides = [];
+        foreach ($filters as $offset => $reachesBooking) {
+            $adjacent = $day->modify($offset);
+            $date = $adjacent->format('Y-m-d');
+            $weekday = (int) $adjacent->format('N');
+            $effective = $policyForDate($date);
+            $before = array_values(array_filter($anchor['windows'][$weekday] ?? [], $reachesBooking));
+            $after = array_values(array_filter($effective['windows'][$weekday] ?? [], $reachesBooking));
+            if ($before !== $after) {
+                $overrides[$date] = $after;
+            }
+        }
+
+        return $overrides;
     }
 
     /** Read/compute one source outside the global accounting lock. */
@@ -191,13 +242,18 @@ final class WorkTimePreviewService
         // policy cache populated before another connection changed an assignment.
         $freshPolicies = new WorkTimePolicyService($this->connection, $this->enabled());
         $policy = $entry !== null ? $freshPolicies->policyFor((int) $entry['user_id'], (string) $entry['work_date']) : null;
-        $breaks = $entry !== null ? $this->connection->fetchAll('SELECT break_started_at, break_ended_at FROM timesheet_breaks WHERE timesheet_id = :id ORDER BY break_started_at, id', ['id' => $timesheetId]) : [];
+        $calendarWindows = $entry !== null ? $this->windowOverrides(
+            $entry,
+            $policy,
+            fn (string $date): ?array => $freshPolicies->policyFor((int) $entry['user_id'], $date)
+        ) : [];
+        $breaks = $entry !== null ? $this->breakIntervals->forTimesheet($timesheetId) : [];
         $deviations = $this->connection->fetchAll('SELECT * FROM work_time_deviations WHERE timesheet_id = :id AND superseded_at IS NULL ORDER BY id', ['id' => $timesheetId]);
         $durationBreaks = $entry !== null ? ($this->pauses?->unplacedDurations($timesheetId) ?? []) : [];
         $pauseModel = $entry !== null ? $this->pauses?->snapshot($timesheetId) : null;
-        $sourceHash = hash('sha256', json_encode([$entry, $policy, $breaks, $deviations, $durationBreaks, $pauseModel], JSON_THROW_ON_ERROR));
+        $sourceHash = hash('sha256', json_encode([$entry, $policy, $breaks, $deviations, $durationBreaks, $pauseModel, $calendarWindows], JSON_THROW_ON_ERROR));
 
-        return ['timesheet_id' => $timesheetId, 'entry' => $entry, 'policy' => $policy, 'breaks' => $breaks, 'deviations' => $deviations, 'duration_breaks' => $durationBreaks, 'pause_model' => $pauseModel, 'source_hash' => $sourceHash];
+        return ['timesheet_id' => $timesheetId, 'entry' => $entry, 'policy' => $policy, 'breaks' => $breaks, 'deviations' => $deviations, 'duration_breaks' => $durationBreaks, 'pause_model' => $pauseModel, 'calendar_windows' => $calendarWindows, 'source_hash' => $sourceHash];
     }
 
     /** Worker-only materialization. Reading a preview never creates or changes audit records. */

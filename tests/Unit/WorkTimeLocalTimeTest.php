@@ -23,6 +23,16 @@ final class WorkTimeLocalTimeTest extends TestCase
         self::assertSame('2030-01-07T08:30:00+01:00', WorkTimeLocalTime::fromInput('2030-01-07 08:30')->format(DATE_ATOM));
     }
 
+    public function testExplicitInstantsOfTheRepeatedHourRemainDistinct(): void
+    {
+        $summer = WorkTimeLocalTime::fromInput('2026-10-25T00:30:00.125Z');
+        $winter = WorkTimeLocalTime::fromInput('2026-10-25T02:30:00+01:00');
+        self::assertSame('2026-10-25T02:30:00+02:00', WorkTimeLocalTime::formatForStorage($summer));
+        self::assertSame('2026-10-25T02:30:00+01:00', WorkTimeLocalTime::formatForStorage($winter));
+        self::assertSame(3600, $winter->getTimestamp() - $summer->getTimestamp());
+        self::assertSame('2026-10-25 03:30:00', WorkTimeLocalTime::formatForStorage($winter->modify('+1 hour')));
+    }
+
     #[DataProvider('invalidInputTimes')]
     public function testInputIsNeverSilentlyRepaired(string $value): void
     {
@@ -32,7 +42,7 @@ final class WorkTimeLocalTimeTest extends TestCase
 
     public static function invalidInputTimes(): array
     {
-        return [['2026-03-29 02:30'], ['2026-10-25 02:30:00'], ['2026-10-25T00:30:00.000Z'], ['2026-02-30T07:30:00Z'], ['2026-01-07 28:99'], ['tomorrow'], ['']];
+        return [['2026-03-29 02:30'], ['2026-10-25 02:30:00'], ['2026-02-30T07:30:00Z'], ['2026-01-07 28:99'], ['tomorrow'], ['']];
     }
 
     #[DataProvider('invalidTimes')]

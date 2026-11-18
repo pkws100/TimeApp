@@ -111,6 +111,10 @@ final class AccountingDocumentExportService
         $bookings->fromArray($this->sheetRow($rows !== [] ? array_keys($rows[0]) : ['Keine Buchungen']), null, 'A1');
         if ($rows !== []) {
             $bookings->fromArray($this->sheetRows(array_values($rows)), null, 'A2');
+            if (isset($rows[0]['Pausenprüfung am Arbeitstag'])) {
+                $bookings->getColumnDimension('N')->setWidth(54);
+                $bookings->getStyle('N2:N' . (count($rows) + 1))->getAlignment()->setWrapText(true);
+            }
         }
 
         $employees = $spreadsheet->createSheet();
@@ -163,6 +167,7 @@ final class AccountingDocumentExportService
         $company = $this->companySettingsService->current();
         $closure = (array) ($package['closure'] ?? []);
         $items = (array) ($package['items'] ?? []);
+        $hasAssessment = $this->hasPauseAssessment($items);
         $rows = '';
 
         foreach ($this->bookingRows($items) as $row) {
@@ -210,11 +215,12 @@ final class AccountingDocumentExportService
             . '<tr><th>Erstellt</th><td>' . $this->e((string) ($closure['created_at'] ?? '')) . '</td><th>Festgeschrieben</th><td>' . $this->e((string) ($closure['finalized_at'] ?? '')) . '</td></tr>'
             . '<tr><th>Buchungen</th><td>' . count($items) . '</td><th>Netto gesamt</th><td>' . $this->minutes((int) ($closure['total_net_minutes'] ?? 0)) . '</td></tr>'
             . '</tbody></table>'
-            . '<h2>Summen Mitarbeiter</h2><table><thead><tr><th>Name</th><th>Buchungen</th><th>Brutto</th><th>Pause</th><th>Netto</th></tr></thead><tbody>' . $employeeTotalRows . '</tbody></table>'
-            . '<h2>Summen Projekte</h2><table><thead><tr><th>Name</th><th>Buchungen</th><th>Brutto</th><th>Pause</th><th>Netto</th></tr></thead><tbody>' . $projectTotalRows . '</tbody></table>'
-            . '<h2>Summen Typen</h2><table><thead><tr><th>Name</th><th>Buchungen</th><th>Brutto</th><th>Pause</th><th>Netto</th></tr></thead><tbody>' . $typeTotalRows . '</tbody></table>'
+            . '<h2>Summen Mitarbeiter</h2><table><thead><tr><th>Name</th><th>Buchungen</th><th>Brutto</th><th>Gespeicherte Pause</th><th>Netto</th></tr></thead><tbody>' . $employeeTotalRows . '</tbody></table>'
+            . '<h2>Summen Projekte</h2><table><thead><tr><th>Name</th><th>Buchungen</th><th>Brutto</th><th>Gespeicherte Pause</th><th>Netto</th></tr></thead><tbody>' . $projectTotalRows . '</tbody></table>'
+            . '<h2>Summen Typen</h2><table><thead><tr><th>Name</th><th>Buchungen</th><th>Brutto</th><th>Gespeicherte Pause</th><th>Netto</th></tr></thead><tbody>' . $typeTotalRows . '</tbody></table>'
             . '<h2>Buchungen</h2><table><thead><tr>'
-            . '<th>Datum</th><th>Mitarbeiter</th><th>Projekt</th><th>Typ</th><th>Start</th><th>Ende</th><th>Pause</th><th>Brutto</th><th>Netto</th><th>Quelle</th><th>Aend.</th><th>Notiz</th><th>Hash</th>'
+            . '<th>Datum</th><th>Mitarbeiter</th><th>Projekt</th><th>Typ</th><th>Start</th><th>Ende</th><th>Gespeicherte Pause</th><th>Brutto</th><th>Netto</th><th>Quelle</th><th>Aend.</th><th>Notiz</th><th>Hash</th>'
+            . ($hasAssessment ? '<th>Pausenprüfung am Arbeitstag</th>' : '')
             . '</tr></thead><tbody>' . $rows . '</tbody></table>'
             . '<p class="muted">Hinweis: Dieser Export stellt pruefbare Arbeitszeit- und Auditdaten bereit und ersetzt keine steuerliche oder rechtliche Beratung.</p>';
     }
@@ -240,6 +246,8 @@ final class AccountingDocumentExportService
 
     private function bookingRows(array $items): array
     {
+        $hasAssessment = $this->hasPauseAssessment($items);
+
         return array_map(
             fn (array $item): array => [
                 'Datum' => (string) ($item['work_date'] ?? ''),
@@ -248,16 +256,42 @@ final class AccountingDocumentExportService
                 'Typ' => (string) ($item['entry_type'] ?? ''),
                 'Start' => (string) ($item['start_time'] ?? ''),
                 'Ende' => (string) ($item['end_time'] ?? ''),
-                'Pause' => $this->minutes((int) ($item['break_minutes'] ?? 0)),
+                'Gespeicherte Pause' => $this->minutes((int) ($item['break_minutes'] ?? 0)),
                 'Brutto' => $this->minutes((int) ($item['gross_minutes'] ?? 0)),
                 'Netto' => $this->minutes((int) ($item['net_minutes'] ?? 0)),
                 'Quelle' => (string) ($item['source_label'] ?? ''),
                 'Aend.' => (int) ($item['change_count'] ?? 0),
                 'Notiz' => (string) ($item['note'] ?? ''),
                 'Hash' => (string) ($item['row_hash'] ?? ''),
+                ...($hasAssessment ? ['Pausenprüfung am Arbeitstag' => $this->pauseAssessmentLabel($item['pause_assessment'] ?? null)] : []),
             ],
             $items
         );
+    }
+
+    private function hasPauseAssessment(array $items): bool
+    {
+        return (bool) array_filter($items, static fn (array $item): bool => isset($item['pause_assessment']));
+    }
+
+    private function pauseAssessmentLabel(?array $assessment): string
+    {
+        if ($assessment === null) {
+            return '';
+        }
+
+        $dates = implode(', ', $assessment['linked_work_dates'] ?? []);
+        $status = match ($assessment['calculation_status'] ?? '') {
+            'resolved' => 'geprüft',
+            'pending' => 'laufend',
+            'needs_clarification' => 'klärungsbedürftig',
+            default => '',
+        };
+        return $dates . ' · ' . $status
+            . ' · Dokumentiert ' . $this->minutes((int) $assessment['documented_break_minutes'])
+            . ' · Pflicht ' . $this->minutes((int) $assessment['required_break_minutes'])
+            . ' · Fehlend ' . $this->minutes((int) $assessment['missing_break_minutes'])
+            . ' · Alt-Abzug ohne Nachweis ' . $this->minutes((int) $assessment['legacy_deduction_minutes']);
     }
 
     private function totalRows(array $totals): array
@@ -267,7 +301,7 @@ final class AccountingDocumentExportService
                 'Name' => (string) ($row['label'] ?? ''),
                 'Buchungen' => (int) ($row['count'] ?? 0),
                 'Brutto' => $this->minutes((int) ($row['gross_minutes'] ?? 0)),
-                'Pause' => $this->minutes((int) ($row['break_minutes'] ?? 0)),
+                'Gespeicherte Pause' => $this->minutes((int) ($row['break_minutes'] ?? 0)),
                 'Netto' => $this->minutes((int) ($row['net_minutes'] ?? 0)),
             ],
             $totals
@@ -295,7 +329,7 @@ final class AccountingDocumentExportService
             . '<td>' . $this->e((string) $row['Name']) . '</td>'
             . '<td>' . $this->e((string) $row['Buchungen']) . '</td>'
             . '<td>' . $this->e((string) $row['Brutto']) . '</td>'
-            . '<td>' . $this->e((string) $row['Pause']) . '</td>'
+            . '<td>' . $this->e((string) $row['Gespeicherte Pause']) . '</td>'
             . '<td>' . $this->e((string) $row['Netto']) . '</td>'
             . '</tr>';
     }

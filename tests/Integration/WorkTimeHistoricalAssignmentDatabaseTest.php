@@ -11,8 +11,10 @@ use App\Domain\Timesheets\AppTimesheetSyncService;
 use App\Domain\Timesheets\TimesheetCalculator;
 use App\Domain\Timesheets\WorkdayStateCalculator;
 use App\Domain\WorkTime\WorkTimeEventService;
+use App\Domain\WorkTime\WorkTimeDeviationService;
 use App\Domain\WorkTime\WorkTimePolicyService;
 use App\Domain\WorkTime\WorkTimePreviewService;
+use App\Domain\WorkTime\WorkTimeReconciliationQueue;
 use DateTimeImmutable;
 use DateTimeZone;
 use InvalidArgumentException;
@@ -72,6 +74,116 @@ final class WorkTimeHistoricalAssignmentDatabaseTest extends MariaDbTestCase
         $second = $service->assignmentPreview($payload, $actor, self::SECRET);
         self::assertNotSame($first['preview_token'], $second['preview_token']);
         self::assertSame(513, $second['rows'][0]['after']['actual_work_minutes']);
+    }
+
+    public function testHistoricalVersionChangeUsesTheWindowsFromTheDatesTheyStart(): void
+    {
+        [$actor, $employee, $service, $template] = $this->setupPolicies();
+        $monday = $this->today()->modify('monday last week');
+        $from = $monday->format('Y-m-d');
+        $next = $monday->modify('+1 day')->format('Y-m-d');
+        $before = $service->addVersion($template['id'], ['windows' => [
+            1 => [['start' => '20:00', 'end' => '23:30']],
+            2 => [['start' => '09:00', 'end' => '17:00']],
+        ]], $actor);
+        $this->save($service, $this->input($employee, $before['id'], $from), $actor);
+        $night = $this->nightWork($employee, $from, '23:00', '07:15', 495);
+        $early = $this->nightWork($employee, $next, '02:00', '03:00', 60);
+        $nextVersion = $service->addVersion($template['id'], ['windows' => [
+            1 => [['start' => '22:00', 'end' => '06:00']],
+            2 => [['start' => '06:15', 'end' => '06:45'], ['start' => '09:00', 'end' => '17:00']],
+        ]], $actor);
+        $preview = new WorkTimePreviewService($this->connection(), $service);
+        $queue = new WorkTimeReconciliationQueue($this->connection(), $preview, $service);
+        self::assertSame(2, $queue->processBatch()['processed']);
+        $originalDeviation = (int) $this->connection()->fetchColumn('SELECT id FROM work_time_deviations WHERE timesheet_id = :id', ['id' => $night]);
+        (new WorkTimeDeviationService($this->connection(), $service))->decide($originalDeviation, 'approved', $actor, 'Belegte Außenzeit', 'approved-before-window-change');
+        self::assertSame(1, $queue->processBatch()['processed']);
+        $originalHash = $preview->prepareTimesheet($night)['row']['calculation_hash'];
+        $payload = $this->input($employee, $nextVersion['id'], $next);
+        $impact = $service->assignmentPreview($payload, $actor, self::SECRET);
+        self::assertSame(2, $impact['booking_count']);
+        $rows = array_column($impact['rows'], null, 'id');
+        self::assertSame(30, $rows[$night]['before']['inside_window_minutes']);
+        self::assertSame(60, $rows[$night]['after']['inside_window_minutes']);
+        self::assertSame(465, $rows[$night]['before']['outside_approved_minutes']);
+        self::assertSame(0, $rows[$night]['after']['outside_approved_minutes']);
+        self::assertSame($before['id'], $rows[$night]['after_version']);
+        self::assertSame(0, $rows[$early]['after']['inside_window_minutes']);
+        self::assertSame($nextVersion['id'], $rows[$early]['after_version']);
+
+        $this->connection()->execute('UPDATE timesheets SET note = "Hinweis zur Nachtschicht" WHERE id = :id', ['id' => $night]);
+        $approval = ['confirm_impact' => '1', 'replace_overlaps' => '1'];
+        $this->reject(fn () => $service->assign($payload + $approval + ['preview_token' => $impact['preview_token']], $actor, self::SECRET), 'erneut prüfen');
+        $this->save($service, $payload, $actor);
+        $rows = array_column($preview->forUserPeriod($employee, $from, $next)['rows'], null, 'timesheet_id');
+        self::assertSame(60, $rows[$night]['calculation']['inside_window_minutes']);
+        self::assertSame(0, $rows[$early]['calculation']['inside_window_minutes']);
+        self::assertNotSame($originalHash, $preview->prepareTimesheet($night)['row']['calculation_hash']);
+        self::assertSame(2, $queue->processBatch()['processed']);
+        self::assertSame('approved', $this->connection()->fetchColumn('SELECT status FROM work_time_deviations WHERE id = :id AND superseded_at IS NOT NULL', ['id' => $originalDeviation]));
+        self::assertSame('approved', $this->connection()->fetchColumn('SELECT new_status FROM work_time_deviation_decisions WHERE deviation_id = :id', ['id' => $originalDeviation]));
+        self::assertSame(0, $queue->processBatch()['claimed']);
+    }
+
+    public function testReplacingTheLastDayOfAnAssignmentReevaluatesEarlyWorkOnTheFollowingDay(): void
+    {
+        [$actor, $employee, $service, $template] = $this->setupPolicies();
+        $monday = $this->today()->modify('monday last week');
+        $from = $monday->format('Y-m-d');
+        $next = $monday->modify('+1 day')->format('Y-m-d');
+        $this->save($service, $this->input($employee, $template['version']['id'], $from, $from), $actor);
+        $this->save($service, $this->input($employee, $template['version']['id'], $next), $actor);
+        $early = $this->nightWork($employee, $next, '02:00', '03:00', 60);
+        $nightRule = $service->addVersion($template['id'], ['windows' => [1 => [['start' => '22:00', 'end' => '06:00']]]], $actor);
+        $payload = $this->input($employee, $nightRule['id'], $from, $from);
+        $preview = new WorkTimePreviewService($this->connection(), $service);
+        $queue = new WorkTimeReconciliationQueue($this->connection(), $preview, $service);
+        self::assertSame(1, $queue->processBatch()['processed']);
+        $impact = $service->assignmentPreview($payload, $actor, self::SECRET);
+        self::assertSame(1, $impact['booking_count']);
+        self::assertSame($early, $impact['rows'][0]['id']);
+        self::assertSame(60, $impact['rows'][0]['after']['inside_window_minutes']);
+        self::assertSame($template['version']['id'], $impact['rows'][0]['after_version']);
+        $service->assign($payload + ['preview_token' => $impact['preview_token'], 'confirm_impact' => '1', 'replace_overlaps' => '1'], $actor, self::SECRET);
+        self::assertSame(60, $preview->prepareTimesheet($early)['row']['calculation']['inside_window_minutes']);
+        self::assertSame(1, $queue->processBatch()['processed']);
+        self::assertSame(0, (int) $this->connection()->fetchColumn('SELECT COUNT(*) FROM work_time_deviations WHERE timesheet_id = :id AND superseded_at IS NULL', ['id' => $early]));
+    }
+
+    public function testAdjacentRevisionKeepsClosedBookingsAndApprovedDeviationsIntact(): void
+    {
+        [$actor, $employee, $service, $template] = $this->setupPolicies();
+        $monday = $this->today()->modify('monday last week');
+        $date = $monday->format('Y-m-d');
+        $next = $monday->modify('+1 day')->format('Y-m-d');
+        $this->save($service, $this->input($employee, $template['version']['id'], $date), $actor);
+        $night = $this->nightWork($employee, $date, '23:00', '01:00', 120);
+        $preview = new WorkTimePreviewService($this->connection(), $service);
+        $queue = new WorkTimeReconciliationQueue($this->connection(), $preview, $service);
+        self::assertSame(1, $queue->processBatch()['processed']);
+        $existingDeviation = (int) $this->connection()->fetchColumn('SELECT id FROM work_time_deviations WHERE timesheet_id = :id', ['id' => $night]);
+        (new WorkTimeDeviationService($this->connection(), $service))->decide($existingDeviation, 'approved', $actor, 'Belegter Einsatz am Vortag', 'approved-closed-night');
+        self::assertSame(1, $queue->processBatch()['processed']);
+        $this->connection()->execute(
+            'INSERT INTO accounting_closures (closure_number, closure_type, status, period_start, period_end, user_id, snapshot_hash, item_count, total_net_minutes)
+             VALUES ("CLOSED-NIGHT", "month", "final", :date_from, :date_to, :user, "test", 1, 120)',
+            ['date_from' => $date, 'date_to' => $date, 'user' => $employee]
+        );
+        $before = $this->accountingRows();
+        $deviationsBefore = $this->connection()->fetchAll('SELECT * FROM work_time_deviations ORDER BY id');
+        $decisionsBefore = $this->connection()->fetchAll('SELECT * FROM work_time_deviation_decisions ORDER BY id');
+        $new = $service->addVersion($template['id'], ['windows' => [2 => [['start' => '00:00', 'end' => '01:00']]]], $actor);
+        $payload = $this->input($employee, $new['id'], $next);
+        $impact = $service->assignmentPreview($payload, $actor, self::SECRET);
+        self::assertSame(1, $impact['closed_workday_count']);
+        self::assertSame(['CLOSED-NIGHT'], $impact['rows'][0]['closures']);
+        self::assertSame(60, $impact['rows'][0]['after']['inside_window_minutes']);
+        $this->save($service, $payload, $actor);
+        self::assertSame(1, $queue->processBatch()['frozen']);
+        self::assertSame($before, $this->accountingRows());
+        self::assertSame($deviationsBefore, $this->connection()->fetchAll('SELECT * FROM work_time_deviations ORDER BY id'));
+        self::assertSame($decisionsBefore, $this->connection()->fetchAll('SELECT * FROM work_time_deviation_decisions ORDER BY id'));
     }
 
     public function testExplicitReplacementPreservesThePriorAndResumedRulesAndAllowsASameDayReplacement(): void
@@ -189,6 +301,16 @@ final class WorkTimeHistoricalAssignmentDatabaseTest extends MariaDbTestCase
         $id = $connection->lastInsertId();
         $connection->execute('INSERT INTO timesheet_breaks (timesheet_id, user_id, break_started_at, break_ended_at, source) VALUES (:id, :user, :started, :ended, "app")', ['id' => $id, 'user' => $employee, 'started' => $date . ' 12:00:00', 'ended' => $date . ' 12:30:00']);
         return $id;
+    }
+
+    private function nightWork(int $employee, string $date, string $start, string $end, int $minutes): int
+    {
+        $this->connection()->execute(
+            'INSERT INTO timesheets (user_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes, entry_type, source)
+             VALUES (:user, :date, :start, :end, :gross, 0, :net, "work", "app")',
+            ['user' => $employee, 'date' => $date, 'start' => $start, 'end' => $end, 'gross' => $minutes, 'net' => $minutes]
+        );
+        return $this->connection()->lastInsertId();
     }
 
     private function accountingRows(): array

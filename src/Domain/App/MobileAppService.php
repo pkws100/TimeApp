@@ -14,6 +14,7 @@ use App\Domain\Terminals\NfcTagService;
 use App\Domain\Timesheets\TimesheetGeoLocationService;
 use App\Domain\Timesheets\TimesheetSignatureService;
 use App\Domain\Timesheets\WorkdayStateCalculator;
+use App\Domain\Timesheets\TimesheetPauseIntervals;
 use App\Domain\Timesheets\TimesheetPauseService;
 use App\Domain\Users\UserWorkdayPolicy;
 use App\Infrastructure\Database\DatabaseConnection;
@@ -485,31 +486,7 @@ final class MobileAppService
 
     private function findBreaksForTimesheet(int $timesheetId): array
     {
-        if ($this->pauses !== null) {
-            return $this->pauses->breaks($timesheetId);
-        }
-        if ($timesheetId <= 0 || !$this->connection->tableExists('timesheet_breaks')) {
-            return [];
-        }
-
-        $rows = $this->connection->fetchAll(
-            'SELECT id, break_started_at, break_ended_at, source, note
-             FROM timesheet_breaks
-             WHERE timesheet_id = :timesheet_id
-             ORDER BY break_started_at ASC, id ASC',
-            ['timesheet_id' => $timesheetId]
-        );
-
-        return array_map(
-            static fn (array $row): array => [
-                'id' => (int) ($row['id'] ?? 0),
-                'break_started_at' => self::dateTimeOrNull($row['break_started_at'] ?? null),
-                'break_ended_at' => self::dateTimeOrNull($row['break_ended_at'] ?? null),
-                'source' => (string) ($row['source'] ?? 'app'),
-                'note' => self::nullableTrimmed($row['note'] ?? null),
-            ],
-            $rows
-        );
+        return $this->findBreaksForTimesheets([$timesheetId])[$timesheetId] ?? [];
     }
 
     private function findBreaksForTimesheets(array $timesheetIds): array
@@ -522,40 +499,13 @@ final class MobileAppService
             static fn (int $id): bool => $id > 0
         )));
 
-        if ($timesheetIds === [] || !$this->connection->tableExists('timesheet_breaks')) {
-            return [];
-        }
-
-        $placeholders = [];
-        $bindings = [];
-
-        foreach ($timesheetIds as $index => $timesheetId) {
-            $placeholder = 'id_' . $index;
-            $placeholders[] = ':' . $placeholder;
-            $bindings[$placeholder] = $timesheetId;
-        }
-
-        $rows = $this->connection->fetchAll(
-            'SELECT timesheet_id, id, break_started_at, break_ended_at, source, note
-             FROM timesheet_breaks
-             WHERE timesheet_id IN (' . implode(', ', $placeholders) . ')
-             ORDER BY timesheet_id ASC, break_started_at ASC, id ASC',
-            $bindings
-        );
-
         $grouped = [];
 
-        foreach ($rows as $row) {
-            $timesheetId = (int) ($row['timesheet_id'] ?? 0);
-
-            if ($timesheetId <= 0) {
-                continue;
-            }
-
-            $grouped[$timesheetId][] = [
+        foreach ((new TimesheetPauseIntervals($this->connection))->rows($timesheetIds) as $row) {
+            $grouped[$row['timesheet_id']][] = [
                 'id' => (int) ($row['id'] ?? 0),
-                'break_started_at' => self::dateTimeOrNull($row['break_started_at'] ?? null),
-                'break_ended_at' => self::dateTimeOrNull($row['break_ended_at'] ?? null),
+                'break_started_at' => TimesheetPauseIntervals::forDisplay($row['break_started_at']),
+                'break_ended_at' => TimesheetPauseIntervals::forDisplay($row['break_ended_at']),
                 'source' => (string) ($row['source'] ?? 'app'),
                 'note' => self::nullableTrimmed($row['note'] ?? null),
             ];

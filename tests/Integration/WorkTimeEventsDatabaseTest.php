@@ -458,7 +458,7 @@ final class WorkTimeEventsDatabaseTest extends MariaDbTestCase
         [$user, , $sync, , $date] = $this->services();
         $in = $this->checkIn($sync, $user, $date);
         $before = $this->connection()->fetchOne('SELECT *, row_start AS source_revision FROM timesheets WHERE id = :id', ['id' => $in['timesheet']['id']]);
-        foreach (['2026-03-29 02:30:00', '2026-10-25 02:30', '2026-10-25T00:30:00.000Z', '2026-02-30T07:30:00Z', 'yesterday'] as $index => $timestamp) {
+        foreach (['2026-03-29 02:30:00', '2026-10-25 02:30', '2026-02-30T07:30:00Z', 'yesterday'] as $index => $timestamp) {
             try {
                 $sync->sync($user, ['client_request_id' => 'invalid-pause-start-' . $index, 'action' => 'pause_start', 'work_date' => $date, 'expected_timesheet_id' => $in['timesheet']['id'], 'break_started_at' => $timestamp]);
                 self::fail('An invalid or unrepresentable pause start must be rejected.');
@@ -472,7 +472,7 @@ final class WorkTimeEventsDatabaseTest extends MariaDbTestCase
         $sync->sync($user, ['client_request_id' => 'valid-offset-pause-start', 'action' => 'pause_start', 'work_date' => $date, 'expected_timesheet_id' => $in['timesheet']['id'], 'break_started_at' => $utcStart]);
         $breakBefore = $this->connection()->fetchOne('SELECT * FROM timesheet_breaks WHERE timesheet_id = :id', ['id' => $in['timesheet']['id']]);
         self::assertSame($date . ' 12:00:00', $breakBefore['break_started_at']);
-        foreach (['2026-03-29 02:30:00', '2026-10-25T00:30:00Z', '2026-02-30 12:30'] as $index => $timestamp) {
+        foreach (['2026-03-29 02:30:00', '2026-10-25 02:30:00', '2026-02-30 12:30'] as $index => $timestamp) {
             try {
                 $sync->sync($user, ['client_request_id' => 'invalid-pause-end-' . $index, 'action' => 'pause_end', 'work_date' => $date, 'expected_timesheet_id' => $in['timesheet']['id'], 'break_ended_at' => $timestamp]);
                 self::fail('An invalid or unrepresentable pause end must be rejected.');

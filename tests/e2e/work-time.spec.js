@@ -406,3 +406,53 @@ test('admin preview ignores a superseded response and invalidates approval after
   await expect(page.locator('[data-worktime-save]')).toBeDisabled();
   await expect(page.locator('[name="preview_token"]')).toHaveValue('');
 });
+
+test('a saved historical assignment retains edits entered while the request was pending', async ({ page }) => {
+  let finishSave;
+  const pendingSave = new Promise((resolve) => { finishSave = resolve; });
+  await page.route('**/*', async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    const json = (data) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(data) });
+    if (pathname === '/admin/work-time') {
+      return route.fulfill({
+        contentType: 'text/html; charset=utf-8',
+        body: '<form data-worktime-form method="post" action="/admin/work-time/assignments">'
+          + '<label>Begründung <input name="reason" required></label><input name="preview_token" type="hidden">'
+          + '<label data-worktime-confirm hidden><input name="confirm_impact" type="checkbox" value="1">Bestätigen</label>'
+          + '<button type="button" data-worktime-preview>Auswirkungen prüfen</button>'
+          + '<button type="submit" data-worktime-save disabled>Speichern</button>'
+          + '<output data-worktime-result></output></form><script src="/assets/js/admin-work-time.js"></script>'
+      });
+    }
+    if (pathname === '/assets/js/admin-work-time.js') {
+      return route.fulfill({ contentType: 'application/javascript', path: path.join(projectRoot, 'public', pathname) });
+    }
+    if (pathname === '/admin/work-time/preview') {
+      return json({ ok: true, data: { preview_token: 'preview', historical: true, overlaps: [], rows: [] } });
+    }
+    if (pathname === '/admin/work-time/assignments') {
+      await pendingSave;
+      return json({ ok: true, location: '/admin/work-time?saved=1' });
+    }
+    return route.fulfill({ status: 204, body: '' });
+  });
+
+  await page.goto('/admin/work-time');
+  const reason = page.getByLabel('Begründung');
+  const preview = page.getByRole('button', { name: 'Auswirkungen prüfen' });
+  const save = page.getByRole('button', { name: 'Speichern' });
+  await reason.fill('Erste Begründung');
+  await preview.click();
+  await page.getByLabel('Bestätigen').check();
+  await save.click();
+  await expect(preview).toBeDisabled();
+  await reason.fill('Neue Begründung');
+  finishSave();
+
+  await expect(page.locator('[data-worktime-result]')).toContainText('Die gesendete Zuordnung wurde gespeichert.');
+  await expect(page).toHaveURL(/\/admin\/work-time$/);
+  await expect(reason).toHaveValue('Neue Begründung');
+  await expect(reason).toBeFocused();
+  await expect(preview).toBeEnabled();
+  await expect(save).toBeDisabled();
+});

@@ -500,8 +500,9 @@ final class TimeAccountService
         $filters = $this->normalizeAdminFilters($filters);
         $rows = $this->adminRows($year, $month, $filters);
         $includeWindow = (bool) array_filter($rows, static fn (array $row): bool => isset($row['work_time_window_preview']));
+        $includeStatus = $includeWindow || (bool) array_filter($rows, static fn (array $row): bool => isset($row['pause_assessment_days']));
 
-        return array_map(function (array $row) use ($includeWindow): array {
+        return array_map(function (array $row) use ($includeWindow, $includeStatus): array {
             $vacation = $row['vacation'] ?? [];
 
             $export = [
@@ -552,8 +553,12 @@ final class TimeAccountService
                     'Fenster Aussenzeit strittig (Min)' => $preview['outside_disputed_minutes'] ?? '',
                     'Fenster Monatsveraenderung Vorschau' => (string) ($preview['period_delta_label'] ?? ''),
                     'Fenster Gesamtstand Vorschau' => (string) ($preview['closing_balance_label'] ?? ''),
-                    'Saldo vorlaeufig' => isset($row['work_time_window_preview']) ? (!empty($row['balance_is_provisional']) ? 'Ja' : 'Nein') : '',
                 ];
+            }
+
+            if ($includeStatus) {
+                $export['Saldo vorlaeufig'] = isset($row['work_time_window_preview']) || isset($row['pause_assessment_days'])
+                    ? (!empty($row['balance_is_provisional']) ? 'Ja' : 'Nein') : '';
             }
 
             return $export;

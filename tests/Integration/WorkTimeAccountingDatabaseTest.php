@@ -6,12 +6,16 @@ namespace Tests\Integration;
 
 use App\Domain\Calendar\CalendarPolicyService;
 use App\Domain\Exports\AccountingClosureService;
+use App\Domain\Exports\AccountingExportService;
 use App\Domain\Exports\TimeAccountExportService;
 use App\Domain\TimeAccounts\AccountJournalService;
 use App\Domain\TimeAccounts\EmployeeAccountCutoverService;
 use App\Domain\TimeAccounts\TimeAccountService;
 use App\Domain\Timesheets\AdminBookingService;
+use App\Domain\Timesheets\PausePolicyService;
 use App\Domain\Timesheets\TimesheetCalculator;
+use App\Domain\Timesheets\TimesheetPauseService;
+use App\Domain\Timesheets\TimesheetService;
 use App\Domain\WorkTime\WorkTimePolicyService;
 use App\Domain\WorkTime\WorkTimePreviewService;
 use App\Domain\WorkTime\WorkTimeDeviationService;
@@ -22,6 +26,77 @@ use Tests\Support\MariaDbTestCase;
 
 final class WorkTimeAccountingDatabaseTest extends MariaDbTestCase
 {
+    public function testIndependentPauseAssessmentSurvivesAccountingFinalizationAndExports(): void
+    {
+        $connection = $this->connection();
+        $userId = $this->createUser();
+        $date = (new DateTimeImmutable('first day of this month', new DateTimeZone('Europe/Berlin')))->format('Y-m-d');
+        $period = substr($date, 0, 7);
+        $policies = new PausePolicyService($connection);
+        $template = $policies->createTemplate(['name' => 'Pausenmodell Export'], $userId);
+        $assignment = $policies->assign([
+            'user_id' => $userId,
+            'policy_version_id' => $template['version']['id'],
+            'effective_from' => (new DateTimeImmutable('tomorrow', new DateTimeZone('Europe/Berlin')))->format('Y-m-d'),
+            'reason' => 'Testzuordnung für Abrechnung',
+        ], $userId);
+        // Synthetically simulate a model already active at the historical booking date.
+        $connection->execute('UPDATE employee_pause_policy_assignments SET effective_from = :date WHERE id = :id', [
+            'date' => $date, 'id' => $assignment['id'],
+        ]);
+        $policies = new PausePolicyService($connection);
+        $pauses = new TimesheetPauseService($connection, $policies);
+        $calculator = new TimesheetCalculator();
+        $timesheets = new TimesheetService($connection, $calculator);
+        $timesheets->setPauseService($pauses);
+        $input = ['work_date' => $date, 'start_time' => '08:00', 'end_time' => '14:30'];
+        self::assertSame(360, $timesheets->calculate($input)['net_minutes']);
+        $calculated = $timesheets->calculate($input, $userId);
+        self::assertSame(390, $calculated['net_minutes']);
+        self::assertSame(0, $calculated['break_minutes']);
+        self::assertSame(30, $calculated['break_assessment']['missing_break_minutes']);
+
+        $this->booking($userId, $this->createProject(), $date, '08:00', '14:30', 390);
+        $pauses->attachSnapshot($connection->lastInsertId(), $policies->policyFor($userId, $date));
+        $bookings = new AdminBookingService($connection, $calculator);
+        $bookings->setPauseService($pauses);
+        $closures = new AccountingClosureService($connection, $bookings);
+        $closures->setPauseService($pauses);
+
+        $preview = $closures->previewPackage(['type' => 'month', 'period' => $period]);
+        $final = $closures->createClosure(['type' => 'month', 'period' => $period], $userId);
+        $assessment = $final['items'][0]['pause_assessment'];
+        self::assertSame(390, (int) $final['closure']['total_net_minutes']);
+        self::assertSame(0, $assessment['documented_break_minutes']);
+        self::assertSame(30, $assessment['required_break_minutes']);
+        self::assertSame($preview['items'][0]['pause_assessment'], $assessment);
+        self::assertSame($preview['items'][0]['row_hash'], $final['items'][0]['row_hash']);
+        self::assertSame($assessment, $timesheets->list()[0]['break_assessment']);
+
+        $export = (new AccountingExportService($bookings))->rows('month')[0];
+        self::assertSame(0, $export['documented_day_break_minutes']);
+        self::assertSame(30, $export['missing_day_break_minutes']);
+        self::assertSame('needs_clarification', $export['break_assessment_status']);
+    }
+
+    public function testTimeAccountExportMarksAnIndependentPauseModelAsProvisional(): void
+    {
+        $userId = $this->createUser();
+        $projectId = $this->createProject();
+        $date = new DateTimeImmutable('first day of last month', new DateTimeZone('Europe/Berlin'));
+        $this->booking($userId, $projectId, $date->format('Y-m-d'), '08:00', '16:00', 450, 30);
+        $this->connection()->execute('UPDATE timesheets SET end_time = NULL WHERE user_id = :id', ['id' => $userId]);
+        $id = (int) $this->connection()->fetchColumn('SELECT id FROM timesheets WHERE user_id = :id', ['id' => $userId]);
+        $pauses = new TimesheetPauseService($this->connection(), new PausePolicyService($this->connection()));
+        $pauses->attachSnapshot($id, ['version_id' => 1]);
+
+        $accounts = $this->accounts();
+        $accounts->setPauseService($pauses);
+        $row = $accounts->adminExportRows((int) $date->format('Y'), (int) $date->format('m'), ['user_id' => $userId])[0];
+        self::assertSame('Ja', $row['Saldo vorlaeufig']);
+        self::assertArrayNotHasKey('Arbeitszeitfenster Status', $row);
+    }
+
     public function testDisabledFeaturePreservesEntireAccountAndExportPayloads(): void
     {
         [$userId, , $date, $policies] = $this->fixture();

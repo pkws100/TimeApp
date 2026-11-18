@@ -16,11 +16,13 @@ final class TimesheetPauseService
 
     private PauseAssessmentCalculator $calculator;
     private WorkdayStateCalculator $workday;
+    private TimesheetPauseIntervals $intervals;
 
     public function __construct(private DatabaseConnection $connection, private PausePolicyService $policies)
     {
         $this->calculator = new PauseAssessmentCalculator();
         $this->workday = new WorkdayStateCalculator();
+        $this->intervals = new TimesheetPauseIntervals($connection);
     }
 
     public function available(): bool
@@ -61,17 +63,15 @@ final class TimesheetPauseService
     public function groupedBreaks(array $timesheetIds): array
     {
         $ids = $this->ids($timesheetIds);
-        if ($ids === [] || !$this->connection->tableExists('timesheet_breaks')) {
+        if ($ids === []) {
             return [];
         }
         $byId = [];
-        $timed = $this->connection->fetchAll('SELECT timesheet_id, id, break_started_at, break_ended_at, source, note
-            FROM timesheet_breaks WHERE timesheet_id IN (' . $this->placeholders($ids) . ') ORDER BY break_started_at, id', $ids);
-        foreach ($timed as $row) {
+        foreach ($this->intervals->rows($ids) as $row) {
             $record = [
                 'id' => (int) $row['id'], 'source' => $row['source'], 'note' => $row['note'],
-                'break_started_at' => $this->timestampForDisplay($row['break_started_at']),
-                'break_ended_at' => $this->timestampForDisplay($row['break_ended_at']),
+                'break_started_at' => TimesheetPauseIntervals::forDisplay($row['break_started_at']),
+                'break_ended_at' => TimesheetPauseIntervals::forDisplay($row['break_ended_at']),
             ];
             $record['duration_minutes'] = $record['break_ended_at'] === null ? null : $this->workday->breakDurationMinutes($record);
             $byId[$row['timesheet_id']][] = $record;
@@ -131,6 +131,28 @@ final class TimesheetPauseService
                 WHERE t.user_id = :user_id AND t.work_date < :date AND t.entry_type = "work" AND t.is_deleted = 0',
                 ['user_id' => $userId, 'date' => $date]) : null;
         return is_string($first) ? $first : null;
+    }
+
+    /** Return the same day assessment for each selected, active work booking. */
+    public function assessmentsForEntries(array $entries): array
+    {
+        $byUser = [];
+        foreach ($entries as $entry) {
+            if ($entry['entry_type'] === 'work' && empty($entry['is_deleted'])) {
+                $byUser[$entry['user_id']][$entry['work_date']][] = (int) $entry['id'];
+            }
+        }
+
+        $result = [];
+        foreach ($byUser as $userId => $days) {
+            $dates = array_keys($days);
+            foreach ($this->assessmentsForPeriod((int) $userId, min($dates), max($dates), true) as $date => $assessment) {
+                foreach ($days[$date] ?? [] as $id) {
+                    $result[$id] = $assessment;
+                }
+            }
+        }
+        return $result;
     }
 
     /** By default only days with a booking activated under a pause model affect account checks. */
@@ -274,8 +296,7 @@ final class TimesheetPauseService
 
     public function addInterval(int $timesheetId, int $userId, string $start, ?string $end, string $source, ?string $note): void
     {
-        $this->connection->execute('INSERT INTO timesheet_breaks (timesheet_id, user_id, break_started_at, break_ended_at, source, note)
-            VALUES (:entry, :user_id, :start, :end, :source, :note)', ['entry' => $timesheetId, 'user_id' => $userId, 'start' => $start, 'end' => $end, 'source' => $source, 'note' => $note]);
+        $this->intervals->append($timesheetId, $userId, $start, $end, $source, $note);
     }
 
     public function validateEvidence(array $entry, array $breaks): void
@@ -333,10 +354,5 @@ final class TimesheetPauseService
     private function placeholders(array $ids): string
     {
         return implode(', ', array_fill(0, count($ids), '?'));
-    }
-
-    private function timestampForDisplay(?string $value): ?string
-    {
-        return $value === null ? null : (new DateTimeImmutable($value, new DateTimeZone('Europe/Berlin')))->format(DATE_ATOM);
     }
 }

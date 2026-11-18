@@ -181,7 +181,7 @@ final class BookingModalRenderer
                 <th data-booking-column="source">{$this->sortableHeader('source', 'Herkunft', $sortEnabled, $currentSort, $currentDirection, $sortBaseUrl, $sortFilters)}</th>
                 <th data-booking-column="start">{$this->sortableHeader('start', 'Start', $sortEnabled, $currentSort, $currentDirection, $sortBaseUrl, $sortFilters)}</th>
                 <th data-booking-column="end">{$this->sortableHeader('end', 'Ende', $sortEnabled, $currentSort, $currentDirection, $sortBaseUrl, $sortFilters)}</th>
-                <th data-booking-column="break">Pause</th>
+                <th data-booking-column="break">Gespeicherte Pause</th>
                 <th data-booking-column="net">{$this->sortableHeader('net', 'Netto', $sortEnabled, $currentSort, $currentDirection, $sortBaseUrl, $sortFilters)}</th>
                 <th data-booking-column="note">Notiz</th>
                 <th data-booking-column="attachments">Anhänge</th>
@@ -375,7 +375,7 @@ HTML;
             'source' => 'Herkunft',
             'start' => 'Start',
             'end' => 'Ende',
-            'break' => 'Pause',
+            'break' => 'Gespeicherte Pause',
             'net' => 'Netto',
             'note' => 'Notiz',
             'attachments' => 'Anhänge',

@@ -42,6 +42,40 @@ final class PauseAssessmentCalculatorTest extends TestCase
         self::assertSame(15, $contiguous['missing_break_minutes']);
     }
 
+    public function testAContinuousDocumentedBreakCrossingTwoBookingsCountsAsOneSection(): void
+    {
+        $calculator = new PauseAssessmentCalculator();
+        $first = $this->entry('08:00', '12:00', [$this->pause('11:53', '12:00')]);
+        $second = $this->entry('12:00', '15:00', [$this->pause('12:00', '12:08'), $this->pause('14:00', '14:15')]);
+        $result = $calculator->assess([$second, $first], []);
+        self::assertSame(390, $result['actual_work_minutes']);
+        self::assertSame(30, $result['documented_break_minutes']);
+        self::assertSame(30, $result['qualifying_break_minutes']);
+        self::assertSame(0, $result['missing_break_minutes']);
+        self::assertSame(233, $result['longest_uninterrupted_work_minutes']);
+        self::assertSame('resolved', $result['calculation_status']);
+
+        $second['start_time'] = '12:01';
+        $second['breaks'][0] = $this->pause('12:01', '12:09');
+        $withUndocumentedGap = $calculator->assess([$first, $second], []);
+        self::assertSame(30, $withUndocumentedGap['documented_break_minutes']);
+        self::assertSame(15, $withUndocumentedGap['qualifying_break_minutes']);
+        self::assertSame(15, $withUndocumentedGap['missing_break_minutes']);
+    }
+
+    public function testOverlappingEvidenceIsCountedOnceAndRemainsUncertain(): void
+    {
+        $first = $this->entry('08:00', '12:00', [$this->pause('11:53', '12:00')]);
+        $second = $this->entry('11:00', '15:00', [$this->pause('11:53', '12:08'), ['duration_minutes' => 8]]);
+        $result = (new PauseAssessmentCalculator())->assess([$first, $second], []);
+        self::assertSame(23, $result['documented_break_minutes']);
+        self::assertSame(15, $result['qualifying_break_minutes']);
+        self::assertSame(8, $result['unplaced_break_minutes']);
+        self::assertNull($result['actual_work_minutes']);
+        self::assertNull($result['longest_uninterrupted_work_minutes']);
+        self::assertSame('needs_clarification', $result['calculation_status']);
+    }
+
     public function testUnplacedDurationAndLongContinuousWorkRequireDifferentEvidence(): void
     {
         $calculator = new PauseAssessmentCalculator();

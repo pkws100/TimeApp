@@ -18,6 +18,7 @@ final class AppTimesheetSyncService
     private const ACTUAL_PAUSE_ACTIONS = ['pause_start', 'pause_end', 'pause_record'];
     private ?WorkTimePresenceService $workTimePresenceService = null;
     private ?TimesheetPauseService $pauses = null;
+    private TimesheetPauseIntervals $pauseIntervals;
 
     public function __construct(
         private DatabaseConnection $connection,
@@ -28,6 +29,7 @@ final class AppTimesheetSyncService
         private ?TimesheetDayConflictService $dayConflictService = null
     ) {
         $this->dayConflictService ??= new TimesheetDayConflictService($connection);
+        $this->pauseIntervals = new TimesheetPauseIntervals($connection);
     }
 
     public function setWorkTimePresenceService(WorkTimePresenceService $service): void
@@ -285,11 +287,11 @@ final class AppTimesheetSyncService
                 && (isset($payload['expected_timesheet_id']) || isset($payload['expected_start_time']))));
         if ($strictPauseStamp) {
             $pauseField = $action === 'pause_start' ? 'break_started_at' : 'break_ended_at';
-            $pauseTimestamp = $payload[$pauseField] ?? (new DateTimeImmutable('now', new \DateTimeZone('Europe/Berlin')))->format('Y-m-d H:i:s');
+            $pauseTimestamp = $payload[$pauseField] ?? (new DateTimeImmutable())->format(DATE_ATOM);
             if (!is_string($pauseTimestamp)) {
                 throw new RuntimeException('Der Pausenzeitpunkt muss als vollstaendiger Zeitstempel angegeben werden.');
             }
-            $payload[$pauseField] = WorkTimeLocalTime::fromInput($pauseTimestamp)->format('Y-m-d H:i:s');
+            $payload[$pauseField] = WorkTimeLocalTime::formatForStorage(WorkTimeLocalTime::fromInput($pauseTimestamp));
         }
 
         $recordedPause = null;
@@ -347,7 +349,7 @@ final class AppTimesheetSyncService
         if ($originalAction === 'work_start') {
             $this->workTimePresenceService?->markWorkStarted($userId, $timesheetId, $workDate, (string) $startTime);
         }
-        $this->handlePauseAction($action, $timesheetId, $userId, $payload, $currentBreak);
+        $this->handlePauseAction($action, $timesheetId, $userId, $payload, $currentBreak, $strictPauseStamp);
         if ($recordedPause !== null) {
             if (isset($recordedPause['duration_minutes'])) {
                 $this->pauses->addDuration($timesheetId, $userId, $recordedPause['duration_minutes'], 'app_manual', $this->nullableTrimmed($payload['note'] ?? null));
@@ -687,76 +689,49 @@ final class AppTimesheetSyncService
         if ($this->pauses !== null) {
             return $this->pauses->breaks($timesheetId);
         }
-        if ($timesheetId <= 0 || !$this->connection->tableExists('timesheet_breaks')) {
+        if ($timesheetId <= 0) {
             return [];
         }
-
-        $rows = $this->connection->fetchAll(
-            'SELECT id, break_started_at, break_ended_at, source, note
-             FROM timesheet_breaks
-             WHERE timesheet_id = :timesheet_id
-             ORDER BY break_started_at ASC, id ASC',
-            ['timesheet_id' => $timesheetId]
-        );
 
         return array_map(
             fn (array $row): array => [
                 'id' => (int) ($row['id'] ?? 0),
-                'break_started_at' => $this->dateTimeOrNull($row['break_started_at'] ?? null),
-                'break_ended_at' => $this->dateTimeOrNull($row['break_ended_at'] ?? null),
+                'break_started_at' => TimesheetPauseIntervals::forDisplay($row['break_started_at']),
+                'break_ended_at' => TimesheetPauseIntervals::forDisplay($row['break_ended_at']),
                 'source' => (string) ($row['source'] ?? 'app'),
                 'note' => $this->nullableTrimmed($row['note'] ?? null),
             ],
-            $rows
+            $this->pauseIntervals->rows([$timesheetId])
         );
     }
 
-    private function handlePauseAction(string $action, int $timesheetId, int $userId, array $payload, ?array $currentBreak): void
+    private function handlePauseAction(string $action, int $timesheetId, int $userId, array $payload, ?array $currentBreak, bool $strictStamp): void
     {
         if ($timesheetId <= 0 || !$this->connection->tableExists('timesheet_breaks')) {
             return;
         }
 
         if ($action === 'pause_start') {
-            $startedAt = $this->normalizeDateTime($payload['break_started_at'] ?? null) ?? (new DateTimeImmutable())->format('Y-m-d H:i:s');
-
-            $this->connection->execute(
-                'INSERT INTO timesheet_breaks (
-                    timesheet_id, user_id, break_started_at, break_ended_at, source, note, created_at, updated_at
-                 ) VALUES (
-                    :timesheet_id, :user_id, :break_started_at, NULL, :source, :note, NOW(), NOW()
-                 )',
-                [
-                    'timesheet_id' => $timesheetId,
-                    'user_id' => $userId,
-                    'break_started_at' => $startedAt,
-                    'source' => 'app',
-                    'note' => $this->nullableTrimmed($payload['note'] ?? null),
-                ]
-            );
-
+            $startedAt = $strictStamp ? $payload['break_started_at']
+                : ($this->normalizeDateTime($payload['break_started_at'] ?? null) ?? (new DateTimeImmutable())->format('Y-m-d H:i:s'));
+            $this->pauseIntervals->append($timesheetId, $userId, $startedAt, null, 'app', $this->nullableTrimmed($payload['note'] ?? null));
             return;
         }
 
         if ($action === 'pause_end' && $currentBreak !== null) {
-            $endedAt = $this->normalizeDateTime($payload['break_ended_at'] ?? null) ?? (new DateTimeImmutable())->format('Y-m-d H:i:s');
+            $endedAt = $strictStamp ? $payload['break_ended_at']
+                : ($this->normalizeDateTime($payload['break_ended_at'] ?? null) ?? (new DateTimeImmutable())->format('Y-m-d H:i:s'));
 
             if (($currentBreak['break_started_at'] ?? null) !== null) {
-                $startedAt = new DateTimeImmutable((string) $currentBreak['break_started_at']);
-                $endAt = new DateTimeImmutable($endedAt);
+                $startedAt = $strictStamp ? WorkTimeLocalTime::fromInput($currentBreak['break_started_at']) : new DateTimeImmutable($currentBreak['break_started_at']);
+                $endAt = $strictStamp ? WorkTimeLocalTime::fromInput($endedAt) : new DateTimeImmutable($endedAt);
 
                 if ($endAt <= $startedAt) {
                     throw new RuntimeException('Das Pausenende muss nach dem Pausenstart liegen.');
                 }
             }
 
-            $this->connection->execute(
-                'UPDATE timesheet_breaks SET break_ended_at = :break_ended_at, updated_at = NOW() WHERE id = :id',
-                [
-                    'id' => (int) ($currentBreak['id'] ?? 0),
-                    'break_ended_at' => $endedAt,
-                ]
-            );
+            $this->pauseIntervals->close((int) ($currentBreak['id'] ?? 0), $endedAt);
         }
     }
 
@@ -769,8 +744,8 @@ final class AppTimesheetSyncService
                 throw new InvalidArgumentException('Bitte Pausenbeginn und Pausenende vollständig angeben.');
             }
             return [
-                'break_started_at' => WorkTimeLocalTime::fromInput($start)->format('Y-m-d H:i:s'),
-                'break_ended_at' => WorkTimeLocalTime::fromInput($end)->format('Y-m-d H:i:s'),
+                'break_started_at' => WorkTimeLocalTime::formatForStorage(WorkTimeLocalTime::fromInput($start)),
+                'break_ended_at' => WorkTimeLocalTime::formatForStorage(WorkTimeLocalTime::fromInput($end)),
             ];
         }
         $duration = filter_var($payload['manual_break_minutes'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => 1440]]);
@@ -1167,21 +1142,6 @@ final class AppTimesheetSyncService
 
         try {
             return (new \DateTimeImmutable($value))->format('Y-m-d H:i:s');
-        } catch (\Exception) {
-            return null;
-        }
-    }
-
-    private function dateTimeOrNull(mixed $value): ?string
-    {
-        $value = trim((string) ($value ?? ''));
-
-        if ($value === '') {
-            return null;
-        }
-
-        try {
-            return (new DateTimeImmutable($value))->format(DATE_ATOM);
         } catch (\Exception) {
             return null;
         }

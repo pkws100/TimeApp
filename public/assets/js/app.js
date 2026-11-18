@@ -2741,9 +2741,17 @@
         const local = String(value).match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::\d{2})?$/);
         if (local) return formatDate(local[1]) + ' ' + local[2];
         const instant = parseDateTime(value);
-        return instant ? new Intl.DateTimeFormat('de-DE', {
+        if (!instant) return '—';
+        const options = {
             timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
-        }).format(instant) : '—';
+        };
+        const formatter = new Intl.DateTimeFormat('de-DE', options);
+        const clockTime = formatter.format(instant);
+        const sameTimeInAnotherHour = [instant.getTime() - 3600000, instant.getTime() + 3600000]
+            .some((candidate) => formatter.format(candidate) === clockTime);
+        return sameTimeInAnotherHour
+            ? new Intl.DateTimeFormat('de-DE', { ...options, timeZoneName: 'short' }).format(instant)
+            : clockTime;
     }
 
     function breakAssessmentMarkup(assessment) {

@@ -1,6 +1,7 @@
 (function () {
     document.querySelectorAll('[data-worktime-form]').forEach(function (form) {
         const save = form.querySelector('[data-worktime-save]');
+        const preview = form.querySelector('[data-worktime-preview]');
         const output = form.querySelector('[data-worktime-result]');
         const token = form.querySelector('[name="preview_token"]');
         const overrides = form.querySelector('[data-worktime-overrides]');
@@ -8,8 +9,9 @@
         const replace = form.querySelector('[data-worktime-replace]');
         const approval = [confirm, replace].filter(Boolean);
         let generation = 0;
+        let saving = false;
         function updateSave() {
-            save.disabled = !token.value || approval.some((box) => !box.hidden && !box.querySelector('input').checked);
+            save.disabled = saving || !token.value || approval.some((box) => !box.hidden && !box.querySelector('input').checked);
         }
         function clearApprovals() {
             approval.forEach(function (box) {
@@ -60,25 +62,33 @@
                 if (save.disabled) return;
                 const current = ++generation;
                 const data = new FormData(form);
+                saving = true;
+                preview.disabled = true;
                 token.value = '';
                 updateSave();
                 try {
                     const response = await fetch(form.action, { method: 'POST', headers: { Accept: 'application/json' }, body: data });
                     const result = await response.json().catch(() => null);
                     if (response.ok && result && result.ok) {
+                        if (current !== generation) {
+                            output.textContent = 'Die gesendete Zuordnung wurde gespeichert. Bitte die neuen Eingaben erneut prüfen.';
+                            return;
+                        }
                         window.location.assign(result.location);
                         return;
                     }
                     throw new Error(result?.message || 'Die Zuordnung konnte nicht gespeichert werden.');
                 } catch (error) {
-                    if (current !== generation) return;
                     clearApprovals();
-                    updateSave();
                     output.textContent = error.message;
+                } finally {
+                    saving = false;
+                    preview.disabled = false;
+                    updateSave();
                 }
             });
         }
-        form.querySelector('[data-worktime-preview]').addEventListener('click', async function () {
+        preview.addEventListener('click', async function () {
             if (confirm && !form.reportValidity()) return;
             const current = ++generation;
             token.value = '';

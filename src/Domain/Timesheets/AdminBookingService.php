@@ -588,22 +588,7 @@ final class AdminBookingService
         $rows = $this->list($filters);
         $timesheetIds = array_map(static fn (array $row): int => (int) ($row['id'] ?? 0), $rows);
         $signatures = $this->signatureService?->listForTimesheetsGrouped($timesheetIds) ?? [];
-        $datesByUser = [];
-        if ($this->pauses !== null) {
-            foreach ($rows as $row) {
-                if ($row['entry_type'] === 'work' && !$row['is_deleted']) {
-                    $datesByUser[$row['user_id']][$row['work_date']] = true;
-                }
-            }
-        }
-        $assessments = [];
-        foreach ($datesByUser as $userId => $dates) {
-            $keys = array_keys($dates);
-            $assessed = array_intersect_key($this->pauses->assessmentsForPeriod((int) $userId, min($keys), max($keys), true), $dates);
-            if ($assessed !== []) {
-                $assessments[$userId] = $assessed;
-            }
-        }
+        $assessments = $this->pauses?->assessmentsForEntries($rows) ?? [];
 
         return array_map(
             function (array $row) use ($signatures, $assessments): array {
@@ -611,7 +596,7 @@ final class AdminBookingService
                 if ($assessments === []) {
                     return $export;
                 }
-                $day = $row['entry_type'] === 'work' && !$row['is_deleted'] ? ($assessments[$row['user_id']][$row['work_date']] ?? []) : [];
+                $day = $assessments[$row['id']] ?? [];
                 return $export + [
                     'Pausenprüfung Arbeitstage' => implode(', ', $day['linked_work_dates'] ?? []),
                     'Dokumentierte Tagespause (Min)' => $day['documented_break_minutes'] ?? '',
@@ -668,6 +653,7 @@ final class AdminBookingService
             'entry_type' => '',
             'scope' => $includeArchived ? 'all' : 'active',
         ]);
+        $assessments = $this->pauses?->assessmentsForEntries($rows) ?? [];
 
         return array_map(
             static fn (array $row): array => [
@@ -687,6 +673,14 @@ final class AdminBookingService
                 'expenses_amount' => (string) ($row['expenses_amount'] ?? '0.00'),
                 'note' => (string) ($row['note'] ?? ''),
                 'booking_status' => (int) ($row['is_deleted'] ?? 0) === 1 ? 'archived' : 'active',
+                ...($assessments === [] ? [] : [
+                    'break_assessment_work_dates' => implode(', ', $assessments[$row['id']]['linked_work_dates'] ?? []),
+                    'documented_day_break_minutes' => $assessments[$row['id']]['documented_break_minutes'] ?? null,
+                    'required_day_break_minutes' => $assessments[$row['id']]['required_break_minutes'] ?? null,
+                    'missing_day_break_minutes' => $assessments[$row['id']]['missing_break_minutes'] ?? null,
+                    'legacy_day_deduction_minutes' => $assessments[$row['id']]['legacy_deduction_minutes'] ?? null,
+                    'break_assessment_status' => $assessments[$row['id']]['calculation_status'] ?? null,
+                ]),
             ],
             $rows
         );

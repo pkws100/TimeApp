@@ -127,6 +127,29 @@ test('stamped and manual pauses accumulate, preserve their durations and show as
   expect(state.calls[3]).not.toHaveProperty('break_started_at');
 });
 
+test('pause history distinguishes equal Berlin clock times across the autumn time change', async ({ page }) => {
+  const state = await pauseApp(page);
+  state.entry.work_date = '2026-10-25';
+  state.entry.start_time = '00:00:00';
+  state.entry.end_time = '06:00:00';
+  state.entry.break_minutes = 60;
+  state.breaks.push({
+    id: 1,
+    break_started_at: '2026-10-25T02:30:00+02:00',
+    break_ended_at: '2026-10-25T02:30:00+01:00',
+    duration_minutes: 60,
+  });
+
+  await page.evaluate(() => localStorage.setItem('app.timesheetFilterMonth', '2026-10'));
+  await page.goto('/app/historie');
+  await page.getByText('Pausen anzeigen', { exact: true }).click();
+
+  const pause = page.locator('.app-history-breaks > div');
+  await expect(pause.locator('strong')).toHaveText('01:00');
+  await expect(pause.locator('span')).toContainText(/02:30\s+(?:MESZ|(?:GMT|UTC)\+0?2(?::00)?)/);
+  await expect(pause.locator('span')).toContainText(/02:30\s+(?:MEZ|(?:GMT|UTC)\+0?1(?::00)?)/);
+});
+
 test('the manual pause dialog retains its fields and focus during refresh and a validation response', async ({ page }) => {
   const state = await pauseApp(page);
   await page.emulateMedia({ colorScheme: 'dark' });

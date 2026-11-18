@@ -10,11 +10,13 @@ use InvalidArgumentException;
 
 final class PauseAssessmentCalculator
 {
+    private const MINIMUM_BREAK_SECONDS = 15 * 60;
+
     public function assess(array $entries, array $policy, ?DateTimeImmutable $asOf = null): array
     {
         $asOf ??= new DateTimeImmutable();
-        $intervals = [];
-        $legacyDeduction = 0;
+        $recordedBookings = $bookings = $placed = [];
+        $legacyDeduction = $unplaced = $qualifying = 0;
         $running = false;
         $uncertain = false;
 
@@ -24,45 +26,41 @@ final class PauseAssessmentCalculator
             }
             try {
                 [$start, $end] = self::bounds($entry['work_date'], $entry['start_time'], $entry['end_time'] ?? null, $asOf);
+                if ($end < $start) {
+                    throw new InvalidArgumentException('Das Buchungsende liegt vor dem Arbeitsbeginn.');
+                }
                 $evidence = $this->evidence($entry['breaks'] ?? [], $start, $end);
                 $running = $running || empty($entry['end_time']);
                 $uncertain = $uncertain || $evidence['uncertain'];
                 $legacyDeduction += max(0, (int) ($entry['legacy_deduction_minutes'] ?? 0));
-                $intervals[] = [$start, $end, $evidence];
+                $recordedBookings[] = [$start, $end];
+                $bookings[] = [$start, $evidence['open_start'] ?? $end];
+                foreach ($evidence['placed'] as $interval) {
+                    $placed[] = $interval;
+                }
+                $unplaced += $evidence['unplaced'];
+                $qualifying += $evidence['qualifying_unplaced'];
             } catch (InvalidArgumentException) {
                 $uncertain = true;
             }
         }
 
-        usort($intervals, static fn (array $left, array $right): int => $left[0] <=> $right[0]);
-        $actual = $documented = $qualifying = $unplaced = $longest = $run = 0;
-        $previousEnd = null;
-        foreach ($intervals as [$start, $end, $evidence]) {
-            if ($previousEnd !== null && $start - $previousEnd >= 15 * 60) {
-                $run = 0;
-            }
-            if ($previousEnd !== null && $start < $previousEnd) {
-                $uncertain = true;
-            }
-            $previousEnd = max($previousEnd ?? 0, $end);
-            $workEnd = $evidence['open_start'] ?? $end;
-            $actual += max(0, $workEnd - $start - $evidence['documented']);
-            $documented += $evidence['documented'];
-            $qualifying += $evidence['qualifying'];
-            $unplaced += $evidence['unplaced'];
-
-            $cursor = $start;
-            foreach ($evidence['placed'] as [$from, $to]) {
-                $run += $from - $cursor;
-                if ($to - $from >= 15 * 60) {
-                    $longest = max($longest, $run);
-                    $run = 0;
-                }
-                $cursor = $to;
-            }
-            $run += max(0, $workEnd - $cursor);
-            $longest = max($longest, $run);
+        [$bookings, $overlappingBookings] = $this->mergeIntervals($bookings);
+        if ($running && !$overlappingBookings) {
+            // An open pause cuts off elapsed work, but cannot resolve overlapping bookings.
+            [, $overlappingBookings] = $this->mergeIntervals($recordedBookings);
         }
+        [$placed, $overlappingPauses] = $this->mergeIntervals($placed);
+        $documented = $unplaced;
+        foreach ($placed as [$start, $end]) {
+            $duration = $end - $start;
+            $documented += $duration;
+            $qualifying += $duration >= self::MINIMUM_BREAK_SECONDS ? $duration : 0;
+        }
+        $totalBooked = array_sum(array_map(static fn (array $interval): int => $interval[1] - $interval[0], $bookings));
+        $actual = max(0, $totalBooked - $documented);
+        $longest = $this->longestWorkRun($bookings, $placed);
+        $uncertain = $uncertain || $overlappingBookings || $overlappingPauses;
 
         $required = match (true) {
             $actual > 9 * 3600 => max(45, (int) ($policy['minimum_over_nine_minutes'] ?? 45), (int) ($policy['minimum_over_six_minutes'] ?? 30)),
@@ -125,44 +123,79 @@ final class PauseAssessmentCalculator
                 }
                 $placed[] = [$from, $to];
             } elseif (!empty($row['break_started_at'])) {
-                $openStart = WorkTimeLocalTime::fromInput($row['break_started_at'])->getTimestamp();
-                $uncertain = $uncertain || $openStart < $start || $openStart > $end;
-                continue;
+                $open = WorkTimeLocalTime::fromInput($row['break_started_at'])->getTimestamp();
+                if ($open < $start || $open > $end || $openStart !== null) {
+                    $uncertain = true;
+                } else {
+                    $openStart = $open;
+                }
             } else {
                 $duration = max(0, (int) ($row['duration_minutes'] ?? 0)) * 60;
                 $unplaced += $duration;
-                $longUnplaced += $duration >= 15 * 60 ? $duration : 0;
+                $longUnplaced += $duration >= self::MINIMUM_BREAK_SECONDS ? $duration : 0;
             }
         }
-        sort($placed);
+        $workEnd = $openStart ?? $end;
         $valid = [];
-        $previous = $start;
+        $documented = $unplaced;
         foreach ($placed as [$from, $to]) {
-            if ($from < $previous) {
+            if ($to > $workEnd) {
                 $uncertain = true;
                 continue;
             }
-            if ($from === $previous && $valid !== []) {
-                $valid[array_key_last($valid)][1] = $to;
-            } else {
-                $valid[] = [$from, $to];
-            }
-            $previous = $to;
-        }
-        $documented = $unplaced;
-        $qualifying = $longUnplaced;
-        foreach ($valid as [$from, $to]) {
-            $duration = $to - $from;
-            $documented += $duration;
-            $qualifying += $duration >= 15 * 60 ? $duration : 0;
+            $valid[] = [$from, $to];
+            $documented += $to - $from;
         }
         return [
             'placed' => $valid,
-            'documented' => $documented,
-            'qualifying' => $qualifying,
+            'qualifying_unplaced' => $longUnplaced,
             'unplaced' => $unplaced,
             'open_start' => $openStart,
-            'uncertain' => $uncertain || $documented > ($openStart ?? $end) - $start,
+            'uncertain' => $uncertain || $documented > $workEnd - $start,
         ];
+    }
+
+    /** @return array{list<array{int, int}>, bool} Union of timed intervals and whether any overlapped. */
+    private function mergeIntervals(array $intervals): array
+    {
+        sort($intervals);
+        $merged = [];
+        $overlapping = false;
+        foreach ($intervals as [$start, $end]) {
+            $last = array_key_last($merged);
+            if ($last === null || $start > $merged[$last][1]) {
+                $merged[] = [$start, $end];
+                continue;
+            }
+            $overlapping = $overlapping || $start < $merged[$last][1];
+            $merged[$last][1] = max($merged[$last][1], $end);
+        }
+        return [$merged, $overlapping];
+    }
+
+    private function longestWorkRun(array $bookings, array $breaks): int
+    {
+        $longest = $run = $pauseIndex = 0;
+        $breakCount = count($breaks);
+        $previousEnd = null;
+        foreach ($bookings as [$start, $end]) {
+            if ($previousEnd !== null && $start - $previousEnd >= self::MINIMUM_BREAK_SECONDS) {
+                $run = 0;
+            }
+            $cursor = $start;
+            while ($pauseIndex < $breakCount && $breaks[$pauseIndex][0] < $end) {
+                [$from, $to] = $breaks[$pauseIndex++];
+                $run += $from - $cursor;
+                if ($to - $from >= self::MINIMUM_BREAK_SECONDS) {
+                    $longest = max($longest, $run);
+                    $run = 0;
+                }
+                $cursor = $to;
+            }
+            $run += $end - $cursor;
+            $longest = max($longest, $run);
+            $previousEnd = $end;
+        }
+        return $longest;
     }
 }

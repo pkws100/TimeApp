@@ -7,7 +7,7 @@ koennen historische Zuordnungen begruendet und nach Vorschau bestaetigt werden.
 Der Bereich `/admin/work-time#pausenmodelle` verwaltet eigenstaendige Pausenmodelle
 mit Betriebsstandard, individuellen Regeln und unveraenderlichen Versionen.
 Neue Buchungen unter einer aktiven Regel weisen dokumentierte Pausen, Pflichtdauer
-und fehlende Nachweise separat aus. Vor der Nutzung die drei neuen Phinx-Migrationen
+und fehlende Nachweise separat aus. Vor der Nutzung die Phinx-Migrationen
 in Reihenfolge anwenden und die Regel fuer die vorgesehenen Mitarbeiter freigeben.
 
 ## Ueberblick
@@ -269,7 +269,7 @@ Zeitkonten, Projekte und Material gegen eine automatisch erzeugte
 einen eigenen PHP-Testserver und temporaere Artefakte. Jahreswechsel-Schliessungen
 werden aus einem sicher zukuenftigen Kalenderjahr berechnet.
 `npm run ui:test:smoke` startet die Smokes ohne MariaDB-Fixture.
-`npm run ui:test:webkit` prueft Projektansicht und Materialentwuerfe mit Mobile WebKit.
+`npm run ui:test:webkit` prueft Projektansicht, Materialentwuerfe und die Pausenbedienung mit Mobile WebKit.
 - Bezahlte Abwesenheiten speichern eine separate Zeitgutschrift in `timesheets.credited_minutes`; tatsaechliche Arbeitszeit bleibt davon getrennt.
 - Bezahlter Erholungsurlaub wird als `vacation/vacation_paid` erfasst. Legacy-Urlaub ohne Reason-Code zaehlt weiterhin; `unpaid_leave` erhaelt keine Zeitgutschrift, wird als unbezahlte Abwesenheit ausgewiesen und reduziert den Resturlaub nicht.
 - Das Urlaubsjahr des aktiven Stichtags ist ein verbindlicher Snapshot, auch wenn Anspruch, Uebertrag und Resturlaub null sind. Die implizite Anpassung ist `Resturlaub - Anspruch - Uebertrag`; vorhandene Stichtags-Journalzeilen werden dabei nicht doppelt gezaehlt.

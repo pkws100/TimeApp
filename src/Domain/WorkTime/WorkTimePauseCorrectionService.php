@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\WorkTime;
 
 use App\Domain\Timesheets\TimesheetAuditService;
+use App\Domain\Timesheets\TimesheetPauseIntervals;
 use App\Domain\Timesheets\TimesheetPauseService;
 use App\Domain\Timesheets\TimesheetWriteGuard;
 use App\Infrastructure\Database\DatabaseConnection;
@@ -16,6 +17,7 @@ use InvalidArgumentException;
 final class WorkTimePauseCorrectionService
 {
     private TimesheetWriteGuard $guard;
+    private TimesheetPauseIntervals $pauseIntervals;
     private ?bool $auditAvailable = null;
 
     public function __construct(
@@ -26,6 +28,7 @@ final class WorkTimePauseCorrectionService
         private ?TimesheetPauseService $pauses = null
     ) {
         $this->guard = $guard ?? new TimesheetWriteGuard($connection);
+        $this->pauseIntervals = new TimesheetPauseIntervals($connection);
     }
 
     public function details(int $timesheetId, bool $forUpdate = false): array
@@ -45,8 +48,8 @@ final class WorkTimePauseCorrectionService
                 if ($break['break_ended_at'] === null) {
                     throw new InvalidArgumentException('Eine bestehende Pause ist noch offen. Bitte diese zuerst im urspruenglichen Buchungsablauf abschliessen.');
                 }
-                $start = WorkTimeLocalTime::parse((string) $break['break_started_at']);
-                $end = WorkTimeLocalTime::parse((string) $break['break_ended_at']);
+                $start = WorkTimeLocalTime::fromInput((string) $break['break_started_at']);
+                $end = WorkTimeLocalTime::fromInput((string) $break['break_ended_at']);
                 if ($end <= $start) {
                     throw new InvalidArgumentException('Ein vorhandenes Pausenintervall ist ungueltig. Es wird nicht automatisch ersetzt.');
                 }
@@ -153,10 +156,10 @@ final class WorkTimePauseCorrectionService
             if ($end <= $start || $start->format('s') !== '00' || $end->format('s') !== '00') {
                 throw new InvalidArgumentException('Pausen muessen minutengenau beginnen und nach ihrem Beginn enden.');
             }
-            $normalized[] = ['start' => $start->format('Y-m-d H:i:s'), 'end' => $end->format('Y-m-d H:i:s')];
+            $normalized[] = ['start' => WorkTimeLocalTime::formatForStorage($start), 'end' => WorkTimeLocalTime::formatForStorage($end)];
         }
-        usort($normalized, static fn (array $a, array $b): int => $a['start'] <=> $b['start']);
-        $this->assertNoOverlap(array_map(static fn (array $i): array => [(new DateTimeImmutable($i['start']))->getTimestamp(), (new DateTimeImmutable($i['end']))->getTimestamp()], $normalized));
+        usort($normalized, static fn (array $a, array $b): int => WorkTimeLocalTime::fromInput($a['start']) <=> WorkTimeLocalTime::fromInput($b['start']));
+        $this->assertNoOverlap(array_map(static fn (array $i): array => [WorkTimeLocalTime::fromInput($i['start'])->getTimestamp(), WorkTimeLocalTime::fromInput($i['end'])->getTimestamp()], $normalized));
 
         return $this->guard->withAccountingWriteLock(function () use ($timesheetId, $normalized, $actorId, $reason, $requestId, $sourceToken): array {
             return $this->connection->transaction(function () use ($timesheetId, $normalized, $actorId, $reason, $requestId, $sourceToken): array {
@@ -180,10 +183,10 @@ final class WorkTimePauseCorrectionService
                 $endDate = $entry['end_time'] < $entry['start_time'] ? (new DateTimeImmutable($entry['work_date']))->modify('+1 day')->format('Y-m-d') : $entry['work_date'];
                 $workEnd = WorkTimeLocalTime::parse($endDate . ' ' . $entry['end_time']);
                 $now = new DateTimeImmutable('now', new DateTimeZone('Europe/Berlin'));
-                $all = array_map(static fn (array $b): array => [(new DateTimeImmutable($b['break_started_at']))->getTimestamp(), (new DateTimeImmutable($b['break_ended_at']))->getTimestamp()], $before['breaks']);
+                $all = array_map(static fn (array $b): array => [WorkTimeLocalTime::fromInput($b['break_started_at'])->getTimestamp(), WorkTimeLocalTime::fromInput($b['break_ended_at'])->getTimestamp()], $before['breaks']);
                 foreach ($normalized as $interval) {
-                    $start = WorkTimeLocalTime::parse($interval['start']);
-                    $end = WorkTimeLocalTime::parse($interval['end']);
+                    $start = WorkTimeLocalTime::fromInput($interval['start']);
+                    $end = WorkTimeLocalTime::fromInput($interval['end']);
                     if ($start < $workStart || $end > $workEnd || $end > $now) {
                         throw new InvalidArgumentException('Jede Pause muss innerhalb der abgeschlossenen Arbeitsbuchung und darf nicht in der Zukunft liegen.');
                     }
@@ -191,7 +194,7 @@ final class WorkTimePauseCorrectionService
                 }
                 $this->assertNoOverlap($all);
                 $seconds = array_sum(array_map(static fn (array $i): int => $i[1] - $i[0], $all));
-                $newSeconds = array_sum(array_map(static fn (array $interval): int => WorkTimeLocalTime::parse($interval['end'])->getTimestamp() - WorkTimeLocalTime::parse($interval['start'])->getTimestamp(), $normalized));
+                $newSeconds = array_sum(array_map(static fn (array $interval): int => WorkTimeLocalTime::fromInput($interval['end'])->getTimestamp() - WorkTimeLocalTime::fromInput($interval['start'])->getTimestamp(), $normalized));
                 $matches = $before['pause_model_version_id'] !== null
                     ? $newSeconds === array_sum(array_column($before['duration_records'], 'duration_minutes')) * 60
                     : $seconds === (int) $entry['break_minutes'] * 60;
@@ -199,7 +202,7 @@ final class WorkTimePauseCorrectionService
                     throw new InvalidArgumentException('Die belegten Pausen muessen zusammen exakt der gespeicherten Dauer von ' . (int) $entry['break_minutes'] . ' Minuten entsprechen. Rechnerische Abzuege duerfen nicht als tatsaechliche Pause unterstellt werden.');
                 }
                 foreach ($normalized as $interval) {
-                    $this->connection->execute('INSERT INTO timesheet_breaks (timesheet_id, user_id, break_started_at, break_ended_at, source, note, created_at, updated_at) VALUES (:timesheet, :user_id, :starts_at, :ends_at, "admin_evidence", :note, NOW(), NOW())', ['timesheet' => $timesheetId, 'user_id' => $entry['user_id'], 'starts_at' => $interval['start'], 'ends_at' => $interval['end'], 'note' => mb_substr('Nachweis: ' . $reason, 0, 255)]);
+                    $this->pauseIntervals->append($timesheetId, (int) $entry['user_id'], $interval['start'], $interval['end'], 'admin_evidence', mb_substr('Nachweis: ' . $reason, 0, 255));
                 }
                 if ($before['duration_records'] !== []) {
                     $this->pauses->markDurationsPlaced($timesheetId);
@@ -224,7 +227,7 @@ final class WorkTimePauseCorrectionService
 
     private function breaks(int $id, bool $forUpdate = false): array
     {
-        return $this->connection->fetchAll('SELECT * FROM timesheet_breaks WHERE timesheet_id = :id ORDER BY break_started_at, id' . ($forUpdate ? ' FOR UPDATE' : ''), ['id' => $id]);
+        return $this->pauseIntervals->rows([$id], $forUpdate);
     }
 
     private function hasActiveSignature(int $id, bool $forUpdate = false): bool

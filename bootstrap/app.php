@@ -280,6 +280,7 @@ $nfcTagService = new NfcTagService($connection, (string) $config->get('app.setti
 $pausePolicies = new PausePolicyService($connection);
 $timesheetPauses = new TimesheetPauseService($connection, $pausePolicies);
 $adminBookingService->setPauseService($timesheetPauses);
+$timesheetService->setPauseService($timesheetPauses);
 $mobileAppService = new MobileAppService($connection, $projectService, $companySettingsService, $workdayStateCalculator, $fileService, $timesheetGeoLocationService, $calendarPolicyService, $timesheetSignatureService, $personnelEventService, $personnelLabelService, $nfcTagService, $userWorkdayPolicy, $timesheetPauses);
 $appTimesheetSyncService = new AppTimesheetSyncService($connection, $timesheetCalculator, $companySettingsService, $workdayStateCalculator, $timesheetSignatureService, $timesheetDayConflictService);
 $workTimePolicies = new WorkTimePolicyService($connection, (bool) $config->get('app.work_time_windows_enabled', false));
@@ -673,7 +674,7 @@ $router->put('/api/v1/assets/{id}', $api([new AssetController($assetService), 'u
 $router->delete('/api/v1/assets/{id}', $api([new AssetController($assetService), 'archive'], 'assets.manage'));
 $router->get('/api/v1/assets', $api([new AssetController($assetService), 'index'], 'assets.manage'));
 $router->get('/api/v1/timesheets', $api([new TimesheetController($timesheetService), 'index'], 'timesheets.manage'));
-$router->post('/api/v1/timesheets/calculate', $api([new TimesheetController($timesheetService), 'calculate'], 'timesheets.create'));
+$router->post('/api/v1/timesheets/calculate', $api([new TimesheetController($timesheetService, $authService), 'calculate'], 'timesheets.create'));
 $router->get('/api/v1/projects/{id}/files', $api([$fileController, 'listProjectFiles'], 'files.view'));
 $router->post('/api/v1/projects/{id}/files', $api([$fileController, 'uploadProject'], 'files.upload'));
 $router->delete('/api/v1/project-files/{id}', $api([$fileController, 'archiveProjectFile'], 'files.manage'));

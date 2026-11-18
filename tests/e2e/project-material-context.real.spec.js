@@ -1,6 +1,7 @@
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { test, expect } = require('@playwright/test');
+const { expect } = require('@playwright/test');
+const { test } = require('../Support/playwright-offline-origin');
 
 test.describe('real mobile project view and material capture', () => {
   test.describe.configure({ timeout: 60000, retries: 0 });
@@ -163,20 +164,21 @@ test.describe('real mobile project view and material capture', () => {
     }
   });
 
-  test('service worker replaces the old app cache and serves the current shell and versioned assets offline', async ({ page, context }) => {
-    await page.goto('/admin/login');
+  test('service worker replaces the old app cache and serves the current shell and versioned assets offline', async ({ page, origin }) => {
+    const url = (pathname) => new URL(pathname, origin.baseURL).href;
+    await page.goto(url('/admin/login'));
     await page.evaluate(async () => {
       const oldCache = await caches.open('zeiterfassung-app-v7');
       await oldCache.put('/assets/js/app.js?v=old', new Response('obsolete app code'));
     });
-    await page.goto('/app');
+    await page.goto(url('/app'));
     await expect(page.getByRole('heading', { name: 'Anmelden' })).toBeVisible();
     await expect.poll(() => page.evaluate(() => Boolean(navigator.serviceWorker.controller))).toBeTruthy();
     const assets = await page.evaluate(() => [
       document.querySelector('script[src^="/assets/js/app.js?v="]').src,
       document.querySelector('link[href^="/assets/css/app.css?v="]').href,
     ]);
-    const worker = await page.request.get('/app/sw.js');
+    const worker = await page.request.get(url('/app/sw.js'));
     expect(worker.ok()).toBeTruthy();
     const workerScript = await worker.text();
     for (const asset of assets) expect(workerScript).toContain(new URL(asset).pathname + new URL(asset).search);
@@ -186,8 +188,8 @@ test.describe('real mobile project view and material capture', () => {
     }), assets);
     expect(cacheState.caches).not.toContain('zeiterfassung-app-v7');
     expect(cacheState.currentAssets).toEqual([true, true]);
-    await context.setOffline(true);
-    await page.reload();
+    await origin.goOffline();
+    await page.goto(url('/app'), { waitUntil: 'domcontentloaded' });
     await expect(page.getByRole('heading', { name: 'Anmelden' })).toBeVisible();
   });
 });
