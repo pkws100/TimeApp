@@ -880,6 +880,7 @@ final class UserEditPdoDouble extends PDO
     private array $userRoles = [];
 
     private bool $inTransaction = false;
+    private bool $delegationLock = false;
 
     public function __construct()
     {
@@ -938,6 +939,23 @@ final class UserEditPdoDouble extends PDO
     public function fetchAllFor(string $sql, array $params): array
     {
         $normalizedSql = preg_replace('/\s+/', ' ', trim($sql)) ?? $sql;
+
+        if ($normalizedSql === 'SELECT DATABASE()') {
+            return [['database' => 'test']];
+        }
+
+        if ($normalizedSql === 'SELECT GET_LOCK(:name, 10)') {
+            $this->delegationLock = true;
+
+            return [['acquired' => 1]];
+        }
+
+        if ($normalizedSql === 'SELECT RELEASE_LOCK(:name)') {
+            $held = $this->delegationLock;
+            $this->delegationLock = false;
+
+            return [['released' => (int) $held]];
+        }
 
         if (str_contains($normalizedSql, 'FROM information_schema.tables')) {
             $table = (string) ($params['table'] ?? '');

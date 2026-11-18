@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Users;
 
 use App\Domain\App\AppUiSettings;
+use App\Domain\Personnel\Compliance\PersonnelPermissionDelegationService;
 use App\Infrastructure\Database\DatabaseConnection;
 use InvalidArgumentException;
 
@@ -12,8 +13,11 @@ final class UserService
 {
     public const TIME_MODEL_CHANGE_BLOCKED_MESSAGE = 'Das Arbeitszeitmodell ist Bestandteil eines aktiven Zeitkontos. Rueckwirkende Aenderungen benoetigen ein zeitlich gueltiges Arbeitszeitmodell oder eine dokumentierte Kontokorrektur.';
 
+    private readonly PersonnelPermissionDelegationService $delegation;
+
     public function __construct(private DatabaseConnection $connection)
     {
+        $this->delegation = new PersonnelPermissionDelegationService($connection);
     }
 
     public function list(string $scope = 'active'): array
@@ -108,9 +112,10 @@ final class UserService
         return $this->normalizeUserSettings($user);
     }
 
-    public function create(array $payload): array
+    public function create(array $payload, ?string $csrfToken = null): array
     {
         $record = $this->normalize($payload);
+        $roleIds = $this->normalizeRoleIds($payload['role_ids'] ?? []);
 
         if ($record['password'] === null) {
             throw new InvalidArgumentException('Beim Anlegen eines Users ist ein Passwort erforderlich.');
@@ -118,7 +123,7 @@ final class UserService
 
         if (!$this->connection->tableExists('users')) {
             $record['id'] = random_int(1000, 9999);
-            $record['role_ids'] = $this->normalizeRoleIds($payload['role_ids'] ?? []);
+            $record['role_ids'] = $roleIds;
 
             return $record;
         }
@@ -135,7 +140,8 @@ final class UserService
             : [];
         [$timeAccountColumns, $timeAccountValues, $timeAccountBindings] = $this->timeAccountInsertParts($record);
 
-        return $this->connection->transaction(function () use ($record, $payload, $timeTrackingColumns, $timeTrackingValues, $timeTrackingBindings, $appUiSettingsColumns, $appUiSettingsValues, $appUiSettingsBindings, $timeAccountColumns, $timeAccountValues, $timeAccountBindings) {
+        return $this->delegation->mutate(function () use ($record, $roleIds, $csrfToken, $timeTrackingColumns, $timeTrackingValues, $timeTrackingBindings, $appUiSettingsColumns, $appUiSettingsValues, $appUiSettingsBindings, $timeAccountColumns, $timeAccountValues, $timeAccountBindings) {
+            $this->delegation->assertUserMutation(null, $roleIds, $csrfToken);
             $this->connection->execute(
                 'INSERT INTO users (
                     employee_number, first_name, last_name, email, phone, password_hash, employment_status, emergency_contact_name, emergency_contact_phone, target_hours_month' . $timeAccountColumns . $timeTrackingColumns . $appUiSettingsColumns . ', is_deleted, deleted_at, deleted_by_user_id, created_at, updated_at
@@ -157,7 +163,7 @@ final class UserService
             );
 
             $userId = $this->connection->lastInsertId();
-            $this->syncRoles($userId, $this->normalizeRoleIds($payload['role_ids'] ?? []));
+            $this->syncRoles($userId, $roleIds);
 
             return $this->find($userId) ?? [];
         });
@@ -201,7 +207,7 @@ final class UserService
         return (int) $this->connection->fetchColumn($sql, $bindings) > 0;
     }
 
-    public function update(int $id, array $payload): ?array
+    public function update(int $id, array $payload, ?string $csrfToken = null): ?array
     {
         $existing = $this->find($id);
 
@@ -218,11 +224,12 @@ final class UserService
         }
 
         $record = $this->normalize($payload);
+        $roleIds = $this->normalizeRoleIds($payload['role_ids'] ?? []);
         $this->assertTimeModelChangeAllowed($id, $existing, $record);
 
         if (!$this->connection->tableExists('users')) {
             $record['id'] = $id;
-            $record['role_ids'] = $this->normalizeRoleIds($payload['role_ids'] ?? []);
+            $record['role_ids'] = $roleIds;
 
             return $record;
         }
@@ -233,7 +240,8 @@ final class UserService
                     app_ui_settings = :app_ui_settings' : '';
         [$timeAccountAssignment, $timeAccountBindings] = $this->timeAccountUpdateParts($record);
 
-        return $this->connection->transaction(function () use ($id, $record, $payload, $timeTrackingAssignment, $appUiSettingsAssignment, $timeAccountAssignment, $timeAccountBindings) {
+        return $this->delegation->mutate(function () use ($id, $record, $roleIds, $csrfToken, $timeTrackingAssignment, $appUiSettingsAssignment, $timeAccountAssignment, $timeAccountBindings) {
+            $this->delegation->assertUserMutation($id, $roleIds, $csrfToken);
             $bindings = [
                 'id' => $id,
                 'employee_number' => $record['employee_number'],
@@ -278,22 +286,26 @@ final class UserService
                 $bindings
             );
 
-            $this->syncRoles($id, $this->normalizeRoleIds($payload['role_ids'] ?? []));
+            $this->syncRoles($id, $roleIds);
 
             return $this->find($id);
         });
     }
 
-    public function archive(int $id, ?int $deletedByUserId = null): bool
+    public function archive(int $id, ?int $deletedByUserId = null, ?string $csrfToken = null): bool
     {
         if (!$this->connection->tableExists('users')) {
             return true;
         }
 
-        return $this->connection->execute(
-            'UPDATE users SET is_deleted = 1, deleted_at = NOW(), deleted_by_user_id = :deleted_by_user_id, updated_at = NOW() WHERE id = :id',
-            ['id' => $id, 'deleted_by_user_id' => $deletedByUserId]
-        );
+        return $this->delegation->mutate(function () use ($id, $deletedByUserId, $csrfToken): bool {
+            $this->delegation->assertUserMutation($id, [], $csrfToken);
+
+            return $this->connection->execute(
+                'UPDATE users SET is_deleted = 1, deleted_at = NOW(), deleted_by_user_id = :deleted_by_user_id, updated_at = NOW() WHERE id = :id',
+                ['id' => $id, 'deleted_by_user_id' => $deletedByUserId]
+            );
+        });
     }
 
     private function syncRoles(int $userId, array $roleIds): void

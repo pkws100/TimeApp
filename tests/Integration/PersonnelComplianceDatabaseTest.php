@@ -20,6 +20,7 @@ final class PersonnelComplianceDatabaseTest extends TestCase
     private const BASELINE = '20261118190000';
     private const PHASE_ONE_BASELINE = '20261118202000';
     private const HARDENING = '20261118203000';
+    private const PHASE_TWO_PRIVATE_TABLES = ['employee_personnel_scope_events', 'personnel_command_receipts'];
     private const CATALOG_TABLES = [
         'personnel_compliance_sources', 'personnel_document_types', 'personnel_document_requirements',
     ];
@@ -298,7 +299,7 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         $original = $this->personnelSnapshot();
         self::assertSame([], $this->hardeningTriggers());
 
-        $this->phinx('migrate');
+        $this->phinx('migrate', '-t', self::HARDENING);
         $triggers = $this->hardeningTriggers();
         self::assertCount(9, $triggers);
         self::assertSame($original, $this->personnelSnapshot());
@@ -309,8 +310,8 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         $this->connection->execute('DELETE FROM phinxlog WHERE version = :version', ['version' => self::HARDENING]);
         self::assertCount(7, $this->hardeningTriggers());
         $this->assertRollbackBlocked('Unterbrochene Trigger-DDL', self::PHASE_ONE_BASELINE);
-        $this->phinx('migrate');
-        $this->phinx('migrate');
+        $this->phinx('migrate', '-t', self::HARDENING);
+        $this->phinx('migrate', '-t', self::HARDENING);
         InitialPersonnelComplianceCatalog::seed($this->requirePdo());
         self::assertSame($triggers, $this->hardeningTriggers());
         self::assertSame($original, $this->personnelSnapshot());
@@ -319,13 +320,57 @@ final class PersonnelComplianceDatabaseTest extends TestCase
 
     public function testRollbackStopsBeforeChangesForInitialCatalogPublishedRevisionsAndPrivateRows(): void
     {
-        $this->phinx('migrate');
+        $this->phinx('migrate', '-t', self::HARDENING);
         $this->assertRollbackBlocked('Initialkatalog', self::PHASE_ONE_BASELINE);
         $this->addPublishedRuleRevision();
         $this->assertRollbackBlocked('Ergaenzte Regelrevision', self::BASELINE);
         $this->createDocumentFixture();
         $this->assertRollbackBlocked('Personenbezogene Daten', self::BASELINE, '--force');
         $this->assertRollbackBlocked('Phinx-Status', self::BASELINE, '--fake');
+    }
+
+    public function testPhaseTwoMigrationRetainsPublishedDataAndProtectsNewDocumentProvenance(): void
+    {
+        $this->phinx('migrate', '-t', self::HARDENING);
+        [$employee, $context, $document] = $this->createDocumentFixture();
+        $catalog = $this->connection->fetchAll('SELECT * FROM personnel_document_requirements ORDER BY id');
+        $head = $this->connection->fetchOne('SELECT * FROM employee_documents WHERE id = :id', ['id' => $document]);
+        $contextBefore = $this->connection->fetchOne('SELECT * FROM employee_employment_contexts WHERE id = :id', ['id' => $context]);
+        $this->connection->execute(
+            'INSERT INTO time_account_entries (user_id, effective_date, minutes, entry_type, description)
+             VALUES (:employee, "2026-08-10", 30, "adjustment", "Synthetic prior time account entry")',
+            ['employee' => $employee]
+        );
+        $this->connection->execute(
+            'INSERT INTO vacation_account_entries (user_id, leave_year, effective_date, days, entry_type, description)
+             VALUES (:employee, 2026, "2026-08-10", 1.5, "adjustment", "Synthetic prior vacation account entry")',
+            ['employee' => $employee]
+        );
+        $journals = [];
+        foreach (['time_account_entries', 'vacation_account_entries'] as $table) {
+            $journals[$table] = $this->connection->fetchAll('SELECT * FROM ' . $table . ' ORDER BY id');
+            self::assertCount(1, $journals[$table]);
+        }
+
+        $this->phinx('migrate');
+        $this->phinx('migrate');
+        $newHead = $this->connection->fetchOne('SELECT * FROM employee_documents WHERE id = :id', ['id' => $document]);
+        self::assertSame(1, (int) $newHead['lock_version']);
+        unset($newHead['lock_version']);
+        self::assertSame($head, $newHead);
+        $newContext = $this->connection->fetchOne('SELECT * FROM employee_employment_contexts WHERE id = :id', ['id' => $context]);
+        self::assertNull($newContext['supersedes_context_id']);
+        unset($newContext['supersedes_context_id']);
+        self::assertSame($contextBefore, $newContext);
+        self::assertSame($catalog, $this->connection->fetchAll('SELECT * FROM personnel_document_requirements ORDER BY id'));
+        foreach ($journals as $table => $rows) {
+            self::assertSame($rows, $this->connection->fetchAll('SELECT * FROM ' . $table . ' ORDER BY id'));
+        }
+        $this->assertSqlRejected('UPDATE employee_documents SET source = "import" WHERE id = :id', ['id' => $document], '45000');
+        $migrationLog = $this->connection->fetchAll('SELECT * FROM phinxlog ORDER BY version');
+        [$status] = $this->runPhinx('rollback', '-t', self::HARDENING);
+        self::assertNotSame(0, $status);
+        self::assertSame($migrationLog, $this->connection->fetchAll('SELECT * FROM phinxlog ORDER BY version'));
     }
 
     public function testScratchDatabaseCanBeDiscardedWithAppendOnlyData(): void
@@ -370,6 +415,21 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         ], $emptyValidation['coverage']['excluded_areas']['private_personnel_records']);
         self::assertFalse($emptyValidation['coverage']['excluded_areas']['system_versioned_tables']['data_present']);
 
+        $scopeActor = $this->createUser('scope');
+        $this->connection->execute(
+            'INSERT INTO employee_personnel_scope_events (employee_user_id, grantee_user_id, changed_by_user_id, is_granted, reason_code)
+             VALUES (:employee, :grantee, :actor, 1, "SYNTHETIC-SCOPE-FIXTURE")',
+            ['employee' => $scopeActor, 'grantee' => $scopeActor, 'actor' => $scopeActor]
+        );
+        $this->connection->execute(
+            'INSERT INTO personnel_command_receipts (actor_user_id, request_hash, payload_hash, operation, result_json)
+             VALUES (:actor, :request, :payload, "scope.change", :result)',
+            ['actor' => $scopeActor, 'request' => str_repeat('b', 64), 'payload' => str_repeat('c', 64), 'result' => '{"synthetic":"RECEIPT-FIXTURE"}']
+        );
+        self::assertSame('partial', $service->export()['headers']['X-TimeApp-Backup-Coverage']);
+        $this->assertSqlRejected('DELETE FROM employee_personnel_scope_events', [], '45000');
+        $this->assertSqlRejected('UPDATE personnel_command_receipts SET operation = "other"', [], '45000');
+
         [$user] = $this->createDocumentFixture();
         $this->connection->execute(
             'INSERT INTO timesheets (user_id, created_by_user_id, work_date, start_time, end_time,
@@ -389,11 +449,11 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         $manifest = json_decode($zip->getFromName('manifest.json'), true, flags: JSON_THROW_ON_ERROR);
         self::assertSame(2, $manifest['backup_version']);
         self::assertFalse($zip->locateName('database/timesheets.json'));
-        self::assertEqualsCanonicalizing(self::PRIVATE_TABLES, $manifest['security']['excluded_database_table_rows']);
+        self::assertEqualsCanonicalizing([...self::PRIVATE_TABLES, ...self::PHASE_TWO_PRIVATE_TABLES], $manifest['security']['excluded_database_table_rows']);
         foreach (self::CATALOG_TABLES as $table) {
             self::assertNotEmpty(json_decode($zip->getFromName('database/' . $table . '.json'), true, flags: JSON_THROW_ON_ERROR));
         }
-        foreach (self::PRIVATE_TABLES as $table) {
+        foreach ([...self::PRIVATE_TABLES, ...self::PHASE_TWO_PRIVATE_TABLES] as $table) {
             self::assertSame('[]', $zip->getFromName('database/' . $table . '.json'));
         }
         $zip->close();
@@ -416,6 +476,17 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         self::assertTrue(copy($path, $legacyPath));
         self::assertTrue($zip->open($legacyPath));
         $legacyManifest = $manifest;
+        $legacyManifest['schema_version'] = '20261118203000_harden_personnel_compliance_history';
+        $legacyManifest['database']['tables'] = array_values(array_filter($legacyManifest['database']['tables'], static fn (array $entry): bool => !in_array($entry['table'], self::PHASE_TWO_PRIVATE_TABLES, true)));
+        $legacyManifest['security']['excluded_database_table_rows'] = array_values(array_diff($legacyManifest['security']['excluded_database_table_rows'], self::PHASE_TWO_PRIVATE_TABLES));
+        foreach (self::PHASE_TWO_PRIVATE_TABLES as $table) {
+            self::assertTrue($zip->deleteName('database/' . $table . '.json'));
+        }
+        self::assertTrue($zip->addFromString('manifest.json', json_encode($legacyManifest, JSON_THROW_ON_ERROR)));
+        self::assertTrue($zip->close());
+        self::assertFalse($service->validateImport(['tmp_name' => $legacyPath])['apply_supported']);
+
+        self::assertTrue($zip->open($legacyPath));
         $legacyManifest['backup_version'] = 1;
         $legacyManifest['schema_version'] = '20261118202000_personnel_compliance_permissions';
         unset($legacyManifest['coverage'], $legacyManifest['uploads']['entries'], $legacyManifest['security']['status']);
@@ -444,7 +515,7 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         }
 
         self::assertTrue($zip->open($path));
-        self::assertTrue($zip->addFromString('database/employee_document_audit.json', '[{"reason":"SYNTHETIC-AUDIT-FIXTURE"}]'));
+        self::assertTrue($zip->addFromString('database/personnel_command_receipts.json', '[{"result":"RECEIPT-FIXTURE"}]'));
         $zip->close();
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('Das Systembackup akzeptiert Personalakten-Tabellen nur ohne personenbezogene Zeilen.');
@@ -465,7 +536,7 @@ final class PersonnelComplianceDatabaseTest extends TestCase
              INNER JOIN permissions ON permissions.id = role_permissions.permission_id
              WHERE permissions.scope = "personnel_compliance" ORDER BY permissions.code';
         $grants = $this->connection->fetchAll($grantSql);
-        self::assertSame(['personnel_compliance.manage', 'personnel_documents.export', 'personnel_documents.manage', 'personnel_documents.view'], array_column($grants, 'code'));
+        self::assertSame(['personnel_compliance.manage', 'personnel_documents.delegate', 'personnel_documents.export', 'personnel_documents.manage', 'personnel_documents.view'], array_column($grants, 'code'));
         self::assertSame(['administrator'], array_values(array_unique(array_column($grants, 'slug'))));
         $this->phinx('seed:run', '-s', 'InitialReferenceSeeder');
         $this->phinx('seed:run', '-s', 'InitialReferenceSeeder');

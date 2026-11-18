@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Domain\Auth\AuthService;
+use App\Domain\Auth\CsrfService;
 use App\Domain\Dashboard\DashboardService;
 use App\Domain\Settings\DatabaseSettingsManager;
 use App\Http\Request;
@@ -16,7 +18,8 @@ final class AdminController
     public function __construct(
         private AdminView $view,
         private DashboardService $dashboardService,
-        private DatabaseSettingsManager $databaseSettingsManager
+        private DatabaseSettingsManager $databaseSettingsManager,
+        private AuthService $authService
     ) {
     }
 
@@ -143,13 +146,18 @@ HTML;
         $badgeClass = $status['connected'] ? 'ok' : 'warn';
         $notice = $this->databaseNotice($request);
         $settingsTabs = $this->settingsTabs('database');
+        $editable = $this->authService->canChangeDatabaseConnection();
+        $description = $editable
+            ? 'Hier können Sie die Datenbankverbindung testen und speichern.'
+            : 'Sie können die aktive Verbindung und ihre Einstellungen einsehen.';
+        $configuration = $editable ? $this->databaseSettingsForm($settings) : $this->databaseSettingsSummary($settings);
 
         $content = <<<HTML
 <header class="page-header">
     <div>
         <p class="eyebrow">Anwendungs-Settings</p>
         <h1>Aktive Datenbankverbindung</h1>
-        <p>Die Eingaben werden in <code>storage/config/database.override.php</code> gespeichert.</p>
+        <p>{$description}</p>
     </div>
 </header>
 
@@ -176,7 +184,19 @@ HTML;
     </article>
 </section>
 
+{$configuration}
+HTML;
+
+        return Response::html($this->view->render('Datenbank', $content));
+    }
+
+    private function databaseSettingsForm(array $settings): string
+    {
+        $csrfToken = $this->escape((new CsrfService())->token());
+
+        return <<<HTML
 <form method="post" action="/admin/settings/database" class="card form-grid">
+    <input type="hidden" name="csrf_token" value="{$csrfToken}">
     <label><span>Host</span><input name="host" value="{$this->escape($settings['host'] ?? '')}" required></label>
     <label><span>Port</span><input name="port" type="number" value="{$this->escape((string) ($settings['port'] ?? 3306))}" required></label>
     <label><span>Datenbank</span><input name="database" value="{$this->escape($settings['database'] ?? '')}" required></label>
@@ -189,8 +209,23 @@ HTML;
     <button class="button" type="submit">Verbindung testen und speichern</button>
 </form>
 HTML;
+    }
 
-        return Response::html($this->view->render('Datenbank', $content));
+    private function databaseSettingsSummary(array $settings): string
+    {
+        $passwordStatus = ($settings['password_is_set'] ?? false) ? 'Gespeichert' : 'Nicht gesetzt';
+
+        return <<<HTML
+<section class="card">
+    <h2>Verbindungseinstellungen</h2>
+    <dl>
+        <dt>Benutzer</dt><dd>{$this->escape($settings['username'] ?? '')}</dd>
+        <dt>Passwort</dt><dd>{$passwordStatus}</dd>
+        <dt>Charset</dt><dd>{$this->escape($settings['charset'] ?? 'utf8mb4')}</dd>
+        <dt>Collation</dt><dd>{$this->escape($settings['collation'] ?? 'utf8mb4_unicode_ci')}</dd>
+    </dl>
+</section>
+HTML;
     }
 
     private function databaseNotice(Request $request): string

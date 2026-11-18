@@ -4,15 +4,19 @@ declare(strict_types=1);
 
 namespace App\Domain\Users;
 
+use App\Domain\Personnel\Compliance\PersonnelPermissionDelegationService;
 use App\Infrastructure\Database\DatabaseConnection;
 use RuntimeException;
 
 final class RoleService
 {
+    private readonly PersonnelPermissionDelegationService $delegation;
+
     public function __construct(
         private DatabaseConnection $connection,
         private PermissionMatrix $permissionMatrix
     ) {
+        $this->delegation = new PersonnelPermissionDelegationService($connection);
     }
 
     public function list(string $scope = 'active'): array
@@ -91,19 +95,21 @@ final class RoleService
         );
     }
 
-    public function create(array $payload): array
+    public function create(array $payload, ?string $csrfToken = null): array
     {
         $record = $this->normalize($payload);
+        $permissionIds = $this->normalizePermissionIds($payload['permission_ids'] ?? []);
 
         if (!$this->connection->tableExists('roles')) {
             $record['id'] = random_int(1000, 9999);
-            $record['permission_ids'] = $this->normalizePermissionIds($payload['permission_ids'] ?? []);
+            $record['permission_ids'] = $permissionIds;
             $record['is_system_role'] = 0;
 
             return $record;
         }
 
-        return $this->connection->transaction(function () use ($record, $payload) {
+        return $this->delegation->mutate(function () use ($record, $permissionIds, $csrfToken) {
+            $this->delegation->assertRoleMutation(null, $record['slug'], $permissionIds, $csrfToken);
             $this->connection->execute(
                 'INSERT INTO roles (
                     slug, name, description, is_system_role, is_deleted, deleted_at, deleted_by_user_id, created_at, updated_at
@@ -114,51 +120,59 @@ final class RoleService
             );
 
             $roleId = $this->connection->lastInsertId();
-            $this->syncPermissions($roleId, $this->normalizePermissionIds($payload['permission_ids'] ?? []));
+            $this->syncPermissions($roleId, $permissionIds);
 
             return $this->find($roleId) ?? [];
         });
     }
 
-    public function update(int $id, array $payload): ?array
+    public function update(int $id, array $payload, ?string $csrfToken = null): ?array
     {
         $record = $this->normalize($payload);
+        $permissionIds = $this->normalizePermissionIds($payload['permission_ids'] ?? []);
 
         if (!$this->connection->tableExists('roles')) {
             $record['id'] = $id;
-            $record['permission_ids'] = $this->normalizePermissionIds($payload['permission_ids'] ?? []);
+            $record['permission_ids'] = $permissionIds;
 
             return $record;
         }
 
-        return $this->connection->transaction(function () use ($id, $record, $payload) {
+        return $this->delegation->mutate(function () use ($id, $record, $permissionIds, $csrfToken) {
+            $this->delegation->assertRoleMutation($id, $record['slug'], $permissionIds, $csrfToken);
             $this->connection->execute(
                 'UPDATE roles SET slug = :slug, name = :name, description = :description, updated_at = NOW() WHERE id = :id',
                 [...$record, 'id' => $id]
             );
 
-            $this->syncPermissions($id, $this->normalizePermissionIds($payload['permission_ids'] ?? []));
+            $this->syncPermissions($id, $permissionIds);
 
             return $this->find($id);
         });
     }
 
-    public function archive(int $id, ?int $deletedByUserId = null): bool
+    public function archive(int $id, ?int $deletedByUserId = null, ?string $csrfToken = null): bool
     {
-        $role = $this->find($id);
-
-        if ($role === null) {
+        if (!$this->connection->tableExists('roles')) {
             return false;
         }
 
-        if ((int) ($role['is_system_role'] ?? 0) === 1) {
-            throw new RuntimeException('Systemrollen koennen nicht archiviert werden.');
-        }
+        return $this->delegation->mutate(function () use ($id, $deletedByUserId, $csrfToken): bool {
+            $this->delegation->assertRoleMutation($id, null, [], $csrfToken);
+            $role = $this->find($id);
+            if ($role === null) {
+                return false;
+            }
 
-        return $this->connection->execute(
-            'UPDATE roles SET is_deleted = 1, deleted_at = NOW(), deleted_by_user_id = :deleted_by_user_id, updated_at = NOW() WHERE id = :id',
-            ['id' => $id, 'deleted_by_user_id' => $deletedByUserId]
-        );
+            if ((int) ($role['is_system_role'] ?? 0) === 1) {
+                throw new RuntimeException('Systemrollen koennen nicht archiviert werden.');
+            }
+
+            return $this->connection->execute(
+                'UPDATE roles SET is_deleted = 1, deleted_at = NOW(), deleted_by_user_id = :deleted_by_user_id, updated_at = NOW() WHERE id = :id',
+                ['id' => $id, 'deleted_by_user_id' => $deletedByUserId]
+            );
+        });
     }
 
     private function syncPermissions(int $roleId, array $permissionIds): void

@@ -116,6 +116,8 @@
 - Der gesetzliche Basiskatalog wird in Phinx versioniert und ohne Mitarbeiterdaten eingespielt. Die Anwendbarkeit bleibt `manual_review`. Unbekannte Beschaeftigungsmerkmale werden nicht aus Benutzerstatus, Berechtigungen oder Projektzuordnung abgeleitet.
 - Phase 1 enthaelt keine Dateioperationen und keine automatische Frist-, Anwendbarkeits- oder Loeschentscheidung. Das Systembackup enthaelt den Katalog und leere Eintraege fuer private Tabellen. Manifestformat 2 weist die Sicherungsabdeckung und belegte Ausschluesse aus. Der Dry-Run akzeptiert private Tabellen nur ohne personenbezogene Zeilen.
 - Quellen, Historienregeln, Rechte und Backup-Grenzen sind im [Datenmodell](docs/COMPLIANCE_2027_DATA_MODEL.md) beschrieben.
+- Phase 2A ergaenzt append-only Mitarbeiterbereiche in `employee_personnel_scope_events` und Auftragsbelege in `personnel_command_receipts`. Beide Tabellen sind vom allgemeinen Sicherungsinhalt ausgeschlossen. Manuelle Personalaktenauftraege schreiben Fachzustand, Audit und Beleg gemeinsam. Angebundene Katalog- und Kontextrevisionen bleiben historisch lesbar.
+- `employee_employment_contexts.supersedes_context_id` verknuepft eine Ersatzrevision desselben Mitarbeiters und Beschaeftigungsschluessels. `employee_documents.lock_version` ermoeglicht die Konfliktpruefung. Ein Trigger schuetzt die Quelle des Dokumentkopfs. `employee_document_audit.related_document_id` erhaelt die Bezugskette bei korrigierter Zuordnung. Details in der [Phase-2A-Implementierung](docs/COMPLIANCE_2027_PHASE2A_IMPLEMENTATION.md).
 
 ## Seeder-Startpunkt
 - Standard-Seeds liefern Rollen, Rechte und notwendige Referenzdaten.

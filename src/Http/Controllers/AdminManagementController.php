@@ -12,6 +12,7 @@ use App\Domain\Files\DocumentStatusService;
 use App\Domain\Files\FileAttachmentService;
 use App\Domain\Personnel\PersonnelEventService;
 use App\Domain\Personnel\PersonnelLabelService;
+use App\Domain\Personnel\Compliance\PersonnelDelegationDenied;
 use App\Domain\Projects\ProjectAccessService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Projects\ProjectDispatchService;
@@ -734,9 +735,11 @@ final class AdminManagementController
         }
 
         try {
-            $user = $this->userService->create($payload);
+            $user = $this->userService->create($payload, $request->csrfToken());
 
             return Response::redirect('/admin/users/' . (int) $user['id'] . '/edit?notice=created');
+        } catch (PersonnelDelegationDenied $exception) {
+            return $this->delegationDenied($exception);
         } catch (RuntimeException|\InvalidArgumentException $exception) {
             return $this->userCreateFailureResponse(
                 $payload,
@@ -761,7 +764,9 @@ final class AdminManagementController
         }
 
         try {
-            $this->userService->update($userId, $request->input());
+            $this->userService->update($userId, $request->input(), $request->csrfToken());
+        } catch (PersonnelDelegationDenied $exception) {
+            return $this->delegationDenied($exception);
         } catch (RuntimeException|\InvalidArgumentException $exception) {
             return $this->userEditFailureResponse(
                 $userId,
@@ -781,7 +786,15 @@ final class AdminManagementController
 
     public function userArchive(Request $request, array $params): Response
     {
-        $this->userService->archive((int) $params['id']);
+        if (!$this->csrfService->isValid($request->csrfToken())) {
+            return Response::redirect('/admin/users?error=csrf');
+        }
+
+        try {
+            $this->userService->archive((int) $params['id'], $this->currentUserId(), $request->csrfToken());
+        } catch (PersonnelDelegationDenied $exception) {
+            return $this->delegationDenied($exception);
+        }
 
         return Response::redirect('/admin/users?notice=archived');
     }
@@ -839,27 +852,58 @@ final class AdminManagementController
 
     public function roleStore(Request $request): Response
     {
-        $role = $this->roleService->create($request->input());
+        if (!$this->csrfService->isValid($request->csrfToken())) {
+            return Response::redirect('/admin/roles/create?error=csrf');
+        }
+
+        try {
+            $role = $this->roleService->create($request->input(), $request->csrfToken());
+        } catch (PersonnelDelegationDenied $exception) {
+            return $this->delegationDenied($exception);
+        }
 
         return Response::redirect('/admin/roles/' . (int) $role['id'] . '/edit?notice=created');
     }
 
     public function roleUpdate(Request $request, array $params): Response
     {
-        $this->roleService->update((int) $params['id'], $request->input());
+        $roleId = (int) $params['id'];
+        if (!$this->csrfService->isValid($request->csrfToken())) {
+            return Response::redirect('/admin/roles/' . $roleId . '/edit?error=csrf');
+        }
 
-        return Response::redirect('/admin/roles/' . (int) $params['id'] . '/edit?notice=updated');
+        try {
+            $this->roleService->update($roleId, $request->input(), $request->csrfToken());
+        } catch (PersonnelDelegationDenied $exception) {
+            return $this->delegationDenied($exception);
+        }
+
+        return Response::redirect('/admin/roles/' . $roleId . '/edit?notice=updated');
     }
 
     public function roleArchive(Request $request, array $params): Response
     {
+        if (!$this->csrfService->isValid($request->csrfToken())) {
+            return Response::redirect('/admin/roles?error=csrf');
+        }
+
         try {
-            $this->roleService->archive((int) $params['id']);
+            $this->roleService->archive((int) $params['id'], $this->currentUserId(), $request->csrfToken());
 
             return Response::redirect('/admin/roles?notice=archived');
+        } catch (PersonnelDelegationDenied $exception) {
+            return $this->delegationDenied($exception);
         } catch (RuntimeException) {
             return Response::redirect('/admin/roles?error=system-role');
         }
+    }
+
+    private function delegationDenied(PersonnelDelegationDenied $exception): Response
+    {
+        return Response::html($this->view->render(
+            'Keine Berechtigung',
+            '<p class="notice error">' . $this->e($exception->getMessage()) . '</p>'
+        ), 403);
     }
 
     private function renderIndexLayout(
@@ -1578,6 +1622,7 @@ HTML;
     {
         $isEdit = $role !== null;
         $method = $isEdit ? '<input type="hidden" name="_method" value="PUT">' : '';
+        $csrfToken = $this->e($this->csrfService->token());
         $permissionIds = $role['permission_ids'] ?? [];
         $permissionCheckboxes = '';
 
@@ -1603,6 +1648,7 @@ HTML;
 {$this->noticeFromCurrentQuery()}
 <form method="post" action="{$this->e($action)}" class="card form-grid">
     {$method}
+    <input type="hidden" name="csrf_token" value="{$csrfToken}">
     <label><span>Slug</span><input name="slug" value="{$this->field($role, 'slug')}"></label>
     <label><span>Name</span><input name="name" value="{$this->field($role, 'name')}" required></label>
     <label class="full-span"><span>Beschreibung</span><textarea name="description" rows="4">{$this->field($role, 'description')}</textarea></label>

@@ -48,6 +48,7 @@ final class InitialReferenceSeeder extends AbstractSeed
             ['code' => 'personnel_documents.view', 'label' => 'Personal- und Entgeltunterlagen ansehen', 'scope' => 'personnel_compliance'],
             ['code' => 'personnel_documents.manage', 'label' => 'Personal- und Entgeltunterlagen verwalten', 'scope' => 'personnel_compliance'],
             ['code' => 'personnel_documents.export', 'label' => 'Personal- und Entgeltunterlagen exportieren', 'scope' => 'personnel_compliance'],
+            ['code' => 'personnel_documents.delegate', 'label' => 'Rechte fuer Personalunterlagen delegieren', 'scope' => 'personnel_compliance'],
             ['code' => 'personnel_compliance.manage', 'label' => 'Regelkatalog fuer Personalunterlagen verwalten', 'scope' => 'personnel_compliance'],
             ['code' => 'settings.manage', 'label' => 'Globale Einstellungen verwalten', 'scope' => 'backend'],
             ['code' => 'settings.database.manage', 'label' => 'Datenbank umstellen', 'scope' => 'backend'],

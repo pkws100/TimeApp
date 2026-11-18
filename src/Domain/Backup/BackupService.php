@@ -14,6 +14,8 @@ final class BackupService
     private const BACKUP_VERSION = 2;
     private const PERSONNEL_TRIGGER_MIGRATION = '20261118203000_harden_personnel_compliance_history';
     private const PREVIOUS_PERSONNEL_SCHEMA = '20261118202000_personnel_compliance_permissions';
+    private const PERSONNEL_PHASE_TWO_SCHEMA = '20261118205000_personnel_phase_two_foundation';
+    private const PHASE_TWO_PRIVATE_TABLES = ['employee_personnel_scope_events', 'personnel_command_receipts'];
     private const REDACTED_SECRET = '[redacted:backup-secret]';
     private const RUNTIME_OVERRIDE_EXCLUDED_WARNING = 'Eine Runtime-Datenbankkonfiguration ist vorhanden und benoetigt eine separate geschuetzte Sicherung.';
     private const LEGACY_RUNTIME_OVERRIDE_EXCLUDED_WARNING = 'storage/config/database.override.php wurde erkannt, aber nicht ins Backup-Archiv aufgenommen.';
@@ -29,6 +31,7 @@ final class BackupService
         'employee_document_versions',
         'employee_document_audit',
         'employee_document_access_log',
+        ...self::PHASE_TWO_PRIVATE_TABLES,
     ];
     private const PERSONNEL_CATALOG_TABLES = [
         'personnel_compliance_sources',
@@ -453,8 +456,9 @@ final class BackupService
             throw new RuntimeException('Im Backup-Manifest ist schema_version ungueltig.');
         }
         $currentSchema = $this->schemaVersion();
-        $previousPersonnelSchema = $legacy && $currentSchema === self::PERSONNEL_TRIGGER_MIGRATION
-            && $schemaVersion === self::PREVIOUS_PERSONNEL_SCHEMA;
+        $previousPersonnelSchema = ($legacy && $schemaVersion === self::PREVIOUS_PERSONNEL_SCHEMA
+                && in_array($currentSchema, [self::PERSONNEL_TRIGGER_MIGRATION, self::PERSONNEL_PHASE_TWO_SCHEMA], true))
+            || (!$legacy && $schemaVersion === self::PERSONNEL_TRIGGER_MIGRATION && $currentSchema === self::PERSONNEL_PHASE_TWO_SCHEMA);
         if ($schemaVersion !== $currentSchema && !$previousPersonnelSchema) {
             throw new RuntimeException('Die Backup-Schema-Version passt nicht zum aktuellen System.');
         }
@@ -473,7 +477,11 @@ final class BackupService
 
         $databaseTables = $this->validateDatabaseFiles($tables, $zip, $legacy);
         $databaseFiles = array_column($databaseTables, 'filename');
-        $this->assertExpectedTables($databaseTables, !$legacy || $previousPersonnelSchema);
+        $this->assertExpectedTables(
+            $databaseTables,
+            !$legacy || $previousPersonnelSchema,
+            $previousPersonnelSchema && $currentSchema === self::PERSONNEL_PHASE_TWO_SCHEMA ? self::PHASE_TWO_PRIVATE_TABLES : []
+        );
         $this->assertPersonnelArchiveEntries($archiveEntries, $databaseFiles);
 
         $uploadFiles = $this->uploadEntries($archiveEntries);
@@ -649,7 +657,7 @@ final class BackupService
         return $redactions;
     }
 
-    private function assertExpectedTables(array $tables, bool $requireSchema): void
+    private function assertExpectedTables(array $tables, bool $requireSchema, array $tablesAddedSinceArchive): void
     {
         $expectedTables = $this->applicationTables();
         if ($expectedTables === []) {
@@ -661,6 +669,7 @@ final class BackupService
         $this->assertCoverageTablesDiscoverable($expectedTables, $this->databaseSource->systemVersionedTables());
 
         $manifestTables = array_column($tables, 'table');
+        $expectedTables = array_values(array_diff($expectedTables, $tablesAddedSinceArchive));
         sort($manifestTables);
         sort($expectedTables);
         if ($manifestTables !== $expectedTables) {

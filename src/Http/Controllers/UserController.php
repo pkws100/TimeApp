@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Domain\Auth\AuthService;
+use App\Domain\Personnel\Compliance\PersonnelDelegationDenied;
 use App\Domain\Users\UserService;
 use App\Http\Request;
 use App\Http\Response;
@@ -11,7 +13,7 @@ use InvalidArgumentException;
 
 final class UserController
 {
-    public function __construct(private UserService $userService)
+    public function __construct(private UserService $userService, private AuthService $authService)
     {
     }
 
@@ -32,7 +34,9 @@ final class UserController
     public function store(Request $request): Response
     {
         try {
-            return Response::json(['data' => $this->userService->create($request->input())], 201);
+            return Response::json(['data' => $this->userService->create($request->input(), $request->csrfToken())], 201);
+        } catch (PersonnelDelegationDenied $exception) {
+            return Response::json(['error' => $exception->getMessage()], 403);
         } catch (InvalidArgumentException $exception) {
             return Response::json(['error' => $exception->getMessage()], 422);
         }
@@ -40,7 +44,13 @@ final class UserController
 
     public function update(Request $request, array $params): Response
     {
-        $user = $this->userService->update((int) $params['id'], $request->input());
+        try {
+            $user = $this->userService->update((int) $params['id'], $request->input(), $request->csrfToken());
+        } catch (PersonnelDelegationDenied $exception) {
+            return Response::json(['error' => $exception->getMessage()], 403);
+        } catch (InvalidArgumentException $exception) {
+            return Response::json(['error' => $exception->getMessage()], 422);
+        }
 
         return $user === null
             ? Response::json(['error' => 'User nicht gefunden.'], 404)
@@ -49,7 +59,16 @@ final class UserController
 
     public function archive(Request $request, array $params): Response
     {
-        $this->userService->archive((int) $params['id']);
+        $actor = $this->authService->currentUser();
+        if ($actor === null) {
+            return Response::json(['error' => 'Anmeldung erforderlich.'], 401);
+        }
+
+        try {
+            $this->userService->archive((int) $params['id'], (int) $actor['id'], $request->csrfToken());
+        } catch (PersonnelDelegationDenied $exception) {
+            return Response::json(['error' => $exception->getMessage()], 403);
+        }
 
         return Response::json(['message' => 'User archiviert.']);
     }

@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace Tests\Unit;
 
 use App\Domain\Attendance\AttendanceService;
+use App\Domain\Auth\AuthService;
 use App\Domain\Dashboard\DashboardService;
 use App\Domain\Settings\DatabaseSettingsManager;
+use App\Domain\Users\PermissionMatrix;
 use App\Domain\Users\StorageUsageService;
 use App\Http\Controllers\AdminController;
 use App\Http\Request;
@@ -22,7 +24,8 @@ final class AdminDashboardControllerTest extends TestCase
         $controller = new AdminController(
             new AdminView('Baustellen Zeiterfassung', 'http://localhost'),
             new DashboardService($connection, new StorageUsageService(storage_path()), new AttendanceService($connection)),
-            new DatabaseSettingsManager([], sys_get_temp_dir() . '/timeapp-dashboard-settings-' . uniqid('', true) . '.php')
+            new DatabaseSettingsManager([], sys_get_temp_dir() . '/timeapp-dashboard-settings-' . uniqid('', true) . '.php'),
+            new AuthService($connection, new PermissionMatrix([], []))
         );
 
         ob_start();

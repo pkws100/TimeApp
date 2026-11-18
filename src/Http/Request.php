@@ -111,6 +111,13 @@ final class Request
         return $this->headers[$key] ?? $default;
     }
 
+    public function csrfToken(): ?string
+    {
+        $token = $this->input('csrf_token', $this->server('HTTP_X_CSRF_TOKEN', $this->header('X-CSRF-Token')));
+
+        return is_string($token) ? $token : null;
+    }
+
     public function server(string $key, mixed $default = null): mixed
     {
         return $this->server[$key] ?? $default;

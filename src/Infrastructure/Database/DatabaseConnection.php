@@ -22,6 +22,11 @@ final class DatabaseConnection
         return $this->pdo() instanceof PDO;
     }
 
+    public function authenticationRealm(): string
+    {
+        return hash('sha256', $this->buildDsn($this->config));
+    }
+
     public function pdo(): ?PDO
     {
         if ($this->pdo instanceof PDO) {

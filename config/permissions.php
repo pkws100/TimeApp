@@ -131,6 +131,7 @@ return [
         'personnel_documents.view',
         'personnel_documents.manage',
         'personnel_documents.export',
+        'personnel_documents.delegate',
         'personnel_compliance.manage',
         'settings.manage',
         'settings.database.manage',

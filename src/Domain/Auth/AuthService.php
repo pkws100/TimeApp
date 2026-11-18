@@ -11,10 +11,17 @@ use App\Infrastructure\Database\DatabaseConnection;
 
 final class AuthService
 {
+    public const PERSONNEL_DELEGATE = 'personnel_documents.delegate';
+
     public function __construct(
         private DatabaseConnection $connection,
         private PermissionMatrix $permissionMatrix
     ) {
+    }
+
+    public function usesConnection(DatabaseConnection $connection): bool
+    {
+        return $this->connection === $connection;
     }
 
     public function login(string $email, string $password): array
@@ -47,15 +54,88 @@ final class AuthService
 
     public function currentUser(): ?array
     {
-        $userId = $_SESSION['auth']['user_id'] ?? null;
+        $userId = self::sessionUserId($this->connection);
 
-        if (!is_int($userId) && !ctype_digit((string) $userId)) {
+        return $userId === null ? null : $this->findById($userId);
+    }
+
+    public static function sessionUserId(DatabaseConnection $connection): ?int
+    {
+        $session = $_SESSION['auth'] ?? [];
+        $id = $session['user_id'] ?? null;
+
+        if ((!is_int($id) && (!is_string($id) || !ctype_digit($id))) || (int) $id <= 0) {
             return null;
         }
 
-        $userId = (int) $userId;
+        // Browser logins always include a timestamp. Expire their pre-realm sessions on upgrade.
+        if (array_key_exists('logged_in_at', $session) || array_key_exists('database_realm', $session)) {
+            $realm = $session['database_realm'] ?? null;
+            if (!is_string($realm) || !hash_equals($connection->authenticationRealm(), $realm)) {
+                return null;
+            }
+        }
 
-        return $this->findById($userId);
+        return (int) $id;
+    }
+
+    public static function isPersonnelPermission(string $permission): bool
+    {
+        $permission = strtolower($permission);
+
+        return str_starts_with($permission, 'personnel_documents.') || str_starts_with($permission, 'personnel_compliance.');
+    }
+
+    public function isSystemAdministrator(): bool
+    {
+        $id = self::sessionUserId($this->connection);
+        if ($id === null || !$this->connection->tableExists('user_roles')) {
+            return false;
+        }
+
+        return (int) $this->connection->fetchColumn(
+            'SELECT EXISTS (
+                SELECT 1 FROM users u
+                JOIN user_roles ur ON ur.user_id = u.id
+                JOIN roles r ON r.id = ur.role_id
+                WHERE u.id = :id AND u.employment_status = "active" AND u.is_deleted = 0
+                  AND r.slug = "administrator" AND r.is_system_role = 1 AND r.is_deleted = 0
+            )',
+            ['id' => $id]
+        ) === 1;
+    }
+
+    /** @return array{actor_id:int,system_administrator:bool}|null */
+    public function lockPersonnelAuthority(string $permission): ?array
+    {
+        $actorId = self::sessionUserId($this->connection);
+        if ($actorId === null || !self::isPersonnelPermission($permission)
+            || !$this->connection->pdo()?->inTransaction()) {
+            return null;
+        }
+
+        // A locking read sees grants committed while the domain command waited for its subject.
+        $grants = $this->connection->fetchAll(
+            'SELECT (r.slug = "administrator" AND r.is_system_role = 1) AS system_administrator, p.code
+             FROM users u
+             JOIN user_roles ur ON ur.user_id = u.id
+             JOIN roles r ON r.id = ur.role_id AND r.is_deleted = 0
+             LEFT JOIN role_permissions rp ON rp.role_id = r.id
+             LEFT JOIN permissions p ON p.id = rp.permission_id
+             WHERE u.id = :id AND u.employment_status = "active" AND u.is_deleted = 0
+             LOCK IN SHARE MODE',
+            ['id' => $actorId]
+        );
+        if (!in_array($permission, array_column($grants, 'code'), true)) {
+            return null;
+        }
+
+        return ['actor_id' => $actorId, 'system_administrator' => in_array(1, array_map('intval', array_column($grants, 'system_administrator')), true)];
+    }
+
+    public function canChangeDatabaseConnection(): bool
+    {
+        return $this->isSystemAdministrator() && $this->hasPermission(self::PERSONNEL_DELEGATE);
     }
 
     public function sessionPayload(): array
@@ -109,6 +189,10 @@ final class AuthService
 
         $permissions = $user['permissions'] ?? [];
 
+        if (self::isPersonnelPermission($permission)) {
+            return in_array($permission, $permissions, true);
+        }
+
         return in_array('*', $permissions, true) || in_array($permission, $permissions, true);
     }
 
@@ -121,6 +205,7 @@ final class AuthService
         $_SESSION['auth'] = [
             'user_id' => (int) ($user['id'] ?? 0),
             'logged_in_at' => (new \DateTimeImmutable())->format(DATE_ATOM),
+            'database_realm' => $this->connection->authenticationRealm(),
         ];
     }
 
@@ -244,7 +329,10 @@ final class AuthService
             );
             $permissions = array_values(array_filter(array_map(static fn (array $row): string => (string) ($row['code'] ?? ''), $permissionRows)));
         } else {
-            $permissions = $this->permissionMatrix->permissionsForRoles($roles);
+            $permissions = array_values(array_filter(
+                $this->permissionMatrix->permissionsForRoles($roles),
+                static fn (string $permission): bool => !self::isPersonnelPermission($permission)
+            ));
         }
 
         $user['roles'] = $roles;

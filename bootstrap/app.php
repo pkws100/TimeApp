@@ -260,6 +260,9 @@ $personnelReminderService = new PersonnelReminderService(
 );
 $authService = new AuthService($connection, $permissionMatrix);
 $csrfService = new CsrfService();
+$databaseSettingsController = new SettingsController($databaseSettings, $authService, $csrfService);
+$userController = new UserController($userService, $authService);
+$roleController = new RoleController($roleService, $authService);
 $routeGuard = new RouteGuard($authService);
 $dashboardService = new DashboardService($connection, $storageUsage, $attendanceService);
 $fileService = new FileAttachmentService($connection, $config->get('uploads', []));
@@ -352,7 +355,7 @@ $appProjectWorkReportController = new AppProjectWorkReportController($projectWor
 $terminalApiController = new TerminalApiController($terminalService, $terminalPunchService, $terminalTrustBundleService);
 $adminTimesheetAttachmentController = new AdminTimesheetAttachmentController($fileService, $authService, $csrfService);
 $adminTimesheetSignatureController = new AdminTimesheetSignatureController($timesheetSignatureService, $authService, $csrfService);
-$adminController = new AdminController($adminView, $dashboardService, $databaseSettings);
+$adminController = new AdminController($adminView, $dashboardService, $databaseSettings, $authService);
 $adminManagementController = new AdminManagementController(
     $adminView,
     $projectService,
@@ -607,7 +610,7 @@ $router->post('/admin/settings/document-statuses', $admin([$documentStatusContro
 $router->post('/admin/settings/document-statuses/{id}', $admin([$documentStatusController, 'update'], 'settings.manage'));
 $router->post('/admin/settings/document-statuses/{id}/archive', $admin([$documentStatusController, 'archive'], 'settings.manage'));
 $router->get('/admin/settings/database', $admin([$adminController, 'databaseSettings'], 'settings.database.manage'));
-$router->post('/admin/settings/database', $admin([new SettingsController($databaseSettings), 'saveFromAdmin'], 'settings.database.manage'));
+$router->post('/admin/settings/database', $admin([$databaseSettingsController, 'saveFromAdmin'], 'settings.database.manage'));
 $router->get('/admin/settings/push', $admin([$adminPushController, 'show'], 'push.manage'));
 $router->post('/admin/settings/push', $admin([$adminPushController, 'save'], 'push.manage'));
 $router->post('/admin/settings/push/subscriptions/{id}', $admin([$adminPushController, 'updateDevice'], 'push.manage'));
@@ -654,16 +657,16 @@ $router->get('/api/v1/app/timesheet-signatures/{id}/image', $api([$appTimesheetS
 $router->get('/api/v1/attendance/today', $api([$attendanceController, 'today'], 'attendance.view'));
 $router->get('/api/v1/dashboard/overview', $api([new DashboardController($dashboardService), 'overview'], 'dashboard.view'));
 $router->get('/api/v1/dashboard/charts', $api([new DashboardController($dashboardService), 'charts'], 'dashboard.view'));
-$router->get('/api/v1/users/{id}', $api([new UserController($userService), 'show'], 'users.manage'));
-$router->post('/api/v1/users', $api([new UserController($userService), 'store'], 'users.manage'));
-$router->put('/api/v1/users/{id}', $api([new UserController($userService), 'update'], 'users.manage'));
-$router->delete('/api/v1/users/{id}', $api([new UserController($userService), 'archive'], 'users.manage'));
-$router->get('/api/v1/users', $api([new UserController($userService), 'index'], 'users.manage'));
-$router->get('/api/v1/roles/{id}', $api([new RoleController($roleService), 'show'], 'roles.manage'));
-$router->post('/api/v1/roles', $api([new RoleController($roleService), 'store'], 'roles.manage'));
-$router->put('/api/v1/roles/{id}', $api([new RoleController($roleService), 'update'], 'roles.manage'));
-$router->delete('/api/v1/roles/{id}', $api([new RoleController($roleService), 'archive'], 'roles.manage'));
-$router->get('/api/v1/roles', $api([new RoleController($roleService), 'index'], 'roles.manage'));
+$router->get('/api/v1/users/{id}', $api([$userController, 'show'], 'users.manage'));
+$router->post('/api/v1/users', $api([$userController, 'store'], 'users.manage'));
+$router->put('/api/v1/users/{id}', $api([$userController, 'update'], 'users.manage'));
+$router->delete('/api/v1/users/{id}', $api([$userController, 'archive'], 'users.manage'));
+$router->get('/api/v1/users', $api([$userController, 'index'], 'users.manage'));
+$router->get('/api/v1/roles/{id}', $api([$roleController, 'show'], 'roles.manage'));
+$router->post('/api/v1/roles', $api([$roleController, 'store'], 'roles.manage'));
+$router->put('/api/v1/roles/{id}', $api([$roleController, 'update'], 'roles.manage'));
+$router->delete('/api/v1/roles/{id}', $api([$roleController, 'archive'], 'roles.manage'));
+$router->get('/api/v1/roles', $api([$roleController, 'index'], 'roles.manage'));
 $router->get('/api/v1/projects/{id}', $api([$projectController, 'show'], 'projects.view'));
 $router->get('/api/v1/projects', $api([$projectController, 'index'], 'projects.view'));
 $router->post('/api/v1/projects', $api([$projectController, 'store'], 'projects.manage'));
@@ -686,8 +689,8 @@ $router->get('/api/v1/reports/export', $api([new ReportController($reportService
 $router->get('/api/v1/reports/accounting-export', $api([$accountingExportController, 'export'], 'reports.accounting.export'));
 $router->get('/api/v1/settings/company', [$companySettingsController, 'publicProfile']);
 $router->get('/api/v1/settings/company/logo', [$companySettingsController, 'publicLogo']);
-$router->get('/api/v1/settings/database', $api([new SettingsController($databaseSettings), 'show'], 'settings.database.manage'));
-$router->post('/api/v1/settings/database', $api([new SettingsController($databaseSettings), 'store'], 'settings.database.manage'));
+$router->get('/api/v1/settings/database', $api([$databaseSettingsController, 'show'], 'settings.database.manage'));
+$router->post('/api/v1/settings/database', $api([$databaseSettingsController, 'store'], 'settings.database.manage'));
 $router->get('/api/v1/system/backup/export', $api([$backupController, 'export'], 'settings.database.manage'));
 $router->post('/api/v1/system/backup/import/validate', $api([$backupController, 'validateImport'], 'settings.database.manage'));
 

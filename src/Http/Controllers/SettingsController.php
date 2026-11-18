@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Domain\Auth\AuthService;
+use App\Domain\Auth\CsrfService;
 use App\Domain\Settings\DatabaseSettingsManager;
 use App\Http\Request;
 use App\Http\Response;
@@ -11,8 +13,11 @@ use App\Infrastructure\Database\DatabaseConnection;
 
 final class SettingsController
 {
-    public function __construct(private DatabaseSettingsManager $databaseSettingsManager)
-    {
+    public function __construct(
+        private DatabaseSettingsManager $databaseSettingsManager,
+        private AuthService $authService,
+        private CsrfService $csrfService,
+    ) {
     }
 
     public function show(Request $request): Response
@@ -22,12 +27,20 @@ final class SettingsController
 
     public function store(Request $request): Response
     {
+        if (!$this->canChangeDatabase($request)) {
+            return Response::json(['error' => 'Keine Berechtigung fuer diese Datenbank-Aenderung.'], 403);
+        }
+
         $sanitized = $this->databaseSettingsManager->sanitize($request->input());
         $connection = new DatabaseConnection($sanitized);
         $result = $connection->test($sanitized);
 
         if (!$result['ok']) {
             return Response::json(['error' => $result['message']], 422);
+        }
+
+        if (!$this->canChangeDatabase($request)) {
+            return Response::json(['error' => 'Keine Berechtigung fuer diese Datenbank-Aenderung.'], 403);
         }
 
         $saved = $this->databaseSettingsManager->saveForOutput($sanitized);
@@ -40,16 +53,29 @@ final class SettingsController
 
     public function saveFromAdmin(Request $request): Response
     {
+        if (!$this->canChangeDatabase($request)) {
+            return Response::html('<p>Keine Berechtigung fuer diese Datenbank-Aenderung.</p>', 403);
+        }
+
         $sanitized = $this->databaseSettingsManager->sanitize($request->input());
         $connection = new DatabaseConnection($sanitized);
         $result = $connection->test($sanitized);
 
         if ($result['ok']) {
+            if (!$this->canChangeDatabase($request)) {
+                return Response::html('<p>Keine Berechtigung fuer diese Datenbank-Aenderung.</p>', 403);
+            }
             $this->databaseSettingsManager->save($sanitized);
 
             return Response::redirect('/admin/settings/database?notice=saved');
         }
 
         return Response::redirect('/admin/settings/database?error=' . rawurlencode((string) $result['message']));
+    }
+
+    private function canChangeDatabase(Request $request): bool
+    {
+        return $this->csrfService->isValid($request->csrfToken())
+            && $this->authService->canChangeDatabaseConnection();
     }
 }
