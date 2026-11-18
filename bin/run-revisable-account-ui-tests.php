@@ -142,6 +142,7 @@ try {
     foreach ([
         ['UI-ADMIN', 'UI', 'Administrator', 'ui-admin@example.test', 'administrator'],
         ['UI-EMPLOYEE', 'UI', 'Mitarbeiter', 'ui-employee@example.test', 'mitarbeiter'],
+        ['UI-MATERIAL', 'UI', 'Materialerfassung', 'ui-material@example.test', 'mitarbeiter'],
         ['UI-PAGINATION', 'UI', 'Pagination', 'ui-pagination@example.test', 'mitarbeiter'],
         ['UI-WORKTIME-CONTINUE', 'UI', 'Weiterarbeit', 'ui-worktime-continue@example.test', 'mitarbeiter'],
         ['UI-WORKTIME-CONFIRM', 'UI', 'Endbestaetigung', 'ui-worktime-confirm@example.test', 'mitarbeiter'],
@@ -291,6 +292,20 @@ try {
     $connection->execute('INSERT INTO projects (project_number, name, status, created_at, updated_at, is_deleted) VALUES ("UI-FORM-COLLISION", "UI Formularnummer bereits vergeben", "active", NOW(), NOW(), 0)');
     $connection->execute('INSERT INTO project_material_entries (project_id, created_by_user_id, work_date, description, quantity, unit, note) VALUES (:project, :actor, :work_date, "UI Formular Material", 1.5, "Stk", "Synthetischer Navigationstest")', ['project' => $formProjectId, 'actor' => $employeeId, 'work_date' => date('Y-m-d')]);
     $formMaterialId = $connection->lastInsertId();
+    $materialUserId = $userIds['ui-material@example.test'];
+    $materialProjects = [];
+    foreach (['A' => 'UI Zeitbuchungsprojekt', 'B' => 'UI Materialprojekt'] as $key => $name) {
+        $connection->execute(
+            'INSERT INTO projects (project_number, name, status, created_at, updated_at, is_deleted)
+             VALUES (:number, :name, "active", NOW(), NOW(), 0)',
+            ['number' => 'UI-MATERIAL-' . $key, 'name' => $name]
+        );
+        $materialProjects[$key] = $connection->lastInsertId();
+        $connection->execute(
+            'INSERT INTO project_memberships (project_id, user_id) VALUES (:project, :user)',
+            ['project' => $materialProjects[$key], 'user' => $materialUserId]
+        );
+    }
     $connection->execute(
         'INSERT INTO timesheets (
             user_id, project_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes,
@@ -410,6 +425,10 @@ try {
         'UI_TEST_FORM_PROJECT_ID' => (string) $formProjectId,
         'UI_TEST_FORM_MATERIAL_ID' => (string) $formMaterialId,
         'UI_TEST_FORM_OTHER_USER_ID' => (string) $paginationUserId,
+        'UI_TEST_MATERIAL_USER_ID' => (string) $materialUserId,
+        'UI_TEST_MATERIAL_EMAIL' => 'ui-material@example.test',
+        'UI_TEST_MATERIAL_PROJECT_A' => (string) $materialProjects['A'],
+        'UI_TEST_MATERIAL_PROJECT_B' => (string) $materialProjects['B'],
         'UI_TEST_EMPLOYEE_EMAIL' => 'ui-employee@example.test',
         'UI_TEST_EMPLOYEE_PASSWORD' => $password,
         'UI_TEST_EMPLOYEE_ID' => (string) $employeeId,
@@ -442,7 +461,13 @@ try {
         'UI_TEST_HARDENING_DISABLED_URL' => $disabledBaseUrl,
     ]);
     $playwright = base_path('node_modules/.bin/playwright');
-    $realSpecs = ['tests/e2e/revisable-accounts.real.spec.js', 'tests/e2e/work-time.real.spec.js', 'tests/e2e/work-time-hardening.real.spec.js', 'tests/e2e/admin-project-forms.real.spec.js'];
+    $realSpecs = [
+        'tests/e2e/revisable-accounts.real.spec.js',
+        'tests/e2e/work-time.real.spec.js',
+        'tests/e2e/work-time-hardening.real.spec.js',
+        'tests/e2e/admin-project-forms.real.spec.js',
+        'tests/e2e/project-material-context.real.spec.js',
+    ];
     $selectedSpec = trim((string) getenv('UI_REAL_TEST_SPEC'));
     if ($selectedSpec !== '') {
         if (!in_array($selectedSpec, $realSpecs, true)) { throw new RuntimeException('Unbekannte isolierte Browser-Testdatei.'); }

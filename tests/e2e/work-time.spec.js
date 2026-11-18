@@ -43,8 +43,7 @@ async function mockWorkTimeApp(page, options = {}) {
   const flags = { show_geo_section: false, show_project_files: false, show_timesheet_files: false, show_personnel_overview: false };
   const todayState = () => ({ status: app.entry && !app.entry.end_time ? 'working' : 'not_started', is_missing: false, booking_required: false, work_entry: app.entry, status_entry: null, current_break: null });
   await page.addInitScript(() => {
-    localStorage.setItem('app.projectSelectionId', '1');
-    localStorage.setItem('app.preferredProjectId', '1');
+    localStorage.setItem('app.checkInProjectId.user.7', '1');
   });
   // All network requests are intercepted; these tests never touch a live API or DB.
   await page.route('**/*', async (route) => {

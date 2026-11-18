@@ -1,7 +1,7 @@
 (function () {
     const THEME_KEY = 'app.theme';
-    const PREFERRED_PROJECT_KEY = 'app.preferredProjectId';
-    const PROJECT_SELECTION_KEY = 'app.projectSelectionId';
+    const CHECK_IN_PROJECT_KEY = 'app.checkInProjectId';
+    const VIEWED_PROJECT_KEY = 'app.viewedProjectId';
     const TIMESHEET_FILTER_SCOPE_KEY = 'app.timesheetFilterScope';
     const TIMESHEET_FILTER_PROJECT_KEY = 'app.timesheetFilterProjectId';
     const TIMESHEET_FILTER_MONTH_KEY = 'app.timesheetFilterMonth';
@@ -36,7 +36,7 @@
     const root = document.getElementById('appRoot');
     const bootstrap = window.__APP_BOOTSTRAP__ || {};
     let state = {
-        session: bootstrap.session || { authenticated: false, user: null },
+        session: { authenticated: false, user: null },
         today: null,
         company: null,
         projects: [],
@@ -50,8 +50,9 @@
         pendingAction: null,
         uploadingTimesheetId: null,
         uploadingProjectId: null,
-        preferredProjectId: null,
-        projectSelectionId: undefined,
+        checkInProjectId: undefined,
+        viewedProjectId: undefined,
+        projectAccessNotice: '',
         projectSearchQueries: {},
         projectSearchComposing: null,
         projectFiles: {},
@@ -117,7 +118,9 @@
     let onlineDataRequestCounter = 0;
     let workTimeRequestCounter = 0;
     let activeOnlineDataLoad = null;
+    let queueSyncTail = Promise.resolve(null);
     let sessionGeneration = 0;
+    let viewedProjectGeneration = 0;
     let workReportStorageQueue = Promise.resolve();
     let materialDraftStorageQueue = Promise.resolve();
     let revalidateTimer = null;
@@ -138,59 +141,76 @@
         return 'system';
     }
 
-    function readPreferredProjectId() {
-        try {
-            const stored = window.localStorage.getItem(PREFERRED_PROJECT_KEY);
+    function userPreferenceKey(key) {
+        const userPart = currentSessionUserCachePart();
 
-            if (stored === null || stored === '') {
-                return null;
-            }
-
-            const parsed = Number(stored);
-
-            return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-        } catch (error) {
-            return null;
-        }
+        return state.session.authenticated && userPart !== 'anonymous' ? key + '.user.' + userPart : null;
     }
 
-    function storePreferredProjectId(projectId) {
-        state.preferredProjectId = typeof projectId === 'number' && projectId > 0 ? projectId : null;
+    function readProjectPreference(key) {
+        const storageKey = userPreferenceKey(key);
+        if (!storageKey) return undefined;
 
         try {
-            if (state.preferredProjectId === null) {
-                window.localStorage.removeItem(PREFERRED_PROJECT_KEY);
-            } else {
-                window.localStorage.setItem(PREFERRED_PROJECT_KEY, String(state.preferredProjectId));
-            }
-        } catch (error) {
-            console.warn('Projektvormerkung konnte nicht gespeichert werden.', error);
-        }
-    }
-
-    function readProjectSelectionState() {
-        try {
-            const stored = window.localStorage.getItem(PROJECT_SELECTION_KEY);
-
-            if (stored === null) {
-                return undefined;
-            }
-
-            if (stored === 'none') {
-                return null;
-            }
+            const stored = window.localStorage.getItem(storageKey);
+            if (stored === 'none') return null;
 
             const parsed = Number(stored);
-
             return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
         } catch (error) {
             return undefined;
         }
     }
 
-    function readTimesheetFilterScope() {
+    function storeProjectPreference(key, projectId) {
+        const storageKey = userPreferenceKey(key);
+        if (!storageKey) return;
+
         try {
-            const stored = window.localStorage.getItem(TIMESHEET_FILTER_SCOPE_KEY);
+            if (projectId === undefined) {
+                window.localStorage.removeItem(storageKey);
+            } else {
+                window.localStorage.setItem(storageKey, projectId === null ? 'none' : String(projectId));
+            }
+        } catch (error) {
+            console.warn('Projektauswahl konnte nicht gespeichert werden.', error);
+        }
+    }
+
+    function restoreUserProjectPreferences() {
+        state.checkInProjectId = readProjectPreference(CHECK_IN_PROJECT_KEY);
+        state.viewedProjectId = readProjectPreference(VIEWED_PROJECT_KEY);
+        state.timesheetFilterScope = readTimesheetFilterScope();
+        state.timesheetFilterProjectId = readProjectPreference(TIMESHEET_FILTER_PROJECT_KEY) ?? null;
+    }
+
+    function setCheckInProjectId(projectId) {
+        state.checkInProjectId = projectId;
+        storeProjectPreference(CHECK_IN_PROJECT_KEY, projectId);
+    }
+
+    function setViewedProjectId(projectId) {
+        if (projectId !== state.viewedProjectId) {
+            viewedProjectGeneration += 1;
+            projectFilesRequestCounter += 1;
+            projectMaterialRequestCounter += 1;
+            projectWorkReportRequestCounter += 1;
+            state.projectFilesLoading = false;
+            state.projectMaterialsLoading = false;
+            state.projectMaterialsOffline = !state.online;
+            state.projectWorkReportsLoading = false;
+            state.projectWorkReportsOffline = !state.online;
+        }
+        state.viewedProjectId = projectId;
+        storeProjectPreference(VIEWED_PROJECT_KEY, projectId);
+    }
+
+    function readTimesheetFilterScope() {
+        const storageKey = userPreferenceKey(TIMESHEET_FILTER_SCOPE_KEY);
+        if (!storageKey) return 'all';
+
+        try {
+            const stored = window.localStorage.getItem(storageKey);
 
             return stored === 'project' ? 'project' : 'all';
         } catch (error) {
@@ -201,40 +221,19 @@
     function storeTimesheetFilterScope(scope) {
         state.timesheetFilterScope = scope === 'all' ? 'all' : 'project';
 
+        const storageKey = userPreferenceKey(TIMESHEET_FILTER_SCOPE_KEY);
+        if (!storageKey) return;
+
         try {
-            window.localStorage.setItem(TIMESHEET_FILTER_SCOPE_KEY, state.timesheetFilterScope);
+            window.localStorage.setItem(storageKey, state.timesheetFilterScope);
         } catch (error) {
             console.warn('Zeiten-Filter konnte nicht gespeichert werden.', error);
         }
     }
 
-    function readTimesheetFilterProjectId() {
-        try {
-            const stored = window.localStorage.getItem(TIMESHEET_FILTER_PROJECT_KEY);
-
-            if (stored === null || stored === '' || stored === 'none') {
-                return null;
-            }
-
-            const parsed = Number(stored);
-
-            return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-        } catch (error) {
-            return null;
-        }
-    }
-
     function storeTimesheetFilterProjectId(projectId) {
         state.timesheetFilterProjectId = typeof projectId === 'number' && projectId > 0 ? projectId : null;
-
-        try {
-            window.localStorage.setItem(
-                TIMESHEET_FILTER_PROJECT_KEY,
-                state.timesheetFilterProjectId === null ? 'none' : String(state.timesheetFilterProjectId)
-            );
-        } catch (error) {
-            console.warn('Historien-Projektfilter konnte nicht gespeichert werden.', error);
-        }
+        storeProjectPreference(TIMESHEET_FILTER_PROJECT_KEY, state.timesheetFilterProjectId);
     }
 
     function readTimesheetFilterMonth() {
@@ -277,38 +276,8 @@
         }
     }
 
-    function preferredProjectId() {
-        return typeof state.preferredProjectId === 'number' && state.preferredProjectId > 0
-            ? state.preferredProjectId
-            : readPreferredProjectId();
-    }
-
-    function preferredProject() {
-        const projectId = preferredProjectId();
-
-        if (projectId === null || !state.today || !Array.isArray(state.today.projects)) {
-            return null;
-        }
-
-        return state.today.projects.find((project) => project.id === projectId) || null;
-    }
-
     function activeProjects() {
         return state.today && Array.isArray(state.today.projects) ? state.today.projects : [];
-    }
-
-    function selectedProjectId() {
-        const projectSelect = document.getElementById('projectSelect');
-
-        if (!projectSelect || !projectSelect.value) {
-            const selection = projectSelectionStateId();
-
-            return typeof selection === 'undefined' ? null : selection;
-        }
-
-        const projectId = Number(projectSelect.value);
-
-        return Number.isInteger(projectId) && projectId > 0 ? projectId : null;
     }
 
     function projectById(projectId) {
@@ -364,32 +333,8 @@
         return permissions.includes('*') || permissions.includes(permission);
     }
 
-    function projectFileContextId() {
-        const explicitSelection = projectSelectionStateId();
-
-        if (typeof explicitSelection === 'number' && explicitSelection > 0 && isCurrentAuthorizedProject(explicitSelection)) {
-            return explicitSelection;
-        }
-
-        if (explicitSelection === null) {
-            return null;
-        }
-
-        const entry = workEntry();
-
-        if (entry && typeof entry.project_id === 'number' && entry.project_id > 0 && isCurrentAuthorizedProject(entry.project_id)) {
-            return entry.project_id;
-        }
-
-        const preferred = preferredProjectId();
-
-        if (preferred !== null && isCurrentAuthorizedProject(preferred)) {
-            return preferred;
-        }
-
-        const projects = activeProjects();
-
-        return projects.length > 0 ? projects[0].id : null;
+    function viewedProjectId() {
+        return isCurrentAuthorizedProject(state.viewedProjectId) ? state.viewedProjectId : null;
     }
 
     function projectFilesCacheKey(projectId) {
@@ -508,14 +453,21 @@
         sessionGeneration += 1;
         onlineDataRequestCounter += 1;
         activeOnlineDataLoad = null;
+        queueSyncTail = Promise.resolve(null);
         projectMaterialRequestCounter += 1;
         projectFilesRequestCounter += 1;
         projectWorkReportRequestCounter += 1;
+        workTimeRequestCounter += 1;
         state.pendingAction = null;
         state.uploadingTimesheetId = null;
         state.uploadingProjectId = null;
         state.today = null;
         state.projects = [];
+        state.checkInProjectId = undefined;
+        state.viewedProjectId = undefined;
+        state.projectAccessNotice = '';
+        state.timesheetFilterScope = 'all';
+        state.timesheetFilterProjectId = null;
         state.projectFiles = {};
         state.projectSearchQueries = {};
         state.projectSearchComposing = null;
@@ -572,35 +524,6 @@
         const project = projectById(projectId);
 
         return 'Projektfilter: ' + (project ? project.name : 'Nicht zugeordnet');
-    }
-
-    function projectSelectionStateId() {
-        return typeof state.projectSelectionId === 'undefined'
-            ? undefined
-            : state.projectSelectionId;
-    }
-
-    function setProjectSelectionState(projectId) {
-        state.projectSelectionId = typeof projectId === 'number' && projectId > 0 ? projectId : null;
-
-        try {
-            window.localStorage.setItem(
-                PROJECT_SELECTION_KEY,
-                state.projectSelectionId === null ? 'none' : String(state.projectSelectionId)
-            );
-        } catch (error) {
-            console.warn('Projekt-Auswahl konnte nicht gespeichert werden.', error);
-        }
-    }
-
-    function resetProjectSelectionState() {
-        state.projectSelectionId = undefined;
-
-        try {
-            window.localStorage.removeItem(PROJECT_SELECTION_KEY);
-        } catch (error) {
-            console.warn('Projekt-Auswahl konnte nicht zurueckgesetzt werden.', error);
-        }
     }
 
     function currentThemeMode() {
@@ -726,8 +649,10 @@
     }
 
     function closeDialog() {
+        const projectAssignment = state.dialog?.type === 'confirm-project-assignment';
         state.dialog = null;
         render();
+        if (projectAssignment) document.getElementById('assignTimeBookingProject')?.focus();
     }
 
     function friendlyMessage(message, fallback) {
@@ -814,8 +739,12 @@
         // Session expiry requires reauthentication, not destruction of unsent work.
         await clearProjectWorkReportStorage(previousUserPart, undefined, true);
         if (!isCurrentSessionContext(expiredContext)) return;
-        await cacheSet('session', state.session, () => isCurrentSessionContext(expiredContext));
-        await cacheDelete(previousTodayCacheKey);
+        try {
+            await clearCachedSession(previousUserPart, expiredContext);
+            await cacheDelete(previousTodayCacheKey);
+        } catch (error) {
+            console.warn('Lokaler Sitzungsstatus konnte nicht bereinigt werden.', error);
+        }
         if (!isCurrentSessionContext(expiredContext)) return;
 
         state.route = '/app/login';
@@ -839,9 +768,11 @@
         }
     }
 
-    async function apiJson(url, options) {
+    async function apiJson(url, options = {}) {
         const context = sessionContext();
-        const response = await fetch(url, options || {});
+        const headers = new Headers(options.headers);
+        if (context.userPart !== 'anonymous') headers.set('X-TimeApp-User-Id', context.userPart);
+        const response = await fetch(url, { ...options, headers });
         const payload = await parseJsonResponse(response);
 
         if (!isCurrentSessionContext(context)) {
@@ -850,7 +781,9 @@
 
         if (response.status === 401) {
             const message = payload.message || payload.error || 'Bitte erneut anmelden.';
-            await handleExpiredSession('Ihre Sitzung ist abgelaufen. Bitte erneut anmelden. Wartende Buchungen bleiben erhalten.');
+            await handleExpiredSession(payload.code === 'session_changed'
+                ? 'Das angemeldete Konto hat gewechselt. Bitte melden Sie sich erneut an.'
+                : 'Ihre Sitzung ist abgelaufen. Bitte erneut anmelden. Wartende Buchungen bleiben erhalten.');
             throw new SessionExpiredError(message);
         }
 
@@ -908,6 +841,26 @@
         await new Promise((resolve, reject) => {
             const tx = database.transaction('cache', 'readwrite');
             tx.objectStore('cache').put({ key, value, updatedAt: Date.now() });
+            tx.oncomplete = resolve;
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error || new Error('Lokaler Speichervorgang wurde abgebrochen.'));
+        });
+    }
+
+    async function clearCachedSession(userPart, context) {
+        const database = await db();
+        if (!isCurrentSessionContext(context)) return;
+
+        await new Promise((resolve, reject) => {
+            const tx = database.transaction('cache', 'readwrite');
+            const store = tx.objectStore('cache');
+            const request = store.get('session');
+            request.onsuccess = function () {
+                const cachedOwner = request.result?.value?.user?.id;
+                if (isCurrentSessionContext(context) && String(cachedOwner) === userPart) {
+                    store.put({ key: 'session', value: { authenticated: false, user: null }, updatedAt: Date.now() });
+                }
+            };
             tx.oncomplete = resolve;
             tx.onerror = () => reject(tx.error);
             tx.onabort = () => reject(tx.error || new Error('Lokaler Speichervorgang wurde abgebrochen.'));
@@ -995,7 +948,7 @@
             ...item,
             id: item.id || createClientId(),
             status: 'pending',
-            createdAt: Date.now()
+            createdAt: performance.timeOrigin + performance.now()
         };
 
         await new Promise((resolve, reject) => {
@@ -1009,12 +962,15 @@
     }
 
     async function queueAll() {
+        const userPart = currentSessionUserCachePart();
         const database = await db();
 
         return new Promise((resolve, reject) => {
             const tx = database.transaction('queue', 'readonly');
             const request = tx.objectStore('queue').getAll();
-            request.onsuccess = () => resolve(request.result || []);
+            request.onsuccess = () => resolve((request.result || [])
+                .filter((item) => !item.userPart || item.userPart === userPart)
+                .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)));
             request.onerror = () => reject(request.error);
         });
     }
@@ -1098,6 +1054,20 @@
                 + '</div>'
                 + '</section>'
                 + '</div>';
+        }
+
+        if (state.dialog.type === 'confirm-project-assignment') {
+            const payload = state.dialog.payload;
+            return '<div class="app-dialog-layer">'
+                + '<button type="button" class="app-dialog-overlay" id="dialogCancel" tabindex="-1" aria-label="Dialog schließen"></button>'
+                + '<section class="app-dialog" role="dialog" aria-modal="true" aria-labelledby="projectAssignmentTitle">'
+                + '<h2 id="projectAssignmentTitle">Laufende Zeitbuchung zuordnen?</h2>'
+                + '<p>Der laufende Einsatz wird von ' + escapeHtml(projectDisplayName(payload.previousProjectId))
+                + ' auf ' + escapeHtml(projectDisplayName(payload.projectId)) + ' umgebucht.</p>'
+                + '<div class="app-inline-actions">'
+                + '<button type="button" id="dialogConfirmPrimary">Zeitbuchung zuordnen</button>'
+                + '<button type="button" id="dialogConfirmSecondary" class="app-button-secondary">Abbrechen</button>'
+                + '</div></section></div>';
         }
 
         if (state.dialog.type === 'pause-minutes') {
@@ -1436,86 +1406,40 @@
         return !bookingRequiredToday() && (status === 'not_started' || status === 'planned');
     }
 
-    function normalizeProjectSelectionAgainstToday() {
-        if (!state.today) {
-            return;
+    function reconcileProjectContexts(confirmed) {
+        if (!state.today || !Array.isArray(state.today.projects)) return;
+
+        if (confirmed && typeof state.checkInProjectId === 'number' && !isCurrentAuthorizedProject(state.checkInProjectId)) {
+            setCheckInProjectId(undefined);
         }
-
-        const todayState = state.today.today_state || {};
-        const entry = todayState.work_entry || null;
-        const explicitSelection = projectSelectionStateId();
-        const summaryProjectIds = projectDaySummaries().map((item) => Object.prototype.hasOwnProperty.call(item, 'project_id') ? item.project_id : null);
-        const availableProjectIds = Array.isArray(state.today.projects)
-            ? state.today.projects.map((project) => project.id)
-            : [];
-
-        if (entry && entry.start_time && !entry.end_time) {
-            const runningProjectId = Object.prototype.hasOwnProperty.call(entry, 'project_id') ? entry.project_id : null;
-            setProjectSelectionState(
-                runningProjectId === null || availableProjectIds.includes(runningProjectId)
-                    ? runningProjectId
-                    : null
-            );
-            return;
+        if (confirmed && typeof state.viewedProjectId === 'number' && !isCurrentAuthorizedProject(state.viewedProjectId)) {
+            setViewedProjectId(null);
+            state.projectAccessNotice = 'Das geöffnete Projekt ist für Sie nicht mehr verfügbar. Bitte wählen Sie ein anderes Projekt.';
         }
-
-        const preferred = preferredProjectId();
-
-        if (preferred !== null && !availableProjectIds.includes(preferred)) {
-            storePreferredProjectId(null);
-        }
-
-        if (typeof explicitSelection === 'undefined') {
-            return;
-        }
-
-        if (explicitSelection === null) {
-            return;
-        }
-
-        if (routeName() === '/projektwahl' && !availableProjectIds.includes(explicitSelection)) {
-            // A revoked selection must not silently turn into a different job site.
-            setProjectSelectionState(null);
-            return;
-        }
-
-        const selectionExists = availableProjectIds.includes(explicitSelection) || summaryProjectIds.includes(explicitSelection);
-
-        if (selectionExists) {
-            return;
-        }
-
-        if (entry && Object.prototype.hasOwnProperty.call(entry, 'project_id')) {
-            setProjectSelectionState(entry.project_id);
-        } else {
-            resetProjectSelectionState();
+        if (routeName() === '/projektwahl' && state.viewedProjectId === undefined) {
+            const activeId = runningWorkEntry()?.project_id ?? null;
+            const initialId = isCurrentAuthorizedProject(activeId) ? activeId : (checkInProjectId() ?? activeProjects()[0]?.id);
+            if (initialId !== undefined) setViewedProjectId(initialId);
         }
     }
 
-    function normalizeTimesheetFilterAgainstToday() {
-        return;
+    function checkInProjectId() {
+        if (state.checkInProjectId === null || isCurrentAuthorizedProject(state.checkInProjectId)) {
+            return state.checkInProjectId;
+        }
+
+        const latestId = globalWorkEntry()?.project_id ?? null;
+        return isCurrentAuthorizedProject(latestId) ? latestId : null;
     }
 
-    function activeProjectId() {
-        const explicitSelection = projectSelectionStateId();
+    function timeContextProjectId() {
+        const running = runningWorkEntry();
+        return running ? running.project_id ?? null : checkInProjectId();
+    }
 
-        if (typeof explicitSelection !== 'undefined') {
-            return explicitSelection;
-        }
-
-        const projectSelectValue = selectedProjectId();
-
-        if (projectSelectValue !== null) {
-            return projectSelectValue;
-        }
-
-        const entry = state.today && state.today.today_state ? state.today.today_state.work_entry || null : null;
-
-        if (entry && Object.prototype.hasOwnProperty.call(entry, 'project_id')) {
-            return entry.project_id === null ? null : Number(entry.project_id);
-        }
-
-        return preferredProjectId();
+    function canEditTimeContext() {
+        const latest = globalWorkEntry();
+        return !latest?.start_time || (latest.project_id ?? null) === timeContextProjectId();
     }
 
     function projectNameForId(projectId) {
@@ -1526,8 +1450,8 @@
 
     function emptyProjectDayView() {
         return {
-            project_id: activeProjectId(),
-            project_name: projectNameForId(activeProjectId()),
+            project_id: timeContextProjectId(),
+            project_name: projectNameForId(timeContextProjectId()),
             status: 'not_started',
             start_time: null,
             end_time: null,
@@ -1542,7 +1466,7 @@
     }
 
     function currentProjectDayView() {
-        const projectId = activeProjectId();
+        const projectId = timeContextProjectId();
         const summaries = projectDaySummaries();
         const summary = summaries.find((item) => {
             const itemProjectId = Object.prototype.hasOwnProperty.call(item, 'project_id') ? item.project_id : null;
@@ -1641,52 +1565,13 @@
         return view.project_name || 'Nicht zugeordnet';
     }
 
-    function activeProjectlessWorkEntry() {
-        const entry = globalWorkEntry();
-
-        if (!entry || !entry.start_time || entry.end_time) {
-            return null;
-        }
-
-        const projectId = Object.prototype.hasOwnProperty.call(entry, 'project_id') ? entry.project_id : null;
-
-        return projectId === null ? entry : null;
-    }
-
     function globalWorkEntry() {
         return state.today && state.today.today_state ? state.today.today_state.work_entry || null : null;
     }
 
-    function globalActiveProjectId() {
+    function runningWorkEntry() {
         const entry = globalWorkEntry();
-
-        if (!entry || !entry.start_time || entry.end_time) {
-            return null;
-        }
-
-        return Object.prototype.hasOwnProperty.call(entry, 'project_id') ? entry.project_id : null;
-    }
-
-    function otherActiveProjectName() {
-        const globalEntry = globalWorkEntry();
-
-        if (!globalEntry || !globalEntry.start_time || globalEntry.end_time) {
-            return null;
-        }
-
-        return globalEntry.project_name || projectNameForId(globalEntry.project_id ?? null);
-    }
-
-    function isBlockedByOtherActiveProject() {
-        const entry = globalWorkEntry();
-
-        if (!entry || !entry.start_time || entry.end_time) {
-            return false;
-        }
-
-        const globalProjectId = Object.prototype.hasOwnProperty.call(entry, 'project_id') ? entry.project_id : null;
-
-        return globalProjectId !== activeProjectId();
+        return entry && entry.start_time && !entry.end_time ? entry : previousWorkTimeEntry();
     }
 
     function currentStartTimeValue() {
@@ -1835,7 +1720,7 @@
         const summaries = projectDaySummaries().slice();
         const projectId = entry && Object.prototype.hasOwnProperty.call(entry, 'project_id')
             ? entry.project_id
-            : activeProjectId();
+            : timeContextProjectId();
         const previousProjectIdProvided = typeof previousProjectId !== 'undefined';
         const previousSummary = summaries.find((item) => item.project_id === projectId)
             || (previousProjectIdProvided ? summaries.find((item) => item.project_id === previousProjectId) : null)
@@ -2258,14 +2143,14 @@
         return html + '</section>';
     }
 
-    async function loadWorkTime(context) {
+    async function loadWorkTime(context, current = () => isCurrentSessionContext(context)) {
         const requestId = ++workTimeRequestCounter;
         if (!state.today || !state.today.work_time_windows_enabled) {
             state.workTime = null;
             return;
         }
         const result = await apiJson('/api/v1/app/me/work-time');
-        if (isCurrentSessionContext(context) && requestId === workTimeRequestCounter) state.workTime = result.data || null;
+        if (current() && requestId === workTimeRequestCounter) state.workTime = result.data || null;
     }
 
     function workTimeNowLocal() {
@@ -2443,7 +2328,7 @@
             return '';
         }
 
-        const projectId = projectFileContextId();
+        const projectId = viewedProjectId();
 
         if (projectId === null) {
             return '<section class="app-card app-grid"><div><p class="muted">Auftragsunterlagen</p><h2>Projektdateien</h2><p>Bitte zuerst ein Projekt auswaehlen.</p></div></section>';
@@ -2474,7 +2359,7 @@
     }
 
     function projectDetailsSectionMarkup() {
-        const projectId = projectFileContextId();
+        const projectId = viewedProjectId();
         const project = projectById(projectId);
 
         if (!project) {
@@ -2540,12 +2425,25 @@
         return number.toLocaleString('de-DE', { maximumFractionDigits: 3 });
     }
 
+    function materialCaptureMarkup(item) {
+        const crossProject = ['cross_project', 'cross_project_backdated'].includes(item.capture_type);
+        const backdated = ['backdated', 'cross_project_backdated'].includes(item.capture_type);
+        if (!crossProject && !backdated) return '';
+
+        const source = crossProject && item.captured_work_project_name && isCurrentAuthorizedProject(item.captured_work_project_id)
+            ? '<small class="muted">Eingecheckt bei der Erfassung: ' + escapeHtml(item.captured_work_project_name) + '</small>' : '';
+        return '<div class="app-material-capture">'
+            + (crossProject ? '<small>Projektübergreifend erfasst</small>' : '')
+            + (backdated ? '<small>Nachgetragen</small>' : '')
+            + '</div>' + source;
+    }
+
     function projectMaterialSectionMarkup() {
         if (!showAppWidget('show_project_materials')) {
             return '';
         }
 
-        const projectId = projectFileContextId();
+        const projectId = viewedProjectId();
 
         if (projectId === null) {
             return '<section class="app-card app-grid"><div><p class="muted">Material</p><h2>Materialdokumentation</h2><p>Bitte zuerst ein Projekt auswaehlen.</p></div></section>';
@@ -2558,6 +2456,12 @@
         const locked = !draft.ready || busy || uncertain ? ' readonly' : '';
         const storageError = state.projectMaterialStorageErrors[String(projectId)];
         const currentUserId = Number(state.session && state.session.user ? state.session.user.id || 0 : 0);
+        const destination = projectDisplayName(projectId);
+        const running = runningWorkEntry();
+        const activeId = running?.project_id ?? null;
+        const targetLabel = activeId !== null && activeId !== projectId
+            ? 'Materialnachtrag für ' + destination + '. Ihre Zeitbuchung in ' + projectDisplayName(activeId) + ' wird nicht verändert.'
+            : 'Material wird in ' + destination + ' gespeichert.';
         const canManage = hasPermission('projects.manage');
         const loading = state.projectMaterialsLoading ? '<div class="app-empty">Materialeintraege werden geladen ...</div>' : '';
         const offline = state.projectMaterialsOffline || !state.online
@@ -2572,11 +2476,14 @@
             : '<div class="app-info-list">' + items.map(function (item) {
                 const canArchive = canManage || Number(item.created_by_user_id || 0) === currentUserId;
                 const quantity = formatMaterialQuantity(item.quantity) + (item.unit ? ' ' + item.unit : '');
+                const civilTime = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}):\d{2}$/.exec(item.created_at || '');
+                const recorded = civilTime ? formatDate(civilTime[1]) + ' ' + civilTime[2] : formatDateTimeStamp(item.created_at);
 
-                return '<article class="app-info-row app-material-row">'
+                return '<article class="app-info-row app-material-row" data-render-key="material-' + Number(item.id) + '">'
                     + '<div><strong>' + escapeHtml(item.description || 'Material') + '</strong>'
-                    + '<span>' + escapeHtml(quantity) + ' · ' + escapeHtml(formatDate(item.work_date) || item.work_date || '-') + '</span>'
-                    + '<small class="muted">Erfasst von ' + escapeHtml(item.created_by_name || 'Unbekannt') + '</small>'
+                    + '<span>' + escapeHtml(quantity) + ' · Materialdatum ' + escapeHtml(formatDate(item.work_date)) + '</span>'
+                    + '<small class="muted">Erfasst von ' + escapeHtml(item.created_by_name || 'Unbekannt') + ' · ' + escapeHtml(recorded) + '</small>'
+                    + materialCaptureMarkup(item)
                     + (item.note ? '<p>' + escapeHtml(item.note) + '</p>' : '') + '</div>'
                     + (canArchive ? '<button type="button" class="app-button-secondary" data-archive-project-material="' + item.id + '">Archivieren</button>' : '')
                     + '</article>';
@@ -2591,13 +2498,14 @@
             + (uncertain && !busy ? '<div class="app-empty" role="status">Die Speicherantwort ist noch nicht bestätigt. Prüfen Sie denselben Eintrag erneut, bevor Sie die Angaben ändern.</div>' : '')
             + '</div>'
             + rows
-            + '<form id="projectMaterialForm" class="app-grid" data-project-id="' + projectId + '">'
+            + '<form id="projectMaterialForm" class="app-grid" data-project-id="' + projectId + '" aria-describedby="projectMaterialTarget">'
+            + '<p id="projectMaterialTarget" class="app-material-target">' + escapeHtml(targetLabel) + '</p>'
             + '<label class="app-field"><span>Material / Artikel</span><input id="projectMaterialDescription" name="description" maxlength="255" required' + locked + ' value="' + escapeHtml(draft.description) + '"></label>'
             + '<label class="app-field"><span>Menge</span><input id="projectMaterialQuantity" name="quantity" inputmode="decimal" required' + locked + ' value="' + escapeHtml(draft.quantity) + '"></label>'
             + '<label class="app-field"><span>Einheit</span><input id="projectMaterialUnit" name="unit" maxlength="40" list="projectMaterialUnits"' + locked + ' value="' + escapeHtml(draft.unit) + '"></label>'
             + '<datalist id="projectMaterialUnits"><option value="Stueck"></option><option value="m"></option><option value="m²"></option><option value="kg"></option><option value="g"></option><option value="l"></option><option value="ml"></option><option value="Rolle"></option><option value="Packung"></option><option value="Satz"></option></datalist>'
             + '<label class="app-field"><span>Bemerkung</span><textarea id="projectMaterialNote" name="note" maxlength="2000" rows="3"' + locked + '>' + escapeHtml(draft.note) + '</textarea></label>'
-            + '<label class="app-field"><span>Datum</span><input id="projectMaterialDate" name="work_date" type="date" max="' + escapeHtml(state.today && state.today.today ? state.today.today : '') + '" required' + locked + ' value="' + escapeHtml(draft.work_date) + '"></label>'
+            + '<label class="app-field"><span>Materialdatum</span><input id="projectMaterialDate" name="work_date" type="date" max="' + escapeHtml(state.today && state.today.today ? state.today.today : '') + '" required' + locked + ' value="' + escapeHtml(draft.work_date) + '"></label>'
             + '<button type="submit" ' + (!draft.ready || busy ? 'disabled' : '') + '>' + escapeHtml(busy ? buttonLabel('project_material', 'Material speichern') : (uncertain ? 'Speichern erneut prüfen' : 'Material speichern')) + '</button>'
             + '</form>'
             + '</section>';
@@ -2616,7 +2524,7 @@
     }
 
     function projectWorkReportSectionMarkup() {
-        const projectId = projectFileContextId();
+        const projectId = viewedProjectId();
         if (projectId === null) {
             return '<section class="app-card app-grid" id="projectWorkReportSection"><h2>Ausgeführte Arbeiten</h2><p>Bitte zuerst ein Projekt auswählen.</p></section>';
         }
@@ -3100,14 +3008,10 @@
         const today = state.today || {};
         const entry = workEntry();
         const status = currentStatus();
-        const blockedByOtherProject = isBlockedByOtherActiveProject();
-        const canCheckIn = !blockedByOtherProject && status !== 'working' && status !== 'paused' && status !== 'presence_only' && !hasOpenWorkTimeCarryover();
-        const canPause = !blockedByOtherProject && status === 'working';
-        const canCheckOut = !blockedByOtherProject && (status === 'working' || status === 'paused');
+        const canCheckIn = status !== 'working' && status !== 'paused' && status !== 'presence_only' && !hasOpenWorkTimeCarryover();
+        const canPause = status === 'working';
+        const canCheckOut = (status === 'working' || status === 'paused');
         const totalBreakMinutes = todayTotalBreakMinutes();
-        const otherProjectHint = blockedByOtherProject
-            ? '<div class="app-empty">Auf <strong>' + escapeHtml(otherActiveProjectName() || 'einem anderen Projekt') + '</strong> laeuft noch ein Einsatz. Bitte zuerst dorthin wechseln.</div>'
-            : '';
         const todayTotalRow = showAppWidget('show_today_total_minutes')
             ? '<div class="app-stat-row"><span class="muted">Heute gesamt</span><strong data-live-today-duration>' + escapeHtml(formatDurationMinutes(todayTotalWorkMinutes())) + '</strong></div>'
             : '';
@@ -3143,11 +3047,10 @@
             + (canPause ? '<button type="button" data-action="pause" ' + (isBusy('pause') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('pause', 'Pause buchen')) + '</button>' : '')
             + (canCheckOut ? '<button type="button" data-action="check_out" ' + (isBusy('check_out') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('check_out', 'Check-out')) + '</button>' : '')
             + '</div>'
-            + otherProjectHint
             + '<div class="app-grid">'
-            + projectSelectMarkup('Projekt')
+            + projectSelectMarkup(runningWorkEntry() ? 'Projekt für den nächsten Check-in' : 'Projekt für die Zeiterfassung')
             + '<label class="app-field"><span>Notiz</span><textarea id="timesheetNote" rows="4">' + escapeHtml(entry && entry.note ? entry.note : '') + '</textarea></label>'
-            + '<button type="button" id="saveUpsert" ' + (isBusy('upsert') || blockedByOtherProject || status === 'presence_only' || hasOpenWorkTimeCarryover() ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Stand speichern')) + '</button>'
+            + '<button type="button" id="saveUpsert" ' + (isBusy('upsert') || !canEditTimeContext() || status === 'presence_only' || hasOpenWorkTimeCarryover() ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Stand speichern')) + '</button>'
             + '</div>'
             + '</section>'
             + geoSection
@@ -3157,13 +3060,9 @@
     function timesView() {
         const entry = workEntry();
         const status = currentStatus();
-        const blockedByOtherProject = isBlockedByOtherActiveProject();
-        const canCheckIn = !blockedByOtherProject && status !== 'working' && status !== 'paused' && status !== 'presence_only' && !hasOpenWorkTimeCarryover();
-        const canPause = !blockedByOtherProject && status === 'working';
-        const canCheckOut = !blockedByOtherProject && (status === 'working' || status === 'paused');
-        const otherProjectHint = blockedByOtherProject
-            ? '<div class="app-empty">Auf <strong>' + escapeHtml(otherActiveProjectName() || 'einem anderen Projekt') + '</strong> laeuft noch ein Einsatz. Bitte zuerst dorthin wechseln.</div>'
-            : '';
+        const canCheckIn = status !== 'working' && status !== 'paused' && status !== 'presence_only' && !hasOpenWorkTimeCarryover();
+        const canPause = status === 'working';
+        const canCheckOut = (status === 'working' || status === 'paused');
         const optionalMetrics = [
             showAppWidget('show_current_shift_minutes')
                 ? metric('Aktueller Einsatz', '<span data-live-work-duration>' + escapeHtml(formatDurationMinutes(currentEntryWorkMinutes())) + '</span>', 'Nettozeit fuer den laufenden oder letzten Einsatz')
@@ -3192,16 +3091,15 @@
             + '<div class="app-stat-row"><span class="muted">Aktueller Einsatz</span><strong data-live-work-duration>' + escapeHtml(formatDurationMinutes(currentEntryWorkMinutes())) + '</strong></div>'
             + '</div>'
             + '<div class="app-grid">'
-            + projectSelectMarkup('Projekt')
+            + projectSelectMarkup(runningWorkEntry() ? 'Projekt für den nächsten Check-in' : 'Projekt für die Zeiterfassung')
             + '</div>'
             + manualTimeMarkup(entry)
             + '<div class="app-inline-actions">'
             + (canCheckIn ? '<button type="button" data-action="check_in" ' + (isBusy('check_in') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('check_in', 'Start jetzt')) + '</button>' : '')
             + (canPause ? '<button type="button" data-action="pause" ' + (isBusy('pause') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('pause', 'Pause buchen')) + '</button>' : '')
             + (canCheckOut ? '<button type="button" data-action="check_out" ' + (isBusy('check_out') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('check_out', 'Ende jetzt')) + '</button>' : '')
-            + '<button type="button" id="saveUpsert" ' + (isBusy('upsert') || blockedByOtherProject || status === 'presence_only' || hasOpenWorkTimeCarryover() ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Zeiten speichern')) + '</button>'
+            + '<button type="button" id="saveUpsert" ' + (isBusy('upsert') || !canEditTimeContext() || status === 'presence_only' || hasOpenWorkTimeCarryover() ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Zeiten speichern')) + '</button>'
             + '</div>'
-            + otherProjectHint
             + '</section>'
             + attachmentSectionMarkup()
         );
@@ -3366,63 +3264,68 @@
         );
     }
 
+    function projectDisplayName(projectId) {
+        if (projectId === null) return 'Nicht zugeordnet';
+        const project = projectById(projectId);
+        if (!project) return 'Projekt nicht verfügbar';
+        return project.project_number ? project.project_number + ' – ' + project.name : project.name;
+    }
+
+    function projectContextsMarkup(projectId, running) {
+        const activeId = running?.project_id ?? null;
+        const separateProject = running && projectId !== null && projectId !== activeId;
+        const paused = running?.current_break || state.today?.today_state?.status === 'paused';
+        return '<section class="app-project-contexts" id="projectContexts" aria-label="Zeitbuchung und Projektansicht">'
+            + '<dl>'
+            + '<div><dt>Aktuelle Zeitbuchung</dt><dd><strong>' + escapeHtml(running ? projectDisplayName(activeId) : 'Kein laufender Einsatz') + '</strong>'
+            + (running ? '<span>' + (paused ? 'Eingecheckt – Pause läuft' : 'Eingecheckt – Arbeitszeit läuft') + '</span>' : '') + '</dd></div>'
+            + '<div><dt>Aktuell geöffnetes Projekt</dt><dd><strong>' + escapeHtml(projectId === null ? 'Kein Projekt geöffnet' : projectDisplayName(projectId)) + '</strong></dd></div>'
+            + '</dl>'
+            + (separateProject
+                ? '<p>Materialeinträge und Arbeitsberichte werden dem geöffneten Projekt zugeordnet. Ihre laufende Zeitbuchung bleibt unverändert.</p>'
+                : '')
+            + (running && projectId !== activeId && isCurrentAuthorizedProject(activeId)
+                ? '<button type="button" id="viewRunningProject" class="app-button-secondary">Zum eingecheckten Projekt wechseln</button>'
+                : '')
+            + '</section>';
+    }
+
     function projectView() {
-        const entry = workEntry();
-        const hasStartedEntry = !!(entry && entry.start_time);
-        const preferred = preferredProject();
+        const projectId = viewedProjectId();
+        const running = runningWorkEntry();
+        const latestEntry = globalWorkEntry();
         const hasProjects = activeProjects().length > 0;
-        const projectlessEntry = activeProjectlessWorkEntry();
-        const projectSelectionButtonLabel = projectlessEntry
-            ? 'Laufenden Einsatz zuordnen'
-            : (hasStartedEntry ? 'Projekt fuer heute speichern' : 'Projekt fuer Check-in vormerken');
-        const canStartWithoutProject = !hasStartedEntry
-            && currentStatus() !== 'working'
-            && currentStatus() !== 'paused'
-            && !isBlockedByOtherActiveProject();
-        const projectlessReturnCard = projectlessEntry
-            ? '<div class="app-current-project-card">'
-                + '<div><p class="muted">Laufender Einsatz</p><strong>Nicht zugeordnet</strong>'
-                + '<p>' + escapeHtml(projectlessEntry.note || 'Keine Beschreibung hinterlegt.') + '</p></div>'
-                + '<button type="button" id="returnToProjectlessEntry">Zum laufenden Einsatz</button>'
-                + '</div>'
-            : '';
+        const hasExistingBooking = latestEntry && latestEntry.start_time;
+        const canStart = !running && !hasOpenWorkTimePresence() && !hasOpenWorkTimeCarryover();
+        const canAssign = hasExistingBooking && Number(latestEntry.id) > 0 && !hasOpenWorkTimeCarryover()
+            && projectId !== null && projectId !== (latestEntry.project_id ?? null);
+        const assignmentLabel = !canAssign ? '' : latestEntry.end_time ? 'Letzte Zeitbuchung diesem Projekt zuordnen'
+            : (latestEntry.project_id === null ? 'Laufenden Einsatz zuordnen' : 'Laufende Zeitbuchung diesem Projekt zuordnen');
 
         return shell(
             '<section class="app-card app-grid">'
-            + '<div><p class="muted">Projektwahl</p><h1>Baustelle waehlen</h1><p>'
-            + (hasStartedEntry
-                ? 'Die gewaehlte Baustelle wird direkt dem heutigen Zeiteintrag zugeordnet.'
-                : (hasProjects
-                    ? 'Sie koennen hier vorab eine Baustelle vormerken. Beim naechsten Check-in wird sie automatisch verwendet.'
-                    : 'Kein Projekt angelegt? Starten Sie ohne Projekt und beschreiben Sie kurz die Baustelle. Die Zuordnung erfolgt spaeter im Buero.'))
-            + '</p></div>'
-            + (hasProjects
-                ? projectSelectMarkup('Aktives Projekt')
+            + '<h1>Baustelle waehlen</h1>'
+            + (state.projectAccessNotice ? '<p class="app-empty" role="alert">' + escapeHtml(state.projectAccessNotice) + '</p>' : '')
+            + (hasProjects ? projectSelectMarkup('Projektansicht öffnen') : '')
+            + projectContextsMarkup(projectId, running)
+            + (canStart && projectId !== null
+                ? '<button type="button" class="app-button-secondary" id="saveProjectSelection">Für nächsten Check-in vormerken</button>'
                 : '')
-            + (hasProjects && preferred && !hasStartedEntry
-                ? '<div class="app-empty"><strong>Vorgemerkt:</strong> ' + escapeHtml(preferred.project_number + ' - ' + preferred.name) + '</div>'
+            + (canAssign
+                ? '<button type="button" class="app-button-secondary" id="assignTimeBookingProject" ' + (isBusy('select_project') ? 'disabled' : '') + '>'
+                    + escapeHtml(buttonLabel('select_project', assignmentLabel)) + '</button>'
                 : '')
-            + projectlessReturnCard
-            + (hasProjects
-                ? '<button type="button" id="saveProjectSelection" ' + (isBusy('select_project') ? 'disabled' : '') + '>'
-                    + escapeHtml(buttonLabel('select_project', projectSelectionButtonLabel))
-                    + '</button>'
-                : '')
-            + (!hasStartedEntry && !projectlessEntry
+            + (canStart && !hasExistingBooking
                 ? '<div class="app-projectless-card">'
-                    + '<div><strong>' + escapeHtml(hasProjects ? 'Projekt nicht in der Liste?' : 'Ohne Projekt weiterarbeiten') + '</strong>'
-                    + '<p>Starten Sie ohne Projekt und beschreiben Sie kurz die Baustelle. Die Zuordnung erfolgt spaeter im Buero.</p></div>'
+                    + '<div><strong>Ohne Projekt starten</strong><p>Beschreiben Sie kurz die Baustelle oder den Ort für die spätere Zuordnung.</p></div>'
                     + '<label class="app-field"><span>Baustelle / Ort</span><textarea id="projectlessProjectNote" rows="3" required placeholder="z. B. Musterstrasse 12, Neubau Garage"></textarea></label>'
-                    + '<button type="button" id="startWithoutProject" ' + (isBusy('check_in') || !canStartWithoutProject ? 'disabled' : '') + '>'
-                    + escapeHtml(buttonLabel('check_in', 'Ohne Projekt starten'))
-                    + '</button>'
+                    + '<button type="button" id="startWithoutProject" ' + (isBusy('check_in') ? 'disabled' : '') + '>'
+                    + escapeHtml(buttonLabel('check_in', 'Ohne Projekt starten')) + '</button>'
                     + '</div>'
-                : (!entry || entry.project_id
-                    ? ''
-                    : '<div class="app-empty"><strong>Nicht zugeordnet:</strong> Diese Buchung kann spaeter im Buero einem Projekt zugeordnet werden.</div>'))
+                : '')
             + '</section>'
             + projectDetailsSectionMarkup()
-            + (showAppWidget('show_project_files') ? projectAttachmentSectionMarkup() : '')
+            + projectAttachmentSectionMarkup()
             + projectMaterialSectionMarkup()
             + projectWorkReportSectionMarkup()
         );
@@ -3918,12 +3821,7 @@
     }
 
     function projectPickerSelectionId() {
-        const explicitSelection = projectSelectionStateId();
-        return typeof explicitSelection !== 'undefined'
-            ? explicitSelection
-            : (state.today && state.today.today_state && state.today.today_state.work_entry
-                ? state.today.today_state.work_entry.project_id
-                : preferredProjectId());
+        return routeName() === '/projektwahl' ? viewedProjectId() : checkInProjectId();
     }
 
     function projectSearchQuery() {
@@ -3969,7 +3867,8 @@
         const visibleIds = new Set(results.matches.map((project) => Number(project.id)));
         if (results.selectedOutside) visibleIds.add(Number(results.selectedOutside.id));
 
-        const options = ['<option value=""' + (activeId === null ? ' selected' : '') + '>Nicht zugeordnet</option>'];
+        const emptyLabel = routeName() === '/projektwahl' ? 'Kein Projekt geöffnet' : 'Nicht zugeordnet';
+        const options = ['<option value=""' + (activeId === null ? ' selected' : '') + '>' + emptyLabel + '</option>'];
 
         activeProjects().forEach((project) => {
             if (!visibleIds.has(Number(project.id))) return;
@@ -3990,18 +3889,21 @@
                 .filter((field) => field && field.value !== field.defaultValue)
                 .map((field) => ({ id: field.id, value: field.value }))
             : [];
-        if (preserveDrafts && document.getElementById('projectMaterialForm')) captureProjectMaterialDraft();
-        if (preserveDrafts) captureProjectWorkReportDraft();
-        setProjectSelectionState(projectId);
-        state.projectFilesLoading = false;
-        state.projectMaterialsLoading = false;
-        state.projectMaterialsOffline = !state.online;
+        if (routeName() === '/projektwahl') {
+            const material = captureProjectMaterialDraft();
+            if (material?.dirty) persistProjectMaterialDraft(viewedProjectId(), material);
+            captureProjectWorkReportDraft();
+            setViewedProjectId(projectId);
+            state.projectAccessNotice = '';
+        } else {
+            setCheckInProjectId(projectId);
+        }
         render();
         dirtyFields.forEach(({ id, value }) => {
             const field = document.getElementById(id);
             if (field) field.value = value;
         });
-        if (routeName() === '/projektwahl') loadProjectContext(projectFileContextId(), false);
+        if (routeName() === '/projektwahl') loadProjectContext(viewedProjectId(), false);
     }
 
     function filterProjectSelect(event, compositionChanged) {
@@ -4078,7 +3980,8 @@
         const items = Object.values(byId).sort((left, right) => {
             return String(left.project_number + left.name).localeCompare(String(right.project_number + right.name));
         });
-        const options = ['<option value=""' + (activeId === null ? ' selected' : '') + '>Nicht zugeordnet</option>'];
+        const emptyLabel = routeName() === '/projektwahl' ? 'Kein Projekt geöffnet' : 'Nicht zugeordnet';
+        const options = ['<option value=""' + (activeId === null ? ' selected' : '') + '>' + emptyLabel + '</option>'];
 
         items.forEach((project) => {
             const selected = activeId === project.id ? ' selected' : '';
@@ -4304,7 +4207,7 @@
             userId: currentSessionUserCachePart(),
             generation: sessionGeneration,
             route: routeName(),
-            projectId: routeName() === '/projektwahl' ? projectFileContextId() : null,
+            projectId: routeName() === '/projektwahl' ? viewedProjectId() : null,
             signatureId: state.signatureDialog && state.signatureDialog.timesheet ? state.signatureDialog.timesheet.id : null
         };
         const samePage = renderedAppContext
@@ -4403,7 +4306,7 @@
                     return;
                 }
                 await workTimeMutation('/api/v1/app/timesheets/sync', {
-                    action, work_date: entry.work_date, project_id: entry.project_id,
+                    action, work_date: entry.work_date,
                     expected_timesheet_id: Number(entry.id), expected_start_time: entry.start_time,
                     ...(action === 'pause_end' ? { break_ended_at: actualEnd + ':00' } : { end_time: actualEnd.slice(11, 16), actual_end_at: actualEnd }),
                     client_request_id: createClientId()
@@ -4490,7 +4393,13 @@
 
         if (dialogConfirmPrimary) {
             bindInteraction(dialogConfirmPrimary, 'click', async function () {
-                if (state.dialog && state.dialog.type === 'confirm-check-in-without-project') {
+                if (state.dialog?.type === 'confirm-project-assignment') {
+                    const target = state.dialog.payload;
+                    closeDialog();
+                    await assignTimeBookingProject(target);
+                    return;
+                }
+                if (state.dialog?.type === 'confirm-check-in-without-project') {
                     const note = requireProjectlessNote('projectlessDialogNote');
 
                     if (note === null) {
@@ -4509,9 +4418,8 @@
 
         if (dialogConfirmSecondary) {
             bindInteraction(dialogConfirmSecondary, 'click', function () {
-                if (state.dialog && state.dialog.type === 'signature-prompt') {
-                    state.dialog = null;
-                    render();
+                if (['signature-prompt', 'confirm-project-assignment'].includes(state.dialog?.type)) {
+                    closeDialog();
                     return;
                 }
 
@@ -4558,6 +4466,7 @@
 
                 clearSessionScopedState();
                 state.session = payload.session || { authenticated: true, user: payload.user || null };
+                restoreUserProjectPreferences();
                 state.sessionExpiredHandled = false;
                 await cacheSet('session', state.session);
                 await loadOnlineData(true);
@@ -4594,17 +4503,28 @@
         const projectSelection = document.getElementById('saveProjectSelection');
 
         if (projectSelection) {
-            bindInteraction(projectSelection, 'click', async function () {
-                await handleProjectSelection();
+            bindInteraction(projectSelection, 'click', function () {
+                const projectId = viewedProjectId();
+                if (projectId === null || runningWorkEntry()) return;
+                setCheckInProjectId(projectId);
+                showFeedback('success', projectDisplayName(projectId) + ' ist für den nächsten Check-in vorgemerkt.');
+                navigate('/app/heute');
             });
         }
 
-        const returnToProjectlessEntry = document.getElementById('returnToProjectlessEntry');
+        const assignment = document.getElementById('assignTimeBookingProject');
+        if (assignment) bindInteraction(assignment, 'click', handleProjectBookingAction);
 
-        if (returnToProjectlessEntry) {
-            bindInteraction(returnToProjectlessEntry, 'click', function () {
-                setProjectSelectionState(null);
-                navigate('/app/heute');
+        const viewRunningProject = document.getElementById('viewRunningProject');
+        if (viewRunningProject) {
+            bindInteraction(viewRunningProject, 'click', function () {
+                const projectId = runningWorkEntry()?.project_id;
+                if (!isCurrentAuthorizedProject(projectId) || projectId === viewedProjectId() || state.dialog) return;
+                if (hasPendingUploadSelection()) {
+                    showFeedback('info', 'Bitte zuerst die gewählte Datei hochladen oder die Dateiauswahl leeren.');
+                    return;
+                }
+                applyProjectPickerSelection(projectId, false);
             });
         }
 
@@ -4618,7 +4538,7 @@
                     return;
                 }
 
-                storePreferredProjectId(null);
+                setCheckInProjectId(null);
 
                 const saved = await submitAction('check_in', { project_id: null, note });
 
@@ -4877,7 +4797,6 @@
                 state.sessionExpiredHandled = false;
                 state.menuOpen = false;
                 state.dialog = null;
-                resetProjectSelectionState();
                 navigate('/app/login');
                 const logoutContext = sessionContext();
                 // Queue old-owner deletion before a new login can start draft
@@ -4887,7 +4806,7 @@
                     clearProjectMaterialDraftStorage(previousUserPart),
                     (async function () {
                         if (!isCurrentSessionContext(logoutContext)) return;
-                        await cacheSet('session', { authenticated: false, user: null }, () => isCurrentSessionContext(logoutContext));
+                        await clearCachedSession(previousUserPart, logoutContext);
                         if (!isCurrentSessionContext(logoutContext)) return;
                         await cacheDelete(previousTodayCacheKey);
                         if (!isCurrentSessionContext(logoutContext)) return;
@@ -4990,6 +4909,7 @@
         state.menuOpen = false;
         state.route = path;
         window.history.pushState({}, '', path);
+        reconcileProjectContexts(false);
         render();
 
         if (state.session.authenticated) {
@@ -4999,16 +4919,16 @@
 
     async function applyCachedData() {
         const context = sessionContext();
-        const cachedToday = await cacheGet(todayCacheKey());
-        const cachedCompany = await cacheGet('company');
-        if (!isCurrentSessionContext(context)) return;
+        const current = () => isCurrentSessionContext(context);
+        const [cachedToday, cachedCompany] = await Promise.all([cacheGet(todayCacheKey()), cacheGet('company')]);
+        if (!current()) return;
 
-        if (cachedToday && !state.today) {
+        if (cachedToday && (!cachedToday.user?.id || String(cachedToday.user.id) === context.userPart) && !state.today) {
             state.today = cachedToday;
             syncTodayStateStatus();
-            normalizeProjectSelectionAgainstToday();
-            normalizeTimesheetFilterAgainstToday();
+            reconcileProjectContexts(false);
             await cacheProjectOrders(activeProjects(), true);
+            if (!current()) return;
         }
 
         if (cachedCompany) {
@@ -5017,14 +4937,15 @@
 
         if (routeName() !== '/historie' || !showAppWidget('show_history')) {
             if (routeName() === '/projektwahl') {
-                await handleProjectDeepLink();
-                await loadProjectContext(projectFileContextId(), false);
+                handleProjectDeepLink();
+                await loadProjectContext(viewedProjectId(), false);
+                if (!current()) return;
             }
 
             if (routeName() === '/urlaub') {
                 const cachedVacation = await readVacationCache();
 
-                if (cachedVacation) {
+                if (cachedVacation && current() && routeName() === '/urlaub') {
                     applyVacationCachePayload(cachedVacation);
                 }
             }
@@ -5032,7 +4953,9 @@
             return;
         }
 
-        const cachedTimesheets = await cacheGet(currentTimesheetCacheKey());
+        const timesheetKey = currentTimesheetCacheKey();
+        const cachedTimesheets = await cacheGet(timesheetKey);
+        if (!current() || routeName() !== '/historie' || timesheetKey !== currentTimesheetCacheKey()) return;
 
         if (cachedTimesheets && Array.isArray(cachedTimesheets.items)) {
             state.timesheetList = cachedTimesheets.items;
@@ -5057,7 +4980,7 @@
         // Callers that synchronize afterwards must await the same current settings,
         // rather than returning early because another refresh superseded theirs.
         const route = routeName();
-        const projectId = route === '/projektwahl' ? projectFileContextId() : null;
+        const projectId = route === '/projektwahl' ? viewedProjectId() : null;
         if (activeOnlineDataLoad && isCurrentSessionContext(activeOnlineDataLoad.context)
             && activeOnlineDataLoad.route === route && activeOnlineDataLoad.projectId === projectId) {
             return activeOnlineDataLoad.promise;
@@ -5089,10 +5012,6 @@
             if (routeName() === '/urlaub') {
                 await loadVacationData(force);
             }
-            if (routeName() === '/projektwahl') {
-                await handleProjectDeepLink();
-                await loadProjectContext(projectFileContextId(), force);
-            }
             render();
             return;
         }
@@ -5112,21 +5031,24 @@
             }
 
             if (dayResult.status === 'fulfilled') {
-                state.today = dayResult.value.data;
-                await loadWorkTime(context);
-                if (!current()) return;
+                const today = dayResult.value.data;
+                if (today.user?.id && String(today.user.id) !== context.userPart) {
+                    await handleExpiredSession('Das angemeldete Konto hat gewechselt. Bitte melden Sie sich erneut an.');
+                    return;
+                }
+                state.today = today;
                 syncTodayStateStatus();
-                normalizeProjectSelectionAgainstToday();
-                normalizeTimesheetFilterAgainstToday();
-                // Apply confirmed access changes before waiting for local storage.
+                reconcileProjectContexts(true);
+                handleProjectDeepLink();
+                // Apply confirmed access changes before waiting for local storage or other requests.
                 render();
-                await pruneUnauthorizedProjectState();
+                await Promise.all([pruneUnauthorizedProjectState(), loadWorkTime(context, current)]);
                 if (!current()) return;
                 await cacheProjectOrders(activeProjects(), false);
                 if (!current()) return;
 
                 try {
-                    await cacheSet(todayCacheKey(), state.today);
+                    await cacheSet(todayCacheKey(), state.today, current);
                 } catch (cacheError) {
                     console.warn('Today-Cache konnte nicht geschrieben werden.', cacheError);
                     // Never let an offline restart authorize projects using a superseded snapshot.
@@ -5136,11 +5058,10 @@
                 const cachedToday = await cacheGet(todayCacheKey());
                 if (!current()) return;
 
-                if (cachedToday) {
+                if (cachedToday && (!cachedToday.user?.id || String(cachedToday.user.id) === context.userPart)) {
                     state.today = cachedToday;
                     syncTodayStateStatus();
-                    normalizeProjectSelectionAgainstToday();
-                    normalizeTimesheetFilterAgainstToday();
+                    reconcileProjectContexts(false);
                     await cacheProjectOrders(activeProjects(), true);
                 } else {
                     state.today = null;
@@ -5172,8 +5093,8 @@
             }
 
             if (routeName() === '/projektwahl') {
-                await handleProjectDeepLink();
-                await loadProjectContext(projectFileContextId(), force);
+                handleProjectDeepLink();
+                await loadProjectContext(viewedProjectId(), force);
             }
 
             if (failures.length > 0) {
@@ -5561,7 +5482,7 @@
         const cacheKey = projectFilesCacheKey(projectId);
         const context = sessionContext();
         const requestId = ++projectFilesRequestCounter;
-        const current = () => isCurrentSessionContext(context) && requestId === projectFilesRequestCounter && isCurrentAuthorizedProject(projectId) && projectId === projectFileContextId();
+        const current = () => isCurrentSessionContext(context) && requestId === projectFilesRequestCounter && isCurrentAuthorizedProject(projectId) && projectId === viewedProjectId();
 
         if (!navigator.onLine) {
             const cached = await cacheGet(cacheKey);
@@ -5618,6 +5539,7 @@
         }
 
         const cachedAt = new Date().toISOString();
+        const context = sessionContext();
 
         await Promise.all(projects.map(async function (project) {
             const projectId = Number(project && project.id ? project.id : 0);
@@ -5635,30 +5557,12 @@
                     await cacheSet(projectOrderCacheKey(projectId), {
                         item: project,
                         cached_at: cachedAt
-                    });
+                    }, () => isCurrentSessionContext(context) && isCurrentAuthorizedProject(projectId));
                 } catch (error) {
                     console.warn('Projektauftrags-Cache konnte nicht geschrieben werden.', error);
                 }
             }
         }));
-    }
-
-    async function loadCachedProjectOrder(projectId) {
-        if (!isCurrentAuthorizedProject(projectId)) {
-            return false;
-        }
-
-        const cached = await cacheGet(projectOrderCacheKey(projectId));
-
-        if (!cached || !cached.item) {
-            return false;
-        }
-
-        state.projectOrders[String(projectId)] = cached.item;
-        state.projectOrdersOffline[String(projectId)] = true;
-        state.projectOrdersUpdatedAt[String(projectId)] = cached.cached_at || null;
-
-        return true;
     }
 
     async function loadProjectMaterials(projectId, force) {
@@ -5673,7 +5577,7 @@
 
         const requestId = ++projectMaterialRequestCounter;
         const context = sessionContext();
-        const current = () => isCurrentSessionContext(context) && requestId === projectMaterialRequestCounter && isCurrentAuthorizedProject(projectId) && projectId === projectFileContextId();
+        const current = () => isCurrentSessionContext(context) && requestId === projectMaterialRequestCounter && isCurrentAuthorizedProject(projectId) && projectId === viewedProjectId();
         const cacheKey = projectMaterialsCacheKey(projectId);
 
         if (!navigator.onLine) {
@@ -5765,7 +5669,7 @@
             } finally {
                 if (isCurrentSessionContext(context) && isCurrentAuthorizedProject(projectId)) {
                     draft.ready = true;
-                    if (projectFileContextId() === projectId) resetProjectFormAfterSave('projectWorkReportForm');
+                    if (viewedProjectId() === projectId) resetProjectFormAfterSave('projectWorkReportForm');
                     render();
                 }
             }
@@ -5874,9 +5778,9 @@
                 await queueWorkReportStorage(() => cacheDelete(projectWorkReportDraftKey(projectId, context.userPart)));
                 if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return;
                 state.projectWorkReportDrafts[String(projectId)] = { description: '', work_date: berlinToday(), revision: 0, ready: true, submission: null };
-                if (projectFileContextId() === projectId) resetProjectFormAfterSave('projectWorkReportForm');
+                if (viewedProjectId() === projectId) resetProjectFormAfterSave('projectWorkReportForm');
             }
-            if (projectFileContextId() === projectId) {
+            if (viewedProjectId() === projectId) {
                 showFeedback('success', payload.data && payload.data.is_deleted ? 'Dieser Arbeitsbericht wurde bereits gespeichert und archiviert.' : 'Arbeitsbericht wurde gespeichert.');
                 await loadProjectWorkReports(projectId, true);
             }
@@ -5899,7 +5803,7 @@
     }
 
     async function archiveProjectWorkReport(reportId) {
-        const projectId = projectFileContextId();
+        const projectId = viewedProjectId();
         if (state.pendingAction || !reportId || !isCurrentAuthorizedProject(projectId)) return;
         if (!navigator.onLine) {
             showFeedback('error', 'Arbeitsberichte können nur online archiviert werden.');
@@ -5929,7 +5833,7 @@
     async function loadProjectWorkReports(projectId, force) {
         const context = sessionContext();
         const requestId = ++projectWorkReportRequestCounter;
-        const current = () => isCurrentSessionContext(context) && requestId === projectWorkReportRequestCounter && isCurrentAuthorizedProject(projectId) && projectFileContextId() === projectId;
+        const current = () => isCurrentSessionContext(context) && requestId === projectWorkReportRequestCounter && isCurrentAuthorizedProject(projectId) && viewedProjectId() === projectId;
         const cacheKey = projectWorkReportCacheKey(projectId, context.userPart);
         if (!current()) return;
         state.projectWorkReportsLoading = true;
@@ -5972,19 +5876,25 @@
     }
 
     async function loadProjectContext(projectId, force) {
-        if (projectId === null || !isCurrentAuthorizedProject(projectId)) {
-            return;
-        }
-
         const context = sessionContext();
-        if (!projectById(projectId) || !navigator.onLine) {
-            await loadCachedProjectOrder(projectId);
-        }
+        const generation = viewedProjectGeneration;
+        const current = () => isCurrentSessionContext(context) && generation === viewedProjectGeneration
+            && routeName() === '/projektwahl' && projectId !== null && projectId === viewedProjectId();
+        if (!current()) return;
 
-        const tasks = [];
+        if (!projectById(projectId) || !navigator.onLine) {
+            const cached = await cacheGet(projectOrderCacheKey(projectId));
+            if (!current()) return;
+            if (cached?.item) {
+                state.projectOrders[String(projectId)] = cached.item;
+                state.projectOrdersOffline[String(projectId)] = true;
+                state.projectOrdersUpdatedAt[String(projectId)] = cached.cached_at || null;
+            }
+        }
 
         await Promise.all([loadProjectWorkReportDraft(projectId), loadProjectMaterialDraft(projectId)]);
-        if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId) || projectId !== projectFileContextId()) return;
+        if (!current()) return;
+        const tasks = [];
         tasks.push(loadProjectWorkReports(projectId, force));
 
         if (showAppWidget('show_project_files')) {
@@ -6089,7 +5999,7 @@
         projectWorkReportRequestCounter += 1;
         projectMaterialRequestCounter += 1;
         projectFilesRequestCounter += 1;
-        normalizeProjectSelectionAgainstToday();
+        reconcileProjectContexts(true);
         render();
         await pruneUnauthorizedProjectState();
         if (isCurrentSessionContext(context) && state.today) {
@@ -6099,13 +6009,13 @@
                 await cacheDelete(todayCacheKey());
             }
         }
-        if (isCurrentSessionContext(context) && routeName() === '/projektwahl' && projectFileContextId() !== null) {
-            await loadProjectContext(projectFileContextId(), true);
+        if (isCurrentSessionContext(context) && routeName() === '/projektwahl' && viewedProjectId() !== null) {
+            await loadProjectContext(viewedProjectId(), true);
         }
     }
 
-    async function handleProjectDeepLink() {
-        if (routeName() !== '/projektwahl' || !window.location.search) {
+    function handleProjectDeepLink() {
+        if (routeName() !== '/projektwahl' || !state.today || !window.location.search) {
             return;
         }
 
@@ -6116,20 +6026,19 @@
         }
 
         const requestedId = Number(params.get('project'));
-        const authorized = Number.isInteger(requestedId)
-            && requestedId > 0
-            && activeProjects().some((project) => Number(project.id) === requestedId);
+        const authorized = isCurrentAuthorizedProject(requestedId);
 
         params.delete('project');
         const query = params.toString();
         window.history.replaceState({}, '', '/app/projektwahl' + (query ? '?' + query : ''));
 
         if (authorized) {
-            setProjectSelectionState(requestedId);
+            setViewedProjectId(requestedId);
+            state.projectAccessNotice = '';
             return;
         }
 
-        setProjectSelectionState(null);
+        setViewedProjectId(null);
         showFeedback('error', 'Das angeforderte Projekt ist nicht verfuegbar oder fuer Sie nicht freigegeben.');
     }
 
@@ -6159,7 +6068,7 @@
             } finally {
                 if (isCurrentSessionContext(context) && isCurrentAuthorizedProject(projectId)) {
                     draft.ready = true;
-                    if (projectFileContextId() === projectId) resetProjectFormAfterSave('projectMaterialForm');
+                    if (viewedProjectId() === projectId) resetProjectFormAfterSave('projectMaterialForm');
                     render();
                 }
             }
@@ -6171,7 +6080,7 @@
     function captureProjectMaterialDraft() {
         const form = document.getElementById('projectMaterialForm');
         const projectId = Number(form && form.dataset.projectId);
-        if (!isCurrentAuthorizedProject(projectId) || projectId !== projectFileContextId()) return null;
+        if (!isCurrentAuthorizedProject(projectId) || projectId !== viewedProjectId()) return null;
         const draft = projectMaterialDraft(projectId);
         if (!draft.ready || (isBusy('project_material') && state.projectMaterialSavingProjectId === projectId)
             || (draft.submission && draft.submission.status !== 'rejected')) return draft;
@@ -6270,11 +6179,12 @@
                 delete state.projectMaterialDrafts[String(projectId)];
                 projectMaterialDraft(projectId).ready = true;
                 delete state.projectMaterialStorageErrors[String(projectId)];
-                if (projectFileContextId() === projectId) resetProjectFormAfterSave('projectMaterialForm');
+                if (viewedProjectId() === projectId) resetProjectFormAfterSave('projectMaterialForm');
             }
-            if (projectFileContextId() === projectId) {
+            if (viewedProjectId() === projectId) {
                 showFeedback('success', payload.data && payload.data.is_deleted
-                    ? 'Dieser Materialeintrag wurde bereits gespeichert und inzwischen archiviert.' : 'Materialeintrag wurde gespeichert.');
+                    ? 'Dieser Materialeintrag wurde bereits gespeichert und inzwischen archiviert.'
+                    : 'Material wurde in ' + projectDisplayName(projectId) + ' gespeichert.');
                 await loadProjectMaterials(projectId, true);
             }
         } catch (error) {
@@ -6307,7 +6217,7 @@
     }
 
     async function archiveProjectMaterial(materialId) {
-        const projectId = projectFileContextId();
+        const projectId = viewedProjectId();
 
         if (state.pendingAction || !isCurrentAuthorizedProject(projectId) || materialId <= 0) {
             return;
@@ -6326,7 +6236,7 @@
         try {
             await apiJson('/api/v1/app/project-materials/' + materialId, { method: 'DELETE' });
             if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return;
-            if (projectFileContextId() === projectId) {
+            if (viewedProjectId() === projectId) {
                 showFeedback('success', 'Materialeintrag wurde archiviert.');
                 await loadProjectMaterials(projectId, true);
             }
@@ -6537,10 +6447,7 @@
     }
 
     async function enqueueAction(action) {
-        const projectSelect = document.getElementById('projectSelect');
-        const projectId = projectSelect
-            ? projectSelect.value || null
-            : (workEntry() ? workEntry().project_id : preferredProjectId());
+        const projectId = checkInProjectId();
 
         if (action === 'check_in' && !projectId) {
             const noteField = document.getElementById('timesheetNote');
@@ -6559,50 +6466,46 @@
         await submitAction(action, {});
     }
 
-    async function handleProjectSelection() {
-        const projectSelect = document.getElementById('projectSelect');
-        const selectedProjectId = projectSelect && projectSelect.value ? Number(projectSelect.value) : null;
-        const projectlessEntry = activeProjectlessWorkEntry();
-        const entry = workEntry();
-        const hasStartedEntry = !!(entry && entry.start_time);
+    async function handleProjectBookingAction() {
+        const projectId = viewedProjectId();
+        const entry = globalWorkEntry();
+        if (projectId === null || !entry?.start_time || !(Number(entry.id) > 0) || projectId === (entry.project_id ?? null)) return;
 
-        if (projectlessEntry) {
-            if (selectedProjectId === null) {
-                setProjectSelectionState(null);
-                navigate('/app/heute');
+        const target = {
+            projectId,
+            previousProjectId: entry.project_id ?? null,
+            entryId: Number(entry.id),
+            workDate: state.today.today,
+            startTime: entry.start_time,
+            isRunning: !entry.end_time,
+        };
+        if (target.isRunning) {
+            openDialog('confirm-project-assignment', target);
+            document.getElementById('dialogConfirmSecondary')?.focus();
+        } else {
+            await assignTimeBookingProject(target);
+        }
+    }
 
-                return true;
-            }
-
-            const saved = await submitAction('select_project', { project_id: selectedProjectId });
-
-            if (saved) {
-                navigate('/app/heute');
-            }
-
-            return saved;
+    async function assignTimeBookingProject(target) {
+        const entry = globalWorkEntry();
+        if (state.pendingAction || !entry?.start_time || !isCurrentAuthorizedProject(target.projectId)
+            || state.today.today !== target.workDate || Number(entry.id) !== target.entryId
+            || entry.start_time !== target.startTime || (entry.project_id ?? null) !== target.previousProjectId
+            || (!entry.end_time) !== target.isRunning || hasOpenWorkTimeCarryover()) {
+            showFeedback('error', 'Die Zeitbuchung oder die Projektberechtigung wurde inzwischen geändert. Bitte prüfen Sie den aktuellen Stand.');
+            return;
         }
 
-        if (!hasStartedEntry) {
-            storePreferredProjectId(selectedProjectId);
-            showFeedback(
-                'success',
-                selectedProjectId
-                    ? 'Baustelle erfolgreich vorgemerkt. Beim naechsten Check-in wird sie verwendet.'
-                    : 'Keine Baustelle vorgemerkt. Sie koennen den Check-in auch ohne Projekt buchen.'
-            );
-            navigate('/app/heute');
-
-            return true;
-        }
-
-        const saved = await submitAction('select_project', {});
-
-        if (saved) {
-            navigate('/app/heute');
-        }
-
-        return saved;
+        const saved = await submitAction('select_project', {
+            project_id: target.projectId,
+            expected_timesheet_id: target.entryId,
+            expected_project_id: target.previousProjectId,
+            expected_user_id: Number(currentSessionUserCachePart()),
+            expected_running: target.isRunning,
+            expected_start_time: target.startTime,
+        });
+        if (saved) navigate('/app/heute');
     }
 
     function manualTimesOverride() {
@@ -6621,6 +6524,8 @@
             return false;
         }
 
+        const context = sessionContext();
+
         if (hasOpenWorkTimePresence() && ['check_in', 'upsert', 'pause', 'check_out', 'day_close'].includes(action)) {
             showFeedback('error', 'Ihre Anwesenheit ist erfasst. Bitte bestätigen Sie zuerst den tatsächlichen Arbeitsbeginn oben.');
             return false;
@@ -6630,41 +6535,38 @@
             return false;
         }
 
+        if (action === 'check_in' && runningWorkEntry()) {
+            showFeedback('error', 'Bitte beenden Sie zuerst die laufende Zeitbuchung.');
+            return false;
+        }
+        if (action === 'upsert' && !canEditTimeContext()) {
+            showFeedback('error', 'Bitte wählen Sie für die Bearbeitung das Projekt der letzten Zeitbuchung.');
+            return false;
+        }
+
         if (state.today && state.today.work_time_windows_enabled && action === 'check_in') {
             if (!state.workTime) {
                 showFeedback('error', 'Bitte zuerst den aktuellen Stand der Kernarbeitszeit laden.');
                 return false;
             }
             if (state.workTime.policy && state.workTime.policy.early_check_in_mode === 'presence_only') {
-                const selection = document.getElementById('projectSelect');
                 const note = document.getElementById('timesheetNote');
-                return workTimeMutation('/api/v1/app/timesheets/sync', { action: 'check_in', work_date: state.today.today, start_time: manualTimesOverride().start_time || nowTime(), project_id: selection ? selection.value || null : preferredProjectId(), note: note ? note.value : '', ...(overrides || {}), client_request_id: createClientId() });
+                return workTimeMutation('/api/v1/app/timesheets/sync', { action: 'check_in', work_date: state.today.today, start_time: manualTimesOverride().start_time || nowTime(), project_id: checkInProjectId(), note: note ? note.value : '', ...(overrides || {}), client_request_id: createClientId() });
             }
         }
 
-        const allowProjectlessReassignment = action === 'select_project' && activeProjectlessWorkEntry() !== null;
-
-        if (isBlockedByOtherActiveProject() && !allowProjectlessReassignment) {
-            showFeedback(
-                'error',
-                'Auf ' + (otherActiveProjectName() || 'einem anderen Projekt') + ' laeuft noch ein Einsatz. Bitte zuerst dorthin wechseln.'
-            );
-            return false;
-        }
-
-        const projectSelect = document.getElementById('projectSelect');
         const noteField = document.getElementById('timesheetNote');
         const entry = workEntry();
         const manualTimes = manualTimesOverride();
         const payload = {
             action: action,
             work_date: state.today ? state.today.today : new Date().toISOString().slice(0, 10),
-            project_id: projectSelect
-                ? projectSelect.value || null
-                : (entry ? entry.project_id : preferredProjectId()),
-            note: noteField ? noteField.value : (entry ? entry.note : ''),
-            manual_break_minutes: entry ? entry.break_minutes : 0
+            project_id: action === 'check_in' ? checkInProjectId() : timeContextProjectId(),
         };
+        if (action !== 'select_project') {
+            payload.note = noteField ? noteField.value : (entry ? entry.note : '');
+            payload.manual_break_minutes = entry ? entry.break_minutes : 0;
+        }
 
         if (action === 'check_in') {
             payload.start_time = manualTimes.start_time || nowTime();
@@ -6681,20 +6583,21 @@
 
         Object.assign(payload, overrides || {});
 
-        if (state.today && state.today.work_time_windows_enabled && entry && entry.start_time && action !== 'check_in') {
+        if (state.today?.work_time_windows_enabled && entry?.start_time && action !== 'check_in' && action !== 'select_project') {
             // Bind delayed/offline changes to the session the employee actually saw.
             // A later confirmed proposal and new check-in must not redirect this action.
             if (Number(entry.id) > 0) payload.expected_timesheet_id = Number(entry.id);
             payload.expected_start_time = entry.start_time;
         }
 
-        const geo = await currentGeoPayload();
+        const geo = action === 'select_project' ? null : await currentGeoPayload();
 
         if (geo) {
             payload.geo = geo;
             payload.geo_acknowledged = readGeoAck();
         }
 
+        if (!isCurrentSessionContext(context)) return false;
         state.pendingAction = action;
         render();
         let succeeded = false;
@@ -6706,28 +6609,43 @@
                 throw new Error('Die Aktion konnte nicht vorbereitet werden. Bitte erneut versuchen.');
             }
 
+            const queuedPayload = { ...payload };
+            const usesSelectedProject = action === 'check_in' || action === 'select_project'
+                || (action === 'upsert' && !globalWorkEntry()?.start_time);
+            if (!usesSelectedProject) delete queuedPayload.project_id;
+
             await queueAdd({
                 client_request_id: clientRequestId,
                 endpoint: '/api/v1/app/timesheets/sync',
-                payload
+                userPart: context.userPart,
+                payload: queuedPayload
             });
 
-            state.pendingCount = (await queueAll()).length;
-            applyOptimisticPayload(payload);
-            await cacheSet(todayCacheKey(), state.today);
+            const pending = await queueAll();
+            if (!isCurrentSessionContext(context)) return false;
+            state.pendingCount = pending.length;
+            if (action !== 'select_project') {
+                applyOptimisticPayload(payload);
+                await cacheSet(todayCacheKey(), state.today, () => isCurrentSessionContext(context));
+            }
             render();
-            const syncResult = await syncQueue();
+            const syncResult = await syncQueue(clientRequestId);
 
-            if (syncResult.sessionExpired) {
+            if (!isCurrentSessionContext(context) || syncResult.sessionExpired) {
                 return false;
             }
 
-            succeeded = true;
+            if (action === 'select_project' && syncResult.deferred) {
+                showFeedback('info', 'Die Projektzuordnung wartet auf eine Verbindung. Bis zur Bestätigung bleibt die bisherige Zeitbuchung sichtbar.', true);
+            }
+            succeeded = action !== 'select_project' || syncResult.deferred || syncResult.requestedCompleted;
         } catch (error) {
-            showFeedback('error', friendlyMessage(error.message, 'Die Aktion konnte nicht vorbereitet werden. Bitte erneut versuchen.'), true);
+            if (isCurrentSessionContext(context)) showFeedback('error', friendlyMessage(error.message, 'Die Aktion konnte nicht vorbereitet werden. Bitte erneut versuchen.'), true);
         } finally {
-            state.pendingAction = null;
-            render();
+            if (isCurrentSessionContext(context)) {
+                state.pendingAction = null;
+                render();
+            }
         }
 
         return succeeded;
@@ -6799,7 +6717,7 @@
             workEntry.attachments = [];
         }
 
-        if (payload.action === 'check_in' || payload.action === 'upsert' || payload.action === 'select_project') {
+        if (payload.action === 'check_in' || payload.action === 'upsert') {
             todayState.is_missing = false;
             todayState.status_source = null;
         }
@@ -6854,7 +6772,21 @@
         return sanitized;
     }
 
-    async function syncQueue() {
+    function syncQueue(requestedClientRequestId) {
+        const context = sessionContext();
+        const sync = queueSyncTail.then(function (previous) {
+            if (!isCurrentSessionContext(context)) return { completed: false, deferred: false, sessionExpired: true };
+            if (requestedClientRequestId && previous?.syncedRequestIds?.has(requestedClientRequestId)) return previous;
+            return performQueueSync();
+        });
+        queueSyncTail = sync.catch(() => null);
+        return sync.then((result) => ({
+            ...result,
+            requestedCompleted: Boolean(requestedClientRequestId && result.syncedRequestIds?.has(requestedClientRequestId))
+        }));
+    }
+
+    async function performQueueSync() {
         if (!navigator.onLine || !state.session.authenticated) {
             return {
                 completed: false,
@@ -6863,15 +6795,19 @@
             };
         }
 
+        const context = sessionContext();
         const items = await queueAll();
         let completed = true;
         let sessionExpired = false;
         let completedAny = false;
+        const syncedRequestIds = new Set();
 
         for (const item of items) {
+            if (!isCurrentSessionContext(context)) break;
             try {
                 const sanitizedPayload = syncPayloadForCurrentSettings(item.payload);
                 await queueUpdate({ ...item, payload: sanitizedPayload, status: 'syncing' });
+                if (!isCurrentSessionContext(context)) break;
                 const payload = await apiJson(item.endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -6882,9 +6818,16 @@
                 });
 
                 await queueRemove(item.id);
+                if (!isCurrentSessionContext(context)) break;
                 completedAny = true;
+                syncedRequestIds.add(item.client_request_id);
+                if (item.payload.action === 'select_project') {
+                    onlineDataRequestCounter += 1;
+                    activeOnlineDataLoad = null;
+                }
 
                 if (state.today && payload.data) {
+                    const previousProjectId = globalWorkEntry()?.project_id;
                     if (payload.data.today_state) {
                         state.today.today_state = payload.data.today_state;
                     }
@@ -6917,6 +6860,7 @@
                     }
 
                     syncTodayStateStatus();
+                    if (item.payload.action === 'select_project') syncSelectedProjectSummaryFromTodayState(previousProjectId);
                 }
 
                 maybePromptForSignatureAfterSync(item, payload);
@@ -6931,13 +6875,21 @@
 
                 const message = friendlyMessage(error.message, 'Synchronisierung fehlgeschlagen.');
 
-                await queueUpdate({ ...item, status: 'failed', error: message });
+                if (item.payload.action === 'select_project' && error.httpStatus === 422) {
+                    await queueRemove(item.id);
+                } else {
+                    await queueUpdate({ ...item, status: 'failed', error: message });
+                }
+                if (!isCurrentSessionContext(context)) break;
                 showFeedback('error', message, true);
             }
         }
 
-        state.pendingCount = (await queueAll()).length;
-        await cacheSet(todayCacheKey(), state.today);
+        if (!isCurrentSessionContext(context)) return { completed: false, deferred: false, sessionExpired: true };
+        const pending = await queueAll();
+        if (!isCurrentSessionContext(context)) return { completed: false, deferred: false, sessionExpired: true };
+        state.pendingCount = pending.length;
+        await cacheSet(todayCacheKey(), state.today, () => isCurrentSessionContext(context));
         if (completedAny) {
             markTimesheetHistoryDirty();
         }
@@ -6946,7 +6898,8 @@
         return {
             completed,
             deferred: false,
-            sessionExpired
+            sessionExpired,
+            syncedRequestIds
         };
     }
 
@@ -7038,7 +6991,7 @@
             && routeName() === '/projektwahl'
             && renderedAppContext.userId === currentSessionUserCachePart()
             && renderedAppContext.generation === sessionGeneration
-            && renderedAppContext.projectId === projectFileContextId();
+            && renderedAppContext.projectId === viewedProjectId();
 
         return Date.now() < Number(state.fileSelectionGuardUntil || 0)
             || (!stableProjectDom && hasPendingUploadSelection());
@@ -7103,7 +7056,7 @@
     }
 
     async function uploadProjectAttachment() {
-        const projectId = projectFileContextId();
+        const projectId = viewedProjectId();
         const selectedFile = selectedUploadFile(['projectCameraInput', 'projectAttachmentInput']);
 
         if (projectId === null) {
@@ -7128,6 +7081,8 @@
 
         const formData = new FormData();
         formData.append('file', selectedFile);
+        const context = sessionContext();
+        const current = () => isCurrentSessionContext(context) && isCurrentAuthorizedProject(projectId);
 
         state.pendingAction = 'upload_project_attachment';
         state.uploadingProjectId = projectId;
@@ -7139,23 +7094,26 @@
                 body: formData
             });
 
+            if (!current()) return;
             updateProjectAttachments(projectId, payload.data && payload.data.files ? payload.data.files : []);
             await cacheSet(projectFilesCacheKey(projectId), {
                 items: state.projectFiles[String(projectId)] || [],
                 cached_at: new Date().toISOString()
-            });
-            showFeedback('success', friendlyMessage(payload.message, 'Datei erfolgreich hochgeladen.'));
-        } catch (error) {
-            if (isSessionExpiredError(error)) {
-                return;
+            }, current);
+            if (current() && projectId === viewedProjectId()) {
+                showFeedback('success', friendlyMessage(payload.message, 'Datei erfolgreich hochgeladen.'));
             }
-
-            showFeedback('error', friendlyMessage(error.message, 'Die Datei konnte nicht hochgeladen werden.'), true);
+        } catch (error) {
+            if (!isSessionExpiredError(error) && current() && projectId === viewedProjectId()) {
+                showFeedback('error', friendlyMessage(error.message, 'Die Datei konnte nicht hochgeladen werden.'), true);
+            }
         } finally {
-            state.pendingAction = null;
-            state.uploadingProjectId = null;
-            state.fileSelectionGuardUntil = 0;
-            render();
+            if (isCurrentSessionContext(context)) {
+                state.pendingAction = null;
+                state.uploadingProjectId = null;
+                state.fileSelectionGuardUntil = 0;
+                render();
+            }
         }
     }
 
@@ -7597,7 +7555,20 @@
         }
 
         try {
-            await navigator.serviceWorker.register('/app/sw.js');
+            const serviceWorker = navigator.serviceWorker;
+            const registration = await serviceWorker.register('/app/sw.js', { scope: '/app', updateViaCache: 'none' });
+            const legacy = (await serviceWorker.getRegistrations()).find((item) => new URL(item.scope).pathname === '/app/'
+                && [item.active, item.waiting, item.installing].some((worker) => worker && new URL(worker.scriptURL).pathname === '/app/sw.js'));
+            if (!legacy) return;
+
+            if (registration.active) {
+                await legacy.unregister();
+            } else {
+                const worker = registration.installing || registration.waiting;
+                worker?.addEventListener('statechange', function () {
+                    if (worker.state === 'activated') legacy.unregister().catch(console.warn);
+                });
+            }
         } catch (error) {
             console.warn('Service Worker konnte nicht registriert werden.', error);
         }
@@ -7624,18 +7595,13 @@
 
     async function bootstrapSession() {
         resolveTheme();
-        state.preferredProjectId = readPreferredProjectId();
-        state.projectSelectionId = readProjectSelectionState();
-        state.timesheetFilterScope = readTimesheetFilterScope();
-        state.timesheetFilterProjectId = readTimesheetFilterProjectId();
         state.timesheetFilterMonth = readTimesheetFilterMonth();
         state.timesheetFilterEntryType = readTimesheetFilterEntryType();
         const cachedSession = await cacheGet('session');
         const hadCachedAuthenticatedSession = !!(cachedSession && cachedSession.authenticated);
 
-        if (cachedSession) {
-            state.session = cachedSession;
-        }
+        // The worker may serve an older HTML shell. The stored session owns offline data.
+        state.session = cachedSession || { authenticated: false, user: null };
 
         if (navigator.onLine) {
             try {
@@ -7655,6 +7621,7 @@
             }
         }
 
+        restoreUserProjectPreferences();
         state.pendingCount = (await queueAll()).length;
         await loadOnlineData(true);
         render();
@@ -7765,6 +7732,7 @@
 
     window.addEventListener('popstate', function () {
         state.route = window.location.pathname || '/app';
+        reconcileProjectContexts(false);
         render();
 
         if (state.session.authenticated) {
@@ -7784,6 +7752,24 @@
         state.installPromptAvailable = false;
         showFeedback('success', 'App wurde installiert.');
         render();
+    });
+
+    window.addEventListener('keydown', function (event) {
+        if (state.dialog?.type !== 'confirm-project-assignment') return;
+        if (event.key === 'Escape') {
+            closeDialog();
+        } else if (event.key === 'Tab') {
+            const primary = document.getElementById('dialogConfirmPrimary');
+            const secondary = document.getElementById('dialogConfirmSecondary');
+            if (document.activeElement === (event.shiftKey ? primary : secondary)) {
+                event.preventDefault();
+                (event.shiftKey ? secondary : primary)?.focus();
+            }
+        }
+    });
+
+    window.addEventListener('pageshow', function (event) {
+        if (event.persisted) scheduleRevalidate();
     });
 
     window.addEventListener('focus', function () {

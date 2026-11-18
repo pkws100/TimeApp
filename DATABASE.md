@@ -90,10 +90,13 @@
 - `work_time_pause_corrections` dokumentiert nachgewiesene Intervallnachtraege mit Vorher-/Nachher-Snapshot, Akteur, Begruendung, Quellenbindung und Request-ID. Nettozeit und versionierte Buchungszeile bleiben unveraendert; bestehende Signaturen und Periodensperren blockieren Nachtraege.
 - Aeltere Buchungswege pruefen einen vorhandenen Pausenauditmarker bzw. `timesheet_breaks.source = admin_evidence` vor Writes innerhalb Accounting-Lock und Transaktion. Geschuetzte Stempel-/Dauer-/Herkunftsdaten und Intervalle sind dort nicht veraenderbar; der Schutz gilt auch bei deaktiviertem WorkTime. Metadaten und logisch archivierte Nachweise behalten ihre Historie.
 
-## Material-Anfrage-IDs
+## Material-Erfassungskontext und Anfrage-IDs
 
 - Die additive Migration `20261111220000_project_material_request_ids.php` ergaenzt nullable `client_request_id` und `request_payload_hash` an `project_material_entries`; ein Unique-Index je Autor/Anfrage serialisiert parallele Wiederholungen.
 - Altclients ohne ID bleiben kompatibel. Replays pruefen zuerst die aktuelle Projektberechtigung, aendern keine gespeicherten Daten und legen archivierte Buchungen nicht erneut an. Geaenderte normalisierte Angaben unter derselben ID ergeben einen Konflikt statt einer zweiten Buchung.
+- Die additive Migration `20261118120000_project_material_capture_context.php` speichert `capture_type`, `captured_work_project_id` und `captured_timesheet_id` am Materialeintrag. `project_id` bleibt das Zielprojekt, `work_date` das Materialdatum. `created_at` und `created_by_user_id` erfassen Zeitpunkt und Mitarbeiter.
+- Der Server bestimmt beim ersten erfolgreichen Speichern den laufenden Zeiteintrag des Mitarbeiters. Massgeblich ist die offene Tagesbuchung oder der nach Kernarbeitszeitregeln gueltige Vortagseinsatz. `capture_type` unterscheidet `standard`, `cross_project`, `backdated` und `cross_project_backdated`. Fuer `backdated` liegt das Materialdatum vor dem lokalen Erfassungstag in `Europe/Berlin`. Ist ein anderes Projekt im laufenden Zeiteintrag hinterlegt, gilt `cross_project`. Die zwei Merkmale koennen zusammen auftreten.
+- Der Server verwendet fuer Snapshot und Materialanlage denselben Schreiblock wie Zeitbuchungsaenderungen. Der Snapshot bleibt bei Replays und spaeteren Zeitbuchungsaenderungen erhalten. Alteintraege haben einen leeren Kontext. Zeitbuchungsreferenzen sind intern. Projektinformationen zum damaligen Einsatz werden bei der Anzeige anhand der aktuellen Zugriffsrechte gefiltert.
 
 ## Seeder-Startpunkt
 - Standard-Seeds liefern Rollen, Rechte und notwendige Referenzdaten.

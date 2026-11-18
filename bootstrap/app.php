@@ -232,7 +232,6 @@ $companySettingsService = new CompanySettingsService($connection, $config->get('
 $pushSettingsService = new PushSettingsService($connection, $config->get('push', []));
 $pushSubscriptionService = new PushSubscriptionService($connection);
 $pushNotificationService = new PushNotificationService($connection, $pushSettingsService, $pushSubscriptionService);
-$projectMaterialService = new ProjectMaterialService($connection, $projectAccessService);
 $projectWorkReportService = new ProjectWorkReportService($connection, $projectAccessService);
 $projectDispatchService = new ProjectDispatchService(
     $connection,
@@ -277,6 +276,7 @@ $workTimePreview = new WorkTimePreviewService($connection, $workTimePolicies);
 $workTimePresence = new WorkTimePresenceService($connection, $workTimePolicies);
 $appTimesheetSyncService->setWorkTimePresenceService($workTimePresence);
 $workTimeEvents = new WorkTimeEventService($connection, $workTimePolicies, $appTimesheetSyncService, new WorkTimePushChannel($pushSubscriptionService, $pushNotificationService), null, $workTimePreview);
+$projectMaterialService = new ProjectMaterialService($connection, $projectAccessService, $workTimeEvents);
 $workTimeDeviations = new WorkTimeDeviationService($connection, $workTimePolicies);
 $workTimePauseCorrections = new WorkTimePauseCorrectionService($connection, $workTimePolicies, $workTimePreview, $timesheetWriteGuard);
 $workTimeUserSummary = new WorkTimeUserSummaryService($connection, $workTimePolicies);

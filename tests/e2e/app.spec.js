@@ -411,7 +411,7 @@ test('mobile project rejects unknown deep links and renders the empty instructio
 test('mobile project never exposes revoked project data from preferred IndexedDB caches', async ({ page }) => {
   await page.goto('/app/login');
   await page.evaluate(async () => {
-    localStorage.setItem('app.preferredProjectId', '2');
+    localStorage.setItem('app.viewedProjectId.user.7', '2');
     const database = await new Promise((resolve, reject) => {
       const request = indexedDB.open('zeiterfassung-app', 1);
       request.onupgradeneeded = () => {
@@ -490,7 +490,7 @@ test('mobile project never exposes revoked project data from preferred IndexedDB
   await expect(page.getByText('Vertrauliche Arbeitsanweisung')).toHaveCount(0);
   await expect(page.getByText('vertraulich.pdf')).toHaveCount(0);
   await expect(page.getByText('Vertrauliches Material')).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => localStorage.getItem('app.preferredProjectId'))).toBeNull();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('app.viewedProjectId.user.7'))).not.toBe('2');
   await expect.poll(() => page.evaluate(async () => {
     const database = await new Promise((resolve, reject) => {
       const request = indexedDB.open('zeiterfassung-app', 1);
@@ -1626,7 +1626,7 @@ test('mobile history hides timesheet file counters when timesheet files are disa
   await expect(page.getByText('stundenzettel.pdf')).toHaveCount(0);
 });
 
-test('mobile today totals count unassigned running work live', async ({ page, context }) => {
+test('mobile today totals keep unassigned work live until a queued assignment is confirmed by the server', async ({ page, context }) => {
   await page.addInitScript(() => {
     const RealDate = Date;
     let mockedNow = new RealDate('2026-05-15T10:00:00+02:00').getTime();
@@ -1721,8 +1721,8 @@ test('mobile today totals count unassigned running work live', async ({ page, co
           tracked_minutes_live_basis: liveBasis,
           project_day_summaries: [
             {
-              project_id: null,
-              project_name: 'Nicht zugeordnet',
+              project_id: workEntry.project_id,
+              project_name: workEntry.project_name,
               status: 'working',
               start_time: '09:45:00',
               end_time: null,
@@ -1764,6 +1764,14 @@ test('mobile today totals count unassigned running work live', async ({ page, co
     });
   });
 
+  const timeActions = [];
+  await page.route('**/api/v1/app/timesheets/sync', async (route) => {
+    timeActions.push(route.request().postDataJSON());
+    workEntry.project_id = 1;
+    workEntry.project_name = 'Baustelle A';
+    await route.fulfill({ json: { ok: true, data: { timesheet: workEntry } } });
+  });
+
   await page.goto('/app/heute');
 
   await expect(page.locator('main [data-live-today-duration]')).toHaveText('00:15');
@@ -1785,10 +1793,19 @@ test('mobile today totals count unassigned running work live', async ({ page, co
   await expect(page.getByRole('heading', { name: 'Baustelle waehlen' })).toBeVisible();
   await page.locator('#projectSelect').selectOption('1');
   await page.getByRole('button', { name: 'Laufenden Einsatz zuordnen' }).click();
+  await page.getByRole('button', { name: 'Zeitbuchung zuordnen', exact: true }).click();
 
   await expect(page.locator('main [data-live-today-duration]')).toHaveText('00:17');
   await expect(page.locator('main [data-live-project-today-duration]')).toHaveText('00:17');
+  await expect(page.locator('main strong[data-live-project-name]')).toHaveText('Nicht zugeordnet');
+  expect(timeActions).toEqual([]);
+
+  await context.setOffline(false);
+  await expect.poll(() => timeActions.length).toBe(1);
+  expect(timeActions[0]).toMatchObject({ action: 'select_project', project_id: 1, expected_project_id: null, expected_timesheet_id: 31, expected_running: true });
   await expect(page.locator('main strong[data-live-project-name]')).toHaveText('Baustelle A');
+  await expect(page.locator('main [data-live-today-duration]')).toHaveText('00:17');
+  await expect(page.locator('main [data-live-project-today-duration]')).toHaveText('00:17');
 });
 
 test('mobile today totals keep manual pause and offline checkout duration', async ({ page, context }) => {

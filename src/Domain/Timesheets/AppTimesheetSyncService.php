@@ -114,6 +114,12 @@ final class AppTimesheetSyncService
                 throw new RuntimeException('Der Arbeitseinsatz wurde inzwischen geaendert. Bitte neu laden.');
             }
         }
+        $guardedProjectAssignment = $action === 'select_project'
+            && (array_key_exists('expected_project_id', $payload) || array_key_exists('expected_running', $payload));
+        if ($guardedProjectAssignment) {
+            $this->assertExpectedProjectAssignment($entry, $payload, $userId);
+            unset($payload['source']);
+        }
         if ($appliesToUser && !in_array($action, ['check_in', 'work_start', 'presence_end'], true)) {
             if (isset($payload['expected_start_time']) && !isset($payload['expected_timesheet_id'])) {
                 $expectedStart = is_string($payload['expected_start_time']) ? $this->normalizeTime($payload['expected_start_time']) : null;
@@ -157,7 +163,7 @@ final class AppTimesheetSyncService
         if ($action === 'work_start') {
             $action = 'check_in';
         }
-        $note = $this->nullableTrimmed($payload['note'] ?? ($entry['note'] ?? null));
+        $note = $guardedProjectAssignment ? ($entry['note'] ?? null) : $this->nullableTrimmed($payload['note'] ?? ($entry['note'] ?? null));
         $source = $this->normalizeSource($payload['source'] ?? ($entry['source'] ?? 'app'));
         $manualBreakMinutes = isset($entry['break_minutes']) ? (int) $entry['break_minutes'] : $this->workdayStateCalculator->completedBreakMinutes($existingBreaks);
 
@@ -292,6 +298,25 @@ final class AppTimesheetSyncService
         $this->updateSyncOperationResponse($clientRequestId, $userId, $action, $response);
 
         return $response;
+    }
+
+    private function assertExpectedProjectAssignment(?array $entry, array $payload, int $userId): void
+    {
+        $expectedProjectId = $payload['expected_project_id'] ?? null;
+        if ($expectedProjectId !== null) {
+            $expectedProjectId = filter_var($expectedProjectId, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+        }
+        $expectedStart = is_string($payload['expected_start_time'] ?? null)
+            ? $this->normalizeTime($payload['expected_start_time']) : null;
+        $currentProjectId = isset($entry['project_id']) ? (int) $entry['project_id'] : null;
+
+        if ($entry === null || !isset($payload['expected_timesheet_id'])
+            || $expectedStart === null || $expectedStart !== $this->normalizeTime($entry['start_time'])
+            || !array_key_exists('expected_project_id', $payload) || $expectedProjectId !== $currentProjectId
+            || ($payload['expected_running'] ?? null) !== empty($entry['end_time'])
+            || ($payload['expected_user_id'] ?? null) !== $userId) {
+            throw new RuntimeException('Der Arbeitseinsatz wurde inzwischen geaendert. Bitte neu laden.');
+        }
     }
 
     private function findDailyWorkEntry(int $userId, string $workDate): ?array

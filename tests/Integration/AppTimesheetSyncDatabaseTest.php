@@ -140,6 +140,57 @@ final class AppTimesheetSyncDatabaseTest extends TestCase
         });
     }
 
+    public function testConfirmedProjectAssignmentCannotMoveAChangedWorkEntry(): void
+    {
+        $this->withScratchDatabase(function (DatabaseConnection $connection): void {
+            [$userId, $projectId, $suffix] = $this->seedAssignedUserAndProject($connection, 'guarded-assignment');
+            $service = $this->createSyncService($connection);
+            $user = ['id' => $userId, 'permissions' => ['timesheets.create', 'timesheets.view_own']];
+            $workDate = '2026-06-05';
+            $entry = $service->sync($user, [
+                'client_request_id' => 'check-in-' . $suffix,
+                'action' => 'check_in',
+                'work_date' => $workDate,
+                'start_time' => '08:00',
+                'note' => 'Aktuelle Notiz',
+            ])['timesheet'];
+            $assignment = [
+                'client_request_id' => 'guarded-move-' . $suffix,
+                'action' => 'select_project',
+                'work_date' => $workDate,
+                'project_id' => $projectId,
+                'expected_timesheet_id' => $entry['id'],
+                'expected_user_id' => $userId,
+                'expected_project_id' => null,
+                'expected_running' => true,
+                'expected_start_time' => '08:00',
+                'note' => 'Veraltete Notiz',
+            ];
+
+            $result = $service->sync($user, $assignment);
+            self::assertSame($projectId, $result['timesheet']['project_id']);
+            self::assertSame('Aktuelle Notiz', $result['timesheet']['note']);
+            self::assertSame($result, $service->sync($user, $assignment));
+
+            foreach ([
+                ['expected_project_id' => null],
+                ['expected_project_id' => $projectId, 'expected_running' => false],
+                ['expected_project_id' => $projectId, 'expected_user_id' => $userId + 1],
+                ['expected_project_id' => $projectId, 'expected_timesheet_id' => null],
+            ] as $index => $staleExpectation) {
+                try {
+                    $service->sync($user, array_replace($assignment, $staleExpectation, ['client_request_id' => 'stale-move-' . $index . '-' . $suffix]));
+                    self::fail('Stale project assignment should have been rejected.');
+                } catch (RuntimeException $exception) {
+                    self::assertSame('Der Arbeitseinsatz wurde inzwischen geaendert. Bitte neu laden.', $exception->getMessage());
+                }
+            }
+
+            self::assertSame(1, (int) $connection->fetchColumn('SELECT COUNT(*) FROM timesheets'));
+            self::assertSame($projectId, (int) $connection->fetchColumn('SELECT project_id FROM timesheets WHERE id = :id', ['id' => $entry['id']]));
+        });
+    }
+
     public function testLegalMinimumOverridesLowerManualBreak(): void
     {
         $this->withScratchDatabase(function (DatabaseConnection $connection): void {

@@ -89,7 +89,7 @@ final class AppController
         $appleTouchIconUrl = AppView::versionedAssetUrl('/assets/apple-touch-icon.png');
         $appName = json_encode($this->appName, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
         $script = <<<JS
-const CACHE_NAME = 'zeiterfassung-app-v7';
+const CACHE_NAME = 'zeiterfassung-app-v8';
 const APP_NAME = {$appName};
 const APP_FALLBACK_URL = '/app';
 const APP_SHELL = [
@@ -110,7 +110,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))))
+      .then((keys) => Promise.all(keys.filter((key) => key.startsWith('zeiterfassung-app-') && key !== CACHE_NAME).map((key) => caches.delete(key))))
       .then(() => self.clients.claim())
   );
 });
@@ -215,6 +215,10 @@ self.addEventListener('notificationclick', (event) => {
 });
 JS;
 
-        return new Response($script, 200, ['Content-Type' => 'application/javascript; charset=utf-8']);
+        return new Response($script, 200, [
+            'Content-Type' => 'application/javascript; charset=utf-8',
+            'Cache-Control' => 'no-cache',
+            'Service-Worker-Allowed' => '/app',
+        ]);
     }
 }

@@ -29,8 +29,8 @@ async function mockProjectSearchApp(page, routeName, options = {}) {
   const flags = { show_project_files: !!options.showFiles, show_project_materials: !!options.showMaterials, show_geo_section: false, show_personnel_overview: false };
   const todayState = () => ({ status: app.entry ? 'working' : 'not_started', is_missing: false, booking_required: false, work_entry: app.entry, status_entry: null, current_break: null });
   await page.addInitScript(() => {
-    localStorage.setItem('app.projectSelectionId', '1');
-    localStorage.setItem('app.preferredProjectId', '1');
+    if (localStorage.getItem('app.viewedProjectId.user.7') === null) localStorage.setItem('app.viewedProjectId.user.7', '1');
+    if (localStorage.getItem('app.checkInProjectId.user.7') === null) localStorage.setItem('app.checkInProjectId.user.7', '1');
   });
   // Catch every request: these browser checks never reach a live API or DB.
   await page.route('**/*', async (route) => {
@@ -257,17 +257,17 @@ test('starting a second composition cancels the previous deferred automatic sele
   expect(app.mutations).toEqual([]);
 });
 
-test('search text stays separate for each app route during navigation', async ({ page }) => {
+test('the project view search does not replace the next check-in selection', async ({ page }) => {
   const app = await mockProjectSearchApp(page, 'heute');
   await page.locator('#projectSearch').fill('rathaus');
   await page.locator('#appMenuToggle').click();
-  await page.locator('.app-drawer-nav [data-app-link][href="/app/zeiten"]').click();
+  await page.locator('.app-drawer-nav [data-app-link][href="/app/projektwahl"]').click();
   await expect(page.locator('#projectSearch')).toHaveValue('');
   await page.locator('#projectSearch').fill('p-001');
   await page.locator('#appMenuToggle').click();
   await page.locator('.app-drawer-nav [data-app-link][href="/app/heute"]').click();
   await expect(page.locator('#projectSearch')).toHaveValue('rathaus');
-  await expect(page.locator('#projectSelect')).toHaveValue('1');
+  await expect(page.locator('#projectSelect')).toHaveValue('3');
   expect(app.mutations).toEqual([]);
 });
 
@@ -291,7 +291,7 @@ for (const routeName of ['heute', 'zeiten']) {
     expect(app.mutations).toEqual([]);
     await page.locator('[data-action="check_in"]').click();
     await expect.poll(() => app.mutations.length).toBe(1);
-    expect(app.mutations[0]).toMatchObject({ pathname: '/api/v1/app/timesheets/sync', payload: { action: 'check_in', project_id: '2' } });
+    expect(app.mutations[0]).toMatchObject({ pathname: '/api/v1/app/timesheets/sync', payload: { action: 'check_in', project_id: 2 } });
     if (routeName === 'heute') expect(app.mutations[0].payload.note).toBe('Notiz vor der Projektsuche');
     else expect(app.mutations[0].payload.start_time).toBe('07:45');
   });
@@ -344,7 +344,7 @@ test('a large project list selects the unique match and only an explicit check-i
   expect(app.mutations).toEqual([]);
   await page.locator('[data-action="check_in"]').click();
   await expect.poll(() => app.mutations.length).toBe(1);
-  expect(app.mutations[0]).toMatchObject({ pathname: '/api/v1/app/timesheets/sync', payload: { action: 'check_in', project_id: '184' } });
+  expect(app.mutations[0]).toMatchObject({ pathname: '/api/v1/app/timesheets/sync', payload: { action: 'check_in', project_id: 184 } });
 });
 
 for (const theme of ['light', 'dark']) {

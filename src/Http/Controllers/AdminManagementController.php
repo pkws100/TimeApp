@@ -162,7 +162,7 @@ final class AdminManagementController
             )
             . $this->renderProjectDispatchSection($project, $dispatchRecipients, $dispatchHistory)
             . $this->renderProjectWorkReportSection($workReports)
-            . $this->renderProjectMaterialSection($project, $materials)
+            . $this->renderProjectMaterialSection($materials)
             . $this->renderProjectBookingsSection($project, $bookings, $allProjects, $bookingUsers, $request);
 
         return Response::html($this->view->render('Projekt bearbeiten', $content), $status);
@@ -2057,9 +2057,8 @@ HTML;
 HTML;
     }
 
-    private function renderProjectMaterialSection(array $project, array $materials): string
+    private function renderProjectMaterialSection(array $materials): string
     {
-        $projectId = (int) ($project['id'] ?? 0);
         $csrfToken = $this->e($this->csrfService->token());
         $rows = '';
 
@@ -2072,19 +2071,32 @@ HTML;
                 : '<form method="post" action="/admin/project-materials/' . (int) ($material['id'] ?? 0) . '/archive" class="inline-form" onsubmit="return confirm(\'Materialeintrag wirklich archivieren?\')">'
                     . '<input type="hidden" name="csrf_token" value="' . $csrfToken . '">'
                     . '<button type="submit">Archivieren</button></form>';
+            $captureType = $material['capture_type'] ?? null;
+            $capture = '';
+            if (in_array($captureType, [ProjectMaterialService::CAPTURE_CROSS_PROJECT, ProjectMaterialService::CAPTURE_CROSS_PROJECT_BACKDATED], true)) {
+                $capture = '<span class="badge neutral">Projektübergreifend erfasst</span>';
+                if (!empty($material['captured_work_project_name'])) {
+                    $capture .= '<br><small class="muted">Eingecheckt in ' . $this->e($material['captured_work_project_name']) . '</small>';
+                }
+            }
+            if (in_array($captureType, [ProjectMaterialService::CAPTURE_BACKDATED, ProjectMaterialService::CAPTURE_CROSS_PROJECT_BACKDATED], true)) {
+                $capture .= ($capture === '' ? '' : '<br>') . '<span class="badge neutral">Nachgetragen</span>';
+            }
             $rows .= '<tr>'
                 . '<td>' . $this->e((string) ($material['work_date'] ?? '')) . '</td>'
                 . '<td>' . $this->e((string) ($material['description'] ?? '')) . '</td>'
                 . '<td>' . $this->e($quantity . ((string) ($material['unit'] ?? '') !== '' ? ' ' . (string) $material['unit'] : '')) . '</td>'
                 . '<td>' . $this->e((string) ($material['created_by_name'] ?? 'Unbekannt')) . '</td>'
+                . '<td>' . $this->e((string) ($material['created_at'] ?? '')) . '</td>'
                 . '<td>' . nl2br($this->e((string) ($material['note'] ?? ''))) . '</td>'
+                . '<td>' . $capture . '</td>'
                 . '<td>' . ($isDeleted ? '<span class="badge warn">Archiviert</span>' : '<span class="badge ok">Aktiv</span>') . '</td>'
                 . '<td>' . $archive . '</td>'
                 . '</tr>';
         }
 
         if ($rows === '') {
-            $rows = '<tr><td colspan="7" class="table-empty">Noch keine Materialeintraege fuer dieses Projekt.</td></tr>';
+            $rows = '<tr><td colspan="9" class="table-empty">Noch keine Materialeintraege fuer dieses Projekt.</td></tr>';
         }
 
         return <<<HTML
@@ -2094,7 +2106,7 @@ HTML;
     </div>
     <div class="table-scroll">
         <table>
-            <thead><tr><th>Datum</th><th>Material</th><th>Menge</th><th>Erfasst von</th><th>Bemerkung</th><th>Status</th><th>Aktion</th></tr></thead>
+            <thead><tr><th>Materialdatum</th><th>Material</th><th>Menge</th><th>Erfasst von</th><th>Erfasst am</th><th>Bemerkung</th><th>Erfassung</th><th>Status</th><th>Aktion</th></tr></thead>
             <tbody>{$rows}</tbody>
         </table>
     </div>

@@ -180,7 +180,7 @@ final class AdminManagementControllerTest extends TestCase
         $controller = $this->controller();
         $method = new ReflectionMethod($controller, 'renderProjectMaterialSection');
         $method->setAccessible(true);
-        $html = (string) $method->invoke($controller, ['id' => 5], [
+        $html = (string) $method->invoke($controller, [
             [
                 'id' => 11,
                 'work_date' => '2026-07-22',
@@ -188,6 +188,9 @@ final class AdminManagementControllerTest extends TestCase
                 'quantity' => '2.500',
                 'unit' => 'm',
                 'created_by_name' => 'Max Muster',
+                'created_at' => '2026-07-23 12:03:45',
+                'capture_type' => 'cross_project_backdated',
+                'captured_work_project_name' => 'Projekt <A>',
                 'note' => '<b>Notiz</b>',
                 'is_deleted' => false,
             ],
@@ -204,6 +207,10 @@ final class AdminManagementControllerTest extends TestCase
         self::assertStringContainsString('name="csrf_token" value="material-csrf"', $html);
         self::assertStringContainsString('&lt;Rohr&gt;', $html);
         self::assertStringContainsString('&lt;b&gt;Notiz&lt;/b&gt;', $html);
+        self::assertStringContainsString('2026-07-23 12:03:45', $html);
+        self::assertStringContainsString('Projektübergreifend erfasst', $html);
+        self::assertStringContainsString('Eingecheckt in Projekt &lt;A&gt;', $html);
+        self::assertStringContainsString('Nachgetragen', $html);
         self::assertStringContainsString('Archiviert', $html);
     }
 

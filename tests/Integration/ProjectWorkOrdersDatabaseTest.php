@@ -54,7 +54,7 @@ final class ProjectWorkOrdersDatabaseTest extends MariaDbTestCase
                AND referenced_table_name = "users"
              LIMIT 1'
         ));
-        self::assertSame(2, (int) $this->connection()->fetchColumn(
+        self::assertSame(3, (int) $this->connection()->fetchColumn(
             'SELECT COUNT(*) FROM information_schema.referential_constraints
              WHERE constraint_schema = DATABASE()
                AND table_name IN ("project_material_entries", "project_dispatches")

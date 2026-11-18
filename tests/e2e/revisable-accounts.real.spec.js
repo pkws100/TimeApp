@@ -159,6 +159,7 @@ test.describe('real revisable account workflow', () => {
     await reversedGeneration.getByRole('link', { name: 'Journal' }).click();
     await expect(page.getByText('Diese historische Stichtagsgeneration ist revisionssicher und nur lesbar.')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Ausgleichen' })).toHaveCount(0);
+    await page.waitForLoadState('load');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
     await page.setViewportSize({ width: 1440, height: 900 });
 
@@ -297,6 +298,8 @@ test.describe('real revisable account workflow', () => {
     await page.getByRole('button', { name: 'Urlaub fuer Mitarbeiter buchen' }).click();
     const modal = page.locator('[data-absence-period-modal]');
     async function savePeriod() {
+      const warnings = modal.locator('[name="confirm_warnings"]');
+      if (await warnings.isVisible()) await warnings.check();
       // The fetch handler reloads the same URL. Arm a fresh load event before
       // submitting so DOM text alone cannot race the responsive stylesheet.
       const [response] = await Promise.all([

@@ -37,7 +37,7 @@ final class WorkTimeEventService
 
     public function setReconciliationQueue(WorkTimeReconciliationQueue $queue): void { $this->reconciliationQueue = $queue; }
 
-    public function statusForUser(int $userId): array
+    public function statusForUser(int $userId, ?string $today = null): array
     {
         if (!$this->policies->enabled()) {
             return ['enabled' => false, 'checkout_proposals' => [], 'presence_session' => null];
@@ -48,7 +48,7 @@ final class WorkTimeEventService
         $assignedEntries = array_filter($activeEntries, fn (array $row): bool => $this->policies->policyFor($userId, $row['work_date']) !== null);
         $conflict = $assignedEntries !== [] && count($activeEntries) > 1;
         $activeEntry = null;
-        $today = (new DateTimeImmutable('today', new DateTimeZone('Europe/Berlin')))->format('Y-m-d');
+        $today ??= (new DateTimeImmutable('today', new DateTimeZone('Europe/Berlin')))->format('Y-m-d');
         if (count($activeEntries) === 1 && $assignedEntries !== [] && $activeEntries[0]['work_date'] < $today) {
             $activeEntry = $activeEntries[0];
             foreach (['id', 'user_id'] as $field) { $activeEntry[$field] = (int) $activeEntry[$field]; }

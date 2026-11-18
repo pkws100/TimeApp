@@ -6,6 +6,7 @@ const { test, expect } = require('@playwright/test');
 test.use({ serviceWorkers: 'block' });
 
 const projectRoot = path.join(__dirname, '../..');
+const today = '2026-11-06';
 const appShell = execFileSync('php', ['-r',
   'function base_path(string $path): string { return getcwd() . "/" . $path; } '
   + 'require "src/Presentation/App/AppView.php"; '
@@ -18,25 +19,31 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function materialApp(page) {
+async function materialApp(page, initialPath = '/app/projektwahl?project=1') {
   const state = {
     userId: 7, authenticated: true, dayReads: 0, dayError: null,
     projects: [1, 2].map((id) => ({ id, project_number: 'P-00' + id, name: 'Baustelle ' + id,
       work_instructions: Array.from({ length: 12 }, (_, line) => 'Arbeitsschritt ' + (line + 1)).join('\n') })),
     materials: { 1: [], 2: [] }, posts: [], entries: new Map(), nextPost: null,
-    holdPost: null, holdGet: null, materialError: null
+    holdPost: null, holdGet: null, materialError: null, workEntry: null, timeActions: []
   };
   const flags = { show_project_files: true, show_project_work_instructions: true, show_project_materials: true };
   const user = () => ({ id: state.userId, display_name: state.userId === 7 ? 'Max Beispiel' : 'Erika Beispiel',
     email: state.userId === 7 ? 'max@example.test' : 'erika@example.test',
     permissions: ['timesheets.create', 'timesheets.view_own', 'files.view', 'files.upload'] });
+  const todayState = () => ({ status: state.workEntry ? (state.workEntry.end_time ? 'completed' : 'working') : 'not_started', is_missing: false,
+    work_entry: state.workEntry, status_entry: null, current_break: null });
+  const projectDaySummaries = () => state.workEntry ? [{ project_id: state.workEntry.project_id,
+    project_name: state.workEntry.project_name, status: todayState().status, work_entry: state.workEntry,
+    start_time: state.workEntry.start_time, end_time: state.workEntry.end_time, total_break_minutes: 0, total_net_minutes: 0, breaks_today: [] }] : [];
   await page.route('**/*', async (route) => {
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
     const json = (data, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data) });
     if (pathname === '/assets/js/app.js' || pathname === '/assets/css/app.css') {
-      const body = pathname.endsWith('.js') && process.env.PWA_MATERIAL_BASELINE === '1'
-        ? execFileSync('git', ['show', '9774a446ffb247d27eb5a40c7d6d9e73d1a7942b:public/assets/js/app.js'], { cwd: projectRoot })
+      const baseline = process.env.PWA_PROJECT_CONTEXT_BASELINE || (process.env.PWA_MATERIAL_BASELINE === '1' ? '9774a446ffb247d27eb5a40c7d6d9e73d1a7942b' : '');
+      const body = pathname.endsWith('.js') && baseline
+        ? execFileSync('git', ['show', baseline + ':public/assets/js/app.js'], { cwd: projectRoot })
         : fs.readFileSync(path.join(projectRoot, 'public', pathname));
       return route.fulfill({ contentType: pathname.endsWith('.js') ? 'application/javascript' : 'text/css', body });
     }
@@ -50,11 +57,28 @@ async function materialApp(page) {
     if (pathname === '/api/v1/app/me/day') {
       state.dayReads += 1;
       if (state.dayError) return json({ message: state.dayError.message }, state.dayError.status);
-      return json({ data: { today: '2026-11-06', server_time: '2026-11-06T12:00:00+01:00',
+      return json({ data: { today, server_time: today + 'T12:00:00+01:00',
         user: { ...user(), roles: [], app_ui_settings: flags }, app_ui_settings: flags,
-        projects: state.projects, attachments: [], project_day_summaries: [],
-        today_state: { status: 'not_started', is_missing: false, work_entry: null, status_entry: null, current_break: null },
+        projects: state.projects, attachments: [], project_day_summaries: projectDaySummaries(),
+        today_state: todayState(),
         current_break: null, breaks_today: [], company: {}, geo_policy: {}, personnel_events: [], personnel_labels: [] } });
+    }
+    if (pathname === '/api/v1/app/timesheets/sync' && request.method() === 'POST') {
+      const payload = request.postDataJSON();
+      state.timeActions.push(payload);
+      const project = state.projects.find(({ id }) => id === Number(payload.project_id));
+      if (payload.action === 'check_in') {
+        state.workEntry = { id: 500, project_id: project?.id ?? null, project_name: project?.name ?? null,
+          entry_type: 'work', work_date: today, start_time: '08:00:00', end_time: null,
+          break_minutes: 0, net_minutes: 0, note: payload.note || '', attachments: [] };
+      } else if (payload.action === 'select_project' && state.workEntry) {
+        state.workEntry = { ...state.workEntry, project_id: project?.id ?? null, project_name: project?.name ?? null };
+      } else if (payload.action === 'check_out' && state.workEntry) {
+        state.workEntry = { ...state.workEntry, end_time: payload.end_time };
+      } else {
+        return json({ message: 'Unexpected time action: ' + payload.action }, 422);
+      }
+      return json({ ok: true, data: { today_state: todayState(), timesheet: state.workEntry, breaks_today: [], current_break: null } });
     }
     if (pathname === '/api/v1/settings/company') return json({ data: { company_name: 'Material-Test' } });
     if (pathname === '/api/v1/app/push/status') return json({ data: { enabled: false, can_subscribe: false, devices: [] } });
@@ -87,7 +111,12 @@ async function materialApp(page) {
       const key = owner + ':' + payload.client_request_id;
       const replayed = state.entries.has(key);
       if (!replayed) {
-        const entry = { ...payload, id: 100 + state.entries.size, project_id: projectId,
+        const runningProjectId = state.workEntry?.project_id ?? null;
+        const crossProject = runningProjectId !== null && runningProjectId !== projectId;
+        const backdated = payload.work_date < today;
+        const captureType = [crossProject ? 'cross_project' : '', backdated ? 'backdated' : ''].filter(Boolean).join('_') || 'standard';
+        const entry = { ...payload, id: 100 + state.entries.size, project_id: projectId, created_at: today + ' 12:08:17',
+          capture_type: captureType, captured_work_project_id: runningProjectId, captured_work_project_name: state.workEntry?.project_name ?? null,
           created_by_user_id: owner, created_by_name: user().display_name, is_deleted: false };
         state.entries.set(key, entry);
         state.materials[projectId].push(entry);
@@ -98,8 +127,9 @@ async function materialApp(page) {
     if (pathname.startsWith('/api/')) return json({ message: 'Unexpected mocked endpoint: ' + pathname }, 501);
     return route.fulfill({ status: 204, body: '' });
   });
-  await page.goto('/app/projektwahl?project=1');
-  await expect(page.locator('#projectMaterialDescription')).toBeEditable();
+  await page.goto(initialPath);
+  if (initialPath.startsWith('/app/projektwahl')) await expect(page.locator('#projectMaterialDescription')).toBeEditable({ timeout: 10000 });
+  else await expect(page.locator('#projectSelect')).toBeVisible();
   await page.waitForLoadState('networkidle');
   return state;
 }
@@ -132,23 +162,217 @@ async function fillMaterial(page, description = 'Kupferrohr 28 mm', note = 'Im K
   await page.locator('#projectMaterialDate').fill('2026-11-05');
 }
 
-async function refresh(page, state) {
+async function refresh(page, state, trigger = () => page.evaluate(() => window.dispatchEvent(new Event('focus')))) {
   const before = state.dayReads;
-  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await trigger();
   await expect.poll(() => state.dayReads).toBeGreaterThan(before);
   await page.waitForLoadState('networkidle');
 }
 
-async function login(page, state, userId = 7) {
+async function login(page, state, userId = 7, projectPath = '/app/projektwahl?project=1') {
   state.userId = userId;
   state.dayError = null;
   await page.locator('#loginForm [name="email"]').fill(userId === 7 ? 'max@example.test' : 'erika@example.test');
   await page.locator('#loginForm [name="password"]').fill('synthetic-password');
   await page.locator('#loginForm button').click();
   await expect(page).toHaveURL(/\/app\/heute$/);
-  await page.goto('/app/projektwahl?project=1');
-  await expect(page.locator('#projectMaterialDescription')).toBeVisible();
+  if (projectPath) await page.goto(projectPath);
+  await expect(page.locator('#projectSelect')).toBeVisible();
 }
+
+async function checkIntoProjectA(page) {
+  const state = await materialApp(page, '/app/heute');
+  await page.locator('#projectSelect').selectOption('1');
+  await page.locator('[data-action="check_in"]').click();
+  await expect.poll(() => state.timeActions.length).toBe(1);
+  expect(state.timeActions[0].action).toBe('check_in');
+  expect(Number(state.timeActions[0].project_id)).toBe(1);
+  await page.waitForLoadState('networkidle');
+  return state;
+}
+
+async function openProjectB(page) {
+  await page.goto('/app/projektwahl?project=1');
+  await expect(page).toHaveURL('/app/projektwahl');
+  await page.locator('#projectSelect').selectOption('2');
+  await expect(page.locator('#projectMaterialForm')).toHaveAttribute('data-project-id', '2');
+  await expect(page.locator('#projectMaterialDescription')).toBeEditable();
+}
+
+test('minute refresh keeps project B and its material inputs while checked into project A', async ({ page }) => {
+  await page.clock.install();
+  const state = await checkIntoProjectA(page);
+  const runningEntry = { ...state.workEntry };
+  await openProjectB(page);
+  const form = page.locator('#projectMaterialForm');
+  await fillMaterial(page, 'Kabel NYM-J 3 × 1,5 mm²', 'Nachträgliche Dokumentation der verlegten Leitungen');
+  await waitDraft(page, 'Nachträgliche Dokumentation');
+
+  const reads = state.dayReads;
+  await page.clock.fastForward(60000);
+  await page.clock.fastForward(200);
+  await expect.poll(() => state.dayReads).toBeGreaterThan(reads);
+  await page.waitForLoadState('networkidle');
+  await expect(form).toHaveAttribute('data-project-id', '2');
+  await expect(page.locator('#projectSelect')).toHaveValue('2');
+  await expect(page.locator('#projectMaterialDescription')).toHaveValue('Kabel NYM-J 3 × 1,5 mm²');
+  await expect(page.locator('#projectMaterialQuantity')).toHaveValue('2,5');
+  await expect(page.locator('#projectMaterialUnit')).toHaveValue('m');
+  await expect(page.locator('#projectMaterialNote')).toHaveValue('Nachträgliche Dokumentation der verlegten Leitungen');
+  await expect(page.locator('#projectMaterialDate')).toHaveValue('2026-11-05');
+  expect(state.workEntry).toEqual(runningEntry);
+  expect(state.timeActions).toHaveLength(1);
+  expect(state.posts).toHaveLength(0);
+});
+
+test('project B survives focus, visibility, offline recovery and reload while project A continues', async ({ page }) => {
+  const state = await checkIntoProjectA(page);
+  const runningEntry = { ...state.workEntry };
+  await openProjectB(page);
+  const description = page.locator('#projectMaterialDescription');
+  await fillMaterial(page, 'Dauerhaft geöffnete Baustelle Zwei');
+  await waitDraft(page, 'Dauerhaft geöffnete Baustelle Zwei');
+
+  const held = { projectId: 2, started: deferred(), release: deferred() };
+  state.holdGet = held;
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await held.started.promise;
+  const note = page.locator('#projectMaterialNote');
+  await note.fill('Während der Antwort ergänzt');
+  await note.evaluate((input) => { window.originalNote = input; input.focus(); input.setSelectionRange(8, 15); });
+  held.release.resolve();
+  await page.waitForLoadState('networkidle');
+  await expect(note).toHaveValue('Während der Antwort ergänzt');
+  expect(await note.evaluate((input) => input === window.originalNote && input === document.activeElement && input.selectionStart === 8 && input.selectionEnd === 15)).toBeTruthy();
+
+  await refresh(page, state, () => page.evaluate(() => {
+    let visibility = 'hidden';
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
+    document.dispatchEvent(new Event('visibilitychange'));
+    visibility = 'visible';
+    document.dispatchEvent(new Event('visibilitychange'));
+  }));
+  await expect(description).toHaveValue('Dauerhaft geöffnete Baustelle Zwei');
+  await refresh(page, state, () => page.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+  }));
+  await expect(page.locator('#projectSelect')).toHaveValue('2');
+
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
+    window.dispatchEvent(new Event('offline'));
+  });
+  await expect(page.locator('#projectSelect')).toHaveValue('2');
+  await refresh(page, state, () => page.evaluate(() => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => true });
+    window.dispatchEvent(new Event('online'));
+  }));
+  await expect(page.locator('#projectSelect')).toHaveValue('2');
+  await waitDraft(page, 'Während der Antwort ergänzt');
+  await page.reload();
+  await expect(page.locator('#projectSelect')).toHaveValue('2');
+  await expect(description).toHaveValue('Dauerhaft geöffnete Baustelle Zwei');
+  await expect(note).toHaveValue('Während der Antwort ergänzt');
+  expect(state.workEntry).toEqual(runningEntry);
+  expect(state.timeActions).toHaveLength(1);
+  expect(state.posts).toHaveLength(0);
+});
+
+test('cross-project material save and the link to the running project only change their intended target', async ({ page }, testInfo) => {
+  await page.emulateMedia({ colorScheme: 'light' });
+  const state = await checkIntoProjectA(page);
+  const runningEntry = { ...state.workEntry };
+  await openProjectB(page);
+  const context = page.locator('#projectContexts');
+  await expect(context).toContainText('Aktuelle Zeitbuchung');
+  await expect(context).toContainText('Aktuell geöffnetes Projekt');
+  await expect(context).toContainText('Baustelle 1');
+  await expect(context).toContainText('Baustelle 2');
+  await expect(context).toContainText(/Arbeitszeit läuft/i);
+  await context.screenshot({ path: testInfo.outputPath('project-context-light.png') });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.setViewportSize({ width: 320, height: 640 });
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await context.screenshot({ path: testInfo.outputPath('project-context-dark.png') });
+  const widths = await page.evaluate(() => {
+    const viewport = document.documentElement.clientWidth;
+    const overflowing = Array.from(document.querySelectorAll('body *'))
+      .filter((element) => element.getBoundingClientRect().right > viewport + 1)
+      .slice(0, 8).map((element) => element.id || element.className || element.tagName);
+    return { scroll: document.documentElement.scrollWidth, viewport, overflowing };
+  });
+  expect(widths.scroll, 'Overflowing elements: ' + widths.overflowing.join(', ')).toBeLessThanOrEqual(widths.viewport);
+  const sameDay = 'Kabel am heutigen Tag';
+  const backdated = 'Kabel vom vorherigen Tag';
+  const form = page.locator('#projectMaterialForm');
+  await expect(form).toContainText(/Materialnachtrag für .*Baustelle 2/);
+  await fillMaterial(page, sameDay);
+  await page.locator('#projectMaterialDate').fill(today);
+  await form.getByRole('button', { name: 'Material speichern', exact: true }).click();
+  await expect(page.getByText(sameDay, { exact: true })).toBeVisible();
+  await expect(page.getByText('Projektübergreifend erfasst', { exact: true })).toHaveCount(1);
+  await expect(page.getByText('Nachgetragen', { exact: true })).toHaveCount(0);
+
+  await fillMaterial(page, backdated);
+  await form.getByRole('button', { name: 'Material speichern', exact: true }).click();
+  await expect(page.getByText(backdated, { exact: true })).toBeVisible();
+  await expect(page.getByText('Projektübergreifend erfasst', { exact: true })).toHaveCount(2);
+  await expect(page.getByText('Nachgetragen', { exact: true })).toHaveCount(1);
+  expect(state.posts.map(({ projectId }) => projectId)).toEqual([2, 2]);
+  expect(state.posts.map(({ payload }) => Object.keys(payload).sort())).toEqual(Array(2).fill([
+    'client_request_id', 'description', 'note', 'quantity', 'unit', 'work_date'
+  ]));
+  expect(state.materials[1]).toHaveLength(0);
+  expect(state.materials[2].map(({ capture_type }) => capture_type)).toEqual(['cross_project', 'cross_project_backdated']);
+
+  await context.getByRole('button', { name: 'Zum eingecheckten Projekt wechseln' }).click();
+  await expect(form).toHaveAttribute('data-project-id', '1');
+  await expect(page.getByText(sameDay, { exact: true })).toHaveCount(0);
+  expect(state.workEntry).toEqual(runningEntry);
+  expect(state.timeActions).toHaveLength(1);
+});
+
+test('assigning a running time entry to the open project requires a separate confirmation', async ({ page }) => {
+  const state = await checkIntoProjectA(page);
+  await openProjectB(page);
+  const runningEntry = { ...state.workEntry };
+  const assign = page.getByRole('button', { name: 'Laufende Zeitbuchung diesem Projekt zuordnen', exact: true });
+  const confirm = page.getByRole('button', { name: 'Zeitbuchung zuordnen', exact: true });
+  await expect(confirm).toHaveCount(0);
+  await assign.click();
+  await expect(confirm).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Abbrechen', exact: true })).toBeFocused();
+  expect(state.timeActions).toHaveLength(1);
+  await page.keyboard.press('Escape');
+  await expect(confirm).toHaveCount(0);
+  await expect(assign).toBeFocused();
+  expect(state.workEntry).toEqual(runningEntry);
+
+  await assign.click();
+  await confirm.click();
+  await expect.poll(() => state.timeActions.length).toBe(2);
+  expect(state.timeActions[1]).toMatchObject({ action: 'select_project', project_id: 2 });
+  expect(state.workEntry).toEqual({ ...runningEntry, project_id: 2, project_name: 'Baustelle 2' });
+  expect(state.posts).toHaveLength(0);
+});
+
+test('an offline check-out follows an explicit reassignment without returning the booking to its old project', async ({ page, context }) => {
+  const state = await checkIntoProjectA(page);
+  await openProjectB(page);
+  await context.setOffline(true);
+  await page.getByRole('button', { name: 'Laufende Zeitbuchung diesem Projekt zuordnen', exact: true }).click();
+  await page.getByRole('button', { name: 'Zeitbuchung zuordnen', exact: true }).click();
+  await expect(page.locator('main strong[data-live-project-name]')).toHaveText('Baustelle 1');
+  await page.locator('[data-action="check_out"]').click();
+  expect(state.timeActions).toHaveLength(1);
+  await context.setOffline(false);
+  await expect.poll(() => state.timeActions.length).toBe(3);
+  expect(state.timeActions.map(({ action }) => action)).toEqual(['check_in', 'select_project', 'check_out']);
+  expect(state.timeActions[1].project_id).toBe(2);
+  expect(state.timeActions[2]).not.toHaveProperty('project_id');
+  expect(state.workEntry.project_id).toBe(2);
+  expect(state.workEntry.end_time).toBeTruthy();
+});
 
 test('a material draft survives a real page reload without automatically submitting', async ({ page }) => {
   const state = await materialApp(page);
@@ -334,19 +558,94 @@ test('session expiry restores the same employee draft while another employee nev
   expect(state.posts).toHaveLength(0);
 });
 
+test('the opened project and next check-in selection both belong to the signed-in employee', async ({ page }) => {
+  const state = await materialApp(page, '/app/heute');
+  await page.locator('#projectSelect').selectOption('1');
+  await page.goto('/app/projektwahl');
+  await page.locator('#projectSelect').selectOption('2');
+  await fillMaterial(page, 'Auswahl und Entwurf von Max');
+  await waitDraft(page, 'Auswahl und Entwurf von Max');
+  await page.evaluate(() => {
+    localStorage.setItem('app.preferredProjectId', '2');
+    localStorage.setItem('app.projectSelectionId', '2');
+  });
+  const expire = async () => {
+    state.dayError = { status: 401, message: 'Sitzung abgelaufen' };
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await expect(page.locator('#loginForm')).toBeVisible();
+  };
+
+  await expire();
+  await login(page, state, 8, null);
+  await expect(page.locator('#projectSelect')).toHaveValue('');
+  await page.goto('/app/projektwahl');
+  await expect(page.locator('#projectSelect')).not.toHaveValue('2');
+  await expect(page.getByText('Auswahl und Entwurf von Max', { exact: true })).toHaveCount(0);
+  await page.locator('#projectSelect').selectOption('1');
+  await fillMaterial(page, 'Auswahl und Entwurf von Erika');
+  await waitDraft(page, 'Auswahl und Entwurf von Erika', 8);
+  await page.goto('/app/heute');
+  await page.locator('#projectSelect').selectOption('2');
+
+  await expire();
+  await login(page, state, 7, null);
+  await expect(page.locator('#projectSelect')).toHaveValue('1');
+  await page.goto('/app/projektwahl');
+  await expect(page.locator('#projectSelect')).toHaveValue('2');
+  await expect(page.locator('#projectMaterialDescription')).toHaveValue('Auswahl und Entwurf von Max');
+
+  await expire();
+  await login(page, state, 8, null);
+  await expect(page.locator('#projectSelect')).toHaveValue('2');
+  await page.goto('/app/projektwahl');
+  await expect(page.locator('#projectSelect')).toHaveValue('1');
+  await expect(page.locator('#projectMaterialDescription')).toHaveValue('Auswahl und Entwurf von Erika');
+  expect(state.posts).toHaveLength(0);
+  expect(state.timeActions).toHaveLength(0);
+});
+
+test('a newly queued offline check-in stays with its employee across a browser account change', async ({ page, context }) => {
+  const state = await materialApp(page, '/app/heute');
+  await page.locator('#projectSelect').selectOption('1');
+  await context.setOffline(true);
+  await page.locator('[data-action="check_in"]').click();
+  await expect(page.locator('[data-action="check_out"]')).toBeVisible();
+  expect(state.timeActions).toEqual([]);
+
+  state.dayError = { status: 401, message: 'Sitzung abgelaufen' };
+  await context.setOffline(false);
+  await expect(page.locator('#loginForm')).toBeVisible();
+  await login(page, state, 8, null);
+  expect(state.timeActions).toEqual([]);
+  await expect(page.locator('#projectSelect')).toHaveValue('');
+
+  state.dayError = { status: 401, message: 'Sitzung abgelaufen' };
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(page.locator('#loginForm')).toBeVisible();
+  await login(page, state, 7, null);
+  await expect.poll(() => state.timeActions.length).toBe(1);
+  expect(state.timeActions[0]).toMatchObject({ action: 'check_in', project_id: 1 });
+});
+
 test('confirmed revocation removes the project draft while a temporary refresh failure retains it', async ({ page }) => {
-  const state = await materialApp(page);
+  const state = await checkIntoProjectA(page);
+  await openProjectB(page);
   await fillMaterial(page, 'Nur solange berechtigt');
   await waitDraft(page, 'Nur solange berechtigt');
   state.dayError = { status: 503, message: 'Vorübergehend nicht erreichbar' };
   await refresh(page, state);
   await expect(page.locator('#projectMaterialDescription')).toHaveValue('Nur solange berechtigt');
   state.dayError = null;
-  state.projects = state.projects.filter((project) => project.id !== 1);
+  state.projects = state.projects.filter((project) => project.id !== 2);
   await refresh(page, state);
+  await expect(page.locator('#projectSelect')).toHaveValue('');
+  await expect(page.getByText(/Das geöffnete Projekt ist für Sie nicht mehr verfügbar/i)).toBeVisible();
+  await expect(page.locator('#projectMaterialForm')).toHaveCount(0);
   await expect.poll(async () => (await drafts(page)).length).toBe(0);
   await page.reload();
   await expect(page.locator('main')).not.toContainText('Nur solange berechtigt');
+  expect(state.workEntry.project_id).toBe(1);
+  expect(state.timeActions).toHaveLength(1);
 });
 
 test('a confirmed material access denial removes the durable draft before a later failed refresh', async ({ page }) => {

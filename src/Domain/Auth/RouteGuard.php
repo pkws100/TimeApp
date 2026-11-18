@@ -16,7 +16,7 @@ final class RouteGuard
     public function forApi(callable $handler, ?string $permission = null): callable
     {
         return function (Request $request, array $params = []) use ($handler, $permission): Response {
-            $response = $this->apiAuthorizationResponse($permission);
+            $response = $this->apiAuthorizationResponse($request, $permission);
 
             return $response ?? $handler($request, $params);
         };
@@ -31,14 +31,24 @@ final class RouteGuard
         };
     }
 
-    private function apiAuthorizationResponse(?string $permission): ?Response
+    private function apiAuthorizationResponse(Request $request, ?string $permission): ?Response
     {
-        if ($this->authService->currentUser() === null) {
+        $user = $this->authService->currentUser();
+        if ($user === null) {
             return Response::json([
                 'ok' => false,
                 'code' => 'auth_required',
                 'error' => 'Nicht authentifiziert.',
                 'message' => 'Bitte erneut anmelden.',
+            ], 401);
+        }
+
+        $expectedUser = $request->server('HTTP_X_TIMEAPP_USER_ID');
+        if ($expectedUser !== null && $expectedUser !== (string) $user['id']) {
+            return Response::json([
+                'ok' => false,
+                'code' => 'session_changed',
+                'message' => 'Das angemeldete Konto hat gewechselt. Bitte erneut anmelden.',
             ], 401);
         }
 

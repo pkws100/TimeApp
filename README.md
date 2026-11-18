@@ -99,17 +99,30 @@ und Projekt lokal gesichert und bei fehlender Verbindung nicht automatisch
 versendet. Nach Wiederverbindung bewusst erneut speichern. Abmeldung und
 bestätigter Rechteentzug entfernen die zugehörigen lokalen Entwürfe.
 
-Auf „Heute“, „Zeiterfassung“ und „Projekt“ lässt sich die Projektauswahl nach
-Projektnummer oder Name durchsuchen. Bei genau einem Treffer übernimmt die Suche
-dieses Projekt in das weiterhin bedienbare Dropdown; danach kann direkt per Button
-eingecheckt werden. Bei mehreren oder keinen Treffern bleibt die bisherige Auswahl
-erhalten. Ein leeres Suchfeld zeigt wieder alle freigegebenen Projekte. Die Suche
-bucht keine Zeiten und ändert keine bestehenden Buchungen. Eine manuelle Auswahl
-einschließlich „Nicht zugeordnet“ bleibt bis zur nächsten Suchtexteingabe erhalten.
+„Heute“ und „Zeiterfassung“ verwenden die Auswahl für den nächsten Check-in.
+Die laufende Buchung zeigt das Projekt des tatsächlichen Einsatzes. Im Reiter
+„Projekt“ öffnet die Auswahl das Projekt für Arbeitsanweisungen, Dateien,
+Material und Arbeitsberichte. Sie wird pro Mitarbeiter gespeichert und bei
+Refresh und Reload wiederhergestellt, solange der Zugriff besteht. Der Sprung
+zum eingecheckten Projekt öffnet dessen Ansicht. Eine Umbuchung ist eine eigene
+Zeitbuchungsaktion mit Bestätigung.
 
-Für dieses Feature vor Freigabe die additive Phinx-Migration
-`20261106120000_project_work_reports.php` anwenden. Bestehende Projekt-, Material-
-und Zeitbuchungsdaten werden dadurch nicht verändert.
+Die Projektsuche filtert nach Projektnummer oder Name. Ein eindeutiger Treffer
+wird im jeweiligen Dropdown ausgewählt. Bei mehreren oder keinen Treffern bleibt
+die Auswahl stehen. Ein leeres Suchfeld zeigt wieder alle freigegebenen Projekte.
+
+Material wird im geöffneten Projekt gespeichert. Die Historie zeigt das
+Materialdatum, den Erfassungszeitpunkt und den Mitarbeiter. Ein früheres
+Materialdatum erscheint als „Nachgetragen“, ein laufender Einsatz in einem
+anderen Projekt als „Projektübergreifend erfasst“. Beide Kennzeichnungen können
+zusammen erscheinen. Die App speichert Entwürfe lokal je Benutzer und Projekt.
+Einträge werden bewusst online gespeichert.
+
+Vor der Freigabe der Materialkennzeichnungen die additive Phinx-Migration
+`20261118120000_project_material_capture_context.php` anwenden. Bestehende
+Einträge behalten ihren bisherigen Datenstand. Bis zur Migration speichert die
+Anwendung Material wie bisher. Neue Buchungen erhalten den Erfassungskontext
+ab der Migration.
 
 1. Abhaengigkeiten installieren:
 ```bash
@@ -244,7 +257,13 @@ vendor/bin/phpunit tests/Integration/RevisableAccountMigrationTest.php
 
 Mit `TIMEAPP_TEST_DB_*` lassen sich separate Testzugangsdaten setzen. `DB_OVERRIDE_FILE` erlaubt Testprozessen einen vom produktiven Runtime-Override getrennten Konfigurationspfad.
 
-`npm run ui:test` fuehrt zuerst die schnellen Playwright-Smokes und danach den realen Zeitkonto-Workflow gegen eine automatisch erzeugte `timeapp_ui_*`-Scratch-Datenbank aus. Der Runner verwendet nur synthetische Benutzer, einen eigenen PHP-Testserver und temporaere Artefakte. Jahreswechsel-Schliessungen werden aus einem sicher zukuenftigen Kalenderjahr berechnet. Fuer einen reinen Smoke-Lauf ohne MariaDB-Fixture steht `npm run ui:test:smoke` bereit.
+`npm run ui:test` fuehrt die Playwright-Smokes und die realen Workflows fuer
+Zeitkonten, Projekte und Material gegen eine automatisch erzeugte
+`timeapp_ui_*`-Scratch-Datenbank aus. Der Runner verwendet synthetische Benutzer,
+einen eigenen PHP-Testserver und temporaere Artefakte. Jahreswechsel-Schliessungen
+werden aus einem sicher zukuenftigen Kalenderjahr berechnet.
+`npm run ui:test:smoke` startet die Smokes ohne MariaDB-Fixture.
+`npm run ui:test:webkit` prueft Projektansicht und Materialentwuerfe mit Mobile WebKit.
 - Bezahlte Abwesenheiten speichern eine separate Zeitgutschrift in `timesheets.credited_minutes`; tatsaechliche Arbeitszeit bleibt davon getrennt.
 - Bezahlter Erholungsurlaub wird als `vacation/vacation_paid` erfasst. Legacy-Urlaub ohne Reason-Code zaehlt weiterhin; `unpaid_leave` erhaelt keine Zeitgutschrift, wird als unbezahlte Abwesenheit ausgewiesen und reduziert den Resturlaub nicht.
 - Das Urlaubsjahr des aktiven Stichtags ist ein verbindlicher Snapshot, auch wenn Anspruch, Uebertrag und Resturlaub null sind. Die implizite Anpassung ist `Resturlaub - Anspruch - Uebertrag`; vorhandene Stichtags-Journalzeilen werden dabei nicht doppelt gezaehlt.
