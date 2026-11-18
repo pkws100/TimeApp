@@ -15,6 +15,14 @@ final class BackupService
     private const RUNTIME_OVERRIDE_EXCLUDED_WARNING = 'storage/config/database.override.php wurde erkannt, aber nicht ins Backup-Archiv aufgenommen.';
     private const RETAINED_SENSITIVE_FIELDS_WARNING = 'Das Backup enthaelt betriebsnotwendige sensible Datenbankfelder und muss wie ein Secret behandelt werden.';
     private const REDACTED_FIELDS_WARNING = 'Einige bekannte Secret-Felder wurden im Datenbank-JSON redigiert.';
+    private const PERSONNEL_ROWS_EXCLUDED_WARNING = 'Personenbezogene Zeilen der Personalakten-Tabellen sind aus dem Systembackup ausgeschlossen.';
+    private const PERSONNEL_PRIVATE_TABLES = [
+        'employee_employment_contexts',
+        'employee_documents',
+        'employee_document_versions',
+        'employee_document_audit',
+        'employee_document_access_log',
+    ];
     private const SECRET_FIELD_POLICIES = [
         'company_settings' => [
             'smtp_password' => 'keep-encrypted-redact-legacy-cleartext',
@@ -65,7 +73,10 @@ final class BackupService
 
         foreach ($tables as $table) {
             $filename = $databaseDir . '/' . $table . '.json';
-            $sanitized = $this->sanitizeDatabaseRows($table, $this->databaseSource->fetchRows($table));
+            $rowsForBackup = in_array($table, self::PERSONNEL_PRIVATE_TABLES, true)
+                ? []
+                : $this->databaseSource->fetchRows($table);
+            $sanitized = $this->sanitizeDatabaseRows($table, $rowsForBackup);
             $rows = $sanitized['rows'];
             file_put_contents(
                 $filename,
@@ -207,6 +218,7 @@ final class BackupService
     {
         $redactedFields = $this->manifestRedactedFields($databaseFiles);
         $retainedSensitiveFields = $this->retainedSensitiveFields();
+        $excludedPersonnelTables = $this->excludedPersonnelTables($databaseFiles);
 
         return [
             'backup_version' => self::BACKUP_VERSION,
@@ -238,10 +250,12 @@ final class BackupService
                 'database_secret_fields' => $this->secretFieldPolicies(),
                 'retained_sensitive_database_fields' => $retainedSensitiveFields,
                 'redacted_database_fields' => $redactedFields,
+                'excluded_database_table_rows' => $excludedPersonnelTables,
                 'warnings' => array_values(array_filter([
                     $hasRuntimeOverride ? self::RUNTIME_OVERRIDE_EXCLUDED_WARNING : null,
                     $retainedSensitiveFields !== [] ? self::RETAINED_SENSITIVE_FIELDS_WARNING : null,
                     $redactedFields !== [] ? self::REDACTED_FIELDS_WARNING : null,
+                    $excludedPersonnelTables !== [] ? self::PERSONNEL_ROWS_EXCLUDED_WARNING : null,
                 ])),
             ],
             'compatibility' => [
@@ -254,6 +268,11 @@ final class BackupService
     private function applicationTables(): array
     {
         return $this->databaseSource->applicationTables();
+    }
+
+    private function excludedPersonnelTables(array $tables): array
+    {
+        return array_values(array_intersect(self::PERSONNEL_PRIVATE_TABLES, array_column($tables, 'table')));
     }
 
     private function collectFiles(string $root, string $prefix): array
@@ -342,6 +361,7 @@ final class BackupService
 
         $databaseFiles = $this->validateDatabaseFiles($tables, $zip);
         $this->assertExpectedTables($tables);
+        $this->assertPersonnelArchiveEntries($archiveEntries, $databaseFiles);
 
         $uploadFiles = $this->uploadEntries($archiveEntries);
         $this->validateUploadManifest($manifest['uploads'], $uploadFiles);
@@ -355,6 +375,7 @@ final class BackupService
             'runtime_files' => $runtimeFiles,
             'warnings' => array_values(array_unique(array_filter([
                 ...$securityWarnings,
+                $this->excludedPersonnelTables($tables) !== [] ? self::PERSONNEL_ROWS_EXCLUDED_WARNING : null,
                 ($manifest['runtime']['database_override_detected'] ?? false) && !($manifest['runtime']['database_override_included'] ?? false)
                     ? self::RUNTIME_OVERRIDE_EXCLUDED_WARNING
                     : null,
@@ -392,6 +413,13 @@ final class BackupService
                 throw new RuntimeException('Zeilen- oder Groessenangaben im Backup-Manifest sind ungueltig.');
             }
 
+            $personnelTable = in_array($tableName, self::PERSONNEL_PRIVATE_TABLES, true);
+            $reservedPersonnelPath = in_array(pathinfo($filename, PATHINFO_FILENAME), self::PERSONNEL_PRIVATE_TABLES, true);
+            if (($personnelTable && ($filename !== 'database/' . $tableName . '.json' || $table['rows'] !== 0))
+                || ($reservedPersonnelPath && !$personnelTable)) {
+                throw new RuntimeException('Das Systembackup akzeptiert Personalakten-Tabellen nur ohne personenbezogene Zeilen.');
+            }
+
             $content = $zip->getFromName($filename);
 
             if (!is_string($content)) {
@@ -406,6 +434,10 @@ final class BackupService
 
             if (!is_array($decoded) || !array_is_list($decoded)) {
                 throw new RuntimeException('Eine Datenbank-Datei muss ein JSON-Array enthalten: ' . $filename);
+            }
+
+            if ($personnelTable && $decoded !== []) {
+                throw new RuntimeException('Das Systembackup akzeptiert Personalakten-Tabellen nur ohne personenbezogene Zeilen.');
             }
 
             foreach ($decoded as $row) {
@@ -438,6 +470,22 @@ final class BackupService
 
         if ($manifestTables !== $expectedTables) {
             throw new RuntimeException('Die Tabellenliste im Backup passt nicht zum aktuellen System.');
+        }
+    }
+
+    private function assertPersonnelArchiveEntries(array $archiveEntries, array $databaseFiles): void
+    {
+        $seen = [];
+        foreach ($archiveEntries as $filename) {
+            $table = pathinfo($filename, PATHINFO_FILENAME);
+            if (!str_starts_with($filename, 'database/') || !in_array($table, self::PERSONNEL_PRIVATE_TABLES, true)) {
+                continue;
+            }
+
+            if (isset($seen[$table]) || $filename !== 'database/' . $table . '.json' || !in_array($filename, $databaseFiles, true)) {
+                throw new RuntimeException('Das Backup enthaelt eine nicht deklarierte oder doppelte Personalakten-Datei.');
+            }
+            $seen[$table] = true;
         }
     }
 

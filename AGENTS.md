@@ -193,6 +193,7 @@ Wichtige Tabellen / Bereiche:
 - `timesheets`
 - `absence_periods`, `absence_period_change_log`
 - `employee_account_cutovers`, `time_account_entries`, `vacation_account_entries`
+- Compliance-2027-Tabellen `personnel_compliance_sources`, `personnel_document_types`, `personnel_document_requirements`, `employee_employment_contexts`, `employee_documents`, `employee_document_versions`, `employee_document_audit`, `employee_document_access_log`
 
 Wichtige Migrationssaetze im Repo:
 
@@ -400,6 +401,7 @@ Die vollstaendige offene Aufgabenliste steht in `PROJECTS.md`.
 - WorkTime-Hardening: Minutenworker verarbeitet eine persistente, triggerbasierte Revisionswarteschlange in begrenzten Batches; keinen historischen Vollabgleich im normalen Lauf wiedereinfuehren. Vollabgleich nur explizit per `--full-reconcile`. Zuordnungen halten Mitarbeiter-Zuordnungslock vor Accounting-Lock vor DB-Transaktion. Versand-I/O liegt ausserhalb des Accounting-Locks. Unklare Versandzustaende werden nicht wiederholt; Providerannahme ist keine Geraetezustellung. Pausennachtraege dokumentieren nur belegte Intervalle und respektieren Signaturen/Abschluesse. Pruefnachweise: `WORK_TIME_HARDENING_RC.md`.
 - Pausennachweise: `TimesheetPauseEvidenceGuard` schuetzt Auditmarker und `admin_evidence` unabhaengig vom Featureflag vor aelteren Zeit-/Pausenschreibwegen. Pruefung vor Writes unter Accounting-Lock/Transaktion; void-Callbacks nie per Null-Coalescing erneut ausfuehren.
 - Projektstammdaten besitzen einen Dirty-Guard fuer Fremdaktionen und explizites Save/Discard; es gibt keinen belegten regelmaessigen Admin-Reload. Materialentwuerfe nutzen benutzer-/projektbezogenen IndexedDB-Cache und stabile Anfrage-IDs; Logout und bestaetigter Berechtigungsentzug bereinigen Entwuerfe. `npm run ui:test:webkit` ergaenzt die Chromiumgruppen gezielt. Details: `WORK_TIME_PAUSE_FORM_STABILITY.md`.
+- Compliance 2027 Phase 1 fuehrt einen versionierten Seeding-Katalog und ein additives Personalunterlagen-Schema ein. Jede Startregel erfordert `manual_review`. `personnel_documents.*` und `personnel_compliance.manage` sind eigene Rechte, standardmaessig nur fuer die Systemrolle `administrator`. Das allgemeine Systembackup exportiert den Katalog und leere private Tabellen. Dateioperationen, Admin-/App-/API-Zugriff und Aufbewahrungsbetrieb fuer echte Unterlagen folgen erst nach fachlicher und datenschutzrechtlicher Abnahme. Details in [Anforderungsmatrix](docs/COMPLIANCE_2027_REQUIREMENTS.md), [Datenmodell](docs/COMPLIANCE_2027_DATA_MODEL.md) und [Phase-2-Backlog](docs/COMPLIANCE_2027_PHASE2_BACKLOG.md).
 Wenn ein neuer Agentenlauf startet, gilt:
 
 - Das Backend-Grundgeruest und die MVP-nahe mobile PWA sind bereits vorhanden.

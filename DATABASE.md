@@ -108,6 +108,14 @@
 - Der Server bestimmt beim ersten erfolgreichen Speichern den laufenden Zeiteintrag des Mitarbeiters. Massgeblich ist die offene Tagesbuchung oder der nach Kernarbeitszeitregeln gueltige Vortagseinsatz. `capture_type` unterscheidet `standard`, `cross_project`, `backdated` und `cross_project_backdated`. Fuer `backdated` liegt das Materialdatum vor dem lokalen Erfassungstag in `Europe/Berlin`. Ist ein anderes Projekt im laufenden Zeiteintrag hinterlegt, gilt `cross_project`. Die zwei Merkmale koennen zusammen auftreten.
 - Der Server verwendet fuer Snapshot und Materialanlage denselben Schreiblock wie Zeitbuchungsaenderungen. Der Snapshot bleibt bei Replays und spaeteren Zeitbuchungsaenderungen erhalten. Alteintraege haben einen leeren Kontext. Zeitbuchungsreferenzen sind intern. Projektinformationen zum damaligen Einsatz werden bei der Anzeige anhand der aktuellen Zugriffsrechte gefiltert.
 
+## Elektronische Personal- und Entgeltunterlagen
+
+- Die additiven Compliance-2027-Migrationen fuehren `personnel_compliance_sources`, `personnel_document_types`, `personnel_document_requirements`, `employee_employment_contexts`, `employee_documents`, `employee_document_versions`, `employee_document_audit` und `employee_document_access_log` ein.
+- Dokumente referenzieren `users.id` und optional eine konkrete Kontext- und Regelrevision. Historische Referenzen verwenden `RESTRICT`. Benutzerarchivierung erhaelt die Beziehungen. Eine neue Dokumentversion verweist auf ihren direkten Vorgaenger.
+- Der gesetzliche Basiskatalog wird in Phinx versioniert und ohne Mitarbeiterdaten eingespielt. Die Anwendbarkeit bleibt `manual_review`. Unbekannte Beschaeftigungsmerkmale werden nicht aus Benutzerstatus, Berechtigungen oder Projektzuordnung abgeleitet.
+- Phase 1 enthaelt keine Dateioperationen und keine automatische Frist-, Anwendbarkeits- oder Loeschentscheidung. Das Systembackup enthaelt den Katalog sowie leere Eintraege fuer die privaten Tabellen. Der Dry-Run akzeptiert diese privaten Tabellen nur ohne personenbezogene Zeilen.
+- Quellen, Historienregeln, Rechte und Backup-Grenzen sind im [Datenmodell](docs/COMPLIANCE_2027_DATA_MODEL.md) beschrieben.
+
 ## Seeder-Startpunkt
 - Standard-Seeds liefern Rollen, Rechte und notwendige Referenzdaten.
 - Der erste Administrator wird anschliessend per CLI angelegt:
