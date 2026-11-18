@@ -11,11 +11,14 @@ RUN apt-get update \
         libpng-dev \
         libwebp-dev \
         libzip-dev \
+        qpdf \
+        util-linux \
     && docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
     && docker-php-ext-install -j"$(nproc)" \
         gd \
         pdo_mysql \
         zip \
+    && php -r 'exit(extension_loaded("sodium") ? 0 : 1);' \
     && a2enmod headers rewrite \
     && rm -rf /var/lib/apt/lists/*
 

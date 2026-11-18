@@ -14,6 +14,19 @@ use ZipArchive;
 
 final class BackupServiceTest extends TestCase
 {
+    public function testExportRejectsPrivatePersonnelRootBelowGeneralUploads(): void
+    {
+        $uploadRoot = sys_get_temp_dir() . '/timeapp-backup-alias-' . bin2hex(random_bytes(8));
+        $service = new BackupService(new DatabaseConnection([]), [
+            'root' => $uploadRoot,
+            'private_personnel_roots' => [$uploadRoot . '/private'],
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('nicht sicher vom privaten Personalaktenspeicher getrennt');
+        $service->export();
+    }
+
     public function testBuildManifestContainsCompatibilityMetadata(): void
     {
         $service = new BackupService(new DatabaseConnection([]), []);

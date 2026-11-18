@@ -18,7 +18,8 @@ final class PersonnelDocumentService
         archived_by_user_id, created_at, updated_at, lock_version';
 
     private const VERSION_COLUMNS = 'id, document_id, version_number, supersedes_version_number,
-        original_status, signature_status, created_by_user_id, created_at';
+        original_status, signature_status, created_by_user_id, created_at,
+        (storage_format IS NOT NULL) AS file_stored, format_verified_at, malware_scanned_at';
 
     private const DATE_FIELDS = [
         'period_from', 'period_until', 'issued_on', 'received_on', 'retention_anchor_on', 'retain_until',
@@ -31,6 +32,7 @@ final class PersonnelDocumentService
         'review_pending_to_rejected' => ['metadata_invalid', 'incorrect_assignment', 'insufficient_evidence'],
         'review_rejected_to_pending' => ['metadata_corrected', 'reassessment_requested'],
         'version_created' => ['metadata_recorded', 'metadata_revised'],
+        'file_version_created' => ['technical_checks_passed'],
         'retention_hold_set' => ['legal_hold', 'retention_review'],
         'retention_hold_released' => ['hold_resolved'],
     ];
@@ -39,7 +41,8 @@ final class PersonnelDocumentService
 
     public function __construct(
         private DatabaseConnection $connection,
-        private PersonnelAccessService $access
+        private PersonnelAccessService $access,
+        private ?PersonnelFileRuntime $files = null,
     ) {
         if (!$access->usesConnection($connection)) {
             throw new LogicException('Die Personalaktendienste müssen dieselbe Datenbankverbindung verwenden.');
@@ -84,7 +87,7 @@ final class PersonnelDocumentService
                 ['user_id' => $employeeId]
             );
 
-            return [array_map(self::unverified(...), $rows), null, null];
+            return [array_map(self::unverified(...), $rows), null, null, $employeeId];
         });
     }
 
@@ -93,28 +96,28 @@ final class PersonnelDocumentService
         return $this->read('document.read', function () use ($documentId): array {
             $head = $this->authorizedDocument($documentId, PersonnelAccessService::VIEW);
 
-            return [self::unverified($head), $documentId, null];
+            return [self::unverified($head), $documentId, null, (int) $head['user_id']];
         });
     }
 
     public function versions(int $documentId): array
     {
         return $this->read('document.versions', function () use ($documentId): array {
-            $this->authorizedDocument($documentId, PersonnelAccessService::VIEW);
+            $head = $this->authorizedDocument($documentId, PersonnelAccessService::VIEW);
             $rows = $this->connection->fetchAll(
                 'SELECT ' . self::VERSION_COLUMNS . ' FROM employee_document_versions
                  WHERE document_id = :document_id ORDER BY version_number',
                 ['document_id' => $documentId]
             );
 
-            return [array_map(self::unverified(...), $rows), $documentId, null];
+            return [array_map(self::unverified(...), $rows), $documentId, null, (int) $head['user_id']];
         });
     }
 
     public function version(int $documentId, int $versionId): array
     {
         return $this->read('document.version', function () use ($documentId, $versionId): array {
-            $this->authorizedDocument($documentId, PersonnelAccessService::VIEW);
+            $head = $this->authorizedDocument($documentId, PersonnelAccessService::VIEW);
             $row = $this->connection->fetchOne(
                 'SELECT ' . self::VERSION_COLUMNS . ' FROM employee_document_versions
                  WHERE document_id = :document_id AND id = :id',
@@ -124,14 +127,14 @@ final class PersonnelDocumentService
                 throw new PersonnelAccessDenied();
             }
 
-            return [self::unverified($row), $documentId, $versionId];
+            return [self::unverified($row), $documentId, $versionId, (int) $head['user_id']];
         });
     }
 
     public function history(int $documentId): array
     {
         return $this->read('document.history', function () use ($documentId): array {
-            $this->authorizedDocument($documentId, PersonnelAccessService::VIEW);
+            $head = $this->authorizedDocument($documentId, PersonnelAccessService::VIEW);
             $rows = $this->connection->fetchAll(
                 'SELECT a.id, a.document_id, a.document_version_id, a.related_document_id,
                         a.action, a.actor_user_id, a.reason, a.created_at, related.user_id AS related_employee_id
@@ -158,7 +161,7 @@ final class PersonnelDocumentService
             }
             unset($row);
 
-            return [$rows, $documentId, null];
+            return [$rows, $documentId, null, (int) $head['user_id']];
         });
     }
 
@@ -323,41 +326,193 @@ final class PersonnelDocumentService
             $documentId,
             $requestId,
             ['expected_predecessor' => $expectedPredecessorNumber, 'reason' => $reason],
-            function (int $actorId, array $head) use ($expectedPredecessorNumber, $reason): array {
-                $this->assertOpen($head);
-                if ($head['review_status'] !== 'pending') {
-                    throw new PersonnelConflict('Neue Metadatenversionen benötigen einen offenen Prüfstatus.');
-                }
-
-                $id = (int) $head['id'];
-                $latest = (int) $this->connection->fetchColumn(
-                    'SELECT version_number FROM employee_document_versions WHERE document_id = :document_id
-                     ORDER BY version_number DESC LIMIT 1 FOR UPDATE',
-                    ['document_id' => $id]
-                );
-                if ($latest !== $expectedPredecessorNumber) {
-                    throw new PersonnelConflict('Die Dokumentversion wurde zwischenzeitlich geändert.');
-                }
-
-                $this->persist(
-                    'INSERT INTO employee_document_versions
-                     (document_id, version_number, supersedes_version_number, created_by_user_id, created_at)
-                     VALUES (:document_id, :version_number, :predecessor, :actor_id, UTC_TIMESTAMP())',
-                    ['document_id' => $id, 'version_number' => $latest + 1, 'predecessor' => $latest ?: null, 'actor_id' => $actorId]
-                );
-                $versionId = $this->connection->lastInsertId();
-                $this->persistHead($id, $actorId);
-                $this->auditChange($id, $actorId, 'version_created', $reason, $versionId);
-
-                return [
-                    'document_id' => $id,
-                    'version_id' => $versionId,
-                    'version_number' => $latest + 1,
-                    'lock_version' => (int) $head['lock_version'] + 1,
-                ];
-            },
+            fn (int $actorId, array $head): array => $this->appendVersion($actorId, $head, $expectedPredecessorNumber, $reason),
             requiresActiveOwner: true
         );
+    }
+
+    /** @param resource $input A complete binary stream of the supplied length. */
+    public function uploadFile(
+        int $documentId,
+        int $expectedPredecessorNumber,
+        $input,
+        int $expectedBytes,
+        string $requestId,
+        ?string $declaredMime = null,
+        ?string $extension = null,
+    ): array {
+        try {
+            $actorId = $this->access->actorId();
+            $this->authorizedDocument($documentId, PersonnelAccessService::MANAGE, $actorId);
+        } catch (PersonnelAccessDenied $exception) {
+            $this->access->auditAccess('document.upload_file', false);
+            throw $exception;
+        }
+        if ($expectedPredecessorNumber < 0 || $expectedBytes < 1 || $expectedBytes > PersonnelFileRuntime::MAX_BYTES
+            || !is_resource($input) || preg_match('/^[A-Za-z0-9._:-]{1,100}$/D', $requestId) !== 1) {
+            throw new InvalidArgumentException('Ungültige Parameter für die Personalaktendatei.');
+        }
+
+        $files = $this->fileRuntime();
+        try {
+            return $files->storage->withLock(false, function () use (
+                $files, $input, $expectedBytes, $documentId, $expectedPredecessorNumber, $requestId, $declaredMime, $extension, $actorId
+            ): array {
+                $staged = $files->storage->stageUpload($input, $expectedBytes);
+                $key = null;
+                try {
+                    $payload = ['expected_predecessor' => $expectedPredecessorNumber, 'sha256' => $staged->sha256(), 'size_bytes' => $staged->size()];
+                    try {
+                        $replay = $this->commands->replayIfCommitted(
+                            $actorId, $requestId, 'document.upload_file', ['document_id' => $documentId, ...$payload],
+                            function () use ($documentId, $actorId): void {
+                                $head = $this->authorizedDocument($documentId, PersonnelAccessService::MANAGE, $actorId);
+                                $this->requireScope(PersonnelAccessService::MANAGE, (int) $head['user_id'], $actorId, true);
+                            },
+                        );
+                    } catch (PersonnelAccessDenied $exception) {
+                        $this->access->auditAccess('document.upload_file', false);
+                        throw $exception;
+                    }
+                    if ($replay !== null) {
+                        return $replay;
+                    }
+
+                    $mime = $files->validator->validate($staged->path(), $declaredMime, $extension);
+                    $formatVerifiedAt = gmdate('Y-m-d H:i:s');
+                    $original = $staged->open();
+                    try {
+                        $files->scanner->scan($original);
+                        $malwareScannedAt = gmdate('Y-m-d H:i:s');
+                        if (!rewind($original)) {
+                            throw new PersonnelFileUnavailable();
+                        }
+                        $key = $files->storage->newStorageKey();
+                        $ciphertext = $files->storage->beginObject($key);
+                        try {
+                            $keyId = $files->cipher->encrypt($original, $ciphertext, PersonnelFileRuntime::objectContext($key));
+                            if (!fflush($ciphertext)) {
+                                throw new PersonnelFileUnavailable();
+                            }
+                        } finally {
+                            fclose($ciphertext);
+                        }
+                    } finally {
+                        fclose($original);
+                    }
+
+                    $technical = [
+                        'storage_key' => $key, 'sha256' => $staged->sha256(), 'size_bytes' => $staged->size(),
+                        'mime_type' => $mime, 'storage_key_id' => $keyId, 'storage_format' => PersonnelFileRuntime::STORAGE_FORMAT,
+                        'format_verified_at' => $formatVerifiedAt, 'malware_scanned_at' => $malwareScannedAt,
+                    ];
+                    return $this->writeDocument(
+                        'document.upload_file', $documentId, $requestId, $payload,
+                        fn (int $actorId, array $head): array => $this->appendVersion(
+                            $actorId, $head, $expectedPredecessorNumber, 'technical_checks_passed', $technical,
+                            fn () => $files->storage->publishObject($key),
+                        ),
+                        requiresActiveOwner: true
+                    );
+                } finally {
+                    try {
+                        $staged->discard();
+                    } finally {
+                        if ($key !== null) {
+                            // Only ciphertext staging is removed here. The commit may already have succeeded.
+                            $files->storage->abortObject($key);
+                        }
+                    }
+                }
+            });
+        } catch (PersonnelAccessDenied | PersonnelConflict | PersonnelFileUnavailable $exception) {
+            throw $exception;
+        } catch (RuntimeException | InvalidArgumentException) {
+            throw new PersonnelFileUnavailable();
+        }
+    }
+
+    public function downloadFile(int $documentId, int $versionId): PersonnelFileDownload
+    {
+        return $this->access->auditedRead('document.download_file', function () use ($documentId, $versionId): array {
+            $head = $this->authorizedDocument($documentId, PersonnelAccessService::VIEW);
+            $version = $this->connection->fetchOne(
+                'SELECT storage_key, sha256, mime_type, size_bytes, storage_key_id, storage_format, format_verified_at, malware_scanned_at
+                 FROM employee_document_versions WHERE document_id = :document_id AND id = :version_id',
+                ['document_id' => $documentId, 'version_id' => $versionId]
+            );
+            if ($version === null) {
+                throw new PersonnelAccessDenied();
+            }
+            $files = $this->fileRuntime();
+            $file = PersonnelStoredObject::openVerified($files, $version);
+            $employeeId = (int) $head['user_id'];
+            $this->access->requireEmployee(PersonnelAccessService::VIEW, $employeeId, true);
+
+            return [$file, $documentId, $versionId, $employeeId];
+        });
+    }
+
+    private function fileRuntime(): PersonnelFileRuntime
+    {
+        if ($this->files === null) {
+            throw new PersonnelFileUnavailable();
+        }
+        $this->files->assertAvailable($this->connection);
+
+        return $this->files;
+    }
+
+    private function appendVersion(
+        int $actorId,
+        array $head,
+        int $expectedPredecessorNumber,
+        string $reason,
+        array $technical = [],
+        ?callable $publish = null,
+    ): array {
+        $this->assertOpen($head);
+        if ($head['review_status'] !== 'pending') {
+            throw new PersonnelConflict('Neue Dokumentversionen benötigen einen offenen Prüfstatus.');
+        }
+        $id = (int) $head['id'];
+        $latest = (int) $this->connection->fetchColumn(
+            'SELECT version_number FROM employee_document_versions WHERE document_id = :document_id
+             ORDER BY version_number DESC LIMIT 1 FOR UPDATE',
+            ['document_id' => $id]
+        );
+        if ($latest !== $expectedPredecessorNumber) {
+            throw new PersonnelConflict('Die Dokumentversion wurde zwischenzeitlich geändert.');
+        }
+        $parameters = ['document_id' => $id, 'version_number' => $latest + 1, 'predecessor' => $latest ?: null, 'actor_id' => $actorId];
+        if ($publish === null) {
+            $this->persist(
+                'INSERT INTO employee_document_versions
+                 (document_id, version_number, supersedes_version_number, created_by_user_id, created_at)
+                 VALUES (:document_id, :version_number, :predecessor, :actor_id, UTC_TIMESTAMP())',
+                $parameters
+            );
+        } else {
+            $publish();
+            $this->persist(
+                'INSERT INTO employee_document_versions
+                 (document_id, version_number, supersedes_version_number, created_by_user_id, created_at,
+                  storage_key, sha256, size_bytes, mime_type, storage_key_id, storage_format, format_verified_at, malware_scanned_at)
+                 VALUES (:document_id, :version_number, :predecessor, :actor_id, UTC_TIMESTAMP(),
+                  :storage_key, :sha256, :size_bytes, :mime_type, :storage_key_id, :storage_format, :format_verified_at, :malware_scanned_at)',
+                $parameters + $technical
+            );
+        }
+        $versionId = $this->connection->lastInsertId();
+        $this->persistHead($id, $actorId);
+        $this->auditChange($id, $actorId, $publish === null ? 'version_created' : 'file_version_created', $reason, $versionId);
+
+        return [
+            'document_id' => $id,
+            'version_id' => $versionId,
+            'version_number' => $latest + 1,
+            'lock_version' => (int) $head['lock_version'] + 1,
+        ];
     }
 
     private function normalizeMetadata(array $input): array

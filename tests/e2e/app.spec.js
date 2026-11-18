@@ -3029,12 +3029,7 @@ test('dark drawer keeps active navigation link readable after login', async ({ p
   await expect(page.locator('.app-drawer-layer')).toBeVisible();
   await expect(activeDrawerLink).toBeVisible();
   await expect(activeDrawerLink).toHaveCSS('color', 'rgb(27, 27, 27)');
-
-  const backgroundImage = await activeDrawerLink.evaluate((element) => {
-    return window.getComputedStyle(element).backgroundImage;
-  });
-
-  expect(backgroundImage).toContain('linear-gradient');
+  await expect(activeDrawerLink).toHaveCSS('background-image', /linear-gradient/);
 });
 
 test('terminal settings modal fills, saves and restores focus', async ({ page }) => {

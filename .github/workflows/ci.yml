@@ -80,7 +80,7 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.2'
-          extensions: curl, gd, mbstring, pdo_mysql, zip
+          extensions: curl, gd, mbstring, pdo_mysql, posix, sodium, zip
           coverage: none
           tools: composer:v2
 
@@ -101,8 +101,40 @@ jobs:
             -name '*.php' -print0 \
             | xargs -0 -n 1 php -l
 
+      - name: Install personnel format and malware check dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qpdf clamav-daemon
+
       - name: Run PHPUnit
-        run: COMPOSER_ALLOW_SUPERUSER=1 composer test
+        run: |
+          set -euo pipefail
+          scanner_dir=$(mktemp -d /tmp/timeapp-ci-clamd-XXXXXX)
+          mkdir "$scanner_dir/signatures"
+          scanner_marker=synthetic-file-for-signature-guard
+          scanner_hash=$(printf '%s' "$scanner_marker" | sha256sum | cut -d ' ' -f 1)
+          printf '%s:%s:TimeApp.Synthetic\n' "$scanner_hash" "${#scanner_marker}" > "$scanner_dir/signatures/synthetic.hsb"
+          cat > "$scanner_dir/clamd.conf" <<EOF
+          Foreground yes
+          LocalSocket $scanner_dir/clamd.sock
+          LocalSocketMode 600
+          DatabaseDirectory $scanner_dir/signatures
+          TemporaryDirectory $scanner_dir
+          StreamMaxLength 16M
+          MaxFileSize 16M
+          MaxScanSize 16M
+          AlertExceedsMax yes
+          EOF
+          clamd --config-file="$scanner_dir/clamd.conf" > "$scanner_dir/clamd.log" 2>&1 &
+          scanner_pid=$!
+          trap 'kill "$scanner_pid" 2>/dev/null || true; wait "$scanner_pid" 2>/dev/null || true' EXIT
+          for scanner_attempt in $(seq 1 100); do
+            if [ -S "$scanner_dir/clamd.sock" ]; then break; fi
+            if ! kill -0 "$scanner_pid" 2>/dev/null; then cat "$scanner_dir/clamd.log"; exit 1; fi
+            sleep 0.1
+          done
+          test -S "$scanner_dir/clamd.sock"
+          PERSONNEL_TEST_QPDF=/usr/bin/qpdf PERSONNEL_TEST_CLAMD_SOCKET="$scanner_dir/clamd.sock" COMPOSER_ALLOW_SUPERUSER=1 composer test
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

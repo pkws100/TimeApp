@@ -125,7 +125,7 @@ final class PersonnelAccessService
         );
     }
 
-    public function auditAccess(string $action, bool $allowed, ?int $documentId = null, ?int $versionId = null): void
+    public function auditAccess(string $action, bool $allowed, ?int $documentId = null, ?int $versionId = null, ?int $employeeId = null): void
     {
         if (preg_match('/^[a-z][a-z0-9._]{0,49}$/D', $action) !== 1) {
             throw new InvalidArgumentException('Ungültige Kennung für das Personalaktenprotokoll.');
@@ -134,10 +134,11 @@ final class PersonnelAccessService
         try {
             $actor = $this->actorId();
             $recorded = $this->connection->execute(
-                'INSERT INTO employee_document_access_log (document_id, document_version_id, action, actor_user_id, outcome, created_at)
-                 VALUES (:document_id, :version_id, :action, :actor_id, :outcome, UTC_TIMESTAMP())',
+                'INSERT INTO employee_document_access_log (document_id, document_version_id, employee_user_id, action, actor_user_id, outcome, created_at)
+                 VALUES (:document_id, :version_id, :employee_id, :action, :actor_id, :outcome, UTC_TIMESTAMP())',
                 ['document_id' => $allowed ? $documentId : null, 'version_id' => $allowed ? $versionId : null,
-                    'action' => $action, 'actor_id' => $actor, 'outcome' => $allowed ? 'allowed' : 'denied']
+                    'employee_id' => $allowed ? $employeeId : null, 'action' => $action,
+                    'actor_id' => $actor, 'outcome' => $allowed ? 'allowed' : 'denied']
             );
             if ($allowed && !$recorded) {
                 throw new RuntimeException('Der Personalaktenzugriff konnte nicht sicher protokolliert werden.');
@@ -149,8 +150,8 @@ final class PersonnelAccessService
         }
     }
 
-    /** @param callable(): array{0:array,1:?int,2:?int} $read */
-    public function auditedRead(string $action, callable $read): array
+    /** @param callable(): array{0:mixed,1:?int,2:?int,3?:?int} $read */
+    public function auditedRead(string $action, callable $read): mixed
     {
         $pdo = $this->connection->pdo();
         if ($pdo === null || $pdo->inTransaction()) {
@@ -159,9 +160,10 @@ final class PersonnelAccessService
 
         try {
             $pdo->exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
-            return $this->connection->transaction(function () use ($action, $read): array {
-                [$result, $documentId, $versionId] = $read();
-                $this->auditAccess($action, true, $documentId, $versionId);
+            return $this->connection->transaction(function () use ($action, $read): mixed {
+                $access = $read();
+                [$result, $documentId, $versionId] = $access;
+                $this->auditAccess($action, true, $documentId, $versionId, $access[3] ?? null);
 
                 return $result;
             });

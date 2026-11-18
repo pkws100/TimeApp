@@ -5,6 +5,10 @@ declare(strict_types=1);
 return [
     'disk' => (string) env('UPLOAD_DISK', 'local'),
     'root' => base_path((string) env('UPLOAD_ROOT', 'storage/app/uploads')),
+    'private_personnel_roots' => array_values(array_filter([
+        (string) env('PERSONNEL_FILE_ROOT', ''),
+        (string) env('PERSONNEL_BACKUP_ROOT', ''),
+    ])),
     'max_filesize' => (int) env('UPLOAD_MAX_FILESIZE', 32 * 1024 * 1024),
     'allowed_extensions' => [
         'pdf',

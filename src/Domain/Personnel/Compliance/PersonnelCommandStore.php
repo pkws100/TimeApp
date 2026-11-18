@@ -25,11 +25,7 @@ final class PersonnelCommandStore
      */
     public function execute(int $actorId, string $requestId, string $operation, array $payload, callable $authorize, callable $write): array
     {
-        if ($actorId < 1 || preg_match('/^[A-Za-z0-9._:-]{1,100}$/D', $requestId) !== 1
-            || preg_match('/^[a-z][a-z0-9._]{0,63}$/D', $operation) !== 1) {
-            throw new InvalidArgumentException('Ungültige Kennung für den Personalaktenauftrag.');
-        }
-
+        $this->validateIdentity($actorId, $requestId, $operation);
         $pdo = $this->connection->pdo();
         if ($pdo === null || $pdo->inTransaction()) {
             throw new RuntimeException('Der Personalaktenauftrag benötigt eine eigene Datenbanktransaktion.');
@@ -48,22 +44,9 @@ final class PersonnelCommandStore
                 return $this->connection->transaction(function () use ($actorId, $requestHash, $operation, $payloadHash, $authorize, $write): array {
                     $authorize();
                     $key = ['actor_user_id' => $actorId, 'request_hash' => $requestHash];
-                    $receipt = $this->connection->fetchOne(
-                        'SELECT operation, payload_hash, result_json FROM personnel_command_receipts
-                         WHERE actor_user_id = :actor_user_id AND request_hash = :request_hash',
-                        $key
-                    );
+                    $receipt = $this->findReceipt($key);
                     if ($receipt !== null) {
-                        if ($receipt['operation'] !== $operation || !hash_equals((string) $receipt['payload_hash'], $payloadHash)) {
-                            throw new PersonnelConflict('Die Anfragekennung wurde bereits für einen anderen Personalaktenauftrag verwendet.');
-                        }
-
-                        $result = json_decode((string) $receipt['result_json'], true, flags: JSON_THROW_ON_ERROR);
-                        if (!is_array($result)) {
-                            throw new RuntimeException('Der Personalaktenauftrag konnte nicht sicher gelesen werden.');
-                        }
-
-                        return $result;
+                        return $this->readReceipt($receipt, $operation, $payloadHash);
                     }
 
                     $result = $write();
@@ -87,6 +70,62 @@ final class PersonnelCommandStore
         } catch (JsonException) {
             throw new RuntimeException('Der Personalaktenauftrag konnte nicht sicher verarbeitet werden.');
         }
+    }
+
+    /** Check an existing receipt before expensive file processing. execute() still arbitrates concurrent first attempts. */
+    public function replayIfCommitted(int $actorId, string $requestId, string $operation, array $payload, callable $authorize): ?array
+    {
+        $this->validateIdentity($actorId, $requestId, $operation);
+        $pdo = $this->connection->pdo();
+        if ($pdo === null || $pdo->inTransaction()) {
+            throw new RuntimeException('Der Personalaktenauftrag benötigt eine eigene Datenbanktransaktion.');
+        }
+
+        return $this->connection->transaction(function () use ($actorId, $requestId, $operation, $payload, $authorize): ?array {
+            $receipt = $this->findReceipt(['actor_user_id' => $actorId, 'request_hash' => hash('sha256', $requestId)]);
+            if ($receipt === null) {
+                return null;
+            }
+
+            $authorize();
+
+            return $this->readReceipt($receipt, $operation, hash('sha256', $this->encode($this->canonicalize($payload))));
+        });
+    }
+
+    private function validateIdentity(int $actorId, string $requestId, string $operation): void
+    {
+        if ($actorId < 1 || preg_match('/^[A-Za-z0-9._:-]{1,100}$/D', $requestId) !== 1
+            || preg_match('/^[a-z][a-z0-9._]{0,63}$/D', $operation) !== 1) {
+            throw new InvalidArgumentException('Ungültige Kennung für den Personalaktenauftrag.');
+        }
+    }
+
+    private function findReceipt(array $key): ?array
+    {
+        return $this->connection->fetchOne(
+            'SELECT operation, payload_hash, result_json FROM personnel_command_receipts
+             WHERE actor_user_id = :actor_user_id AND request_hash = :request_hash',
+            $key
+        );
+    }
+
+    private function readReceipt(array $receipt, string $operation, string $payloadHash): array
+    {
+        if ($receipt['operation'] !== $operation || !hash_equals((string) $receipt['payload_hash'], $payloadHash)) {
+            throw new PersonnelConflict('Die Anfragekennung wurde bereits für einen anderen Personalaktenauftrag verwendet.');
+        }
+
+        try {
+            $result = json_decode((string) $receipt['result_json'], true, flags: JSON_THROW_ON_ERROR);
+        } catch (JsonException) {
+            $result = null;
+        }
+        if (!is_array($result)) {
+            throw new RuntimeException('Der Personalaktenauftrag konnte nicht sicher gelesen werden.');
+        }
+
+        return $result;
     }
 
     private function canonicalize(array $fields): array

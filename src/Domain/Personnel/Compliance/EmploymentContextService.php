@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Domain\Personnel\Compliance;
 
 use App\Infrastructure\Database\DatabaseConnection;
+use DateTimeImmutable;
+use DateTimeZone;
 use InvalidArgumentException;
 use LogicException;
 use RuntimeException;
@@ -21,7 +23,7 @@ final class EmploymentContextService
 
     private const REASONS = ['initial_record', 'change_of_circumstances', 'correction', 'employment_end'];
 
-    private const CONTEXT_COLUMNS = 'ctx.id, ctx.user_id, ctx.employment_key, ctx.revision, ctx.supersedes_context_id,
+    private const CONTEXT_COLUMNS = 'ctx.id, ctx.user_id, ctx.employment_key, ctx.revision, ctx.supersedes_context_id, ctx.continues_context_id,
         ctx.effective_from, ctx.effective_until, ctx.employment_type, ctx.student_status, ctx.pension_insurance_status,
         ctx.cross_border_status, ctx.work_authorization_status, ctx.source, ctx.revision_reason,
         ctx.created_by_user_id, ctx.created_at';
@@ -40,7 +42,7 @@ final class EmploymentContextService
 
     /**
      * With no predecessor this adds an independent effective interval for the employment key.
-     * A predecessor replaces one currently effective slot while keeping its historical row.
+     * A correction replaces a whole slot. A dated change with a predecessor preserves its earlier days.
      *
      * @return array{context_id:int, revision:int}
      */
@@ -90,6 +92,19 @@ final class EmploymentContextService
         }
     }
 
+    /** @return array{context_id:int, revision:int} */
+    public function changeFrom(
+        int $employeeId,
+        string $employmentKey,
+        int $expectedLatestRevision,
+        int $predecessorId,
+        array $metadata,
+        string $requestId,
+    ): array {
+        return $this->append($employeeId, $employmentKey, $expectedLatestRevision, $predecessorId, $metadata,
+            'change_of_circumstances', $requestId);
+    }
+
     public function history(int $employeeId): array
     {
         return $this->access->auditedRead('employment.history', function () use ($employeeId): array {
@@ -102,7 +117,7 @@ final class EmploymentContextService
                 ['employee_id' => $employeeId],
             );
 
-            return [array_map($this->contextForRead(...), $rows), null, null];
+            return [array_map($this->contextForRead(...), $rows), null, null, $employeeId];
         });
     }
 
@@ -112,7 +127,7 @@ final class EmploymentContextService
         return $this->access->auditedRead('employment.as_of', function () use ($employeeId, $date): array {
             $this->access->requireEmployee(PersonnelAccessService::VIEW, $employeeId);
 
-            return [$this->effectiveContexts($employeeId, PersonnelDate::require($date)), null, null];
+            return [$this->effectiveContexts($employeeId, PersonnelDate::require($date)), null, null, $employeeId];
         });
     }
 
@@ -128,23 +143,42 @@ final class EmploymentContextService
             ['employee_id' => $employeeId, 'starts_on' => $date, 'ends_on' => $date],
         );
 
-        // Legacy rows may overlap without a replacement link. Preserve their history and require a choice.
+        // A correction or an explicitly continued segment can establish days displaced by a legacy change.
+        $unresolved = $this->connection->fetchAll(
+            'SELECT ctx.employment_key, MAX(replacement.revision) AS unresolved_revision
+             FROM employee_employment_contexts ctx
+             JOIN employee_employment_contexts replacement ON replacement.supersedes_context_id = ctx.id
+             WHERE ctx.user_id = :employee_id
+               AND (replacement.revision_reason IS NULL OR BINARY replacement.revision_reason NOT IN ("correction", "carried_forward"))
+               AND ctx.effective_from <= :original_start AND (ctx.effective_until IS NULL OR ctx.effective_until >= :original_end)
+               AND replacement.effective_from > :replacement_start
+             GROUP BY ctx.employment_key ORDER BY ctx.employment_key',
+            ['employee_id' => $employeeId, 'original_start' => $date, 'original_end' => $date, 'replacement_start' => $date],
+        );
+        $ambiguous = array_column($unresolved, 'unresolved_revision', 'employment_key');
         $contexts = [];
-        $ambiguous = [];
         foreach ($rows as $row) {
+            $key = $row['employment_key'];
             if ((int) $row['effective_count'] > 1) {
-                $ambiguous[] = $row['employment_key'];
+                $ambiguous[$key] ??= 0;
                 continue;
+            }
+            if (isset($ambiguous[$key])) {
+                $reviewed = in_array($row['revision_reason'], ['correction', 'carried_forward'], true) || $row['continues_context_id'] !== null;
+                if (!$reviewed || (int) $row['revision'] <= (int) $ambiguous[$key]) {
+                    continue;
+                }
+                unset($ambiguous[$key]);
             }
             unset($row['effective_count']);
             $contexts[] = $this->contextForRead($row);
         }
-        return ['contexts' => $contexts, 'ambiguous_employment_keys' => array_values(array_unique($ambiguous))];
+        return ['contexts' => $contexts, 'ambiguous_employment_keys' => array_map('strval', array_keys($ambiguous))];
     }
 
     private function contextForRead(array $row): array
     {
-        if (!in_array($row['revision_reason'], self::REASONS, true)) {
+        if (!in_array($row['revision_reason'], [...self::REASONS, 'carried_forward'], true)) {
             $row['revision_reason'] = 'legacy_unclassified';
         }
 
@@ -184,6 +218,58 @@ final class EmploymentContextService
         }
 
         $previous = $supersedesContextId === null ? null : $this->currentPredecessor($keyScope, $supersedesContextId);
+        if ($previous !== null && $reasonCode === 'change_of_circumstances') {
+            return $this->insertDatedChange($keyScope, $previous, $record, $latestRevision, $actorId);
+        }
+        if ($previous !== null && $reasonCode !== 'correction'
+            && ($reasonCode !== 'employment_end' || $record['effective_from'] !== $previous['effective_from']
+                || $record['effective_until'] === null
+                || ($previous['effective_until'] !== null && $record['effective_until'] > $previous['effective_until'])
+                || array_diff_assoc(array_intersect_key($record, self::TRAIT_VALUES), $previous) !== [])) {
+            throw new PersonnelConflict('Der gewaehlte Abschnitt benoetigt eine Korrektur oder eine datierte Aenderung.');
+        }
+
+        $this->assertNoOverlap($keyScope, $record, $supersedesContextId);
+        $traits = $previous === null
+            ? array_fill_keys(array_keys(self::TRAIT_VALUES), 'unknown')
+            : array_intersect_key($previous, self::TRAIT_VALUES);
+
+        return $this->storeRevision($keyScope, $record + $traits, $latestRevision + 1, $supersedesContextId, null, $reasonCode, $actorId);
+    }
+
+    private function insertDatedChange(array $keyScope, array $previous, array $record, int $latestRevision, int $actorId): array
+    {
+        if ($record['effective_from'] <= $previous['effective_from']) {
+            throw new PersonnelConflict('Die datierte Aenderung muss nach Beginn des gewaehlten Abschnitts liegen.');
+        }
+
+        $previousDay = (new DateTimeImmutable($record['effective_from'], new DateTimeZone('UTC')))->modify('-1 day')->format('Y-m-d');
+        if ($previous['effective_until'] !== null && $previous['effective_until'] < $previousDay) {
+            throw new PersonnelConflict('Die datierte Aenderung grenzt nicht an den gewaehlten Abschnitt.');
+        }
+
+        $predecessorId = (int) $previous['id'];
+        $earlier = ['effective_from' => $previous['effective_from'], 'effective_until' => $previousDay];
+        $this->assertNoOverlap($keyScope, $earlier, $predecessorId);
+        $this->assertNoOverlap($keyScope, $record, $predecessorId);
+        $traits = array_intersect_key($previous, self::TRAIT_VALUES);
+        $sourceId = $predecessorId;
+        $nextRevision = $latestRevision + 1;
+        if ($previous['effective_until'] !== $previousDay) {
+            if ($latestRevision >= 4294967294) {
+                throw new PersonnelConflict('Der Revisionsstand des Beschaeftigungskontexts kann nicht erhoeht werden.');
+            }
+            $earlierRevision = $this->storeRevision($keyScope, $earlier + $traits, $nextRevision, $predecessorId, null,
+                'carried_forward', $actorId);
+            $sourceId = $earlierRevision['context_id'];
+            $nextRevision++;
+        }
+
+        return $this->storeRevision($keyScope, $record + $traits, $nextRevision, null, $sourceId, 'change_of_circumstances', $actorId);
+    }
+
+    private function assertNoOverlap(array $keyScope, array $record, ?int $excludedContextId): void
+    {
         $overlap = $this->connection->fetchColumn(
             'SELECT ctx.id FROM employee_employment_contexts ctx
              LEFT JOIN employee_employment_contexts replacement ON replacement.supersedes_context_id = ctx.id
@@ -192,7 +278,7 @@ final class EmploymentContextService
                AND (ctx.effective_until IS NULL OR ctx.effective_until >= :new_start)
              LIMIT 1 FOR UPDATE',
             $keyScope + [
-                'superseded_id' => $supersedesContextId ?? 0,
+                'superseded_id' => $excludedContextId ?? 0,
                 'new_end' => $record['effective_until'] ?? '9999-12-31',
                 'new_start' => $record['effective_from'],
             ],
@@ -200,24 +286,31 @@ final class EmploymentContextService
         if ($overlap !== false) {
             throw new PersonnelConflict('Der Zeitraum ueberschneidet einen Abschnitt desselben Beschaeftigungsverhaeltnisses.');
         }
+    }
 
-        $traitDefaults = $previous === null
-            ? array_fill_keys(array_keys(self::TRAIT_VALUES), 'unknown')
-            : array_intersect_key($previous, self::TRAIT_VALUES);
-        $nextRevision = $latestRevision + 1;
+    private function storeRevision(
+        array $keyScope,
+        array $record,
+        int $revision,
+        ?int $supersedesContextId,
+        ?int $continuesContextId,
+        string $reasonCode,
+        int $actorId,
+    ): array {
         $stored = $this->connection->execute(
             'INSERT INTO employee_employment_contexts (
-                user_id, employment_key, revision, supersedes_context_id, effective_from, effective_until,
+                user_id, employment_key, revision, supersedes_context_id, continues_context_id, effective_from, effective_until,
                 employment_type, student_status, pension_insurance_status, cross_border_status, work_authorization_status,
                 source, revision_reason, created_by_user_id, created_at
              ) VALUES (
-                :employee_id, :employment_key, :revision, :supersedes_id, :effective_from, :effective_until,
+                :employee_id, :employment_key, :revision, :supersedes_id, :continues_id, :effective_from, :effective_until,
                 :employment_type, :student_status, :pension_insurance_status, :cross_border_status, :work_authorization_status,
                 :source, :reason, :actor_id, UTC_TIMESTAMP()
              )',
-            $keyScope + $record + $traitDefaults + [
-                'revision' => $nextRevision,
+            $keyScope + $record + [
+                'revision' => $revision,
                 'supersedes_id' => $supersedesContextId,
+                'continues_id' => $continuesContextId,
                 'source' => 'manual',
                 'reason' => $reasonCode,
                 'actor_id' => $actorId,
@@ -227,7 +320,7 @@ final class EmploymentContextService
             throw new RuntimeException('Die Beschaeftigungsrevision konnte nicht sicher gespeichert werden.');
         }
 
-        return ['context_id' => $this->connection->lastInsertId(), 'revision' => $nextRevision];
+        return ['context_id' => $this->connection->lastInsertId(), 'revision' => $revision];
     }
 
     private function currentPredecessor(array $keyScope, int $contextId): array

@@ -185,11 +185,32 @@ final class PersonnelDocumentDatabaseTest extends MariaDbTestCase
         self::assertSame($unknown, $this->assertFailure(PersonnelAccessDenied::class, fn () => $this->documents->archive($document, 2, 'duplicate', 'viewer-archive')));
         self::assertSame(5, (int) $this->connection()->fetchColumn(
             "SELECT COUNT(*) FROM employee_document_access_log WHERE actor_user_id = :actor
-               AND outcome = 'denied' AND document_id IS NULL AND document_version_id IS NULL",
+               AND outcome = 'denied' AND employee_user_id IS NULL AND document_id IS NULL AND document_version_id IS NULL",
             ['actor' => $viewer]
         ));
+        $readAudit = $this->connection()->fetchAll(
+            "SELECT action, employee_user_id, document_id, document_version_id, created_at <= UTC_TIMESTAMP() AS utc_recorded
+             FROM employee_document_access_log WHERE actor_user_id = :actor AND outcome = 'allowed' ORDER BY id",
+            ['actor' => $viewer],
+        );
+        self::assertSame(['document.list', 'document.version'], array_column($readAudit, 'action'));
+        self::assertSame([$this->employee, $this->employee], array_column($readAudit, 'employee_user_id'));
+        self::assertSame([null, $document], array_column($readAudit, 'document_id'));
+        self::assertSame([null, $ownVersion['version_id']], array_column($readAudit, 'document_version_id'));
+        self::assertSame([1, 1], array_column($readAudit, 'utc_recorded'));
+        $this->connection()->execute('UPDATE users SET is_deleted = 1 WHERE id = :id', ['id' => $this->employee]);
+        self::assertCount(1, $this->documents->listForEmployee($this->employee));
+        self::assertSame($this->employee, (int) $this->connection()->fetchColumn(
+            'SELECT employee_user_id FROM employee_document_access_log WHERE actor_user_id = :actor ORDER BY id DESC LIMIT 1',
+            ['actor' => $viewer],
+        ));
+        $this->connection()->execute('UPDATE users SET is_deleted = 0 WHERE id = :id', ['id' => $this->employee]);
         $this->scope($viewer, $this->employee, false);
         self::assertSame($unknown, $this->assertFailure(PersonnelAccessDenied::class, fn () => $this->documents->get($document)));
+        self::assertNull($this->connection()->fetchOne(
+            'SELECT employee_user_id FROM employee_document_access_log WHERE actor_user_id = :actor ORDER BY id DESC LIMIT 1',
+            ['actor' => $viewer],
+        )['employee_user_id']);
 
         $manager = $this->createUser();
         $this->grant($manager, [PersonnelAccessService::MANAGE]);
@@ -443,6 +464,7 @@ final class PersonnelDocumentDatabaseTest extends MariaDbTestCase
         try {
             $message = $this->assertFailure(RuntimeException::class, fn () => $this->documents->get($id));
             self::assertStringNotContainsString('synthetic-sensitive', $message);
+            $this->assertFailure(RuntimeException::class, fn () => $this->documents->listForEmployee($this->employee));
             $this->assertFailure(PersonnelAccessDenied::class, fn () => $this->documents->get(999999));
         } finally {
             $connection->execute('DROP TRIGGER test_reject_access_audit');

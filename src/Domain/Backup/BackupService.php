@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Domain\Backup;
 
+use App\Domain\Personnel\Storage\PersonnelPrivatePath;
+use App\Domain\Personnel\Storage\PersonnelStorageException;
 use App\Infrastructure\Database\DatabaseConnection;
 use PDOException;
 use RuntimeException;
@@ -15,6 +17,8 @@ final class BackupService
     private const PERSONNEL_TRIGGER_MIGRATION = '20261118203000_harden_personnel_compliance_history';
     private const PREVIOUS_PERSONNEL_SCHEMA = '20261118202000_personnel_compliance_permissions';
     private const PERSONNEL_PHASE_TWO_SCHEMA = '20261118205000_personnel_phase_two_foundation';
+    private const PERSONNEL_EMPLOYEE_ACCESS_SCHEMA = '20261118206000_personnel_temporal_history_and_access';
+    private const PERSONNEL_PRIVATE_STORAGE_SCHEMA = '20261118207000_personnel_private_storage';
     private const PHASE_TWO_PRIVATE_TABLES = ['employee_personnel_scope_events', 'personnel_command_receipts'];
     private const REDACTED_SECRET = '[redacted:backup-secret]';
     private const RUNTIME_OVERRIDE_EXCLUDED_WARNING = 'Eine Runtime-Datenbankkonfiguration ist vorhanden und benoetigt eine separate geschuetzte Sicherung.';
@@ -79,6 +83,14 @@ final class BackupService
         $databaseDir = $workspace . '/database';
         $uploadsRoot = rtrim((string) ($this->uploadConfig['root'] ?? storage_path('app/uploads')), '/');
         $runtimeOverride = $this->runtimeOverridePath;
+
+        foreach ($this->uploadConfig['private_personnel_roots'] ?? [] as $privateRoot) {
+            try {
+                PersonnelPrivatePath::requireSeparate($privateRoot, [$uploadsRoot, $this->backupRoot]);
+            } catch (PersonnelStorageException) {
+                throw new RuntimeException('Der allgemeine Backupbereich ist nicht sicher vom privaten Personalaktenspeicher getrennt.');
+            }
+        }
 
         try {
             $this->ensureDirectory($databaseDir);
@@ -456,9 +468,13 @@ final class BackupService
             throw new RuntimeException('Im Backup-Manifest ist schema_version ungueltig.');
         }
         $currentSchema = $this->schemaVersion();
-        $previousPersonnelSchema = ($legacy && $schemaVersion === self::PREVIOUS_PERSONNEL_SCHEMA
-                && in_array($currentSchema, [self::PERSONNEL_TRIGGER_MIGRATION, self::PERSONNEL_PHASE_TWO_SCHEMA], true))
-            || (!$legacy && $schemaVersion === self::PERSONNEL_TRIGGER_MIGRATION && $currentSchema === self::PERSONNEL_PHASE_TWO_SCHEMA);
+        // These releases only changed the excluded personnel rows after their original table layouts were published.
+        $personnelSchemaOrder = [self::PREVIOUS_PERSONNEL_SCHEMA, self::PERSONNEL_TRIGGER_MIGRATION,
+            self::PERSONNEL_PHASE_TWO_SCHEMA, self::PERSONNEL_EMPLOYEE_ACCESS_SCHEMA, self::PERSONNEL_PRIVATE_STORAGE_SCHEMA];
+        $archivePosition = array_search($schemaVersion, $personnelSchemaOrder, true);
+        $currentPosition = array_search($currentSchema, $personnelSchemaOrder, true);
+        $previousPersonnelSchema = $archivePosition !== false && $currentPosition !== false && $archivePosition < $currentPosition
+            && ($legacy ? $archivePosition === 0 : $archivePosition > 0);
         if ($schemaVersion !== $currentSchema && !$previousPersonnelSchema) {
             throw new RuntimeException('Die Backup-Schema-Version passt nicht zum aktuellen System.');
         }
@@ -480,7 +496,7 @@ final class BackupService
         $this->assertExpectedTables(
             $databaseTables,
             !$legacy || $previousPersonnelSchema,
-            $previousPersonnelSchema && $currentSchema === self::PERSONNEL_PHASE_TWO_SCHEMA ? self::PHASE_TWO_PRIVATE_TABLES : []
+            $previousPersonnelSchema && $archivePosition < 2 && $currentPosition >= 2 ? self::PHASE_TWO_PRIVATE_TABLES : []
         );
         $this->assertPersonnelArchiveEntries($archiveEntries, $databaseFiles);
 

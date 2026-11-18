@@ -11,11 +11,13 @@ use App\Domain\Personnel\Compliance\PersonnelAccessDenied;
 use App\Domain\Personnel\Compliance\PersonnelAccessService;
 use App\Domain\Personnel\Compliance\PersonnelComplianceCatalogService;
 use App\Domain\Personnel\Compliance\PersonnelConflict;
+use App\Domain\Personnel\Compliance\PersonnelDocumentService;
 use App\Domain\Users\PermissionMatrix;
 use App\Infrastructure\Database\DatabaseConnection;
 use InvalidArgumentException;
 use LogicException;
 use PDOException;
+use PHPUnit\Framework\Attributes\TestWith;
 use RuntimeException;
 use Tests\Support\MariaDbTestCase;
 
@@ -82,6 +84,122 @@ final class PersonnelEmploymentCatalogTest extends MariaDbTestCase
         self::assertCount(3, $service->history($employee));
     }
 
+    public function testStatusChangesAtYearBoundaryKeepTheEarlierContextAndItsDocumentReference(): void
+    {
+        [$service, , $employee] = $this->employmentFixture();
+        $first = $service->append($employee, 'job-main', 0, null, [
+            'effective_from' => '2026-11-01', 'effective_until' => '2026-12-31', 'employment_type' => 'marginal',
+        ], 'initial_record', 'year-opening');
+        $documents = new PersonnelDocumentService($this->connection(), $this->access());
+        $this->connection()->execute(
+            'INSERT INTO personnel_document_types (code, label, category) VALUES ("synthetic-historical", "Synthetic historical fixture", "test")',
+        );
+        $type = $this->connection()->lastInsertId();
+        $document = $documents->create($employee, [
+            'document_type_id' => $type, 'employment_context_id' => $first['context_id'], 'issued_on' => '2026-11-15',
+        ], 'historical-document');
+        $original = $service->history($employee)[0];
+
+        $newDates = ['effective_from' => '2027-01-01', 'employment_type' => 'regular'];
+        $change = $service->changeFrom($employee, 'job-main', 1, $first['context_id'], $newDates, 'year-change');
+        self::assertSame(2, $change['revision']);
+        self::assertSame($change, $service->changeFrom($employee, 'job-main', 1, $first['context_id'], $newDates, 'year-change'));
+        $this->assertRejected(PersonnelConflict::class, fn () => $service->changeFrom($employee, 'job-main', 1, $first['context_id'], [
+            ...$newDates, 'employment_type' => 'other',
+        ], 'year-change'));
+        $history = $service->history($employee);
+        self::assertCount(2, $history);
+        self::assertSame($original, $history[0]);
+        self::assertSame($first['context_id'], (int) $history[1]['continues_context_id']);
+        self::assertNull($history[1]['supersedes_context_id']);
+        foreach (['2026-11-15', '2026-12-31'] as $date) {
+            $context = $service->contextsOn($employee, $date)['contexts'][0];
+            self::assertSame($first['context_id'], (int) $context['id']);
+            self::assertSame('marginal', $context['employment_type']);
+        }
+        foreach (['2027-01-01', '2027-01-15'] as $date) {
+            $context = $service->contextsOn($employee, $date)['contexts'][0];
+            self::assertSame($change['context_id'], (int) $context['id']);
+            self::assertSame('regular', $context['employment_type']);
+        }
+        self::assertSame($first['context_id'], (int) $documents->get($document['document_id'])['employment_context_id']);
+    }
+
+    public function testChangeInsideAnOpenIntervalAppendsBothSegmentsAndPreservesGapsAndParallelJobs(): void
+    {
+        [$service, $actor, $employee] = $this->employmentFixture();
+        $first = $service->append($employee, 'job', 0, null, [
+            'effective_from' => '2026-03-01', 'employment_type' => 'marginal', 'student_status' => 'working_student',
+        ], 'initial_record', 'midyear-opening');
+        $parallel = $service->append($employee, 'parallel', 0, null, ['effective_from' => '2026-06-01'], 'initial_record', 'midyear-parallel');
+        $original = $service->history($employee)[0];
+
+        $change = $service->changeFrom($employee, 'job', 1, $first['context_id'], [
+            'effective_from' => '2026-07-01', 'effective_until' => '2026-07-31', 'employment_type' => 'regular',
+        ], 'midyear-change');
+        [$unchanged, $earlier, $later] = $service->history($employee);
+        self::assertSame($original, $unchanged);
+        self::assertNull($unchanged['effective_until']);
+        self::assertSame(3, $change['revision']);
+        self::assertSame('2026-06-30', $earlier['effective_until']);
+        self::assertSame('carried_forward', $earlier['revision_reason']);
+        self::assertSame($actor, (int) $earlier['created_by_user_id']);
+        self::assertSame($first['context_id'], (int) $earlier['supersedes_context_id']);
+        self::assertSame((int) $earlier['id'], (int) $later['continues_context_id']);
+        self::assertSame('working_student', $later['student_status']);
+        self::assertSame(['marginal', 'unknown'], array_column($service->contextsOn($employee, '2026-06-30')['contexts'], 'employment_type'));
+        self::assertSame(['regular', 'unknown'], array_column($service->contextsOn($employee, '2026-07-01')['contexts'], 'employment_type'));
+        self::assertSame(['contexts' => [$service->history($employee)[3]], 'ambiguous_employment_keys' => []], $service->contextsOn($employee, '2026-08-01'));
+        self::assertSame($parallel['context_id'], (int) $service->contextsOn($employee, '2026-08-01')['contexts'][0]['id']);
+
+        foreach (['2026-07-01', '2026-06-30', '2026-08-02'] as $date) {
+            $this->assertRejected(PersonnelConflict::class, fn () => $service->changeFrom($employee, 'job', 3, $change['context_id'], [
+                'effective_from' => $date,
+            ], 'invalid-midyear-change'));
+        }
+        $this->assertRejected(PersonnelConflict::class, fn () => $service->changeFrom($employee, 'job', 3, (int) $earlier['id'], [
+            'effective_from' => '2026-05-01', 'effective_until' => '2026-07-01',
+        ], 'overlapping-midyear-change'));
+        $this->assertRejected(PersonnelConflict::class, fn () => $service->append($employee, 'job', 3, $change['context_id'], [
+            'effective_from' => '2026-07-01', 'effective_until' => '2026-07-15', 'employment_type' => 'marginal',
+        ], 'employment_end', 'invalid-termination-traits'));
+        self::assertCount(4, $service->history($employee));
+    }
+
+    public function testLegacyDisplacedPeriodRequiresExplicitCorrectionWithoutRewritingHistory(): void
+    {
+        [$service, $actor, $employee] = $this->employmentFixture();
+        $first = $service->append($employee, 'legacy', 0, null, [
+            'effective_from' => '2026-11-01', 'employment_type' => 'marginal',
+        ], 'initial_record', 'legacy-opening');
+        $this->connection()->execute(
+            'INSERT INTO employee_employment_contexts (user_id, employment_key, revision, supersedes_context_id,
+                effective_from, employment_type, revision_reason, created_by_user_id)
+             VALUES (:employee, "legacy", 2, :previous, "2027-01-01", "regular", "change_of_circumstances", :actor)',
+            ['employee' => $employee, 'previous' => $first['context_id'], 'actor' => $actor],
+        );
+        $before = $service->history($employee);
+        self::assertSame(['contexts' => [], 'ambiguous_employment_keys' => ['legacy']], $service->contextsOn($employee, '2026-12-31'));
+        self::assertSame(['regular'], array_column($service->contextsOn($employee, '2027-01-01')['contexts'], 'employment_type'));
+        self::assertSame(['contexts' => [], 'ambiguous_employment_keys' => []], $service->contextsOn($employee, '2026-10-31'));
+
+        $fixed = $service->append($employee, 'legacy', 2, null, [
+            'effective_from' => '2026-11-01', 'effective_until' => '2026-12-31', 'employment_type' => 'marginal',
+        ], 'correction', 'legacy-review');
+        self::assertSame($before, array_slice($service->history($employee), 0, 2));
+        $confirmed = $service->contextsOn($employee, '2026-12-31');
+        self::assertSame([], $confirmed['ambiguous_employment_keys']);
+        self::assertSame($fixed['context_id'], (int) $confirmed['contexts'][0]['id']);
+
+        $service->changeFrom($employee, 'legacy', 3, $fixed['context_id'], [
+            'effective_from' => '2026-12-01', 'effective_until' => '2026-12-31', 'employment_type' => 'short_term',
+        ], 'legacy-reviewed-change');
+        $carried = $service->contextsOn($employee, '2026-11-30');
+        self::assertSame([], $carried['ambiguous_employment_keys']);
+        self::assertSame(['marginal'], array_column($carried['contexts'], 'employment_type'));
+        self::assertSame(['short_term'], array_column($service->contextsOn($employee, '2026-12-31')['contexts'], 'employment_type'));
+    }
+
     public function testInvalidMetadataLeavesNoReceiptOrHistoryAndLegacyOverlapIsUnresolved(): void
     {
         [$service, $actor, $employee] = $this->employmentFixture();
@@ -138,7 +256,9 @@ final class PersonnelEmploymentCatalogTest extends MariaDbTestCase
         self::assertSame(1, (int) $this->connection()->fetchColumn('SELECT COUNT(*) FROM personnel_command_receipts'));
     }
 
-    public function testTwoSessionsWritingTheSameRevisionGiveOneSuccessAndOneConflict(): void
+    #[TestWith([false])]
+    #[TestWith([true])]
+    public function testTwoSessionsWritingTheSameRevisionGiveOneSuccessAndOneConflict(bool $datedChange): void
     {
         [$service, $firstActor, $employee] = $this->employmentFixture();
         $secondActor = $this->createActor([PersonnelAccessService::MANAGE]);
@@ -156,8 +276,11 @@ final class PersonnelEmploymentCatalogTest extends MariaDbTestCase
             echo "ready\n";
             flush();
             try {
-                $result = $service->append($input['employee'], 'job', 1, $input['predecessor'],
-                    ['effective_from' => '2026-11-01', 'effective_until' => $input['end']], 'employment_end', 'employment.race');
+                $result = $input['datedChange']
+                    ? $service->changeFrom($input['employee'], 'job', 1, $input['predecessor'],
+                        ['effective_from' => $input['end'], 'employment_type' => 'regular'], 'employment.race')
+                    : $service->append($input['employee'], 'job', 1, $input['predecessor'],
+                        ['effective_from' => '2026-11-01', 'effective_until' => $input['end']], 'employment_end', 'employment.race');
                 echo 'success:' . $result['revision'];
             } catch (App\Domain\Personnel\Compliance\PersonnelConflict) {
                 echo 'conflict';
@@ -176,7 +299,7 @@ final class PersonnelEmploymentCatalogTest extends MariaDbTestCase
                 $workers[] = [$process, $pipes];
                 fwrite($pipes[0], json_encode([
                     'config' => $this->connectionConfig(), 'actor' => $actor, 'employee' => $employee,
-                    'end' => $end, 'predecessor' => $first['context_id'],
+                    'end' => $end, 'predecessor' => $first['context_id'], 'datedChange' => $datedChange,
                 ], JSON_THROW_ON_ERROR));
                 fclose($pipes[0]);
                 stream_set_timeout($pipes[1], 10);
@@ -207,9 +330,39 @@ final class PersonnelEmploymentCatalogTest extends MariaDbTestCase
             }
         }
 
-        self::assertEqualsCanonicalizing(['success:2', 'conflict'], $results);
-        self::assertCount(2, $service->history($employee));
+        $expectedRevision = $datedChange ? 3 : 2;
+        self::assertEqualsCanonicalizing(['success:' . $expectedRevision, 'conflict'], $results);
+        self::assertCount($expectedRevision, $service->history($employee));
         self::assertSame(2, (int) $this->connection()->fetchColumn('SELECT COUNT(*) FROM personnel_command_receipts'));
+    }
+
+    public function testFailedSecondInsertRollsBackEntireDatedChangeAndCanBeRetried(): void
+    {
+        [$service, , $employee] = $this->employmentFixture();
+        $first = $service->append($employee, 'job', 0, null, [
+            'effective_from' => '2026-11-01', 'employment_type' => 'marginal',
+        ], 'initial_record', 'rollback-opening');
+        $change = fn () => $service->changeFrom($employee, 'job', 1, $first['context_id'], [
+            'effective_from' => '2027-01-01', 'employment_type' => 'regular',
+        ], 'rollback-change');
+
+        $this->connection()->execute(<<<'SQL'
+            CREATE TRIGGER test_reject_dated_change BEFORE INSERT ON employee_employment_contexts FOR EACH ROW
+            BEGIN
+                IF NEW.continues_context_id IS NOT NULL THEN
+                    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'synthetic-second-insert-failure';
+                END IF;
+            END
+            SQL);
+        try {
+            $error = $this->assertRejected(RuntimeException::class, $change);
+            self::assertStringNotContainsString('synthetic-second-insert-failure', $error->getMessage());
+            self::assertCount(1, $service->history($employee));
+            self::assertSame(1, (int) $this->connection()->fetchColumn('SELECT COUNT(*) FROM personnel_command_receipts'));
+        } finally {
+            $this->connection()->execute('DROP TRIGGER test_reject_dated_change');
+        }
+        self::assertSame(3, $change()['revision']);
     }
 
     public function testContextAccessIsScopedAndAuditsDenialsWithoutReferences(): void
@@ -234,10 +387,11 @@ final class PersonnelEmploymentCatalogTest extends MariaDbTestCase
             ['employee' => $employee, 'grantee' => $actor, 'actor' => $actor],
         );
         $this->assertRejected(PersonnelAccessDenied::class, fn () => $service->contextsOn($employee, '2026-11-01'));
-        $logs = $this->connection()->fetchAll('SELECT outcome, document_id, document_version_id FROM employee_document_access_log WHERE actor_user_id = :id ORDER BY id', ['id' => $actor]);
+        $logs = $this->connection()->fetchAll('SELECT outcome, document_id, document_version_id, employee_user_id FROM employee_document_access_log WHERE actor_user_id = :id ORDER BY id', ['id' => $actor]);
         self::assertSame(['allowed', 'denied', 'denied', 'denied'], array_column($logs, 'outcome'));
         self::assertSame([null, null, null, null], array_column($logs, 'document_id'));
         self::assertSame([null, null, null, null], array_column($logs, 'document_version_id'));
+        self::assertSame([$employee, null, null, null], array_column($logs, 'employee_user_id'));
     }
 
     public function testCatalogueSupportsExactHistoricalRevisionsAndOnlyManualReview(): void

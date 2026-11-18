@@ -293,6 +293,28 @@ bin/deploy-prod-check.sh --apply
 
 ## Backup-Hinweise
 
+### Personalaktendateien in Phase 2B
+
+Der Standardmodus ist `PERSONNEL_FILE_MODE=disabled`. `docker-compose.prod.yml` setzt ihn ausdrücklich. Die interne Dateiablage lässt sich für einen CLI-Prozess über `APP_ENV=test` und `PERSONNEL_FILE_MODE=synthetic` mit einer dafür benannten MariaDB-Scratch-Datenbank prüfen. Die Entwicklungsfreigabe erzeugt keine HTTP-Routen.
+
+- Einen eigenen lokalen Linux-Speicher für Objekte und Quarantäne sowie ein getrenntes Sicherungsverzeichnis mit `0700` und passendem Betriebs-UID anlegen. Dateimodus ist `0600`. Schreibrechte für fremde Prozesse sind auszuschließen. Ein Bind-Mount, Symlink, Apache-Alias oder allgemeiner Sicherungsjob darf die privaten Bereiche nicht veröffentlichen. Für Debian den eigenen privaten Pfad im Apache-VHost mit `Require all denied` absichern. Das Docker-VHost schützt `/var/lib/timeapp-personnel` und deaktiviert Symlink-Folgen im Webroot. Im normalen Produktions-Compose sind dort keine privaten Volumes eingebunden.
+- PHP 8.2 benötigt Sodium, POSIX, Fileinfo, GD und Zlib. Für PDF sind `qpdf` ab Version 11 und `/usr/bin/prlimit` erforderlich. Das Docker-Image installiert `qpdf` und `util-linux` und prüft Sodium beim Build. Debian stellt diese Pakete direkt bereit. Parser und Scanner verarbeiten ausschließlich die unveränderten Originalbytes.
+- `PERSONNEL_FILE_ROOT`, `PERSONNEL_FILE_KEYRING`, `PERSONNEL_CLAMD_SOCKET` und `PERSONNEL_QPDF` konfigurieren. `PersonnelFileRuntime::fromConfiguration()` prüft Pfade, Schlüssel, Parser und Scanner. Für ClamAV einen lokalen Unix-Socket in einem vom Dienst verwalteten Verzeichnis und ein separates privates `TemporaryDirectory` bereitstellen. Die Quarantäne und das Scanner-Arbeitsverzeichnis für den Pilot auf geschütztem verschlüsseltem oder flüchtigem Speicher betreiben. Für 16 MiB Uploads müssen `StreamMaxLength`, `MaxFileSize` und `MaxScanSize` mindestens die freigegebene Größe abdecken. `AlertExceedsMax yes` verhindert einen positiven Bericht bei überschrittenen Scanlimits. Signaturstand, Aktualisierung, Erreichbarkeit und bekannte Prüfmuster müssen überwacht werden. Die lokal geprüfte synthetische Signaturdatenbank dient dem technischen Test.
+- Datei- und Backup-Schlüsselbestände getrennt bereitstellen. Jeder enthält `active` und `keys` mit den unabhängig erzeugten Base64-Schlüsseln. Schlüssel und Betriebsdateien außerhalb von App-, Web-, Daten-, Upload- und Sicherungspfaden speichern. Bei Rotation eine neue Kennung hinzufügen, aktiv setzen und alte Kennungen für ältere Versionen und Wiederherstellungen erhalten. Der aktuelle Schlüsselstand muss in einer eigenen geschützten Schlüsselverwahrung gesichert werden.
+
+Die Datei `bin/personnel-private-backup.php` verwendet eine private JSON-Betriebskonfiguration (`0400` oder `0600`) mit `mode` gleich `synthetic`, dem numerischen `operator_uid`, `archive_root`, `storage_keyring` und `backup_keyring`. `create` liest `source_storage` und `source_database`. `validate` und `restore-scratch` verwenden `scratch_storage` und `scratch_database`. Die Datenbankobjekte verwenden die üblichen Verbindungsfelder aus `config/database.php`. Weitere verbotene Pfade können über `forbidden_roots` eingebunden werden. Das Limit `max_object_bytes` beträgt ohne Konfiguration 16 MiB.
+
+```bash
+php bin/personnel-private-backup.php create /geschuetzt/operator.json
+# backup_id mit der Sicherungskennung aus dem JSON-Bericht von create belegen.
+php bin/personnel-private-backup.php validate /geschuetzt/operator.json "$backup_id"
+php bin/personnel-private-backup.php restore-scratch /geschuetzt/operator.json "$backup_id"
+```
+
+Das Ziel hat das Namensmuster `timeapp_personnel_restore_<12-hex>` und eine eigene Kennung `timeapp_pr_<12-hex>` mit gleichem Suffix. MariaDB darf ihr nur `SELECT, INSERT` auf das exakt eingegrenzte Schema gewähren. Unterstriche müssen bei einem Schema-Grant als Literal maskiert sein. Verwende einen separat gemigrierten Scratch-Stand mit passendem Katalog und Mitarbeiter-/Akteurbezug aus der Basissicherung. Der Fachbestand und Zielordner sind für den ersten Restore leer. Ein separat abgesicherter betrieblicher Wiederanlauf bleibt Voraussetzung für echte Unterlagen. Der CLI-Bericht liefert Sicherungskennung, Schema, Prüfsummen und Zähler. Ein Fehler bricht mit technischem Code ab. [Phase-2B-Implementierung](docs/COMPLIANCE_2027_PHASE2B_IMPLEMENTATION.md)
+
+### Allgemeine Sicherungen
+
 Regelmaessig sichern:
 
 - MariaDB-Daten aus `timeapp_timeapp-db-data`

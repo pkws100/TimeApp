@@ -336,6 +336,7 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         $catalog = $this->connection->fetchAll('SELECT * FROM personnel_document_requirements ORDER BY id');
         $head = $this->connection->fetchOne('SELECT * FROM employee_documents WHERE id = :id', ['id' => $document]);
         $contextBefore = $this->connection->fetchOne('SELECT * FROM employee_employment_contexts WHERE id = :id', ['id' => $context]);
+        $accessBefore = $this->connection->fetchOne('SELECT * FROM employee_document_access_log WHERE document_id = :id', ['id' => $document]);
         $this->connection->execute(
             'INSERT INTO time_account_entries (user_id, effective_date, minutes, entry_type, description)
              VALUES (:employee, "2026-08-10", 30, "adjustment", "Synthetic prior time account entry")',
@@ -360,8 +361,24 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         self::assertSame($head, $newHead);
         $newContext = $this->connection->fetchOne('SELECT * FROM employee_employment_contexts WHERE id = :id', ['id' => $context]);
         self::assertNull($newContext['supersedes_context_id']);
-        unset($newContext['supersedes_context_id']);
+        self::assertNull($newContext['continues_context_id']);
+        unset($newContext['supersedes_context_id'], $newContext['continues_context_id']);
         self::assertSame($contextBefore, $newContext);
+        $newAccess = $this->connection->fetchOne('SELECT * FROM employee_document_access_log WHERE document_id = :id', ['id' => $document]);
+        self::assertNull($newAccess['employee_user_id']);
+        unset($newAccess['employee_user_id']);
+        self::assertSame($accessBefore, $newAccess);
+        $foreign = $this->createUser('foreign-history');
+        $bindings = ['document' => $document, 'foreign' => $foreign, 'actor' => $employee];
+        $this->assertSqlRejected('INSERT INTO employee_document_access_log (document_id, employee_user_id, action, actor_user_id, outcome)
+            VALUES (:document, :foreign, "document.read", :actor, "allowed")', $bindings);
+        $this->assertSqlRejected('INSERT INTO employee_document_access_log (document_id, employee_user_id, action, actor_user_id, outcome)
+            VALUES (:document, :foreign, "document.read", :actor, "denied")', $bindings);
+        $this->assertSqlRejected('UPDATE employee_document_access_log SET employee_user_id = :employee WHERE document_id = :id',
+            ['employee' => $employee, 'id' => $document], '45000');
+        $this->assertSqlRejected('INSERT INTO employee_employment_contexts (user_id, employment_key, revision, continues_context_id, effective_from, revision_reason, created_by_user_id)
+            VALUES (:foreign, "synthetic-context", 2, :context, "2027-01-01", "change_of_circumstances", :actor)',
+            ['foreign' => $foreign, 'context' => $context, 'actor' => $employee]);
         self::assertSame($catalog, $this->connection->fetchAll('SELECT * FROM personnel_document_requirements ORDER BY id'));
         foreach ($journals as $table => $rows) {
             self::assertSame($rows, $this->connection->fetchAll('SELECT * FROM ' . $table . ' ORDER BY id'));
