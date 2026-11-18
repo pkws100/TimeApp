@@ -11,6 +11,19 @@ use RuntimeException;
 
 abstract class MariaDbTestCase extends TestCase
 {
+    protected const INITIAL_MIGRATION_TARGET = null;
+
+    private const APPEND_ONLY_FIXTURE_TABLES = [
+        'personnel_compliance_sources',
+        'personnel_document_types',
+        'personnel_document_requirements',
+        'employee_employment_contexts',
+        'employee_documents',
+        'employee_document_versions',
+        'employee_document_audit',
+        'employee_document_access_log',
+    ];
+
     private static ?PDO $serverPdo = null;
     private static ?DatabaseConnection $databaseConnection = null;
     private static ?string $databaseName = null;
@@ -144,6 +157,9 @@ abstract class MariaDbTestCase extends TestCase
     private static function runMigrations(): void
     {
         $command = [PHP_BINARY, base_path('vendor/bin/phinx'), 'migrate', '-c', (string) self::$phinxConfig, '-e', 'test'];
+        if (static::INITIAL_MIGRATION_TARGET !== null) {
+            array_push($command, '-t', static::INITIAL_MIGRATION_TARGET);
+        }
         $process = proc_open($command, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, base_path());
 
         if (!is_resource($process)) {
@@ -165,7 +181,7 @@ abstract class MariaDbTestCase extends TestCase
     {
         $pdo = $this->connection()->pdo();
 
-        if (!$pdo instanceof PDO) {
+        if (!$pdo instanceof PDO || $this->connection()->fetchColumn('SELECT DATABASE()') !== self::$databaseName) {
             throw new RuntimeException('Die MariaDB-Scratch-Datenbank ist nicht erreichbar.');
         }
 
@@ -176,7 +192,10 @@ abstract class MariaDbTestCase extends TestCase
 
         try {
             foreach ($tables as $table) {
-                $pdo->exec('DELETE FROM ' . MariaDbScratchConfig::quoteIdentifier((string) $table['table_name']));
+                $name = (string) $table['table_name'];
+                // Use DDL only for append-only fixtures in the test-owned schema. Keep the triggers installed.
+                $clear = in_array($name, self::APPEND_ONLY_FIXTURE_TABLES, true) ? 'TRUNCATE TABLE ' : 'DELETE FROM ';
+                $pdo->exec($clear . MariaDbScratchConfig::quoteIdentifier($name));
             }
             // Source DELETE triggers can enqueue reconciliation tombstones after
             // information_schema happened to list the queue earlier. Clear this

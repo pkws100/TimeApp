@@ -21,6 +21,7 @@ use App\Domain\Vacation\VacationRequestService;
 use App\Http\Controllers\AdminAbsencePeriodController;
 use App\Http\Controllers\AdminVacationRequestController;
 use App\Http\Request;
+use App\Infrastructure\Database\DatabaseConnection;
 use App\Presentation\Admin\AdminView;
 use InvalidArgumentException;
 use ReflectionMethod;
@@ -158,6 +159,51 @@ final class AbsencePeriodDatabaseTest extends MariaDbTestCase
             'absence_reason_code' => 'unexcused_absence',
             'change_reason' => 'Veraltete Aenderung',
         ], $adminId);
+    }
+
+    public function testCompetingPeriodPreviewsPreserveOnlyTheFirstChange(): void
+    {
+        $actor = $this->createUser();
+        $employee = $this->createUser();
+        $otherEmployee = $this->createUser();
+        $firstEditor = $this->service();
+        $secondEditor = $this->service(new DatabaseConnection($this->connectionConfig()));
+        $base = [
+            'date_from' => '2026-06-08',
+            'date_to' => '2026-06-09',
+            'entry_type' => 'vacation',
+            'absence_reason_code' => 'vacation_paid',
+            'change_reason' => 'Urlaub erfassen',
+            'confirm_warnings' => true,
+        ];
+        $period = $this->createPeriod($firstEditor, $base + ['user_id' => $employee], $actor);
+        $otherPeriod = $this->createPeriod($firstEditor, $base + ['user_id' => $otherEmployee], $actor);
+        $periodId = (int) $period['id'];
+        $otherPeriodId = (int) $otherPeriod['id'];
+        $originalIds = array_column($this->activeRows($periodId), 'id');
+        $otherRows = $this->activeRows($otherPeriodId);
+        $originalEdit = ['lock_version' => (int) $period['lock_version'], ...$base];
+        $firstEdit = [...$originalEdit, 'date_to' => '2026-06-10', 'change_reason' => 'Erste Verlaengerung'];
+        $secondEdit = [...$originalEdit, 'date_to' => '2026-06-11', 'change_reason' => 'Konkurrierende Verlaengerung'];
+        $firstPreview = $firstEditor->preview($firstEdit, $periodId);
+        $secondPreview = $secondEditor->preview($secondEdit, $periodId);
+
+        $firstEditor->update($periodId, $firstEdit + ['preview_token' => $firstPreview['preview_token']], $actor);
+        try {
+            $secondEditor->update($periodId, $secondEdit + ['preview_token' => $secondPreview['preview_token']], $actor);
+            self::fail('Die zweite Aenderung muss nach der konkurrierenden Korrektur erneut geprueft werden.');
+        } catch (InvalidArgumentException $exception) {
+            self::assertStringContainsString('zwischenzeitlich', $exception->getMessage());
+        }
+
+        $rows = $this->activeRows($periodId);
+        self::assertSame(['2026-06-08', '2026-06-09', '2026-06-10'], array_column($rows, 'work_date'));
+        self::assertSame($originalIds, array_column(array_slice($rows, 0, 2), 'id'));
+        self::assertSame($otherRows, $this->activeRows($otherPeriodId));
+        self::assertSame(2, (int) $this->connection()->fetchColumn(
+            'SELECT COUNT(*) FROM absence_period_change_log WHERE absence_period_id = :id',
+            ['id' => $periodId]
+        ));
     }
 
     public function testVacationRequestApprovalCreatesAndCancellationArchivesPeriod(): void
@@ -533,18 +579,19 @@ final class AbsencePeriodDatabaseTest extends MariaDbTestCase
         }
     }
 
-    private function service(): AbsencePeriodService
+    private function service(?DatabaseConnection $connection = null): AbsencePeriodService
     {
-        $calendar = new CalendarPolicyService($this->connection());
-        $writeGuard = new TimesheetWriteGuard($this->connection());
+        $connection ??= $this->connection();
+        $calendar = new CalendarPolicyService($connection);
+        $writeGuard = new TimesheetWriteGuard($connection);
 
         return new AbsencePeriodService(
-            $this->connection(),
+            $connection,
             $calendar,
             new DailyTargetService($calendar),
             $writeGuard,
-            new TimesheetDayConflictService($this->connection()),
-            new TimesheetAuditService($this->connection())
+            new TimesheetDayConflictService($connection),
+            new TimesheetAuditService($connection)
         );
     }
 

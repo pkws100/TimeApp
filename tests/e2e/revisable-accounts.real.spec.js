@@ -296,22 +296,38 @@ test.describe('real revisable account workflow', () => {
     const parseDays = (value) => Number(String(value).replace(/[^\d,-]/g, '').replace('.', '').replace(',', '.'));
     const remainingBefore = parseDays(await accountRow.locator('td').nth(6).innerText());
 
-    await page.getByRole('button', { name: 'Urlaub fuer Mitarbeiter buchen' }).click();
+    const directSection = page.locator('section').filter({
+      has: page.getByRole('heading', { name: 'Direkt gebuchte Urlaubszeitraeume' })
+    });
+    const employeeRows = directSection.locator('.vacation-account-desktop tbody tr')
+      .filter({ hasText: 'UI Mitarbeiter' });
     const modal = page.locator('[data-absence-period-modal]');
-    async function savePeriod() {
-      const warnings = modal.locator('[name="confirm_warnings"]');
-      if (await warnings.isVisible()) await warnings.check();
-      // The fetch handler reloads the same URL. Arm a fresh load event before
-      // submitting so DOM text alone cannot race the responsive stylesheet.
-      const [response] = await Promise.all([
-        page.waitForResponse((response) => ['POST', 'PUT'].includes(response.request().method())
-          && /^\/admin\/(?:vacation-periods|absence-periods\/\d+)$/.test(new URL(response.url()).pathname)),
-        page.waitForEvent('load'),
-        modal.getByRole('button', { name: 'Verbindlich speichern' }).click()
-      ]);
-      expect(response.ok(), 'Save returned HTTP ' + response.status()).toBeTruthy();
+    const previewBox = modal.locator('[data-absence-period-preview]');
+    const changeSummary = previewBox.locator('p').filter({ has: page.locator('strong', { hasText: /^Aenderung:$/ }) });
+    const saveButton = modal.getByRole('button', { name: 'Verbindlich speichern' });
+    const warnings = modal.locator('[name="confirm_warnings"]');
+
+    async function savePeriod(expectedRow, endDate, { confirmWarnings = false } = {}) {
+      if (confirmWarnings) {
+        await expect(warnings).toBeVisible();
+        await expect(saveButton).toBeDisabled();
+        await warnings.check();
+      } else {
+        await expect(warnings).toBeHidden();
+      }
+      await expect(saveButton).toBeEnabled();
+      await saveButton.click();
+
+      // A successful fetch reloads the page. An unsuccessful one shows the error in the modal.
+      const savedRow = expectedRow.filter({ hasText: dateFrom + ' bis ' + endDate });
+      const error = modal.locator('[data-absence-period-error]:visible');
+      await expect(savedRow.or(error)).toBeVisible();
+      expect(await error.allTextContents()).toEqual([]);
+      await expect(savedRow).toHaveCount(1);
       await expect(modal).toBeHidden();
     }
+
+    await page.getByRole('button', { name: 'Urlaub fuer Mitarbeiter buchen' }).click();
     await expect(modal).toBeVisible();
     await modal.locator('select[name="user_id"]').selectOption(employeeId);
     await modal.locator('input[name="date_from"]').fill(dateFrom);
@@ -319,16 +335,11 @@ test.describe('real revisable account workflow', () => {
     await modal.locator('textarea[name="note"]').fill('Playwright Von-bis-Urlaub');
     await modal.locator('textarea[name="change_reason"]').fill('Playwright Neuanlage');
     await modal.getByRole('button', { name: 'Zeitraum pruefen' }).click();
-    await expect(modal.locator('[data-absence-period-preview]')).toContainText('Buchungstage');
-    await expect(modal.locator('[data-absence-period-preview]')).not.toContainText('Blockiert');
-    await savePeriod();
+    await expect(previewBox.locator('strong', { hasText: /^[1-9]\d* Buchungstage$/ })).toBeVisible();
+    await expect(previewBox).not.toContainText('Blockiert');
+    await savePeriod(employeeRows, dateTo);
 
-    const directSection = page.locator('section').filter({
-      has: page.getByRole('heading', { name: 'Direkt gebuchte Urlaubszeitraeume' })
-    });
-    const createdRow = directSection.locator('.vacation-account-desktop tbody tr')
-      .filter({ hasText: 'UI Mitarbeiter' }).filter({ hasText: dateFrom + ' bis ' + dateTo });
-    await expect(createdRow).toHaveCount(1);
+    const createdRow = employeeRows.filter({ hasText: dateFrom + ' bis ' + dateTo });
     const periodId = await createdRow.locator('[data-absence-period-edit]').getAttribute('data-absence-period-edit');
     expect(periodId).toMatch(/^\d+$/);
     const directRow = directSection.locator('.vacation-account-desktop tbody tr')
@@ -353,17 +364,21 @@ test.describe('real revisable account workflow', () => {
     await modal.locator('input[name="date_to"]').fill(dateShortTo);
     await modal.locator('textarea[name="change_reason"]').fill('Playwright Verkuerzung');
     await modal.getByRole('button', { name: 'Zeitraum pruefen' }).click();
-    await expect(modal.locator('[data-absence-period-preview]')).toContainText('entfaellt');
-    await savePeriod();
-    await expect(directRow).toContainText(dateFrom + ' bis ' + dateShortTo);
+    await expect(changeSummary).toContainText(/0 neu, [1-9]\d* entfaellt, [1-9]\d* bleibt/);
+    await savePeriod(directRow, dateShortTo);
+    const remainingAfterShortening = parseDays(await accountRow.locator('td').nth(6).innerText());
+    expect(remainingAfterShortening).toBeGreaterThan(remainingAfter);
 
     await editCreatedPeriod();
     await modal.locator('input[name="date_to"]').fill(dateExtendedTo);
     await modal.locator('textarea[name="change_reason"]').fill('Playwright Verlaengerung');
+    await expect(warnings).toBeHidden();
     await modal.getByRole('button', { name: 'Zeitraum pruefen' }).click();
-    await expect(modal.locator('[data-absence-period-preview]')).toContainText('neu');
-    await savePeriod();
-    await expect(directRow).toContainText(dateFrom + ' bis ' + dateExtendedTo);
+    await expect(changeSummary).toContainText(/[1-9]\d* neu, 0 entfaellt, [1-9]\d* bleibt/);
+    await expect(previewBox).toContainText('Der Zeitraum ueberschreitet ein Kalenderjahr.');
+    await savePeriod(directRow, dateExtendedTo, { confirmWarnings: true });
+    const remainingAfterExtension = parseDays(await accountRow.locator('td').nth(6).innerText());
+    expect(remainingAfterExtension).toBeLessThan(remainingAfterShortening);
 
     await page.goto('/admin/calendar?month=' + dateFrom.slice(0, 7) + '&date=' + dateFrom);
     await expect(page.locator('.calendar-bookings-card')).toContainText('Urlaub');

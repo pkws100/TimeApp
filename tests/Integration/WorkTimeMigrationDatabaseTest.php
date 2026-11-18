@@ -11,6 +11,9 @@ use Tests\Support\MariaDbScratchConfig;
 
 final class WorkTimeMigrationDatabaseTest extends TestCase
 {
+    // Exercise the historical WorkTime rollbacks before the forward-only compliance guard.
+    private const UPGRADE_TARGET = '20261118202000';
+
     public function testUpgradeRetryAndRollbackPreserveExistingSystemVersionedTimesheets(): void
     {
         $server = MariaDbScratchConfig::connectServer();
@@ -35,7 +38,7 @@ final class WorkTimeMigrationDatabaseTest extends TestCase
             foreach (['push', 'sms'] as $channel) {
                 $connection->execute('INSERT INTO work_time_notification_events (event_key, recipient_user_id, channel, status, payload_json, attempts, sent_at) VALUES (:event_key, :recipient, :channel, "sent", "{}", 1, :sent_at)', ['event_key' => 'legacy-notification:' . $channel, 'recipient' => $user, 'channel' => $channel, 'sent_at' => $legacySentAt]);
             }
-            $this->phinx($configFile, 'migrate');
+            $this->phinx($configFile, 'migrate', self::UPGRADE_TARGET);
             $notificationQuery = 'SELECT channel, status, accepted_at, sent_at, legacy_status FROM work_time_notification_events WHERE event_key LIKE "legacy-notification:%" ORDER BY channel';
             $notifications = [
                 ['channel' => 'push', 'status' => 'provider_accepted', 'accepted_at' => $legacySentAt, 'sent_at' => $legacySentAt, 'legacy_status' => 'sent'],
@@ -46,7 +49,7 @@ final class WorkTimeMigrationDatabaseTest extends TestCase
             foreach (['work_time_policy_templates', 'work_time_checkout_proposals', 'work_time_deviation_decisions', 'work_time_presence_sessions', 'work_time_notification_events'] as $table) { self::assertTrue($connection->tableExists($table)); }
             // Simulate a retry after nontransactional DDL committed before Phinx recorded completion.
             $connection->execute('DELETE FROM phinxlog WHERE version IN (20261111120000, 20261111140000)');
-            $this->phinx($configFile, 'migrate');
+            $this->phinx($configFile, 'migrate', self::UPGRADE_TARGET);
             self::assertSame($before, $connection->fetchAll('SELECT * FROM timesheets FOR SYSTEM_TIME ALL ORDER BY row_start'));
             self::assertSame($notifications, $connection->fetchAll($notificationQuery));
             $this->phinx($configFile, 'rollback', '20261111130000');
@@ -55,12 +58,12 @@ final class WorkTimeMigrationDatabaseTest extends TestCase
                 ['channel' => 'sms', 'status' => 'sent', 'sent_at' => $legacySentAt],
             ], $connection->fetchAll('SELECT channel, status, sent_at FROM work_time_notification_events WHERE event_key LIKE "legacy-notification:%" ORDER BY channel'));
             self::assertFalse($connection->columnExists('work_time_notification_events', 'accepted_at'));
-            $this->phinx($configFile, 'migrate');
+            $this->phinx($configFile, 'migrate', self::UPGRADE_TARGET);
             self::assertSame($notifications, $connection->fetchAll($notificationQuery));
             $this->phinx($configFile, 'rollback', '20261106120000');
             self::assertFalse($connection->tableExists('work_time_policy_templates'));
             self::assertSame($before, $connection->fetchAll('SELECT * FROM timesheets FOR SYSTEM_TIME ALL ORDER BY row_start'));
-            $this->phinx($configFile, 'migrate');
+            $this->phinx($configFile, 'migrate', self::UPGRADE_TARGET);
             self::assertTrue($connection->tableExists('work_time_policy_templates'));
             self::assertSame($before, $connection->fetchAll('SELECT * FROM timesheets FOR SYSTEM_TIME ALL ORDER BY row_start'));
         } finally {

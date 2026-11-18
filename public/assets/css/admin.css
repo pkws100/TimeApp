@@ -1363,6 +1363,10 @@ html[data-theme="dark"] .booking-card.has-booking-issue {
     border-radius: .75rem;
 }
 
+.absence-period-confirm[hidden] {
+    display: none;
+}
+
 @media (max-width: 760px) {
     .absence-period-modal__dialog {
         width: 100%;

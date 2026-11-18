@@ -112,8 +112,9 @@
 
 - Die additiven Compliance-2027-Migrationen fuehren `personnel_compliance_sources`, `personnel_document_types`, `personnel_document_requirements`, `employee_employment_contexts`, `employee_documents`, `employee_document_versions`, `employee_document_audit` und `employee_document_access_log` ein.
 - Dokumente referenzieren `users.id` und optional eine konkrete Kontext- und Regelrevision. Historische Referenzen verwenden `RESTRICT`. Benutzerarchivierung erhaelt die Beziehungen. Eine neue Dokumentversion verweist auf ihren direkten Vorgaenger.
+- `20261118202500_personnel_compliance_rollback_boundary` setzt die Phinx-Ruecklaufgrenze. `20261118203000_harden_personnel_compliance_history` ergaenzt die DELETE-Sperre fuer Historie und Dokumentkoepfe. Mitarbeiter, Typ, Kontext, Regel und Erstellungsprovenienz eines Dokumentkopfs bleiben fest. Archiv- und Prueffelder bleiben aenderbar. Fachlich freigegebene Aussonderung erfordert einen gesonderten Wartungsprozess.
 - Der gesetzliche Basiskatalog wird in Phinx versioniert und ohne Mitarbeiterdaten eingespielt. Die Anwendbarkeit bleibt `manual_review`. Unbekannte Beschaeftigungsmerkmale werden nicht aus Benutzerstatus, Berechtigungen oder Projektzuordnung abgeleitet.
-- Phase 1 enthaelt keine Dateioperationen und keine automatische Frist-, Anwendbarkeits- oder Loeschentscheidung. Das Systembackup enthaelt den Katalog sowie leere Eintraege fuer die privaten Tabellen. Der Dry-Run akzeptiert diese privaten Tabellen nur ohne personenbezogene Zeilen.
+- Phase 1 enthaelt keine Dateioperationen und keine automatische Frist-, Anwendbarkeits- oder Loeschentscheidung. Das Systembackup enthaelt den Katalog und leere Eintraege fuer private Tabellen. Manifestformat 2 weist die Sicherungsabdeckung und belegte Ausschluesse aus. Der Dry-Run akzeptiert private Tabellen nur ohne personenbezogene Zeilen.
 - Quellen, Historienregeln, Rechte und Backup-Grenzen sind im [Datenmodell](docs/COMPLIANCE_2027_DATA_MODEL.md) beschrieben.
 
 ## Seeder-Startpunkt
@@ -124,7 +125,7 @@
 
 ## MariaDB-Integrationstests
 - Zeitkonto-, Lock-, Migrations-, Foreign-Key- und System-Versioning-Tests verwenden pro Testklasse eine zufaellige Scratch-Datenbank auf MariaDB.
-- Die Testbasis migriert das Schema mit Phinx, leert Testdaten zwischen Methoden und entfernt die Datenbank danach. Produktivdatenbanken werden nicht als Testziel verwendet.
+- Die Testbasis migriert das Schema mit Phinx, leert Testdaten zwischen Methoden und entfernt die Datenbank danach. Append-only-Tabellen werden nur in der verifizierten, vom Test selbst erzeugten Scratch-Datenbank mittels `TRUNCATE` zurueckgesetzt. Historische Migrationstests starten bei ihrem jeweiligen Zielstand. Produktivdatenbanken werden nicht als Testziel verwendet.
 - Lokale Testzugriffe koennen mit `TIMEAPP_TEST_DB_*` konfiguriert werden. Ein isolierter App-Prozess kann `DB_OVERRIDE_FILE` auf einen separaten oder nicht vorhandenen Override-Pfad setzen.
 - `bin/inspect-absence-periods.php` prueft historische Antrags-, Zeitraum- und Tagesverknuepfungen read-only und meldet Inkonsistenzen, ohne freie Einzelbuchungen heuristisch zu veraendern.
-- Der reale Playwright-Zeitkonto-Runner erstellt ausschliesslich zufaellige Datenbanken mit dem Praefix `timeapp_ui_`, verwendet synthetische Benutzer und entfernt Datenbank, Serverlogs und Browserartefakte auch bei Fehlern. Jahresuebergreifende Betriebsschliessungen werden relativ zum aktuellen Jahr erzeugt, damit der Workflow nicht durch veraltete feste Testdaten ausfaellt.
+- Der reale Playwright-Zeitkonto-Runner erstellt ausschliesslich zufaellige Datenbanken mit dem Praefix `timeapp_ui_` und verwendet synthetische Benutzer. Datenbank und Verbindungsdateien werden auch nach Fehlern entfernt. Browser- und Serverdiagnosen bleiben dort bei Fehlern erhalten und werden in CI kurzzeitig als Artefakte bereitgestellt. Jahresuebergreifende Betriebsschliessung und Testverlaengerung werden ausgehend vom Testdatum erzeugt.

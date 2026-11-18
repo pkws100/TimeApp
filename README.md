@@ -229,7 +229,8 @@ oder per HTTP-Smoke-Check geprueft werden.
 - Es gibt bewusst noch keinen produktiven Restore-Apply. Ein Upload fuehrt niemals automatisch einen Restore aus.
 - Runtime-Overrides wie `storage/config/database.override.php` werden aus App-Backup-ZIPs ausgeschlossen und nur im Manifest als Hinweis gefuehrt.
 - Backup- und Restore-Validierung sind mit `settings.database.manage` geschuetzt.
-- Das Compliance-2027-Schema ist im Systembackup enthalten. Oeffentliche Katalogzeilen werden exportiert. Private Personalaktentabellen erscheinen als leere JSON-Dateien und sind im Manifest unter `security.excluded_database_table_rows` ausgewiesen. Validate weist personenbezogene Zeilen in diesen Tabellen ab.
+- Das Systembackup in Manifestformat 2 enthaelt den oeffentlichen Compliance-Katalog und leere JSON-Dateien fuer private Personalaktentabellen. `coverage` kennzeichnet den Sicherungsumfang und ob fuer ausgeschlossene Bereiche eine separate Sicherung noetig ist. Partielle Exporte sind auch im Dateinamen und im Antwort-Header gekennzeichnet. `GET /api/v1/system/backup/export?require_complete=1` verlangt eine bestaetigte vollstaendige Abdeckung und bricht bei Ausschluessen ab.
+- Validate prueft Format 2 inklusive SHA-256-Angaben und weist personenbezogene Zeilen in privaten Platzhalterdateien ab. Bei kompatiblen Sicherungen im Format 1 bleibt ein Teil der Abdeckung unbekannt. Herkunftsnachweis, getrennte Personalaktensicherung und produktiver Wiederanlauf brauchen eigene Verfahren. [Compliance-Datenmodell](docs/COMPLIANCE_2027_DATA_MODEL.md#backup-und-installation)
 - Verschluesselte Settings-Secrets wie SMTP-Passwoerter bleiben im Backup verschluesselt; Legacy-Klartextwerte werden redigiert und im Manifest unter `security.redacted_database_fields` ausgewiesen. Passwort-Hashes und Push-Subscription-Daten bleiben fuer einen spaeteren Restore erhalten, werden aber unter `security.retained_sensitive_database_fields` klassifiziert. Der passende `.env`-Key wird nicht im Backup mitgeliefert. Nach einem Upgrade mit altem Klartext-SMTP-Passwort die SMTP-Settings einmal mit gesetztem Key speichern, bevor ein Backup erstellt wird.
 
 ## Geschuetzte Settings-Dateien
@@ -353,3 +354,4 @@ COMPOSER_ALLOW_SUPERUSER=1 composer test
 - Offene Folgearbeiten: `PROJECTS.md`
 - Datenbank-Zielbild: `DATABASE.md`
 - Die Dokumentation zu Compliance 2027 umfasst [Rechtsmatrix](docs/COMPLIANCE_2027_REQUIREMENTS.md), [Bestandsanalyse](docs/COMPLIANCE_2027_GAP_ANALYSIS.md), [Datenmodell](docs/COMPLIANCE_2027_DATA_MODEL.md) und [Phase-2-Backlog](docs/COMPLIANCE_2027_PHASE2_BACKLOG.md). Phase 1 stellt den Regelkatalog und die Datenbankgrundlage bereit. Die Anwendung bietet noch keine Ablage echter Personalunterlagen an.
+- Der [Hardening-Bericht](docs/COMPLIANCE_2027_HARDENING_REPORT.md) dokumentiert Ruecklaufgrenze, Backup-Kennzeichnung und die Abnahme des Abwesenheits-Workflows.

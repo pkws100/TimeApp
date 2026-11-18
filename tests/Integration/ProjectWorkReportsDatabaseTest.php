@@ -26,6 +26,9 @@ use Tests\Support\MariaDbTestCase;
 
 final class ProjectWorkReportsDatabaseTest extends MariaDbTestCase
 {
+    // The project-report rollback is tested before the forward-only compliance guard.
+    protected const INITIAL_MIGRATION_TARGET = '20261118202000';
+
     public function testMigrationIsAdditiveAndBackupDiscoversReports(): void
     {
         $this->runPhinx('rollback', '20260724120000');

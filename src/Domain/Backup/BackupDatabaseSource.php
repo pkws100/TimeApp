@@ -9,4 +9,8 @@ interface BackupDatabaseSource
     public function applicationTables(): array;
 
     public function fetchRows(string $table): array;
+
+    public function systemVersionedTables(): array;
+
+    public function hasRows(string $table, bool $includeHistory = false): bool;
 }

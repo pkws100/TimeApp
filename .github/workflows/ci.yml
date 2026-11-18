@@ -160,7 +160,21 @@ jobs:
           UI_BASE_URL=http://127.0.0.1:18081 npm run ui:test:webkit
 
       - name: Run isolated real account workflow
+        id: real-account-workflow
+        env:
+          UI_REVIEW_ARTIFACT_DIR: ${{ runner.temp }}/timeapp-real-account-diagnostics
         run: npm run ui:test:real
+
+      - name: Upload isolated browser failure diagnostics
+        if: ${{ failure() && steps.real-account-workflow.outcome == 'failure' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: real-account-diagnostics-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/timeapp-real-account-diagnostics/**/trace.zip
+            ${{ runner.temp }}/timeapp-real-account-diagnostics/**/*.png
+            ${{ runner.temp }}/timeapp-real-account-diagnostics/**/*-server*.log
+          retention-days: 5
 
   docker-production-smoke:
     name: Production Docker image smoke

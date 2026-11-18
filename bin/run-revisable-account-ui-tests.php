@@ -42,14 +42,19 @@ while ((int) $restoreDateValue->format('N') !== 1) {
 $restoreDate = $restoreDateValue->format('Y-m-d');
 $vacationDate = null;
 $vacationYear = null;
-$absenceStartValue = new DateTimeImmutable('+35 days');
+$absenceEarliest = new DateTimeImmutable('+35 days midnight');
+// Make only the extension cross into January, so every run exercises warning confirmation.
+$absenceStartValue = new DateTimeImmutable($absenceEarliest->format('Y') . '-12-21');
+if ($absenceStartValue < $absenceEarliest) {
+    $absenceStartValue = $absenceStartValue->modify('+1 year');
+}
 while ((int) $absenceStartValue->format('N') > 5) {
     $absenceStartValue = $absenceStartValue->modify('+1 day');
 }
 $absenceDateFrom = $absenceStartValue->format('Y-m-d');
-$absenceDateShortTo = $absenceStartValue->modify('+2 days')->format('Y-m-d');
+$absenceDateShortTo = $absenceStartValue->modify('+1 day')->format('Y-m-d');
 $absenceDateTo = $absenceStartValue->modify('+6 days')->format('Y-m-d');
-$absenceDateExtendedTo = $absenceStartValue->modify('+9 days')->format('Y-m-d');
+$absenceDateExtendedTo = ((int) $absenceStartValue->format('Y') + 1) . '-01-07';
 $absenceConflictValue = $absenceStartValue->modify('+21 days');
 while ((int) $absenceConflictValue->format('N') > 5) {
     $absenceConflictValue = $absenceConflictValue->modify('+1 day');

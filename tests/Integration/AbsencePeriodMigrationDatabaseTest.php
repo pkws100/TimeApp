@@ -11,10 +11,10 @@ use Tests\Support\MariaDbTestCase;
 
 final class AbsencePeriodMigrationDatabaseTest extends MariaDbTestCase
 {
+    protected const INITIAL_MIGRATION_TARGET = '20260723190000';
+
     public function testUpgradeBackfillsOnlyApprovedRequestRowsAndPreservesVersionHistoryAndForeignKey(): void
     {
-        $this->runPhinx('rollback', '20260723190000');
-
         $userId = $this->createUser([
             'employee_number' => 'MIGRATION-AP',
             'email' => 'migration-ap@example.test',

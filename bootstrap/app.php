@@ -192,9 +192,10 @@ if (!$isPublicAppResource && session_status() !== PHP_SESSION_ACTIVE) {
 $config = ConfigRepository::load(['app', 'database', 'permissions', 'uploads', 'exports', 'maps', 'push']);
 date_default_timezone_set((string) $config->get('app.timezone', 'Europe/Berlin'));
 
+$databaseOverridePath = (string) $config->get('database.override_file');
 $databaseSettings = new DatabaseSettingsManager(
     $config->get('database.connections.mysql', []),
-    (string) $config->get('database.override_file')
+    $databaseOverridePath
 );
 $connection = new DatabaseConnection($databaseSettings->current());
 $permissionMatrix = new PermissionMatrix($config->get('permissions.roles', []), $config->get('permissions.available', []));
@@ -274,7 +275,7 @@ $bookingExportService = new BookingExportService($adminBookingService);
 $accountingExportService = new AccountingExportService($adminBookingService);
 $accountingClosureService = new AccountingClosureService($connection, $adminBookingService);
 $accountingDocumentExportService = new AccountingDocumentExportService($companySettingsService, $config->get('exports', []));
-$backupService = new BackupService($connection, $config->get('uploads', []));
+$backupService = new BackupService($connection, $config->get('uploads', []), runtimeOverridePath: $databaseOverridePath);
 $smtpTestService = new SmtpTestService();
 $nfcTagService = new NfcTagService($connection, (string) $config->get('app.settings_encryption_key', ''));
 $pausePolicies = new PausePolicyService($connection);

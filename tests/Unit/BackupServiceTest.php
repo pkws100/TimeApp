@@ -6,6 +6,8 @@ namespace Tests\Unit;
 
 use App\Domain\Backup\BackupDatabaseSource;
 use App\Domain\Backup\BackupService;
+use App\Http\Controllers\BackupController;
+use App\Http\Request;
 use App\Infrastructure\Database\DatabaseConnection;
 use PHPUnit\Framework\TestCase;
 use ZipArchive;
@@ -22,7 +24,7 @@ final class BackupServiceTest extends TestCase
             true
         );
 
-        self::assertSame(1, $manifest['backup_version']);
+        self::assertSame(2, $manifest['backup_version']);
         self::assertSame('database/users.json', $manifest['database']['tables'][0]['filename']);
         self::assertSame(1, $manifest['uploads']['files']);
         self::assertTrue($manifest['runtime']['database_override_detected']);
@@ -44,12 +46,15 @@ final class BackupServiceTest extends TestCase
             'field' => 'password_hash',
             'policy' => 'retain-sensitive',
         ], $manifest['security']['retained_sensitive_database_fields']);
-        self::assertContains([
+        self::assertNotContains([
             'table' => 'push_subscriptions',
             'field' => 'endpoint',
             'policy' => 'retain-sensitive',
         ], $manifest['security']['retained_sensitive_database_fields']);
         self::assertFalse($manifest['compatibility']['import_apply_supported']);
+        self::assertSame('partial', $manifest['coverage']['status']);
+        self::assertTrue($manifest['coverage']['excluded_areas']['runtime_database_override']['data_present']);
+        self::assertSame('warning', $manifest['security']['status']);
     }
 
     public function testBuildManifestListsRedactedDatabaseFields(): void
@@ -89,6 +94,8 @@ final class BackupServiceTest extends TestCase
         self::assertTrue($result['dry_run']);
         self::assertFalse($result['apply_supported']);
         self::assertSame(1, $result['manifest']['backup_version']);
+        self::assertSame('unknown', $result['coverage']['status']);
+        self::assertSame('legacy_unknown', $result['coverage_evidence']);
         self::assertSame(['database/users.json'], $result['database_files']);
         self::assertSame(['uploads/example.txt'], $result['upload_files']);
         self::assertArrayHasKey('restore_plan', $result);
@@ -182,6 +189,7 @@ final class BackupServiceTest extends TestCase
             $result['warnings']
         );
         self::assertNotContains('secret-from-manipulated-manifest', $result['warnings']);
+        self::assertStringNotContainsString('secret-from-manipulated-manifest', json_encode($result, JSON_THROW_ON_ERROR));
     }
 
     public function testExportRedactsLegacyPlainSecretsKeepsOperationalSecretsAndExcludesRuntimeOverride(): void
@@ -201,6 +209,16 @@ final class BackupServiceTest extends TestCase
                 public function applicationTables(): array
                 {
                     return ['company_settings', 'push_subscriptions', 'users'];
+                }
+
+                public function systemVersionedTables(): array
+                {
+                    return [];
+                }
+
+                public function hasRows(string $table, bool $includeHistory = false): bool
+                {
+                    TestCase::fail('Only excluded scopes may be probed for row existence.');
                 }
 
                 public function fetchRows(string $table): array
@@ -234,6 +252,10 @@ final class BackupServiceTest extends TestCase
             $export = $service->export();
             $zipPath = tempnam(sys_get_temp_dir(), 'backup-export-test-');
             file_put_contents($zipPath, $export['content']);
+            $validation = $service->validateImport(['tmp_name' => $zipPath]);
+            self::assertSame('partial', $validation['coverage']['status']);
+            self::assertSame('archive_manifest_only', $validation['coverage_evidence']);
+            self::assertTrue($validation['coverage']['excluded_areas']['redacted_database_values']['data_present']);
 
             $zip = new ZipArchive();
             $zip->open($zipPath);
@@ -485,6 +507,175 @@ final class BackupServiceTest extends TestCase
         }
     }
 
+    public function testExportAndValidateACompleteScopeWithNoPrivateRowsOrOtherKnownExclusions(): void
+    {
+        $this->withCurrentArchive(static function (BackupService $service, string $path, array $export): void {
+            self::assertSame('complete_for_scope', $export['headers']['X-TimeApp-Backup-Coverage']);
+            self::assertSame('clear', $export['headers']['X-TimeApp-Backup-Security']);
+            self::assertSame('no-store', $export['headers']['Cache-Control']);
+
+            $result = $service->validateImport(['tmp_name' => $path]);
+            self::assertSame('valid', $result['validation_status']);
+            self::assertSame('complete_for_scope', $result['coverage']['status']);
+            self::assertSame('archive_manifest_only', $result['coverage_evidence']);
+            self::assertSame([
+                'data_present' => false,
+                'separate_backup_required' => false,
+            ], $result['coverage']['excluded_areas']['private_personnel_records']);
+            self::assertFalse($result['apply_supported']);
+            self::assertSame(['uploads/example.txt'], $result['upload_files']);
+        });
+    }
+
+    public function testValidateRejectsChangedDatabaseBytesWithTheSameSizeAndRowCount(): void
+    {
+        $this->withCurrentArchive(static function (BackupService $service, string $path): void {
+            $zip = new ZipArchive();
+            self::assertTrue($zip->open($path));
+            $content = $zip->getFromName('database/project_files.json');
+            self::assertIsString($content);
+            self::assertTrue($zip->addFromString('database/project_files.json', str_replace('synthetic-original', 'synthetic-modified', $content)));
+            self::assertTrue($zip->close());
+
+            self::expectExceptionMessageForValidation($service, $path, 'Die Integritaetsangaben einer Datenbank-Datei passen nicht zum Archiv.');
+        });
+    }
+
+    public function testValidateRejectsChangedUploadBytesWithTheSameSize(): void
+    {
+        $this->withCurrentArchive(static function (BackupService $service, string $path): void {
+            $zip = new ZipArchive();
+            self::assertTrue($zip->open($path));
+            self::assertTrue($zip->addFromString('uploads/example.txt', 'synthetic-modified'));
+            self::assertTrue($zip->close());
+
+            self::expectExceptionMessageForValidation($service, $path, 'Die Integritaetsangaben einer Upload-Datei passen nicht zum Archiv.');
+        });
+    }
+
+    public function testValidateRejectsASymbolicLinkArchiveEntry(): void
+    {
+        $this->withCurrentArchive(static function (BackupService $service, string $path): void {
+            $zip = new ZipArchive();
+            self::assertTrue($zip->open($path));
+            self::assertTrue($zip->setExternalAttributesName('uploads/example.txt', ZipArchive::OPSYS_UNIX, 0120777 << 16));
+            self::assertTrue($zip->close());
+
+            self::expectExceptionMessageForValidation($service, $path, 'Das Backup enthaelt einen Archiveintrag, der keine regulaere Datei ist.');
+        });
+    }
+
+    public function testValidateRejectsJsonThatWouldExceedThePhpMemoryBudget(): void
+    {
+        $service = $this->backupServiceExpectingTables(['users']);
+        $path = $this->zipWithManifest($this->validManifest(), [
+            'database/users.json' => '[' . str_repeat('{},', 100000) . '{}]',
+            'uploads/example.txt' => '',
+        ], false);
+        $memoryLimit = ini_get('memory_limit');
+        try {
+            ini_set('memory_limit', (string) (memory_get_usage(true) + 16 * 1024 * 1024));
+            self::expectExceptionMessageForValidation($service, $path, 'Eine JSON-Datei ueberschreitet das Speicherbudget fuer die Backup-Validierung.');
+        } finally {
+            ini_set('memory_limit', (string) $memoryLimit);
+            unlink($path);
+        }
+    }
+
+    public function testValidateRejectsInconsistentCoverageAndReturnsAnInvalidStatus(): void
+    {
+        $this->withCurrentArchive(static function (BackupService $service, string $path): void {
+            $zip = new ZipArchive();
+            self::assertTrue($zip->open($path));
+            $manifest = json_decode($zip->getFromName('manifest.json'), true, flags: JSON_THROW_ON_ERROR);
+            $manifest['coverage']['excluded_areas']['private_personnel_records']['separate_backup_required'] = true;
+            $manifest['security']['warnings'][] = 'synthetic-private-text';
+            self::assertTrue($zip->addFromString('manifest.json', json_encode($manifest, JSON_THROW_ON_ERROR)));
+            self::assertTrue($zip->close());
+
+            $controller = new BackupController($service);
+            $response = $controller->validateImport(new Request('POST', '/', [], [], [], ['backup' => ['tmp_name' => $path]], []));
+            self::assertSame(422, $response->status());
+            self::expectExceptionMessageForValidation($service, $path, 'Der Sicherungsumfang passt nicht zu den Backup-Metadaten.');
+        });
+    }
+
+    public function testStrictExportAndOrdinaryExportTreatPrivateRecordsDifferentlyWithoutReadingRows(): void
+    {
+        $this->withCurrentArchive(static function (BackupService $service, string $path, array $export): void {
+            self::assertSame('partial', $export['headers']['X-TimeApp-Backup-Coverage']);
+            self::assertSame('warning', $export['headers']['X-TimeApp-Backup-Security']);
+            self::assertStringStartsWith('attachment; filename="system-backup-partial-', $export['headers']['Content-Disposition']);
+
+            $result = $service->validateImport(['tmp_name' => $path]);
+            self::assertSame('partial', $result['coverage']['status']);
+            self::assertSame([
+                'data_present' => true,
+                'separate_backup_required' => true,
+            ], $result['coverage']['excluded_areas']['private_personnel_records']);
+
+            $controller = new BackupController($service);
+            $request = new Request('GET', '/', ['require_complete' => '1'], [], [], [], []);
+            self::assertSame(503, $controller->export($request)->status());
+        }, withPrivateRows: true);
+    }
+
+    public function testExportRejectsSymlinksInTheUploadScope(): void
+    {
+        $directory = $this->temporaryDirectory('backup-symlink-');
+        try {
+            $private = $directory . '/private';
+            self::assertNotFalse(file_put_contents($private, 'synthetic-private-text'));
+            self::assertTrue(mkdir($directory . '/uploads'));
+            self::assertTrue(symlink($private, $directory . '/uploads/linked.txt'));
+            $service = $this->backupServiceExpectingTables(['project_files'], $directory);
+
+            $this->expectException(\RuntimeException::class);
+            $this->expectExceptionMessage('Symbolische Verknuepfungen im Upload-Bereich');
+            $service->export();
+        } finally {
+            unlink($directory . '/uploads/linked.txt');
+            rmdir($directory . '/uploads');
+            unlink($directory . '/private');
+            rmdir($directory . '/backups');
+            rmdir($directory);
+        }
+    }
+
+    private static function expectExceptionMessageForValidation(BackupService $service, string $path, string $message): void
+    {
+        try {
+            $service->validateImport(['tmp_name' => $path]);
+            self::fail('An inconsistent archive passed validation.');
+        } catch (\RuntimeException $exception) {
+            self::assertSame($message, $exception->getMessage());
+        }
+    }
+
+    private function withCurrentArchive(callable $assertions, bool $withPrivateRows = false): void
+    {
+        $this->requireZipArchive();
+        $directory = $this->temporaryDirectory('backup-coverage-');
+        $path = $directory . '/export.zip';
+        mkdir($directory . '/uploads');
+        file_put_contents($directory . '/uploads/example.txt', 'synthetic-original');
+        try {
+            $tables = $withPrivateRows ? ['employee_document_audit', 'project_files'] : ['project_files'];
+            $service = $this->backupServiceExpectingTables($tables, $directory, $withPrivateRows);
+            $export = $service->export(requireComplete: !$withPrivateRows);
+            file_put_contents($path, $export['content']);
+            $assertions($service, $path, $export);
+        } finally {
+            if (is_file($path)) {
+                unlink($path);
+            }
+            unlink($directory . '/uploads/example.txt');
+            rmdir($directory . '/uploads');
+            rmdir($directory . '/backups');
+            rmdir($directory);
+        }
+    }
+
     private function validManifest(array $overrides = []): array
     {
         return [
@@ -523,16 +714,16 @@ final class BackupServiceTest extends TestCase
     /**
      * @param list<string> $tables
      */
-    private function backupServiceExpectingTables(array $tables): BackupService
+    private function backupServiceExpectingTables(array $tables, ?string $directory = null, bool $withPrivateRows = false): BackupService
     {
         return new BackupService(
             new DatabaseConnection([]),
-            [],
-            new class ($tables) implements BackupDatabaseSource {
+            $directory !== null ? ['root' => $directory . '/uploads'] : [],
+            new class ($tables, $withPrivateRows) implements BackupDatabaseSource {
                 /**
                  * @param list<string> $tables
                  */
-                public function __construct(private array $tables)
+                public function __construct(private array $tables, private bool $withPrivateRows)
                 {
                 }
 
@@ -543,9 +734,22 @@ final class BackupServiceTest extends TestCase
 
                 public function fetchRows(string $table): array
                 {
+                    TestCase::assertNotSame('employee_document_audit', $table, 'No private rows may be passed through the standard reader.');
+                    return [['name' => 'synthetic-original']];
+                }
+
+                public function systemVersionedTables(): array
+                {
                     return [];
                 }
-            }
+
+                public function hasRows(string $table, bool $includeHistory = false): bool
+                {
+                    return $this->withPrivateRows && $table === 'employee_document_audit';
+                }
+            },
+            $directory !== null ? $directory . '/backups' : null,
+            $directory !== null ? $directory . '/missing-runtime' : null
         );
     }
 
