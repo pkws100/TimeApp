@@ -95,6 +95,8 @@ return [
         ],
     ],
     'available' => [
+        'pause_policies.view',
+        'pause_policies.manage',
         'work_time_policies.view',
         'work_time_policies.manage',
         'work_time_deviations.view',

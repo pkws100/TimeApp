@@ -79,10 +79,12 @@ final class AppPwaMetadataTest extends TestCase
         $script = ob_get_clean() ?: '';
 
         self::assertStringContainsString('const APP_NAME = "HTD Zeiterfassung";', $script);
-        self::assertStringContainsString("const CACHE_NAME = 'zeiterfassung-app-v8';", $script);
+        self::assertStringContainsString("const CACHE_NAME = 'zeiterfassung-app-v9';", $script);
         self::assertStringContainsString("const APP_FALLBACK_URL = '/app';", $script);
+        self::assertStringContainsString("APP_FALLBACK_URL + '?offline-shell=1'", $script);
+        self::assertStringContainsString('cache.put(APP_FALLBACK_URL, new Response(fallback.body, { headers: fallback.headers }))', $script);
         self::assertStringContainsString('if (isAppShellRequest) {', $script);
-        self::assertStringContainsString('fetch(request).then((response) => {', $script);
+        self::assertStringContainsString('event.respondWith(fetch(request).catch(() => caches.match(APP_FALLBACK_URL)));', $script);
         self::assertStringContainsString('const title = payload.title || APP_NAME;', $script);
         self::assertStringNotContainsString("payload.title || 'Zeiterfassung'", $script);
     }

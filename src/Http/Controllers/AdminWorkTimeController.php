@@ -33,18 +33,24 @@ final class AdminWorkTimeController
         private WorkTimeDeviationService $deviations,
         private WorkTimeAccessService $access,
         private WorkTimeEventService $events,
-        private ?WorkTimePauseCorrectionService $pauseCorrections = null
+        private ?WorkTimePauseCorrectionService $pauseCorrections = null,
+        private ?AdminPausePolicyController $pausePolicies = null
     ) {
     }
 
     public function index(Request $request): Response
     {
+        $pausePanel = $this->pausePolicies?->section($request) ?? '';
+        $pauseScript = $pausePanel === '' ? '' : '<script src="/assets/js/admin-pause-models.js"></script>';
         if (!$this->auth->hasPermission('work_time_policies.view') && !$this->auth->hasPermission('work_time_deviations.view') && !$this->auth->hasPermission('work_time_notifications.manage')) {
+            if ($pausePanel !== '') {
+                return Response::html($this->view->render('Pausenmodelle', $pausePanel, $pauseScript));
+            }
             return Response::html('Keine Berechtigung für diesen Bereich.', 403);
         }
         $actor = $this->auth->currentUser() ?? [];
         $templates = $this->auth->hasPermission('work_time_policies.view') ? $this->policies->listTemplates() : [];
-        $assignments = array_values(array_filter($this->policies->listAssignments(), fn (array $a): bool => $this->access->canManageUser($actor, (int) $a['user_id'], (string) $a['effective_from'])));
+        $assignments = array_values(array_filter($this->policies->listAssignments((int) $request->query('user_id', 0) ?: null, true), fn (array $a): bool => $this->access->canManageUser($actor, (int) $a['user_id'], (string) $a['effective_from'])));
         $users = array_values(array_filter($this->users->list('active'), fn (array $u): bool => $this->access->canManageUser($actor, (int) $u['id'])));
         $csrf = $this->e($this->csrf->token());
         $enabled = $this->policies->enabled() ? 'Global eingeschaltet; wirksam nur bei zugeordneten Mitarbeitern ab Gültigkeitsbeginn.' : 'Global ausgeschaltet. Die bisherige Zeiterfassung bleibt aktiv.';
@@ -83,26 +89,31 @@ final class AdminWorkTimeController
             if ($this->access->isAdministrator($actor)) {
                 $supervisors = '<label class="full-span"><span>Zuständige Vorgesetzte (Mehrfachauswahl)</span><select name="supervisor_user_ids[]" multiple>' . $this->userOptions($this->users->list('active')) . '</select></label>';
             }
-            $tomorrow = (new DateTimeImmutable('tomorrow', new DateTimeZone('Europe/Berlin')))->format('Y-m-d');
-            $content .= '<section class="card stack"><h2>Für einen Mitarbeiter aktivieren</h2><p>Ohne gültige Zuordnung bleibt der Ablauf unverändert. Überschneidende Zuordnungen werden abgewiesen. Ein optionales Enddatum begrenzt die Gültigkeit.</p><form method="post" action="/admin/work-time/assignments" class="form-grid" data-worktime-form><input type="hidden" name="csrf_token" value="' . $csrf . '"><input type="hidden" name="intent" value="assignment"><input type="hidden" name="preview_token"><label><span>Mitarbeiter</span><select name="user_id" required><option value="">Bitte wählen</option>' . $userOptions . '</select></label><label><span>Regelversion</span><select name="policy_version_id" required data-worktime-version>' . $versionOptions . '</select></label><label><span>Gültig ab</span><input name="effective_from" type="date" min="' . $tomorrow . '" required></label><label><span>Gültig bis (optional)</span><input name="effective_to" type="date" min="' . $tomorrow . '"></label>' . $supervisors
-                . '<label class="full-span"><span><input type="checkbox" name="use_overrides" value="1" data-worktime-overrides> Individuelle Zeitfenster und Optionen überschreiben</span></label><fieldset class="full-span form-grid" data-worktime-override-fields hidden disabled><legend>Individuelle Regel</legend>' . $this->ruleFields() . '</fieldset>' . $this->exampleFields() . '</form></section>';
+            $content .= '<section class="card stack" id="work-time-assignment"><h2>Für einen Mitarbeiter zuordnen</h2><p>Die Vorschau zeigt betroffene Buchungen, Regelkonflikte und vorhandene Abschlüsse. Rückwirkende Zuordnungen benötigen eine Begründung.</p><form method="post" action="/admin/work-time/assignments" class="form-grid" data-worktime-form><input type="hidden" name="csrf_token" value="' . $csrf . '"><input type="hidden" name="intent" value="assignment"><input type="hidden" name="preview_token"><label><span>Mitarbeiter</span><select name="user_id" required><option value="">Bitte wählen</option>' . $userOptions . '</select></label><label><span>Regelversion</span><select name="policy_version_id" required data-worktime-version>' . $versionOptions . '</select></label><label><span>Gültig ab</span><input name="effective_from" type="date" required></label><label><span>Gültig bis (optional)</span><input name="effective_to" type="date"></label>' . $supervisors
+                . '<label class="full-span"><span><input type="checkbox" name="use_overrides" value="1" data-worktime-overrides> Individuelle Zeitfenster und Optionen überschreiben</span></label><fieldset class="full-span form-grid" data-worktime-override-fields hidden disabled><legend>Individuelle Regel</legend>' . $this->ruleFields() . '</fieldset><label class="full-span"><span>Begründung für die Zuordnung</span><textarea name="reason" maxlength="2000" rows="2" required></textarea></label>' . $this->impactFields('Zuordnung speichern') . '</form></section>';
         }
         $content .= '<section class="card stack"><h2>Unveränderliche Regelversionen</h2><div class="table-scroll"><table><thead><tr><th>Vorlage</th><th>Version-ID</th><th>Früher Check-in</th><th>Erstellt</th></tr></thead><tbody>' . ($templateRows ?: '<tr><td colspan="4">Noch keine Vorlagen.</td></tr>') . '</tbody></table></div></section>';
         $assignmentRows = '';
+        $today = $this->localToday();
         foreach ($assignments as $assignment) {
             $endForm = '';
-            if ($this->auth->hasPermission('work_time_policies.manage')) {
-                $endForm = '<form method="post" action="/admin/work-time/assignments/' . (int) $assignment['id'] . '/end"><input type="hidden" name="csrf_token" value="' . $csrf . '"><label><span>Letzter Gültigkeitstag</span><input name="effective_to" type="date" min="' . date('Y-m-d') . '" required></label><label><span>Grund</span><input name="reason" required minlength="3"></label><button class="button button-secondary">Zuordnung beenden</button></form>';
+            $superseded = !empty($assignment['interval_revision']);
+            $status = $superseded ? 'Ersetzt' : ($assignment['effective_from'] > $today ? 'Geplant' : (($assignment['effective_to'] ?? '9999-12-31') < $today ? 'Historisch' : 'Gültig'));
+            if (!$superseded && $this->auth->hasPermission('work_time_policies.manage')) {
+                $id = (int) $assignment['id'];
+                $endForm = '<details><summary>Gültigkeit verkürzen</summary><form method="post" action="/admin/work-time/assignments/' . $id . '/end" class="stack" data-worktime-form><input type="hidden" name="csrf_token" value="' . $csrf . '"><input type="hidden" name="intent" value="end_assignment"><input type="hidden" name="assignment_id" value="' . $id . '"><input type="hidden" name="preview_token"><label><span>Letzter Gültigkeitstag</span><input name="effective_to" type="date" min="' . $this->e($assignment['effective_from']) . '" required></label><label><span>Begründung</span><textarea name="reason" required maxlength="2000" rows="2"></textarea></label>' . $this->impactFields('Zuordnung beenden', false) . '</form></details>';
             }
-            $assignmentRows .= '<tr><td><a href="/admin/work-time?user_id=' . (int) $assignment['user_id'] . '">' . $this->e((string) ($assignment['employee_name'] ?? ('Mitarbeiter #' . $assignment['user_id']))) . '</a></td><td>' . (int) $assignment['policy_version_id'] . '</td><td>' . $this->e((string) $assignment['effective_from']) . '</td><td>' . $this->e((string) ($assignment['effective_to'] ?? 'offen')) . $endForm . '</td></tr>';
+            $assignmentRows .= '<tr><td><a href="/admin/work-time?user_id=' . (int) $assignment['user_id'] . '">' . $this->e((string) ($assignment['employee_name'] ?? ('Mitarbeiter #' . $assignment['user_id']))) . '</a></td><td>' . $this->e((string) $assignment['template_name']) . ' · Version ' . (int) $assignment['revision'] . '</td><td>' . $this->e((string) $assignment['effective_from']) . '</td><td>' . $this->e((string) ($assignment['effective_to'] ?? 'offen')) . '</td><td>' . $status . $endForm . '</td></tr>';
         }
-        $content .= '<section class="card stack"><h2>Mitarbeiterzuordnungen</h2><div class="table-scroll"><table><thead><tr><th>Mitarbeiter-ID</th><th>Regelversion</th><th>Ab</th><th>Bis</th></tr></thead><tbody>' . ($assignmentRows ?: '<tr><td colspan="4">Keine zugeordneten Mitarbeiter.</td></tr>') . '</tbody></table></div></section>';
+        $content .= '<section class="card stack"><h2>Mitarbeiterzuordnungen</h2><div class="table-scroll"><table><thead><tr><th>Mitarbeiter</th><th>Regelversion</th><th>Ab</th><th>Bis</th><th>Status</th></tr></thead><tbody>' . ($assignmentRows ?: '<tr><td colspan="5">Keine zugeordneten Mitarbeiter.</td></tr>') . '</tbody></table></div></section>';
+        $content .= $this->assignmentHistoryPanel((int) $request->query('user_id', 0), $actor);
         $content .= '<section class="card stack"><h2>Mitarbeiter prüfen</h2><form method="get" class="form-grid"><label><span>Mitarbeiter</span><select name="user_id" required><option value="">Bitte wählen</option>' . $this->userOptions($users, (int) $request->query('user_id', 0)) . '</select></label><button class="button button-secondary">Informationen laden</button></form></section>';
         $content .= $this->employeePreviewPanel($request, $actor);
+        $content .= $pausePanel;
         $content .= $this->pauseClarificationPanel($request, $actor, $csrf);
         $content .= $this->deviationPanel($request, $actor, $csrf);
         $content .= $this->notificationPanel($request, $actor);
-        return Response::html($this->view->render('Kernarbeitszeit', $content, '<script src="/assets/js/admin-work-time.js"></script>'));
+        return Response::html($this->view->render('Kernarbeitszeit', $content, '<script src="/assets/js/admin-work-time.js"></script>' . $pauseScript));
     }
 
     public function preview(Request $request): Response
@@ -111,7 +122,23 @@ final class AdminWorkTimeController
             return Response::json(['ok' => false, 'message' => 'Bitte die Seite neu laden.'], 403);
         }
         try {
+            $actor = $this->auth->currentUser() ?? [];
+            if ($request->input('intent') === 'end_assignment') {
+                [$effectiveTo, $reason] = $this->endInput($request);
+                $id = (int) $request->input('assignment_id', 0);
+                if (!$this->canEndAssignment($actor, $id, $effectiveTo)) {
+                    return Response::json(['ok' => false, 'message' => 'Keine Berechtigung für diese Mitarbeiterzuordnung.'], 403);
+                }
+                return $this->impactResponse($this->policies->endAssignmentPreview($id, $effectiveTo, (int) $actor['id'], $reason, $this->csrf->token()));
+            }
             $payload = $this->normalizedPayload($request);
+            if ($payload['intent'] === 'assignment') {
+                if (!$this->canAssign($actor, $payload)) {
+                    return Response::json(['ok' => false, 'message' => 'Keine Berechtigung für diese Mitarbeiterzuordnung.'], 403);
+                }
+                $impact = $this->policies->assignmentPreview($this->assignmentPayload($payload, $actor, $request), (int) $actor['id'], $this->csrf->token());
+                return $this->impactResponse($impact);
+            }
             $result = $this->policies->preview($this->examplePayload($request, $payload['policy']));
             return Response::json(['ok' => true, 'data' => $result, 'preview_token' => $this->previewToken($payload)]);
         } catch (InvalidArgumentException $exception) {
@@ -121,31 +148,31 @@ final class AdminWorkTimeController
 
     public function save(Request $request): Response
     {
+        $assignment = $request->input('intent') === 'assignment';
         if (!$this->validCsrf($request)) {
-            return $this->error('Bitte die Seite neu laden.');
+            return $assignment ? $this->assignmentFormError($request, 'Bitte die Seite neu laden.', 403) : $this->error('Bitte die Seite neu laden.');
         }
         try {
             $payload = $this->normalizedPayload($request);
+            $actor = $this->auth->currentUser() ?? [];
+            if ($payload['intent'] === 'assignment') {
+                if (!$this->canAssign($actor, $payload)) {
+                    return $this->assignmentFormError($request, 'Keine Berechtigung für diesen Mitarbeiter.', 403);
+                }
+                $this->policies->assign($this->assignmentPayload($payload, $actor, $request), (int) $actor['id'], $this->csrf->token());
+                return $this->assignmentSaved($request, $payload['user_id']);
+            }
             if (!hash_equals($this->previewToken($payload), (string) $request->input('preview_token', ''))) {
                 throw new InvalidArgumentException('Bitte die Regel mit einer Beispielbuchung prüfen, bevor Sie speichern.');
             }
-            $actor = $this->auth->currentUser() ?? [];
-            if ($payload['intent'] === 'assignment') {
-                if (!$this->access->canManageUser($actor, (int) $payload['user_id'])) {
-                    return Response::html('Keine Berechtigung für diesen Mitarbeiter.', 403);
-                }
-                if (!$this->access->isAdministrator($actor)) {
-                    $payload['supervisor_user_ids'] = [(int) $actor['id']];
-                }
-                $this->policies->assign($payload, (int) $actor['id']);
-            } elseif ($payload['template_id'] > 0) {
+            if ($payload['template_id'] > 0) {
                 $this->policies->addVersion($payload['template_id'], $payload['policy'], (int) $actor['id']);
             } else {
                 $this->policies->createTemplate($payload, (int) $actor['id']);
             }
             return Response::redirect('/admin/work-time?saved=1');
         } catch (InvalidArgumentException $exception) {
-            return $this->error($exception->getMessage());
+            return $assignment ? $this->assignmentFormError($request, $exception->getMessage()) : $this->error($exception->getMessage());
         }
     }
 
@@ -173,20 +200,97 @@ final class AdminWorkTimeController
     public function endAssignment(Request $request, array $params): Response
     {
         if (!$this->validCsrf($request)) {
-            return $this->error('Bitte die Seite neu laden.');
+            return $this->assignmentFormError($request, 'Bitte die Seite neu laden.', 403);
         }
         $actor = $this->auth->currentUser() ?? [];
         $id = (int) ($params['id'] ?? 0);
-        $rows = array_values(array_filter($this->policies->listAssignments(), static fn (array $row): bool => (int) $row['id'] === $id));
-        if ($rows === [] || !$this->access->canManageUser($actor, (int) $rows[0]['user_id'], (string) $rows[0]['effective_from'])) {
-            return Response::html('Keine Berechtigung für diese Mitarbeiterzuordnung.', 403);
-        }
         try {
-            $this->policies->endAssignment($id, (string) $request->input('effective_to'), (int) $actor['id'], (string) $request->input('reason'));
-            return Response::redirect('/admin/work-time?saved=1');
+            [$effectiveTo, $reason] = $this->endInput($request);
+            $userId = $this->canEndAssignment($actor, $id, $effectiveTo);
+            if ($userId === null) {
+                return $this->assignmentFormError($request, 'Keine Berechtigung für diese Mitarbeiterzuordnung.', 403);
+            }
+            $this->policies->endAssignment($id, $effectiveTo, (int) $actor['id'], $reason, $this->csrf->token(), $this->approval($request));
+            return $this->assignmentSaved($request, $userId);
         } catch (InvalidArgumentException $exception) {
-            return $this->error($exception->getMessage());
+            return $this->assignmentFormError($request, $exception->getMessage());
         }
+    }
+
+    private function assignmentSaved(Request $request, int $userId): Response
+    {
+        $location = '/admin/work-time?user_id=' . $userId . '&saved=1';
+        return $request->server('HTTP_ACCEPT') === 'application/json'
+            ? Response::json(['ok' => true, 'location' => $location]) : Response::redirect($location);
+    }
+
+    private function assignmentFormError(Request $request, string $message, int $status = 422): Response
+    {
+        return $request->server('HTTP_ACCEPT') === 'application/json'
+            ? Response::json(['ok' => false, 'message' => $message], $status)
+            : ($status === 403 ? Response::html($this->e($message), $status) : $this->error($message));
+    }
+
+    private function impactResponse(array $impact): Response
+    {
+        $token = $impact['preview_token'];
+        unset($impact['preview_token']);
+        return Response::json(['ok' => true, 'data' => $impact, 'preview_token' => $token], 200, ['Cache-Control' => 'no-store']);
+    }
+
+    private function canAssign(array $actor, array $payload): bool
+    {
+        return $this->auth->hasPermission('work_time_policies.manage')
+            && ($payload['effective_from'] > $this->localToday() || $this->access->isAdministrator($actor))
+            && $this->access->canManageUser($actor, $payload['user_id']);
+    }
+
+    private function canEndAssignment(array $actor, int $id, string $effectiveTo): ?int
+    {
+        if (!$this->auth->hasPermission('work_time_policies.manage') || (!$this->access->isAdministrator($actor) && $effectiveTo < $this->localToday())) {
+            return null;
+        }
+        foreach ($this->policies->listAssignments() as $row) {
+            if ($row['id'] === $id && $this->access->canManageUser($actor, $row['user_id'], $row['effective_from'])) {
+                return $row['user_id'];
+            }
+        }
+        return null;
+    }
+
+    private function endInput(Request $request): array
+    {
+        $date = $request->input('effective_to');
+        $reason = $request->input('reason');
+        if (!is_string($date) || !is_string($reason)) {
+            throw new InvalidArgumentException('Bitte Gültigkeitsende und Begründung angeben.');
+        }
+        return [$date, $reason];
+    }
+
+    private function approval(Request $request): array
+    {
+        $token = $request->input('preview_token');
+        return [
+            'preview_token' => is_string($token) ? $token : '',
+            'confirm_impact' => $request->input('confirm_impact') === '1' ? '1' : '',
+            'replace_overlaps' => $request->input('replace_overlaps') === '1' ? '1' : '',
+        ];
+    }
+
+    private function assignmentPayload(array $payload, array $actor, Request $request): array
+    {
+        if (!$this->access->isAdministrator($actor)) {
+            $payload['supervisor_user_ids'] = [(int) $actor['id']];
+            $payload['manager_user_id'] = (int) $actor['id'];
+        }
+        $payload['require_reason'] = true;
+        return $payload + $this->approval($request);
+    }
+
+    private function localToday(): string
+    {
+        return (new DateTimeImmutable('today', new DateTimeZone('Europe/Berlin')))->format('Y-m-d');
     }
 
     public function archiveTemplate(Request $request, array $params): Response
@@ -247,7 +351,7 @@ final class AdminWorkTimeController
     private function pauseClarificationPanel(Request $request, array $actor, string $csrf): string
     {
         $userId = (int) $request->query('user_id', 0);
-        if ($this->pauseCorrections === null || !$this->policies->enabled() || !$this->auth->hasPermission('work_time_deviations.view') || $userId <= 0 || !$this->access->canManageUser($actor, $userId)) {
+        if ($this->pauseCorrections === null || !$this->auth->hasPermission('work_time_deviations.view') || $userId <= 0 || !$this->access->canManageUser($actor, $userId)) {
             return '';
         }
         $monthInput = $request->query('pause_month', date('Y-m'));
@@ -256,7 +360,7 @@ final class AdminWorkTimeController
             $month = date('Y-m');
         }
         $firstDay = new DateTimeImmutable($month . '-01', new DateTimeZone('Europe/Berlin'));
-        $html = '<section class="card stack" aria-label="Pausenlage klären"><h2>Pausenlage klären</h2><p>Gespeicherte Pausendauer ist kein Nachweis ihrer tatsächlichen Lage. Hier werden ausschließlich belegte, bislang fehlende Intervalle ergänzt. Vorhandene Intervalle sowie Beginn, Ende und Nettoarbeitszeit bleiben erhalten.</p><form method="get" class="form-grid"><input type="hidden" name="user_id" value="' . $userId . '"><label><span>Prüfmonat</span><input type="month" name="pause_month" value="' . $month . '" required></label><button class="button button-secondary">Pausen prüfen</button></form>';
+        $html = '<section class="card stack" id="pausenlage" aria-label="Pausenlage klären"><h2>Pausenlage klären</h2><p>Hier lassen sich bestätigte Uhrzeiten zu dokumentierten Pausen ergänzen. Bei Altbuchungen ist für einen Nachtrag ein belegtes bisher fehlendes Intervall erforderlich.</p><form method="get" action="/admin/work-time#pausenlage" class="form-grid"><input type="hidden" name="user_id" value="' . $userId . '"><label><span>Prüfmonat</span><input type="month" name="pause_month" value="' . $month . '" required></label><button class="button button-secondary">Pausen prüfen</button></form>';
         $rows = $this->pauseCorrections->listForUser($userId, $firstDay->format('Y-m-d'), $firstDay->modify('last day of this month')->format('Y-m-d'));
         if ($rows === []) {
             return $html . '<p>Keine klärungsbedürftigen Pausen oder Nachträge unter den letzten 100 Arbeitsbuchungen dieses Monats.</p></section>';
@@ -264,7 +368,14 @@ final class AdminWorkTimeController
         foreach ($rows as $details) {
             $entry = $details['timesheet'];
             $id = (int) $entry['id'];
-            $html .= '<article class="card stack" data-pause-evidence="' . $id . '"><h3>Arbeitsbuchung #' . $id . ' · ' . $this->e((string) $entry['work_date']) . '</h3><p>' . $this->e((string) $entry['start_time']) . '–' . $this->e((string) $entry['end_time']) . ' · Gespeicherte Pause: <strong>' . (int) $details['stored_break_minutes'] . ' Min.</strong> · Dokumentiert: ' . $this->e((string) $details['documented_break_minutes']) . ' Min. · Fehlende Lage: ' . $this->e((string) $details['missing_break_minutes']) . ' Min.</p><p>' . $this->e((string) $details['clarification_reason']) . '</p><ul>';
+            $html .= '<article class="card stack" data-pause-evidence="' . $id . '"><h3>Arbeitsbuchung #' . $id . ' · ' . $this->e((string) $entry['work_date']) . '</h3><p>' . $this->e((string) $entry['start_time']) . '–' . $this->e((string) $entry['end_time']) . ' · Gespeicherte Pause: <strong>' . (int) $details['stored_break_minutes'] . ' Min.</strong> · Dokumentiert: ' . $this->e((string) $details['documented_break_minutes']) . ' Min. · Fehlende Lage: ' . $this->e((string) $details['missing_break_minutes']) . ' Min.</p>';
+            $assessment = $details['break_assessment'] ?? null;
+            if (is_array($assessment)) {
+                $html .= '<p>Tagesprüfung · Dokumentierte Pausen ' . (int) $assessment['documented_break_minutes'] . ' Min. · Pflichtpause ' . (int) $assessment['required_break_minutes'] . ' Min. · Fehlende Pflichtpause ' . (int) $assessment['missing_break_minutes'] . ' Min. · Ohne bekannte Uhrzeiten ' . (int) $assessment['unplaced_break_minutes'] . ' Min. · ' . $this->calculationStatusLabel((string) $assessment['calculation_status']) . '</p>';
+            } else {
+                $html .= '<p>' . $this->e((string) $details['clarification_reason']) . '</p>';
+            }
+            $html .= '<ul>';
             foreach ($details['breaks'] as $break) {
                 $html .= '<li>Bestehender Nachweis #' . (int) $break['id'] . ': ' . $this->e((string) $break['break_started_at']) . ' bis ' . $this->e((string) ($break['break_ended_at'] ?? 'offen')) . '</li>';
             }
@@ -344,7 +455,8 @@ final class AdminWorkTimeController
             $notificationReference = $base;
             $payload = ['intent' => $intent, 'user_id' => (int) $request->input('user_id'), 'policy_version_id' => $versionId,
                 'effective_from' => (string) $request->input('effective_from'), 'effective_to' => $request->input('effective_to') ?: null,
-                'overrides' => $override ? $policy : [], 'supervisor_user_ids' => array_map('intval', (array) $request->input('supervisor_user_ids', [])), 'policy' => $override ? $policy : $base];
+                'overrides' => $override ? $policy : [], 'supervisor_user_ids' => array_map('intval', (array) $request->input('supervisor_user_ids', [])), 'policy' => $override ? $policy : $base,
+                'reason' => (string) $request->input('reason', '')];
         } else {
             $payload = ['intent' => 'template', 'template_id' => (int) $request->input('template_id', 0), 'name' => trim((string) $request->input('name')), 'description' => trim((string) $request->input('description')), 'policy' => $policy];
             foreach ($this->policies->listTemplates() as $template) {
@@ -388,12 +500,64 @@ final class AdminWorkTimeController
             return '';
         }
         $today = new DateTimeImmutable('today', new DateTimeZone('Europe/Berlin'));
-        $preview = $this->preview->forUserPeriod($userId, $today->format('Y-m-01'), $today->format('Y-m-d'));
-        $html = '<section class="card stack"><h2>Mitarbeiter #' . $userId . ' · Monatsvorschau</h2><p>Stand ' . $today->format('d.m.Y') . '. Separate Vorschau; laufende oder ungeklärte Anteile werden nicht als abschließend berechnete Arbeitszeit ausgegeben.</p><dl>';
+        $month = $request->query('work_month');
+        $month = is_string($month) && preg_match('/^20\d{2}-(0[1-9]|1[0-2])$/D', $month) ? $month : $today->format('Y-m');
+        $from = new DateTimeImmutable($month . '-01', new DateTimeZone('Europe/Berlin'));
+        $until = $month === $today->format('Y-m') ? $today : $from->modify('last day of this month');
+        $preview = $this->preview->forUserPeriod($userId, $from->format('Y-m-d'), $until->format('Y-m-d'));
+        $html = '<section class="card stack"><h2>Mitarbeiter #' . $userId . ' · Monatsvorschau</h2><p>Stand ' . $until->format('d.m.Y') . '. Laufende oder ungeklärte Anteile bleiben vorläufig.</p><form method="get" class="form-grid"><input type="hidden" name="user_id" value="' . $userId . '"><label><span>Auswertungsmonat</span><input type="month" name="work_month" value="' . $this->e($month) . '"></label><button class="button button-secondary">Monat prüfen</button></form><dl>';
         foreach (['actual_work_minutes' => 'Tatsächliche Arbeit', 'inside_window_minutes' => 'Im Fenster', 'outside_before_minutes' => 'Vor dem Fenster', 'outside_after_minutes' => 'Nach dem Fenster', 'outside_gap_minutes' => 'Zwischen Fenstern', 'outside_pending_minutes' => 'Außenzeit offen', 'outside_approved_minutes' => 'Außenzeit genehmigt', 'outside_rejected_minutes' => 'Außenzeit abgelehnt', 'outside_disputed_minutes' => 'Außenzeit strittig', 'accountable_work_minutes' => 'Vorläufig anrechenbar'] as $key => $label) {
             $html .= '<dt>' . $label . '</dt><dd>' . (isset($preview[$key]) ? (int) $preview[$key] . ' Min.' : 'Klärungsbedürftig / laufend') . '</dd>';
         }
-        return $html . '</dl><p>Status: ' . $this->e((string) $preview['calculation_status']) . '</p></section>';
+        $rows = '';
+        foreach ($preview['rows'] as $row) {
+            $policy = $row['policy'];
+            $calculation = $row['calculation'];
+            $rows .= '<tr><td>' . $this->e($row['work_date']) . '</td><td>' . ($policy === null ? 'Ohne Zuordnung' : $this->e($policy['template_name']) . ' · Version ' . (int) $policy['revision']) . '</td><td>' . $this->minutes($calculation['actual_work_minutes']) . '</td><td>' . $this->minutes($calculation['inside_window_minutes']) . '</td><td>' . $this->minutes($calculation['outside_pending_minutes']) . '</td><td>' . $this->minutes($calculation['outside_approved_minutes']) . '</td><td>' . $this->e($this->calculationStatus($calculation['calculation_status'])) . '</td></tr>';
+        }
+        return $html . '</dl><p>Status ' . $this->e($this->calculationStatus($preview['calculation_status'])) . '</p><div class="table-scroll"><table><thead><tr><th>Arbeitstag</th><th>Regel</th><th>Arbeit</th><th>Im Fenster</th><th>Außenzeit offen</th><th>Außenzeit genehmigt</th><th>Status</th></tr></thead><tbody>' . ($rows ?: '<tr><td colspan="7">Keine Arbeitsbuchungen im Auswertungsmonat.</td></tr>') . '</tbody></table></div></section>';
+    }
+
+    private function assignmentHistoryPanel(int $userId, array $actor): string
+    {
+        if ($userId <= 0 || !$this->auth->hasPermission('work_time_policies.view') || !$this->access->isAdministrator($actor)) {
+            return '';
+        }
+        $rows = '';
+        foreach ($this->policies->assignmentHistory($userId) as $event) {
+            $label = match ($event['action']) {
+                'assignment_created' => 'Zugeordnet', 'assignment_ended' => 'Beendet',
+                'assignment_shortened' => 'Verkürzt', 'assignment_superseded' => 'Ersetzt',
+                'assignment_continued' => 'Fortgeführt', default => 'Geändert',
+            };
+            $after = $event['after'];
+            $previous = $event['before'];
+            $beforePeriod = $previous === null ? '–' : ($previous['effective_from'] ?? '–') . ' bis ' . ($previous['effective_to'] ?? 'offen');
+            $afterPeriod = ($after['effective_from'] ?? ($previous['effective_from'] ?? '–')) . ' bis ' . ($after['effective_to'] ?? 'offen');
+            $rows .= '<tr><td>' . $this->e($event['created_at']) . '</td><td>' . $this->e($event['actor_name']) . '</td><td>' . $label . '</td><td>' . $this->e($beforePeriod) . '</td><td>' . $this->e($afterPeriod) . '</td><td>' . $this->e((string) ($after['reason'] ?? '')) . '</td></tr>';
+        }
+        return '<section class="card stack"><h2>Zuordnungshistorie</h2><div class="table-scroll"><table><thead><tr><th>Änderungszeitpunkt</th><th>Geändert von</th><th>Aktion</th><th>Vorheriger Zeitraum</th><th>Protokollierter Zeitraum</th><th>Begründung</th></tr></thead><tbody>' . ($rows ?: '<tr><td colspan="6">Keine Zuordnungsänderungen.</td></tr>') . '</tbody></table></div></section>';
+    }
+
+    private function impactFields(string $saveLabel, bool $showOverlap = true): string
+    {
+        $conflict = $showOverlap ? '<div class="full-span" data-worktime-replace hidden><label><span><input name="replace_overlaps" type="checkbox" value="1"> Überschneidende Zuordnungen im angezeigten Zeitraum ersetzen</span></label></div>' : '';
+        return '<button type="button" class="button button-secondary" data-worktime-preview>Auswirkungen prüfen</button><div class="full-span" data-worktime-result role="status"></div>'
+            . '<div class="full-span" data-worktime-confirm hidden><label><span><input name="confirm_impact" type="checkbox" value="1"> Rückwirkende Änderung nach dieser Vorschau bestätigen</span></label></div>'
+            . $conflict . '<button type="submit" class="button" data-worktime-save disabled>' . $this->e($saveLabel) . '</button>';
+    }
+
+    private function minutes(?int $minutes): string
+    {
+        return $minutes === null ? 'Klärungsbedürftig' : $minutes . ' Min.';
+    }
+
+    private function calculationStatus(string $status): string
+    {
+        return match ($status) {
+            'complete' => 'Berechnet', 'pending' => 'Vorläufig', 'no_policy' => 'Ohne Zuordnung',
+            'open' => 'Laufend', 'needs_clarification' => 'Klärungsbedürftig', default => 'Vorläufig',
+        };
     }
 
     private function policyInput(Request $request): array

@@ -19,6 +19,7 @@ final class AdminBookingService
     private const DEFAULT_PER_PAGE = 100;
     private const PER_PAGE_OPTIONS = [25, 50, 75, 100];
     private TimesheetAuditService $auditService;
+    private ?TimesheetPauseService $pauses = null;
 
     public function __construct(
         private DatabaseConnection $connection,
@@ -33,6 +34,11 @@ final class AdminBookingService
         $this->dailyTargetService ??= new DailyTargetService(new CalendarPolicyService($connection));
         $this->dayConflictService ??= new TimesheetDayConflictService($connection);
         $this->auditService = $auditService ?? new TimesheetAuditService($connection);
+    }
+
+    public function setPauseService(TimesheetPauseService $service): void
+    {
+        $this->pauses = $service;
     }
 
     public function activeCount(): int
@@ -374,7 +380,7 @@ final class AdminBookingService
             throw new InvalidArgumentException('Die Buchungstabelle ist nicht verfuegbar.');
         }
 
-        return $this->withAccountingWriteLock(function () use ($normalized, $adminUserId, $reason): array {
+        return $this->withAccountingWriteLock(function () use ($normalized, $payload, $adminUserId, $reason): array {
             $this->assertAccountingPeriodOpen(
                 (int) $normalized['user_id'],
                 $normalized['project_id'],
@@ -382,9 +388,19 @@ final class AdminBookingService
             );
             $this->assertDayConflictFree($normalized, null);
 
+            $policy = $this->pauses?->configuredPolicy((int) $normalized['user_id'], $normalized['work_date']);
+            $documented = $policy === null ? 0 : max(0, (int) ($payload['break_minutes'] ?? 0));
+            if ($policy !== null) {
+                $breaks = $documented === 0 ? [] : [['duration_minutes' => $documented]];
+                if ($breaks !== []) {
+                    $this->pauses->validateEvidence($normalized, $breaks);
+                }
+                $normalized = array_replace($normalized, $this->calculator->calculateDocumented($normalized['work_date'], $normalized['start_time'], $normalized['end_time'], $breaks));
+            }
+
             $bookingId = 0;
 
-            $this->connection->transaction(function () use ($normalized, $adminUserId, $reason, &$bookingId): void {
+            $this->connection->transaction(function () use ($normalized, $adminUserId, $reason, $policy, $documented, &$bookingId): void {
                 $this->connection->execute(
                     'INSERT INTO timesheets (
                         user_id, project_id, created_by_user_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes' . $this->insertColumnSql('credited_minutes') . ', expenses_amount, entry_type' . $this->insertColumnSql('absence_reason_code') . ', source, note, created_at, updated_at
@@ -398,6 +414,12 @@ final class AdminBookingService
                 );
 
                 $bookingId = $this->connection->lastInsertId();
+                if ($policy !== null) {
+                    $this->pauses->attachSnapshot($bookingId, $policy);
+                    if ($documented > 0) {
+                        $this->pauses->addDuration($bookingId, $adminUserId, $documented, 'admin_manual', null);
+                    }
+                }
                 $after = $this->find($bookingId);
                 $this->logChange($bookingId, 'manual_created', $adminUserId, $reason, null, $after);
             });
@@ -438,6 +460,20 @@ final class AdminBookingService
             $this->assertNotLockedByAccountingClosure($id);
 
             $normalized = $this->normalizeBookingPayload($payload, $before);
+            $pausePolicy = $this->pauses?->snapshot($id);
+            $recordedBreaks = $this->pauses?->breaks($id) ?? [];
+            if ($pausePolicy !== null || $recordedBreaks !== []) {
+                if ((int) ($payload['break_minutes'] ?? $before['break_minutes']) !== (int) $before['break_minutes']
+                    || $normalized['work_date'] !== $before['work_date'] || $normalized['entry_type'] !== $before['entry_type']) {
+                    throw new InvalidArgumentException('Das Datum, die Buchungsart und dokumentierte Pausen dieser Buchung können nur über den passenden Korrekturweg geändert werden.');
+                }
+                if (($normalized['start_time'] !== $before['start_time'] || $normalized['end_time'] !== $before['end_time']) && $recordedBreaks !== []) {
+                    $this->pauses->validateEvidence($normalized, $recordedBreaks);
+                }
+                if ($pausePolicy !== null && !empty($normalized['start_time'])) {
+                    $normalized = array_replace($normalized, $this->calculator->calculateDocumented($normalized['work_date'], $normalized['start_time'], $normalized['end_time'], $recordedBreaks));
+                }
+            }
             $this->assertAccountingPeriodOpen(
                 (int) ($before['user_id'] ?? 0),
                 $normalized['project_id'],
@@ -552,9 +588,41 @@ final class AdminBookingService
         $rows = $this->list($filters);
         $timesheetIds = array_map(static fn (array $row): int => (int) ($row['id'] ?? 0), $rows);
         $signatures = $this->signatureService?->listForTimesheetsGrouped($timesheetIds) ?? [];
+        $datesByUser = [];
+        if ($this->pauses !== null) {
+            foreach ($rows as $row) {
+                if ($row['entry_type'] === 'work' && !$row['is_deleted']) {
+                    $datesByUser[$row['user_id']][$row['work_date']] = true;
+                }
+            }
+        }
+        $assessments = [];
+        foreach ($datesByUser as $userId => $dates) {
+            $keys = array_keys($dates);
+            $assessed = array_intersect_key($this->pauses->assessmentsForPeriod((int) $userId, min($keys), max($keys), true), $dates);
+            if ($assessed !== []) {
+                $assessments[$userId] = $assessed;
+            }
+        }
 
         return array_map(
-            fn (array $row): array => $this->exportRow($row, $signatures[(int) ($row['id'] ?? 0)] ?? null),
+            function (array $row) use ($signatures, $assessments): array {
+                $export = $this->exportRow($row, $signatures[(int) ($row['id'] ?? 0)] ?? null);
+                if ($assessments === []) {
+                    return $export;
+                }
+                $day = $row['entry_type'] === 'work' && !$row['is_deleted'] ? ($assessments[$row['user_id']][$row['work_date']] ?? []) : [];
+                return $export + [
+                    'Pausenprüfung Arbeitstage' => implode(', ', $day['linked_work_dates'] ?? []),
+                    'Dokumentierte Tagespause (Min)' => $day['documented_break_minutes'] ?? '',
+                    'Pflichtpause am Arbeitstag (Min)' => $day['required_break_minutes'] ?? '',
+                    'Fehlende Pflichtpause am Arbeitstag (Min)' => $day['missing_break_minutes'] ?? '',
+                    'Legacy-Pausenabzug ohne Nachweis (Min)' => $day['legacy_deduction_minutes'] ?? '',
+                    'Pausenprüfung' => match ($day['calculation_status'] ?? null) {
+                        'resolved' => 'Geprüft', 'pending' => 'Laufend', 'needs_clarification' => 'Klärungsbedarf', default => '',
+                    },
+                ];
+            },
             $rows
         );
     }

@@ -9,12 +9,15 @@ use App\Domain\WorkTime\WorkTimePresenceService;
 use App\Domain\WorkTime\WorkTimeLocalTime;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
+use InvalidArgumentException;
 use RuntimeException;
 
 final class AppTimesheetSyncService
 {
     private const ACCOUNTING_WRITE_LOCK = 'accounting-timesheet-write';
+    private const ACTUAL_PAUSE_ACTIONS = ['pause_start', 'pause_end', 'pause_record'];
     private ?WorkTimePresenceService $workTimePresenceService = null;
+    private ?TimesheetPauseService $pauses = null;
 
     public function __construct(
         private DatabaseConnection $connection,
@@ -32,6 +35,11 @@ final class AppTimesheetSyncService
         $this->workTimePresenceService = $service;
     }
 
+    public function setPauseService(TimesheetPauseService $service): void
+    {
+        $this->pauses = $service;
+    }
+
     public function openPresenceForUser(int $userId): ?array
     {
         return $this->workTimePresenceService?->openForUser($userId);
@@ -45,6 +53,11 @@ final class AppTimesheetSyncService
     public function workTimeAppliesToUser(int $userId, string $date): bool
     {
         return $this->workTimePresenceService?->appliesToUser($userId, $date) ?? false;
+    }
+
+    public function hasOpenPauseModelBooking(int $userId): bool
+    {
+        return $this->pauses?->hasOpenModelBooking($userId) ?? false;
     }
 
     /** The optional callback participates in the same transaction as the stamp. */
@@ -61,6 +74,7 @@ final class AppTimesheetSyncService
         $existingOperation = $this->findSyncOperation($clientRequestId, $userId);
 
         if ($existingOperation !== null) {
+            $this->assertReplayAction($existingOperation, is_string($payload['action'] ?? null) ? trim($payload['action']) : '');
             $response = json_decode((string) ($existingOperation['response_json'] ?? ''), true);
 
             return is_array($response) ? $response : ['status' => 'synced'];
@@ -68,7 +82,7 @@ final class AppTimesheetSyncService
 
         $action = trim((string) ($payload['action'] ?? ''));
 
-        $actions = ['check_in', 'check_out', 'pause', 'pause_start', 'pause_end', 'day_close', 'select_project', 'upsert'];
+        $actions = ['check_in', 'check_out', 'pause', 'pause_start', 'pause_end', 'pause_record', 'day_close', 'select_project', 'upsert'];
         if ($this->workTimePresenceService?->enabled()) {
             $actions = [...$actions, 'work_start', 'presence_end'];
         }
@@ -108,6 +122,20 @@ final class AppTimesheetSyncService
             }
         }
         $entry = $this->findDailyWorkEntry($userId, $workDate);
+        $explicitPauseEntry = $action === 'pause_record' && isset($payload['expected_timesheet_id']);
+        if ($explicitPauseEntry) {
+            $entry = $this->connection->fetchOne('SELECT * FROM timesheets WHERE id = :id AND user_id = :user_id
+                AND work_date = :work_date AND entry_type = "work" AND COALESCE(is_deleted, 0) = 0', [
+                'id' => (int) $payload['expected_timesheet_id'], 'user_id' => $userId, 'work_date' => $workDate,
+            ]);
+        }
+        $pausePolicy = $entry === null ? null : $this->pauses?->snapshot((int) $entry['id']);
+        $boundPauseAction = in_array($action, self::ACTUAL_PAUSE_ACTIONS, true);
+        $pauseWrite = $boundPauseAction || $action === 'pause';
+        if (($action === 'pause_record' || ($boundPauseAction && $pausePolicy !== null))
+            && !isset($payload['expected_timesheet_id']) && !isset($payload['expected_start_time'])) {
+            throw new InvalidArgumentException('Bitte den Arbeitseinsatz für die Pause eindeutig auswählen.');
+        }
         if (isset($payload['expected_timesheet_id'])) {
             $expectedId = filter_var($payload['expected_timesheet_id'], FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
             if ($expectedId === false || $entry === null || (int) $entry['id'] !== $expectedId || (in_array($action, ['check_out', 'day_close', 'pause_start', 'pause_end'], true) && !empty($entry['end_time']))) {
@@ -120,14 +148,15 @@ final class AppTimesheetSyncService
             $this->assertExpectedProjectAssignment($entry, $payload, $userId);
             unset($payload['source']);
         }
-        if ($appliesToUser && !in_array($action, ['check_in', 'work_start', 'presence_end'], true)) {
+        if (($appliesToUser || $pausePolicy !== null || $boundPauseAction)
+            && !in_array($action, ['check_in', 'work_start', 'presence_end'], true)) {
             if (isset($payload['expected_start_time']) && !isset($payload['expected_timesheet_id'])) {
                 $expectedStart = is_string($payload['expected_start_time']) ? $this->normalizeTime($payload['expected_start_time']) : null;
                 $sameStartSessions = $expectedStart === null ? 0 : (int) $this->connection->fetchColumn('SELECT COUNT(*) FROM timesheets WHERE user_id = :user_id AND work_date = :work_date AND entry_type = "work" AND COALESCE(is_deleted, 0) = 0 AND start_time = :start_time', ['user_id' => $userId, 'work_date' => $workDate, 'start_time' => $expectedStart]);
                 if ($entry === null || $expectedStart === null || substr((string) $entry['start_time'], 0, 5) !== $expectedStart || $sameStartSessions !== 1) {
                     throw new RuntimeException('Die Offline-Buchung gehoert zu einem anderen oder nicht eindeutig bestimmbaren Arbeitseinsatz. Bitte neu laden und pruefen.');
                 }
-            } elseif (!isset($payload['expected_timesheet_id'])) {
+            } elseif (($appliesToUser || $pausePolicy !== null) && !isset($payload['expected_timesheet_id'])) {
                 $dailySessionCount = (int) $this->connection->fetchColumn('SELECT COUNT(*) FROM timesheets WHERE user_id = :user_id AND work_date = :work_date AND entry_type = "work" AND COALESCE(is_deleted, 0) = 0 AND start_time IS NOT NULL', ['user_id' => $userId, 'work_date' => $workDate]);
                 if ($dailySessionCount > 1) {
                     throw new RuntimeException('Bei mehreren Arbeitseinsaetzen ist eine eindeutige Buchungszuordnung erforderlich. Bitte App-Daten neu laden.');
@@ -136,7 +165,7 @@ final class AppTimesheetSyncService
         }
         $latestDailyEntry = $this->findLatestDailyWorkEntryAnyState($userId, $workDate);
 
-        if ($latestDailyEntry !== null && (int) ($latestDailyEntry['is_deleted'] ?? 0) === 1) {
+        if (!$explicitPauseEntry && $latestDailyEntry !== null && (int) ($latestDailyEntry['is_deleted'] ?? 0) === 1) {
             throw new RuntimeException('Ihre Tagesbuchung wurde im Backend geaendert oder archiviert. Bitte App-Daten neu laden.');
         }
 
@@ -145,14 +174,18 @@ final class AppTimesheetSyncService
         if ($startNewEntry) {
             $entry = null;
         }
+        if ($entry === null) {
+            $pausePolicy = $this->pauses?->configuredPolicy($userId, $workDate);
+        }
 
         $existingBreaks = $entry !== null ? $this->findBreaksForTimesheet((int) $entry['id']) : [];
         $currentBreak = $this->workdayStateCalculator->currentBreak($existingBreaks);
-        $projectId = $this->normalizeProjectId($payload['project_id'] ?? ($entry['project_id'] ?? null));
+        $projectId = $this->normalizeProjectId(($pauseWrite ? null : ($payload['project_id'] ?? null)) ?? ($entry['project_id'] ?? null));
         $this->assertProjectVisibleToUser($projectId, $userId, $permissions, $workDate);
         $this->assertAccountingWriteAllowed($entry, $userId, $projectId, $workDate);
         $this->dayConflictService?->assertNoConflictForWork($userId, $workDate, $entry !== null ? (int) $entry['id'] : null);
-        if ($appliesToUser && $action === 'check_in' && (int) $this->connection->fetchColumn('SELECT COUNT(*) FROM timesheets WHERE user_id = :user_id AND entry_type = "work" AND start_time IS NOT NULL AND end_time IS NULL AND COALESCE(is_deleted, 0) = 0', ['user_id' => $userId]) > 0) {
+        if ($action === 'check_in' && (($this->pauses?->hasOpenModelBooking($userId) ?? false)
+            || (($appliesToUser || $pausePolicy !== null) && (int) $this->connection->fetchColumn('SELECT COUNT(*) FROM timesheets WHERE user_id = :user_id AND entry_type = "work" AND start_time IS NOT NULL AND end_time IS NULL AND COALESCE(is_deleted, 0) = 0', ['user_id' => $userId]) > 0))) {
             throw new RuntimeException('Es besteht bereits ein laufender Arbeitseinsatz. Ein erneuter Check-in darf dessen Arbeitsbeginn nicht veraendern.');
         }
         $presenceResponse = $this->workTimePresenceService?->handle($userId, $payload + ['work_date' => $workDate], $action, $entry);
@@ -163,8 +196,14 @@ final class AppTimesheetSyncService
         if ($action === 'work_start') {
             $action = 'check_in';
         }
-        $note = $guardedProjectAssignment ? ($entry['note'] ?? null) : $this->nullableTrimmed($payload['note'] ?? ($entry['note'] ?? null));
+        $note = $guardedProjectAssignment || $pauseWrite ? ($entry['note'] ?? null) : $this->nullableTrimmed($payload['note'] ?? ($entry['note'] ?? null));
+        if ($pauseWrite) {
+            unset($payload['source'], $payload['geo'], $payload['geo_acknowledged']);
+        }
         $source = $this->normalizeSource($payload['source'] ?? ($entry['source'] ?? 'app'));
+        if ($pauseWrite && isset($entry['source'])) {
+            $source = (string) $entry['source'];
+        }
         $manualBreakMinutes = isset($entry['break_minutes']) ? (int) $entry['break_minutes'] : $this->workdayStateCalculator->completedBreakMinutes($existingBreaks);
 
         if ($action === 'pause' && array_key_exists('manual_break_minutes', $payload)) {
@@ -187,12 +226,12 @@ final class AppTimesheetSyncService
                 throw new RuntimeException('Check-out ist erst moeglich, wenn die laufende Pause beendet wurde.');
             }
 
-            if ($appliesToUser && !empty($endTime)) {
+            if (($appliesToUser || $pausePolicy !== null) && !empty($endTime)) {
                 throw new RuntimeException('Dieser Arbeitseinsatz ist bereits beendet. Bitte App-Daten neu laden.');
             }
 
             $endTime = $this->normalizeTime($payload['end_time'] ?? null) ?? $this->nowTime();
-            if ($appliesToUser && isset($payload['actual_end_at'])) {
+            if (($appliesToUser || $pausePolicy !== null) && isset($payload['actual_end_at'])) {
                 $actualValue = $payload['actual_end_at'];
                 if (!is_string($actualValue) || !preg_match('/^\d{4}-\d{2}-\d{2}[T ](?:[01]\d|2[0-3]):[0-5]\d(?::00)?$/D', $actualValue)) {
                     throw new RuntimeException('Bitte Datum und Uhrzeit des tatsaechlichen Endes minutengenau eingeben.');
@@ -229,7 +268,7 @@ final class AppTimesheetSyncService
             }
         }
 
-        if ($action === 'pause' && ($entry === null || $startTime === null || $startTime === '')) {
+        if (in_array($action, ['pause', 'pause_record'], true) && ($entry === null || $startTime === null || $startTime === '')) {
             throw new RuntimeException('Bitte zuerst einen Check-in buchen, bevor Sie eine Pause erfassen.');
         }
 
@@ -241,7 +280,10 @@ final class AppTimesheetSyncService
             throw new RuntimeException('Bitte zuerst einen Check-in buchen oder eine Startzeit eingeben.');
         }
 
-        if ($appliesToUser && in_array($action, ['pause_start', 'pause_end'], true)) {
+        $strictPauseStamp = in_array($action, ['pause_start', 'pause_end'], true)
+            && ($appliesToUser || $pausePolicy !== null || ($this->pauses !== null
+                && (isset($payload['expected_timesheet_id']) || isset($payload['expected_start_time']))));
+        if ($strictPauseStamp) {
             $pauseField = $action === 'pause_start' ? 'break_started_at' : 'break_ended_at';
             $pauseTimestamp = $payload[$pauseField] ?? (new DateTimeImmutable('now', new \DateTimeZone('Europe/Berlin')))->format('Y-m-d H:i:s');
             if (!is_string($pauseTimestamp)) {
@@ -250,24 +292,82 @@ final class AppTimesheetSyncService
             $payload[$pauseField] = WorkTimeLocalTime::fromInput($pauseTimestamp)->format('Y-m-d H:i:s');
         }
 
-        $calculated = $this->calculatedValues($workDate, $startTime, $endTime, $manualBreakMinutes);
+        $recordedPause = null;
+        if ($action === 'pause_record') {
+            if (!$this->pauses?->available()) {
+                throw new InvalidArgumentException('Pausennachträge sind noch nicht migriert.');
+            }
+            if ($currentBreak !== null) {
+                throw new InvalidArgumentException('Bitte zuerst die laufende Pause beenden.');
+            }
+            $recordedPause = $this->manualPause($payload);
+            if (isset($recordedPause['duration_minutes'])) {
+                $expected = filter_var($payload['expected_documented_break_minutes'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 0]]);
+                if ($expected === false || $expected !== $this->workdayStateCalculator->completedBreakMinutes($existingBreaks)) {
+                    throw new InvalidArgumentException('Die dokumentierten Pausen wurden inzwischen geändert. Bitte prüfen Sie die vorhandenen Nachweise vor einem neuen Nachtrag.');
+                }
+            }
+            $this->pauses->validateEvidence($entry, [...$existingBreaks, $recordedPause]);
+        }
+        if ($action === 'pause_end') {
+            if ($pausePolicy !== null && !isset($payload['expected_break_id']) && !isset($payload['expected_break_started_at'])) {
+                throw new InvalidArgumentException('Bitte die aktuell offene Pause neu laden und eindeutig bestätigen.');
+            }
+            $this->assertExpectedPause($payload, $currentBreak);
+        }
+        if ($pauseWrite && $entry !== null && $this->signatureService !== null) {
+            $this->connection->fetchOne('SELECT id FROM timesheets WHERE id = :id FOR UPDATE', ['id' => $entry['id']]);
+            if ($this->signatureService->findActiveForTimesheet((int) $entry['id'], true) !== null) {
+                throw new InvalidArgumentException('Diese Buchung enthaelt eine Kundenbestaetigung. Bitte die Pause im Admin pruefen.');
+            }
+        }
+        $stampChanged = $this->normalizedComparableValue($startTime) !== $this->normalizedComparableValue($entry['start_time'] ?? null)
+            || $this->normalizedComparableValue($endTime) !== $this->normalizedComparableValue($entry['end_time'] ?? null);
+        if ($stampChanged && $startTime !== null && $recordedPause === null && $existingBreaks !== []) {
+            $this->pauses?->validateEvidence(['work_date' => $workDate, 'start_time' => $startTime, 'end_time' => $endTime], $existingBreaks);
+        }
+
+        $calculated = $pausePolicy !== null && $startTime !== null
+            ? $this->calculator->calculateDocumented($workDate, $startTime, $endTime, $existingBreaks)
+            : $this->calculatedValues($workDate, $startTime, $endTime, $manualBreakMinutes);
         if ($entry !== null) {
             (new TimesheetPauseEvidenceGuard($this->connection))->assertChangeAllowed((int) $entry['id'], [
                 'user_id' => $userId, 'work_date' => $workDate, 'start_time' => $startTime, 'end_time' => $endTime,
                 'gross_minutes' => $calculated['gross_minutes'], 'break_minutes' => $calculated['break_minutes'],
                 'net_minutes' => $calculated['net_minutes'], 'entry_type' => 'work', 'source' => $source,
-            ], in_array($action, ['pause_start', 'pause_end'], true) || ($action === 'pause' && array_key_exists('manual_break_minutes', $payload)));
+            ], $boundPauseAction || ($action === 'pause' && array_key_exists('manual_break_minutes', $payload)));
+        }
+        if ($action === 'pause' && array_key_exists('manual_break_minutes', $payload) && ($pausePolicy !== null || $existingBreaks !== [])) {
+            throw new InvalidArgumentException('Vorhandene Pausennachweise bleiben erhalten. Bitte einen einzelnen Pausennachtrag erfassen.');
         }
         $timesheetId = $this->persistTimesheet($entry, $userId, $projectId, $workDate, $startTime, $endTime, $note, $source, $calculated);
+        if ($entry === null && $pausePolicy !== null) {
+            $this->pauses->attachSnapshot($timesheetId, $pausePolicy);
+        }
         if ($originalAction === 'work_start') {
             $this->workTimePresenceService?->markWorkStarted($userId, $timesheetId, $workDate, (string) $startTime);
         }
         $this->handlePauseAction($action, $timesheetId, $userId, $payload, $currentBreak);
+        if ($recordedPause !== null) {
+            if (isset($recordedPause['duration_minutes'])) {
+                $this->pauses->addDuration($timesheetId, $userId, $recordedPause['duration_minutes'], 'app_manual', $this->nullableTrimmed($payload['note'] ?? null));
+            } else {
+                $this->pauses->addInterval($timesheetId, $userId, $recordedPause['break_started_at'], $recordedPause['break_ended_at'], 'app_manual', $this->nullableTrimmed($payload['note'] ?? null));
+            }
+        }
 
         $breaks = $this->findBreaksForTimesheet($timesheetId);
+        if ($strictPauseStamp && $startTime !== null) {
+            $this->pauses?->validateEvidence(['work_date' => $workDate, 'start_time' => $startTime, 'end_time' => $endTime], $breaks);
+        }
         $effectiveBreakMinutes = $this->effectiveBreakMinutes($action, $payload, $breaks, $manualBreakMinutes);
 
-        $recalculated = $this->calculatedValues($workDate, $startTime, $endTime, $effectiveBreakMinutes);
+        if ($pausePolicy === null && $action === 'pause_record') {
+            $effectiveBreakMinutes = max($manualBreakMinutes, $effectiveBreakMinutes);
+        }
+        $recalculated = $pausePolicy !== null && $startTime !== null
+            ? $this->calculator->calculateDocumented($workDate, $startTime, $endTime, $breaks)
+            : $this->calculatedValues($workDate, $startTime, $endTime, $effectiveBreakMinutes);
         $this->refreshTimesheetDurations($timesheetId, $projectId, $startTime, $endTime, $note, $source, $recalculated);
         $geoStored = $this->storeGeoRecord($timesheetId, $userId, $workDate, $payload);
         $timesheet = $this->findTimesheetById($timesheetId);
@@ -292,6 +392,7 @@ final class AppTimesheetSyncService
             'breaks_today' => $breaks,
             'today_state' => $todayState,
             'tracked_minutes_live_basis' => $todayState['tracked_minutes_live_basis'],
+            ...(!$this->pauses?->available() ? [] : ['break_assessment' => $this->pauses->assessmentForDay($userId, $workDate)]),
             'server_time' => (new DateTimeImmutable())->format(DATE_ATOM),
         ];
 
@@ -525,11 +626,23 @@ final class AppTimesheetSyncService
             }
 
             $existingOperation = $this->findSyncOperation($clientRequestId, $userId);
+            if ($existingOperation !== null) {
+                $this->assertReplayAction($existingOperation, $action);
+            }
             $response = is_array($existingOperation)
                 ? json_decode((string) ($existingOperation['response_json'] ?? ''), true)
                 : null;
 
             return is_array($response) ? $response : ['status' => 'synced'];
+        }
+    }
+
+    private function assertReplayAction(array $operation, string $action): void
+    {
+        $previous = (string) ($operation['operation_type'] ?? '');
+        if ($previous !== $action && (in_array($action, self::ACTUAL_PAUSE_ACTIONS, true)
+            || in_array($previous, self::ACTUAL_PAUSE_ACTIONS, true))) {
+            throw new InvalidArgumentException('Diese Anfrage-ID gehört bereits zu einer anderen Pausenaktion.');
         }
     }
 
@@ -571,6 +684,9 @@ final class AppTimesheetSyncService
 
     private function findBreaksForTimesheet(int $timesheetId): array
     {
+        if ($this->pauses !== null) {
+            return $this->pauses->breaks($timesheetId);
+        }
         if ($timesheetId <= 0 || !$this->connection->tableExists('timesheet_breaks')) {
             return [];
         }
@@ -598,14 +714,6 @@ final class AppTimesheetSyncService
     private function handlePauseAction(string $action, int $timesheetId, int $userId, array $payload, ?array $currentBreak): void
     {
         if ($timesheetId <= 0 || !$this->connection->tableExists('timesheet_breaks')) {
-            return;
-        }
-
-        if ($action === 'pause' && array_key_exists('manual_break_minutes', $payload)) {
-            $this->connection->execute('DELETE FROM timesheet_breaks WHERE timesheet_id = :timesheet_id', [
-                'timesheet_id' => $timesheetId,
-            ]);
-
             return;
         }
 
@@ -649,6 +757,37 @@ final class AppTimesheetSyncService
                     'break_ended_at' => $endedAt,
                 ]
             );
+        }
+    }
+
+    private function manualPause(array $payload): array
+    {
+        $start = $payload['break_started_at'] ?? null;
+        $end = $payload['break_ended_at'] ?? null;
+        if ($start !== null || $end !== null) {
+            if (!is_string($start) || !is_string($end)) {
+                throw new InvalidArgumentException('Bitte Pausenbeginn und Pausenende vollständig angeben.');
+            }
+            return [
+                'break_started_at' => WorkTimeLocalTime::fromInput($start)->format('Y-m-d H:i:s'),
+                'break_ended_at' => WorkTimeLocalTime::fromInput($end)->format('Y-m-d H:i:s'),
+            ];
+        }
+        $duration = filter_var($payload['manual_break_minutes'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => 1440]]);
+        if ($duration === false) {
+            throw new InvalidArgumentException('Bitte eine Pausendauer zwischen 1 und 1.440 Minuten eingeben.');
+        }
+        return ['duration_minutes' => $duration];
+    }
+
+    private function assertExpectedPause(array $payload, ?array $currentBreak): void
+    {
+        $expectedId = $payload['expected_break_id'] ?? null;
+        $expectedStart = $payload['expected_break_started_at'] ?? null;
+        if (($expectedId !== null && (int) $expectedId !== (int) ($currentBreak['id'] ?? 0))
+            || ($expectedStart !== null && (!is_string($expectedStart)
+                || WorkTimeLocalTime::fromInput($expectedStart)->getTimestamp() !== WorkTimeLocalTime::fromInput($currentBreak['break_started_at'])->getTimestamp()))) {
+            throw new InvalidArgumentException('Die offene Pause wurde inzwischen geändert. Bitte App-Daten neu laden.');
         }
     }
 
@@ -1067,7 +1206,7 @@ final class AppTimesheetSyncService
                 ? 'Check-in erfolgreich erfasst.'
                 : 'Check-in ohne Projekt erfolgreich erfasst. Sie koennen die Baustelle spaeter zuordnen.',
             'check_out', 'day_close' => 'Check-out erfolgreich erfasst.',
-            'pause' => 'Pause erfolgreich gespeichert.',
+            'pause', 'pause_record' => 'Pause erfolgreich gespeichert.',
             'select_project' => 'Projekt erfolgreich zugeordnet.',
             'upsert' => 'Zeiteintrag erfolgreich aktualisiert.',
             'pause_start' => 'Pause erfolgreich gestartet.',

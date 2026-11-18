@@ -39,7 +39,6 @@ test.describe('real work-time windows workflow', () => {
       page.off('response', captureResponse);
       page.off('pageerror', captureError);
     }
-    await expect(page.getByRole('region', { name: 'Arbeitsende bestätigen', exact: true })).toBeVisible();
   }
 
   async function history(page) {
@@ -50,6 +49,7 @@ test.describe('real work-time windows workflow', () => {
 
   test('an unconfirmed proposal and continuing work preserve the actual open session', async ({ page }) => {
     await login(page, 'continue');
+    await expect(page.getByRole('region', { name: 'Arbeitsende bestätigen', exact: true })).toBeVisible();
     const id = Number(process.env.UI_TEST_WORKTIME_CONTINUE_ID);
     const before = (await history(page)).find((row) => row.id === id);
     expect(before.end_time).toBeNull();
@@ -105,5 +105,57 @@ test.describe('real work-time windows workflow', () => {
     await save.click();
     await expect(page.getByText('Gespeichert. Historische Regeln und Stempelzeiten bleiben erhalten.', { exact: true })).toBeVisible();
     await expect(page.locator('table tbody tr').filter({ hasText: 'Browser Kernzeit 08 bis 16' })).toHaveCount(1);
+  });
+
+  test('admin confirms a historical assignment with an accounting closure and the PWA shows the applied rule', async ({ page, browser }) => {
+    const userId = process.env.UI_TEST_WORKTIME_HISTORY_USER_ID;
+    const ruleId = process.env.UI_TEST_WORKTIME_HISTORY_VERSION_ID;
+    const workDate = process.env.UI_TEST_WORKTIME_HISTORY_DATE;
+    await page.goto('/admin/login');
+    await page.getByLabel('E-Mail').fill(process.env.UI_TEST_ADMIN_EMAIL);
+    await page.getByLabel('Passwort').fill(process.env.UI_TEST_ADMIN_PASSWORD);
+    await page.getByRole('button', { name: 'Anmelden' }).click();
+    await page.goto('/admin/work-time');
+    const form = page.locator('form[action="/admin/work-time/assignments"]');
+    const save = form.locator('[data-worktime-save]');
+    await form.locator('[name="user_id"]').selectOption(userId);
+    await form.locator('[name="policy_version_id"]').selectOption(ruleId);
+    await form.locator('[name="effective_from"]').fill(workDate);
+    await form.locator('[name="reason"]').fill('Kernzeiten für historische Referenzbuchung ergänzen');
+    await form.getByRole('button', { name: 'Auswirkungen prüfen' }).click();
+    const result = form.locator('[data-worktime-result]');
+    await expect(result).toContainText('2 Buchungen an 2 Arbeitstagen. 1 davon festgeschrieben');
+    await result.getByText('Betroffene Buchungen', { exact: true }).click();
+    const historical = result.locator('li').filter({ hasText: 'Buchung #' + process.env.UI_TEST_WORKTIME_HISTORY_BOOKING_ID });
+    await expect(historical).toContainText('450 Min.');
+    await expect(historical).toContainText('53 Min.');
+    await expect(save).toBeDisabled();
+    await form.getByLabel('Rückwirkende Änderung nach dieser Vorschau bestätigen').check();
+    await expect(save).toBeEnabled();
+    await save.click();
+    await expect(page).toHaveURL(new RegExp('user_id=' + userId + '&saved=1'));
+    await expect(page.getByText('Kernzeiten für historische Referenzbuchung ergänzen')).toBeVisible();
+    await page.getByLabel('Auswertungsmonat').fill(workDate.slice(0, 7));
+    await page.getByRole('button', { name: 'Monat prüfen' }).click();
+    const monthPreview = page.locator('section').filter({ has: page.getByRole('heading', { name: /Monatsvorschau/ }) });
+    await expect(monthPreview.getByRole('row').filter({ hasText: workDate })).toContainText('UI Historischer Referenzplan · Version 1');
+
+    const appContext = await browser.newContext({
+      baseURL: process.env.UI_BASE_URL,
+      viewport: { width: 390, height: 844 },
+      timezoneId: 'Europe/Berlin',
+      serviceWorkers: 'block',
+    });
+    try {
+      const app = await appContext.newPage();
+      await login(app, 'history');
+      const status = app.getByRole('region', { name: 'Kernarbeitszeit', exact: true });
+      await expect(status).toContainText('UI Historischer Referenzplan · Version 1');
+      await expect(status).toContainText('Vorläufig: Offene Abweichungen oder Pausen müssen noch geklärt werden.');
+      const forbidden = await app.request.post('/admin/work-time/preview', { form: { intent: 'assignment', user_id: userId, effective_from: workDate } });
+      expect(forbidden.status()).toBe(403);
+    } finally {
+      await appContext.close();
+    }
   });
 });

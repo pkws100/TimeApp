@@ -215,7 +215,6 @@ final class PauseEvidenceProtectionDatabaseTest extends MariaDbTestCase
     public function testOrdinaryManualPauseRetainsTheExistingLegacyBehaviour(): void
     {
         [, $user, $id, $date] = $this->evidenceFixture(false);
-        $this->connection()->execute('INSERT INTO timesheet_breaks (timesheet_id, user_id, break_started_at, break_ended_at, source) VALUES (:id, :user_id, :pause_start, :pause_end, "app")', ['id' => $id, 'user_id' => $user, 'pause_start' => $date . ' 12:00:00', 'pause_end' => $date . ' 12:30:00']);
         $result = $this->sync()->sync($user, ['client_request_id' => 'ordinary-manual-pause', 'action' => 'pause', 'work_date' => $date, 'manual_break_minutes' => 60]);
         self::assertSame('synced', $result['status']);
         self::assertSame(60, $result['timesheet']['break_minutes']);
@@ -223,6 +222,19 @@ final class PauseEvidenceProtectionDatabaseTest extends MariaDbTestCase
         self::assertSame('07:42:00', $result['timesheet']['start_time']);
         self::assertSame('16:35:00', $result['timesheet']['end_time']);
         self::assertSame(0, (int) $this->connection()->fetchColumn('SELECT COUNT(*) FROM timesheet_breaks WHERE timesheet_id = :id', ['id' => $id]));
+    }
+
+    public function testLegacyManualPauseCannotDeleteStampedIntervals(): void
+    {
+        [, $user, $id, $date] = $this->evidenceFixture(false);
+        $this->connection()->execute('INSERT INTO timesheet_breaks (timesheet_id, user_id, break_started_at, break_ended_at, source) VALUES (:id, :user_id, :pause_start, :pause_end, "app")', ['id' => $id, 'user_id' => $user, 'pause_start' => $date . ' 12:00:00', 'pause_end' => $date . ' 12:30:00']);
+        $before = $this->snapshot($id);
+        try {
+            $this->sync()->sync($user, ['client_request_id' => 'formerly-destructive-pause', 'action' => 'pause', 'work_date' => $date, 'manual_break_minutes' => 60]);
+            self::fail('The legacy action must preserve stamped intervals.');
+        } catch (InvalidArgumentException) {
+            self::assertSame($before, $this->snapshot($id));
+        }
     }
 
     public function testAccountWriteLockExecutesAVoidConsumerOnlyOnceWhileBothLocksAreHeld(): void

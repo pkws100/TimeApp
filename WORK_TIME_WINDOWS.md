@@ -4,8 +4,8 @@
 
 Standard: `WORK_TIME_WINDOWS_ENABLED=false`. Zusaetzlich braucht jeder Mitarbeiter
 eine ausdrueckliche, zeitlich gueltige Regelzuordnung. Ohne Zuordnung gelten
-bisherige Buchungs- und Kontoberechnungen. Neue Regeln gelten fruehestens morgen
-in `Europe/Berlin`.
+bisherige Fensterberechnungen. Zuordnungen koennen in `Europe/Berlin` rueckwirkend
+beginnen oder enden. Die Fensteranrechnung bleibt eine unverbindliche Vorschau.
 
 08:00–16:00 beschreibt eine zeitliche Lage, keine acht Nettoarbeitsstunden.
 `work_started` dokumentiert mit Check-in den Arbeitsbeginn. `presence_only`
@@ -43,12 +43,14 @@ abschliessend ueber arbeitsrechtliche oder Verguetungsansprueche.
 ## Admin, Rechte und Historie
 
 `/admin/work-time`: Vorlagen, unveraenderliche Revisionen, Wochenfenster,
-individuelle Regeln und Mitarbeiterzuordnungen. Vor dem Speichern muss eine
-Beispielbuchung geprueft werden; ein serverseitiges Token bindet dieselben
-Regeleingaben. Endvorschlaege sowie Mitarbeiter-/Vorgesetztenkanaele sind getrennt
-konfigurierbar. Eine spaetere Zuordnung beendet eine vorherige offene am Vortag;
-widerspruechliche Zeitraeume werden abgewiesen. Ein begruendetes Ende fuer die
-Zukunft ermoeglicht die mitarbeiterbezogene Deaktivierung.
+individuelle Regeln und Mitarbeiterzuordnungen. Die serverseitige Vorschau zeigt
+den bisherigen und den vorgeschlagenen Regelstand, betroffene Buchungen und
+Arbeitstage, Regelkonflikte sowie Abschlussstatus. Das Prueftoken bindet Akteur,
+Eingaben und Quellstand. Rueckwirkung braucht Begruendung und Bestaetigung.
+Ueberlappungen brauchen eine ausdrueckliche Ersetzungsentscheidung. Nicht
+betroffene Abschnitte bleiben mit ihrer bisherigen Regelversion erhalten. Alte
+Zuordnungsstaende bleiben in der Historie lesbar. Endvorschlaege sowie Mitarbeiter-
+und Vorgesetztenkanaele sind getrennt konfigurierbar.
 
 Rechte: `work_time_policies.view`, `work_time_policies.manage`,
 `work_time_deviations.view`, `work_time_deviations.manage`,
@@ -74,6 +76,11 @@ UTC-Offset halten. Kalender-/Sollservices bleiben fuer Feiertage/Solltage zustae
 Der Worker materialisiert Abweichungen. Geaenderte Quellen entwerten vorherige
 Entscheidungen fuer die aktuelle Vorschau; historische Nachweise bleiben erhalten.
 Historische FKs verwenden `RESTRICT`; `timesheets` wird nicht strukturell veraendert.
+Rueckwirkende Zuordnungen revidieren nur die betroffenen Quellen in der vorhandenen
+Warteschlange. Die Vorschau auf abgeschlossene Perioden ist lesend. Vorhandene
+Journale, Stichtagsprotokolle und Abschluss-Snapshots behalten ihre Werte.
+Rueckwirkende Regeln erzeugen fuer bereits begonnene Einsaetze keine neuen
+Endvorschlaege, Push- oder SMS-Ereignisse.
 Basismigration: `20261111120000_work_time_windows.php`. Die drei additiven
 Hardening-Migrationen enden auf `reconciliation_queue`, `notification_delivery`
 und `pause_corrections`; Einzelheiten und Pruefnachweise stehen in
@@ -95,6 +102,44 @@ Intervallen, Stempeln und Dauer, auch nach Abschalten des Features. Normale
 unbelegte Pausen bleiben nutzbar. Die Benutzerbearbeitung zeigt Sollstundenmodell
 und individuell gueltige Arbeitszeitfenster getrennt mit berechtigtem Direktlink.
 Details und neue Pruefnachweise: [WORK_TIME_PAUSE_FORM_STABILITY.md](WORK_TIME_PAUSE_FORM_STABILITY.md).
+
+## Eigenstaendige Pausenmodelle
+
+Unter `/admin/work-time#pausenmodelle` lassen sich unveraenderliche
+Vorlagenversionen, ein ausdruecklich aktivierter Betriebsstandard und individuelle
+Zuordnungen verwalten. Beide Zeitplaene beginnen fruehestens am Folgetag. Ein
+Mitarbeitermodell hat Vorrang vor dem Standard. Die Auswahl zur Anlage wird pro
+Arbeitstag eingefroren. Historische Buchungen ohne Snapshot verwenden ihre
+gespeicherten Legacy-Werte.
+
+Stempelpausen und bestaetigte manuelle Pausen sind additiv. Die PWA speichert
+Nachtraege ohne bekannte Uhrzeiten als reine Dauer. Geplante Fenster dienen der
+Orientierung. Die Auswertung zaehlt fuer die Mindestsumme zusammenhaengende
+Pausenabschnitte ab 15 Minuten. Sie wertet dazu die belegte Nettoarbeit ueber die
+Arbeitseinsaetze eines Tages aus und prueft gesondert Intervalle ueber sechs Stunden
+ohne belegte ausreichende Unterbrechung. Zusammenhaengende Einsaetze ueber
+Mitternacht werden gemeinsam geprueft. Nach elf Stunden Ruhezeit beginnt eine
+neue Beurteilung der Pausenpflicht. [§ 5 ArbZG](https://www.gesetze-im-internet.de/arbzg/__5.html)
+
+Unbekannte Zeitlagen erscheinen als
+Klaerungsbedarf. Ohne Modell koennen gespeicherte Altwerte rechnerische Abzuege
+enthalten. Die Modelle folgen der gesetzlichen Untergrenze. [§ 4 ArbZG](https://www.gesetze-im-internet.de/arbzg/__4.html)
+
+Bei aktiviertem Pausenmodell enthalten neue Buchungen tatsaechliche Arbeitszeit
+und dokumentierte Pausendauer. Fehlende Pflichtpausen bleiben im Pruefstatus
+sichtbar. Eine spaetere belegte Zuordnung einer bereits erfassten Pausendauer zu
+konkreten Uhrzeiten nutzt „Pausenlage klaeren“ und behaelt den originalen Nachweis
+in der Historie. Signatur- und Abschlussschutz sowie die vorhandene Versionierung
+greifen ebenfalls bei ausgeschalteten Arbeitszeitfenstern.
+
+Vor einer spaeteren Freigabe einen konsistenten Sicherungspunkt fuer Datenbank
+und Uploads erstellen und die drei additiven Migrationen aus `DATABASE.md`
+anwenden. `pause_policies.view` und `pause_policies.manage` gezielt an die
+zuständigen Rollen vergeben. Vor einem Betriebsstandard zuerst einzelne
+Mitarbeiter ab einem festgelegten Datum zuordnen und Zeitkonto und Exporte
+an einer Schicht mit mehreren Pausen prüfen. Phinx blockiert den Down-Pfad ab der
+ersten gespeicherten Regel oder dem ersten Nachweis. Eine Rueckkehr nach Nutzung
+braucht den Sicherungspunkt und eine Abstimmung ueber zwischenzeitlich erfasste Daten.
 
 ## Anwesenheit, Endvorschlaege und Offline
 

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\WorkTime;
 
 use App\Domain\Timesheets\TimesheetWriteGuard;
+use App\Domain\Timesheets\TimesheetPauseService;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
 use DateTimeZone;
@@ -17,11 +18,20 @@ final class WorkTimePolicyService
     private array $policyCache = [];
     private array $assignmentTimelines = [];
     private ?bool $assignmentSchemaAvailable = null;
+    private ?bool $assignmentHistoryAvailable = null;
+    private ?WorkTimePreviewService $impactPreview = null;
+    private ?TimesheetPauseService $impactPauses = null;
     public function __construct(private DatabaseConnection $connection, private bool $featureEnabled = false)
     {
     }
 
     public function enabled(): bool { return $this->featureEnabled; }
+
+    public function setAssignmentImpactSources(WorkTimePreviewService $preview, TimesheetPauseService $pauses): void
+    {
+        $this->impactPreview = $preview;
+        $this->impactPauses = $pauses;
+    }
 
     public function listTemplates(): array
     {
@@ -34,11 +44,25 @@ final class WorkTimePolicyService
         return $templates;
     }
 
-    public function listAssignments(?int $userId = null): array
+    public function listAssignments(?int $userId = null, bool $includeSuperseded = false): array
     {
         if (!$this->connection->tableExists('employee_work_time_assignments')) { return []; }
-        $rows = $this->connection->fetchAll('SELECT a.*, t.name AS template_name, v.revision, CONCAT(u.first_name, " ", u.last_name) AS employee_name FROM employee_work_time_assignments a JOIN work_time_policy_versions v ON v.id = a.policy_version_id JOIN work_time_policy_templates t ON t.id = v.template_id JOIN users u ON u.id = a.user_id' . ($userId !== null ? ' WHERE a.user_id = :user_id' : '') . ' ORDER BY a.effective_from DESC, a.id DESC', $userId !== null ? ['user_id' => $userId] : []);
+        $where = $userId !== null ? ' AND a.user_id = :user_id' : '';
+        if (!$includeSuperseded && $this->hasAssignmentHistory()) {
+            $where .= ' AND a.interval_revision = 0';
+        }
+        $rows = $this->connection->fetchAll('SELECT a.*, t.name AS template_name, v.revision, CONCAT(u.first_name, " ", u.last_name) AS employee_name FROM employee_work_time_assignments a JOIN work_time_policy_versions v ON v.id = a.policy_version_id JOIN work_time_policy_templates t ON t.id = v.template_id JOIN users u ON u.id = a.user_id WHERE 1 = 1' . $where . ' ORDER BY a.effective_from DESC, a.id DESC', $userId !== null ? ['user_id' => $userId] : []);
         return array_map(fn (array $row): array => $this->assignmentRecord($row), $rows);
+    }
+
+    public function assignmentHistory(int $userId): array
+    {
+        $rows = $this->connection->fetchAll('SELECT p.*, CONCAT(u.first_name, " ", u.last_name) AS actor_name FROM work_time_policy_audit p JOIN employee_work_time_assignments a ON a.id = p.entity_id JOIN users u ON u.id = p.actor_user_id WHERE a.user_id = :user_id AND p.action LIKE "assignment%" ORDER BY p.id DESC', ['user_id' => $userId]);
+        return array_map(static function (array $row): array {
+            $row['before'] = $row['before_json'] === null ? null : json_decode($row['before_json'], true, flags: JSON_THROW_ON_ERROR);
+            $row['after'] = json_decode($row['after_json'], true, flags: JSON_THROW_ON_ERROR);
+            return $row;
+        }, $rows);
     }
 
     public function createTemplate(array $input, int $actorId): array
@@ -91,94 +115,323 @@ final class WorkTimePolicyService
         });
     }
 
-    public function assign(array $input, int $actorId): array
+    public function assignmentPreview(array $input, int $actorId, string $secret): array
     {
         $this->assertSchema();
-        $this->policyCache = [];
-        $this->assignmentTimelines = [];
+        $this->clearAssignmentCache();
+        return $this->previewForPlan($this->assignmentPlan($input), $actorId, $secret);
+    }
+
+    public function endAssignmentPreview(int $assignmentId, string $effectiveTo, int $actorId, string $reason, string $secret): array
+    {
+        $this->assertSchema();
+        $this->clearAssignmentCache();
+        return $this->previewForPlan($this->endPlan($assignmentId, $effectiveTo, $reason), $actorId, $secret);
+    }
+
+    public function assign(array $input, int $actorId, ?string $secret = null): array
+    {
+        $this->assertSchema();
+        $userId = filter_var($input['user_id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+        if ($userId === false) {
+            throw new InvalidArgumentException('Mitarbeiter und Regelversion sind erforderlich.');
+        }
+
+        return $this->withAssignmentLock($userId, function () use ($input, $actorId, $secret): array {
+            $plan = $this->assignmentPlan($input, true);
+            $overlaps = $plan['overlaps'];
+            $from = $plan['effective_from'];
+            $until = $plan['effective_to'];
+            $legacyAppend = $secret === null && !$plan['historical'] && count($overlaps) === 1
+                && $overlaps[0]['effective_to'] === null && $overlaps[0]['effective_from'] < $from;
+            if ($secret !== null || $plan['historical']) {
+                $this->assertPreview($plan, $input, $actorId, $secret);
+            }
+            if (!$legacyAppend && $overlaps !== [] && (string) ($input['replace_overlaps'] ?? '') !== '1') {
+                throw new InvalidArgumentException('Die Arbeitszeitzuordnung überschneidet sich mit einer vorhandenen Zuordnung. Bitte die Ersetzung nach der Vorschau ausdrücklich bestätigen.');
+            }
+            if ($secret === null && !$legacyAppend && $overlaps !== []) {
+                throw new InvalidArgumentException('Die Arbeitszeitzuordnung ueberschneidet sich mit einer vorhandenen Zuordnung.');
+            }
+            foreach ($overlaps as $old) {
+                $before = $old['effective_from'] < $from;
+                $after = !$legacyAppend && $until !== null && ($old['effective_to'] === null || $old['effective_to'] > $until);
+                if ($before) {
+                    $end = $this->adjacentDay($from, '-1 day');
+                    $this->connection->execute('UPDATE employee_work_time_assignments SET effective_to = :date WHERE id = :id', ['date' => $end, 'id' => $old['id']]);
+                    $this->audit('assignment_ended', $old['id'], $actorId, $old, ['user_id' => $plan['user_id'], 'effective_from' => $old['effective_from'], 'effective_to' => $end, 'reason' => $plan['reason']]);
+                } elseif ($after) {
+                    $newStart = $this->adjacentDay($until, '+1 day');
+                    $this->connection->execute('UPDATE employee_work_time_assignments SET effective_from = :date WHERE id = :id', ['date' => $newStart, 'id' => $old['id']]);
+                    $this->audit('assignment_shortened', $old['id'], $actorId, $old, ['user_id' => $plan['user_id'], 'effective_from' => $newStart, 'effective_to' => $old['effective_to'], 'reason' => $plan['reason']]);
+                } else {
+                    $this->connection->execute('UPDATE employee_work_time_assignments SET interval_revision = id WHERE id = :id', ['id' => $old['id']]);
+                    $this->audit('assignment_superseded', $old['id'], $actorId, $old, ['user_id' => $plan['user_id'], 'effective_from' => $old['effective_from'], 'effective_to' => $old['effective_to'], 'reason' => $plan['reason'], 'replaced_from' => $from, 'replaced_until' => $until]);
+                }
+                if ($before && $after) {
+                    $continuation = $this->insertAssignment([
+                        'user_id' => $old['user_id'], 'policy_version_id' => $old['policy_version_id'],
+                        'effective_from' => $this->adjacentDay($until, '+1 day'), 'effective_to' => $old['effective_to'],
+                        'overrides' => $old['overrides'], 'supervisor_user_ids' => $old['supervisor_user_ids'],
+                        'live_from_unix' => $old['live_from_unix'] ?? null,
+                        'carried_from_assignment_id' => $old['carried_from_assignment_id'] ?? $old['id'],
+                    ], $actorId);
+                    $this->audit('assignment_continued', $continuation['id'], $actorId, $old, $continuation + ['reason' => $plan['reason']]);
+                }
+            }
+            $plan['live_from_unix'] = $plan['historical'] ? time() + 1 : null;
+            $result = $this->insertAssignment($plan, $actorId);
+            $this->audit('assignment_created', $result['id'], $actorId, null, $result + [
+                'reason' => $plan['reason'], 'historical' => $plan['historical'],
+                'affected_assignment_ids' => array_column($overlaps, 'id'),
+            ]);
+            return $result;
+        });
+    }
+
+    public function endAssignment(int $assignmentId, string $effectiveTo, int $actorId, string $reason, ?string $secret = null, array $approval = []): void
+    {
+        $this->assertSchema();
+        $userId = (int) $this->connection->fetchColumn('SELECT user_id FROM employee_work_time_assignments WHERE id = :id', ['id' => $assignmentId]);
+        if ($userId <= 0) {
+            throw new InvalidArgumentException('Die Zuordnung wurde nicht gefunden.');
+        }
+        $this->withAssignmentLock($userId, function () use ($assignmentId, $effectiveTo, $actorId, $reason, $secret, $approval): void {
+            $plan = $this->endPlan($assignmentId, $effectiveTo, $reason);
+            $before = $plan['assignment'];
+            if ($secret !== null || $plan['historical']) {
+                $this->assertPreview($plan, $approval, $actorId, $secret);
+            }
+            if ($before['effective_to'] === $effectiveTo) {
+                return;
+            }
+            $this->connection->execute('UPDATE employee_work_time_assignments SET effective_to = :date WHERE id = :id', ['date' => $effectiveTo, 'id' => $assignmentId]);
+            $this->audit('assignment_ended', $assignmentId, $actorId, $before, [
+                'user_id' => $before['user_id'], 'effective_from' => $before['effective_from'],
+                'effective_to' => $effectiveTo, 'reason' => $plan['reason'], 'historical' => $plan['historical'],
+            ]);
+        });
+    }
+
+    private function assignmentPlan(array $input, bool $write = false): array
+    {
         $userId = filter_var($input['user_id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
         $versionId = filter_var($input['policy_version_id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
-        if ($userId === false || $versionId === false) { throw new InvalidArgumentException('Mitarbeiter und Regelversion sind erforderlich.'); }
+        if ($userId === false || $versionId === false) {
+            throw new InvalidArgumentException('Mitarbeiter und Regelversion sind erforderlich.');
+        }
         $from = $this->date((string) ($input['effective_from'] ?? ''));
         $until = trim((string) ($input['effective_to'] ?? ''));
         $until = $until === '' ? null : $this->date($until);
-        if ($from <= (new DateTimeImmutable('today', new DateTimeZone('Europe/Berlin')))->format('Y-m-d')) { throw new InvalidArgumentException('Neue Arbeitszeitregeln duerfen ausschliesslich ab einem zukuenftigen Datum gelten.'); }
-        if ($until !== null && $until < $from) { throw new InvalidArgumentException('Das Gueltigkeitsende liegt vor dem Beginn.'); }
+        if ($until !== null && $until < $from) {
+            throw new InvalidArgumentException('Das Gültigkeitsende liegt vor dem Beginn.');
+        }
+        $historical = $from <= $this->currentDate();
         $overrides = $input['overrides'] ?? [];
-        if (is_string($overrides)) { $overrides = json_decode($overrides, true, 16, JSON_THROW_ON_ERROR); }
-        if (!is_array($overrides)) { throw new InvalidArgumentException('Individuelle Regeln muessen ein Objekt sein.'); }
+        if (is_string($overrides)) {
+            $overrides = json_decode($overrides, true, 16, JSON_THROW_ON_ERROR);
+        }
         $supervisors = $input['supervisor_user_ids'] ?? [];
-        if (!is_array($supervisors)) { throw new InvalidArgumentException('Vorgesetzte muessen als Liste angegeben werden.'); }
+        if (!is_array($overrides) || !is_array($supervisors)) {
+            throw new InvalidArgumentException('Individuelle Regeln und Vorgesetzte sind ungültig.');
+        }
         $supervisors = array_values(array_unique(array_map(static function (mixed $value): int {
             $id = filter_var($value, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
-            if ($id === false) { throw new InvalidArgumentException('Ungueltiger Vorgesetzter.'); }
+            if ($id === false) {
+                throw new InvalidArgumentException('Ungültiger Vorgesetzter.');
+            }
             return $id;
         }, $supervisors)));
-        if (in_array($userId, $supervisors, true)) { throw new InvalidArgumentException('Ein Mitarbeiter kann nicht sein eigener Vorgesetzter sein.'); }
-        $lock = 'work-time-assignment-user-' . $userId;
-        if ((int) $this->connection->fetchColumn('SELECT GET_LOCK(:name, 10)', ['name' => $lock]) !== 1) { throw new RuntimeException('Die Arbeitszeitzuordnung wird gerade bearbeitet.'); }
-        try {
-            return (new TimesheetWriteGuard($this->connection))->withAccountingWriteLock(fn (): array => $this->connection->transaction(function () use ($userId, $versionId, $from, $until, $overrides, $supervisors, $actorId): array {
-                $this->assertActiveUser($userId);
-                foreach ($supervisors as $supervisor) { $this->assertActiveUser($supervisor); }
-                $version = $this->connection->fetchOne('SELECT v.* FROM work_time_policy_versions v JOIN work_time_policy_templates t ON t.id = v.template_id WHERE v.id = :id AND t.is_active = 1', ['id' => $versionId]);
-                if ($version === null) { throw new InvalidArgumentException('Die aktive Regelversion wurde nicht gefunden.'); }
-                $base = json_decode((string) $version['policy_json'], true, 32, JSON_THROW_ON_ERROR);
-                $normalized = $this->normalizePolicy(array_replace($base, $overrides));
-                // Store only explicitly supplied override fields; old versions remain immutable.
-                $overrides = array_intersect_key($normalized, $overrides);
-                $overlap = $this->connection->fetchAll('SELECT * FROM employee_work_time_assignments WHERE user_id = :user_id AND effective_from <= :end_date AND (effective_to IS NULL OR effective_to >= :start_date) FOR UPDATE', ['user_id' => $userId, 'end_date' => $until ?? '9999-12-31', 'start_date' => $from]);
-                foreach ($overlap as $existing) {
-                    // Appending a later assignment explicitly ends an older open-ended assignment.
-                    if ($existing['effective_to'] === null && (string) $existing['effective_from'] < $from) {
-                        $previousEnd = (new DateTimeImmutable($from))->modify('-1 day')->format('Y-m-d');
-                        $this->connection->execute('UPDATE employee_work_time_assignments SET effective_to = :end_date WHERE id = :id', ['end_date' => $previousEnd, 'id' => $existing['id']]);
-                        $this->audit('assignment_ended', (int) $existing['id'], $actorId, $existing, ['effective_to' => $previousEnd]);
-                    } else { throw new InvalidArgumentException('Die Arbeitszeitzuordnung ueberschneidet sich mit einer vorhandenen Zuordnung.'); }
+        sort($supervisors);
+        if (in_array($userId, $supervisors, true)) {
+            throw new InvalidArgumentException('Ein Mitarbeiter kann nicht sein eigener Vorgesetzter sein.');
+        }
+        $this->assertActiveUser($userId);
+        foreach ($supervisors as $supervisor) {
+            $this->assertActiveUser($supervisor);
+        }
+        $version = $this->connection->fetchOne('SELECT v.*, t.name AS template_name FROM work_time_policy_versions v JOIN work_time_policy_templates t ON t.id = v.template_id WHERE v.id = :id AND t.is_active = 1' . ($write ? ' FOR UPDATE' : ''), ['id' => $versionId]);
+        if ($version === null) {
+            throw new InvalidArgumentException('Die aktive Regelversion wurde nicht gefunden.');
+        }
+        $base = json_decode((string) $version['policy_json'], true, 32, JSON_THROW_ON_ERROR);
+        $policy = $this->normalizePolicy(array_replace($base, $overrides));
+        $overlap = $this->connection->fetchAll(
+            'SELECT * FROM employee_work_time_assignments WHERE user_id = :user_id AND effective_from <= :end_date AND (effective_to IS NULL OR effective_to >= :start_date)'
+            . ($this->hasAssignmentHistory() ? ' AND interval_revision = 0' : '') . ' ORDER BY effective_from, id' . ($write ? ' FOR UPDATE' : ''),
+            ['user_id' => $userId, 'end_date' => $until ?? '9999-12-31', 'start_date' => $from]
+        );
+        $overlap = array_map(fn (array $row): array => $this->assignmentRecord($row), $overlap);
+        if (isset($input['manager_user_id'])) {
+            $managerId = (int) $input['manager_user_id'];
+            $current = $this->assignedPolicyFor($userId, $this->currentDate());
+            if (!in_array($managerId, $current['supervisor_user_ids'] ?? [], true)) {
+                throw new InvalidArgumentException('Die Mitarbeiterzuständigkeit hat sich geändert. Bitte laden Sie die Seite neu.');
+            }
+            foreach ($overlap as $existing) {
+                if (!in_array($managerId, $existing['supervisor_user_ids'], true)) {
+                    throw new InvalidArgumentException('Eine überschneidende Zuordnung liegt außerhalb Ihrer Zuständigkeit.');
                 }
-                $this->connection->execute('INSERT INTO employee_work_time_assignments (user_id, policy_version_id, effective_from, effective_to, overrides_json, created_by_user_id) VALUES (:user_id, :version, :date_from, :date_to, :overrides, :actor)', ['user_id' => $userId, 'version' => $versionId, 'date_from' => $from, 'date_to' => $until, 'overrides' => $this->json($overrides), 'actor' => $actorId]);
-                $id = $this->connection->lastInsertId();
-                foreach ($supervisors as $supervisor) { $this->connection->execute('INSERT INTO employee_work_time_supervisors (assignment_id, user_id) VALUES (:assignment_id, :user_id)', ['assignment_id' => $id, 'user_id' => $supervisor]); }
-                $result = ['id' => $id, 'user_id' => $userId, 'policy_version_id' => $versionId, 'effective_from' => $from, 'effective_to' => $until, 'overrides' => $overrides, 'supervisor_user_ids' => $supervisors];
-                $this->audit('assignment_created', $id, $actorId, null, $result);
-                return $result;
-            }));
-        } finally { $this->connection->fetchColumn('SELECT RELEASE_LOCK(:name)', ['name' => $lock]); }
+            }
+        }
+        return [
+            'action' => 'assign', 'user_id' => $userId, 'policy_version_id' => $versionId,
+            'effective_from' => $from, 'effective_to' => $until, 'impact_from' => $from, 'impact_until' => $until,
+            'overrides' => array_intersect_key($policy, $overrides), 'supervisor_user_ids' => $supervisors,
+            'reason' => $this->reason((string) ($input['reason'] ?? ''), $historical || !empty($input['require_reason'])),
+            'historical' => $historical, 'overlaps' => $overlap,
+            'policy' => $policy + ['policy_version_id' => $versionId, 'assignment_id' => 0, 'revision' => (int) $version['revision']],
+        ];
     }
 
-    public function endAssignment(int $assignmentId, string $effectiveTo, int $actorId, string $reason): void
+    private function endPlan(int $id, string $until, string $reason): array
     {
-        $this->assertSchema();
+        $until = $this->date($until);
+        $assignment = $this->connection->fetchOne('SELECT * FROM employee_work_time_assignments WHERE id = :id' . ($this->hasAssignmentHistory() ? ' AND interval_revision = 0' : ''), ['id' => $id]);
+        if ($assignment === null) {
+            throw new InvalidArgumentException('Die aktive Zuordnung wurde nicht gefunden.');
+        }
+        if ($until < $assignment['effective_from']) {
+            throw new InvalidArgumentException('Das Ende liegt vor dem Zuordnungsbeginn.');
+        }
+        if ($assignment['effective_to'] !== null && $until > $assignment['effective_to']) {
+            throw new InvalidArgumentException('Eine beendete Zuordnung darf nicht verlängert werden.');
+        }
+        return [
+            'action' => 'end_assignment', 'user_id' => (int) $assignment['user_id'], 'assignment' => $this->assignmentRecord($assignment),
+            'effective_to' => $until, 'impact_from' => $this->adjacentDay($until, '+1 day'), 'impact_until' => $assignment['effective_to'],
+            'historical' => $until < $this->currentDate(), 'reason' => $this->reason($reason, true),
+            'overlaps' => [], 'policy' => null,
+        ];
+    }
+
+    private function previewForPlan(array $plan, int $actorId, string $secret): array
+    {
+        if (($plan['historical'] || $plan['overlaps'] !== []) && !$this->hasAssignmentHistory()) {
+            throw new InvalidArgumentException('Bitte zuerst die Zuordnungshistorie migrieren.');
+        }
+        $impact = $this->readImpact($plan, true);
+        $token = $this->signImpact($plan, $impact['source_hash'], $actorId, $secret);
+        unset($impact['source_hash']);
+        return [
+            ...$impact, 'historical' => $plan['historical'],
+            'overlaps' => array_map(static fn (array $row): array => array_intersect_key($row, array_flip(['id', 'policy_version_id', 'effective_from', 'effective_to'])), $plan['overlaps']),
+            'preview_token' => $token,
+        ];
+    }
+
+    private function assertPreview(array $plan, array $input, int $actorId, ?string $secret): void
+    {
+        $provided = $input['preview_token'] ?? null;
+        if ($secret === null || $secret === '' || !is_string($provided) || $provided === ''
+            || ($plan['historical'] && (string) ($input['confirm_impact'] ?? '') !== '1')) {
+            throw new InvalidArgumentException('Bitte die Auswirkungsvorschau prüfen und die rückwirkende Änderung ausdrücklich bestätigen.');
+        }
+        if (($plan['historical'] || $plan['overlaps'] !== []) && !$this->hasAssignmentHistory()) {
+            throw new InvalidArgumentException('Bitte zuerst die Zuordnungshistorie migrieren.');
+        }
+        $impact = $this->readImpact($plan, false);
+        $expected = $this->signImpact($plan, $impact['source_hash'], $actorId, $secret);
+        if (!hash_equals($expected, $provided)) {
+            throw new InvalidArgumentException('Zeiten, Abschlüsse oder Zuordnungen haben sich geändert. Bitte die Auswirkungsvorschau erneut prüfen.');
+        }
+    }
+
+    private function readImpact(array $plan, bool $includeRows): array
+    {
+        $impact = new WorkTimeAssignmentImpact($this->connection, $this, $this->impactPreview, $this->impactPauses);
+        return $impact->inspect($plan['user_id'], $plan['impact_from'], $plan['impact_until'], $plan['policy'], $includeRows);
+    }
+
+    private function signImpact(array $plan, string $sourceHash, int $actorId, string $secret): string
+    {
+        return hash_hmac('sha256', $this->json([$actorId, $plan, $sourceHash]), $secret);
+    }
+
+    private function insertAssignment(array $plan, int $actorId): array
+    {
+        $values = [
+            'user_id' => $plan['user_id'], 'policy_version_id' => $plan['policy_version_id'],
+            'effective_from' => $plan['effective_from'], 'effective_to' => $plan['effective_to'],
+            'overrides_json' => $this->json($plan['overrides']), 'created_by_user_id' => $actorId,
+        ];
+        if ($this->hasAssignmentHistory()) {
+            $values['live_from_unix'] = $plan['live_from_unix'] ?? null;
+            $values['carried_from_assignment_id'] = $plan['carried_from_assignment_id'] ?? null;
+        }
+        $columns = array_keys($values);
+        $this->connection->execute('INSERT INTO employee_work_time_assignments (' . implode(', ', $columns) . ') VALUES (:' . implode(', :', $columns) . ')', $values);
+        $id = $this->connection->lastInsertId();
+        foreach ($plan['supervisor_user_ids'] as $supervisor) {
+            $this->connection->execute('INSERT INTO employee_work_time_supervisors (assignment_id, user_id) VALUES (:assignment_id, :user_id)', ['assignment_id' => $id, 'user_id' => $supervisor]);
+        }
+        unset($values['overrides_json']);
+        return ['id' => $id, ...$values, 'overrides' => $plan['overrides'], 'supervisor_user_ids' => $plan['supervisor_user_ids']];
+    }
+
+    private function withAssignmentLock(int $userId, callable $write): mixed
+    {
+        $lock = 'work-time-assignment-user-' . $userId;
+        if ((int) $this->connection->fetchColumn('SELECT GET_LOCK(:name, 10)', ['name' => $lock]) !== 1) {
+            throw new RuntimeException('Die Arbeitszeitzuordnung wird gerade bearbeitet.');
+        }
+        try {
+            return (new TimesheetWriteGuard($this->connection))->withAccountingWriteLock(function () use ($write): mixed {
+                $this->clearAssignmentCache();
+                try {
+                    return $this->connection->transaction($write);
+                } finally {
+                    $this->clearAssignmentCache();
+                }
+            });
+        } finally {
+            $this->connection->fetchColumn('SELECT RELEASE_LOCK(:name)', ['name' => $lock]);
+        }
+    }
+
+    private function clearAssignmentCache(): void
+    {
         $this->policyCache = [];
         $this->assignmentTimelines = [];
-        $effectiveTo = $this->date($effectiveTo);
+    }
+
+    private function hasAssignmentHistory(): bool
+    {
+        return $this->assignmentHistoryAvailable ??= $this->connection->columnExists('employee_work_time_assignments', 'interval_revision');
+    }
+
+    private function currentDate(): string
+    {
+        return (new DateTimeImmutable('today', new DateTimeZone('Europe/Berlin')))->format('Y-m-d');
+    }
+
+    private function adjacentDay(string $date, string $offset): string
+    {
+        return (new DateTimeImmutable($date, new DateTimeZone('Europe/Berlin')))->modify($offset)->format('Y-m-d');
+    }
+
+    private function reason(string $reason, bool $required): string
+    {
         $reason = trim($reason);
-        if ($reason === '' || mb_strlen($reason) > 2000) { throw new InvalidArgumentException('Bitte eine Begruendung mit hoechstens 2.000 Zeichen angeben.'); }
-        if ($effectiveTo < (new DateTimeImmutable('today', new DateTimeZone('Europe/Berlin')))->format('Y-m-d')) { throw new InvalidArgumentException('Eine Zuordnung darf nicht rueckwirkend beendet werden.'); }
-        $assignment = $this->connection->fetchOne('SELECT user_id FROM employee_work_time_assignments WHERE id = :id', ['id' => $assignmentId]);
-        if ($assignment === null) { throw new InvalidArgumentException('Die Zuordnung wurde nicht gefunden.'); }
-        $lock = 'work-time-assignment-user-' . $assignment['user_id'];
-        if ((int) $this->connection->fetchColumn('SELECT GET_LOCK(:name, 10)', ['name' => $lock]) !== 1) { throw new RuntimeException('Die Arbeitszeitzuordnung wird gerade bearbeitet.'); }
-        try {
-            (new TimesheetWriteGuard($this->connection))->withAccountingWriteLock(fn () => $this->connection->transaction(function () use ($assignmentId, $effectiveTo, $actorId, $reason): void {
-                $before = $this->connection->fetchOne('SELECT * FROM employee_work_time_assignments WHERE id = :id FOR UPDATE', ['id' => $assignmentId]);
-                if ($effectiveTo < $before['effective_from']) { throw new InvalidArgumentException('Das Ende liegt vor dem Zuordnungsbeginn.'); }
-                if ($before['effective_to'] !== null && $effectiveTo > $before['effective_to']) { throw new InvalidArgumentException('Eine beendete Zuordnung darf nicht verlaengert werden.'); }
-                if ($before['effective_to'] === $effectiveTo) { return; }
-                $this->connection->execute('UPDATE employee_work_time_assignments SET effective_to = :end_date WHERE id = :id', ['end_date' => $effectiveTo, 'id' => $assignmentId]);
-                $this->audit('assignment_ended', $assignmentId, $actorId, $before, ['effective_to' => $effectiveTo, 'reason' => $reason]);
-            }));
-        } finally { $this->connection->fetchColumn('SELECT RELEASE_LOCK(:name)', ['name' => $lock]); }
+        if (($required && $reason === '') || mb_strlen($reason) > 2000) {
+            throw new InvalidArgumentException('Bitte eine Begründung mit höchstens 2.000 Zeichen angeben.');
+        }
+        return $reason;
     }
 
     public function policyFor(int $userId, string $date): ?array
     {
-        if (!$this->enabled() || !($this->assignmentSchemaAvailable ??= $this->connection->tableExists('employee_work_time_assignments'))) { return null; }
+        return $this->enabled() ? $this->assignedPolicyFor($userId, $date) : null;
+    }
+
+    public function assignedPolicyFor(int $userId, string $date): ?array
+    {
+        if (!($this->assignmentSchemaAvailable ??= $this->connection->tableExists('employee_work_time_assignments'))) { return null; }
         $cacheKey = $userId . ':' . $date;
         if (array_key_exists($cacheKey, $this->policyCache)) { return $this->policyCache[$cacheKey]; }
         $this->date($date);
         if (!array_key_exists($userId, $this->assignmentTimelines)) {
-            $this->assignmentTimelines[$userId] = $this->connection->fetchAll('SELECT a.*, v.policy_json, v.revision, t.name AS template_name FROM employee_work_time_assignments a JOIN work_time_policy_versions v ON v.id = a.policy_version_id JOIN work_time_policy_templates t ON t.id = v.template_id WHERE a.user_id = :user_id ORDER BY a.effective_from DESC', ['user_id' => $userId]);
+            $this->assignmentTimelines[$userId] = $this->connection->fetchAll('SELECT a.*, v.policy_json, v.revision, t.name AS template_name FROM employee_work_time_assignments a JOIN work_time_policy_versions v ON v.id = a.policy_version_id JOIN work_time_policy_templates t ON t.id = v.template_id WHERE a.user_id = :user_id' . ($this->hasAssignmentHistory() ? ' AND a.interval_revision = 0' : '') . ' ORDER BY a.effective_from DESC', ['user_id' => $userId]);
             foreach ($this->assignmentTimelines[$userId] as &$assignment) { $assignment['supervisor_user_ids'] = $this->supervisors((int) $assignment['id']); }
             unset($assignment);
         }
@@ -188,7 +441,7 @@ final class WorkTimePolicyService
         }
         if ($row === null) { return $this->policyCache[$cacheKey] = null; }
         $policy = array_replace(json_decode((string) $row['policy_json'], true, 32, JSON_THROW_ON_ERROR), json_decode((string) $row['overrides_json'], true, 32, JSON_THROW_ON_ERROR));
-        return $this->policyCache[$cacheKey] = [...$policy, 'id' => (int) $row['policy_version_id'], 'policy_version_id' => (int) $row['policy_version_id'], 'assignment_id' => (int) $row['id'], 'effective_from' => $row['effective_from'], 'effective_to' => $row['effective_to'], 'template_name' => $row['template_name'], 'revision' => (int) $row['revision'], 'supervisor_user_ids' => $row['supervisor_user_ids']];
+        return $this->policyCache[$cacheKey] = [...$policy, 'id' => (int) $row['policy_version_id'], 'policy_version_id' => (int) $row['policy_version_id'], 'assignment_id' => (int) $row['id'], 'effective_from' => $row['effective_from'], 'effective_to' => $row['effective_to'], 'template_name' => $row['template_name'], 'revision' => (int) $row['revision'], 'supervisor_user_ids' => $row['supervisor_user_ids'], 'carried_from_assignment_id' => isset($row['carried_from_assignment_id']) ? (int) $row['carried_from_assignment_id'] : null, 'live_from_unix' => isset($row['live_from_unix']) ? (int) $row['live_from_unix'] : null];
     }
 
     public function preview(array $input): array

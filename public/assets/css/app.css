@@ -74,6 +74,7 @@ button,
 .app-shell {
     min-height: 100vh;
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto 1fr auto;
 }
 
@@ -238,6 +239,7 @@ html[data-theme="dark"] .app-topbar-status.is-missing .app-topbar-status__label 
 
 .app-layout {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 1rem;
     padding: 1rem;
     max-width: 56rem;
@@ -490,6 +492,11 @@ html[data-theme="dark"] .app-topbar-status.is-absence .app-topbar-status__label 
 
 .app-feedback p {
     margin: 0.2rem 0 0;
+}
+
+.app-feedback > div {
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .app-feedback-success {
@@ -849,6 +856,34 @@ html[data-theme="dark"] .app-field textarea {
     border: 1px solid var(--app-line);
     background: var(--app-surface);
     box-shadow: var(--app-shadow);
+}
+
+.app-pause-dialog {
+    max-height: calc(100dvh - 2rem);
+    overflow: auto;
+    grid-template-columns: minmax(0, 1fr);
+    background: var(--app-feedback-surface);
+}
+
+.app-pause-dialog h2 {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.app-pause-dialog [hidden] {
+    display: none;
+}
+
+.app-pause-details p,
+.app-break-assessment p,
+.app-pause-conflicts p {
+    margin: 0;
+}
+
+.app-pause-details .app-stat-row > :first-child,
+.app-break-assessment .app-stat-row > :first-child {
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .app-signature-layer {

@@ -6,7 +6,10 @@ declare(strict_types=1);
 use App\Infrastructure\Database\DatabaseConnection;
 use App\Domain\Calendar\CalendarPolicyService;
 use App\Domain\Settings\CompanySettingsService;
+use App\Domain\TimeAccounts\AccountJournalService;
+use App\Domain\TimeAccounts\EmployeeAccountCutoverService;
 use App\Domain\Timesheets\AppTimesheetSyncService;
+use App\Domain\Timesheets\PausePolicyService;
 use App\Domain\Timesheets\TimesheetCalculator;
 use App\Domain\Timesheets\WorkdayStateCalculator;
 use App\Domain\WorkTime\WorkTimeEventService;
@@ -143,9 +146,11 @@ try {
         ['UI-ADMIN', 'UI', 'Administrator', 'ui-admin@example.test', 'administrator'],
         ['UI-EMPLOYEE', 'UI', 'Mitarbeiter', 'ui-employee@example.test', 'mitarbeiter'],
         ['UI-MATERIAL', 'UI', 'Materialerfassung', 'ui-material@example.test', 'mitarbeiter'],
+        ['UI-PAUSE-CONTROLS', 'UI', 'Pausenerfassung', 'ui-pause-controls@example.test', 'mitarbeiter'],
         ['UI-PAGINATION', 'UI', 'Pagination', 'ui-pagination@example.test', 'mitarbeiter'],
         ['UI-WORKTIME-CONTINUE', 'UI', 'Weiterarbeit', 'ui-worktime-continue@example.test', 'mitarbeiter'],
         ['UI-WORKTIME-CONFIRM', 'UI', 'Endbestaetigung', 'ui-worktime-confirm@example.test', 'mitarbeiter'],
+        ['UI-WORKTIME-HISTORY', 'UI', 'Historische Kernzeit', 'ui-worktime-history@example.test', 'mitarbeiter'],
         ['UI-HARDENING-EMPLOYEE', 'UI', 'Hardening Ablauf', 'ui-hardening-employee@example.test', 'mitarbeiter'],
         ['UI-HARDENING-PAUSE', 'UI', 'Hardening Pausennachweis', 'ui-hardening-pause@example.test', 'mitarbeiter'],
         ['UI-HARDENING-OFF', 'UI', 'Hardening Deaktiviert', 'ui-hardening-off@example.test', 'mitarbeiter'],
@@ -178,6 +183,19 @@ try {
     }
 
     $adminId = $userIds['ui-admin@example.test'];
+    $pauseEmployeeId = $userIds['ui-pause-controls@example.test'];
+    $pauseShiftStart = new DateTimeImmutable('-3 hours');
+    $pausePolicies = new PausePolicyService($connection);
+    $pauseTemplate = $pausePolicies->createTemplate(['name' => 'UI Pausenmodell Stempeluhr', 'policy' => ['capture_mode' => 'stamped']], $adminId);
+    $pauseAssignment = $pausePolicies->assign([
+        'user_id' => $pauseEmployeeId,
+        'policy_version_id' => $pauseTemplate['version']['id'],
+        'effective_from' => (new DateTimeImmutable('tomorrow'))->format('Y-m-d'),
+        'reason' => 'Isolierter Browser-Test für tatsächliche Pausen',
+    ], $adminId);
+    $connection->execute('UPDATE employee_pause_policy_assignments SET effective_from = :fixture_date WHERE id = :id', [
+        'fixture_date' => $pauseShiftStart->format('Y-m-d'), 'id' => $pauseAssignment['id'],
+    ]);
     $employeeId = $userIds['ui-employee@example.test'];
     $paginationUserId = $userIds['ui-pagination@example.test'];
     // This feature-enabled server contains only synthetic data. Existing UI users
@@ -205,6 +223,24 @@ try {
     if ($workTimeSummary['proposals'] !== 2 || $workTimeSummary['errors'] !== 0) {
         throw new RuntimeException('Arbeitszeitfenster-UI-Fixture konnte keine zwei offenen Vorschlaege erzeugen.');
     }
+    $historyEmployeeId = $userIds['ui-worktime-history@example.test'];
+    $historyWorkDate = $workTimeNow->modify('-4 days')->format('Y-m-d');
+    $historyTemplate = $workTimePolicies->createTemplate(['name' => 'UI Historischer Referenzplan', 'policy' => [
+        'windows' => array_fill(1, 7, [['start' => '08:00', 'end' => '16:00']]),
+    ]], $adminId);
+    $connection->execute('INSERT INTO timesheets (user_id, work_date, start_time, end_time, entry_type, source, gross_minutes, break_minutes, net_minutes) VALUES (:user_id, :work_date, "07:42:00", "16:35:00", "work", "app", 533, 30, 503)', ['user_id' => $historyEmployeeId, 'work_date' => $historyWorkDate]);
+    $historyBookingId = $connection->lastInsertId();
+    $connection->execute('INSERT INTO timesheet_breaks (timesheet_id, user_id, break_started_at, break_ended_at, source) VALUES (:booking, :user, :started, :ended, "app")', [
+        'booking' => $historyBookingId, 'user' => $historyEmployeeId, 'started' => $historyWorkDate . ' 12:00:00', 'ended' => $historyWorkDate . ' 12:30:00',
+    ]);
+    $historyCutover = new EmployeeAccountCutoverService($connection, new AccountJournalService($connection));
+    $historyCutover->finalize([
+        'user_id' => $historyEmployeeId, 'effective_from' => $workTimeNow->format('Y-m-d'), 'opening_time_balance' => '+01:30',
+        'leave_year' => (int) $workTimeNow->format('Y'), 'annual_leave_entitlement_days' => 30, 'opening_remaining_leave_days' => 20,
+    ], $adminId);
+    $connection->execute('INSERT INTO timesheets (user_id, work_date, start_time, end_time, entry_type, source, gross_minutes, break_minutes, net_minutes) VALUES (:user_id, :work_date, "07:42:00", "08:10:00", "work", "app", 28, 0, 28)', [
+        'user_id' => $historyEmployeeId, 'work_date' => $workTimeNow->format('Y-m-d'),
+    ]);
     $hardeningDate = (new DateTimeImmutable('yesterday'))->format('Y-m-d');
     $hardeningTemplate = $workTimePolicies->createTemplate(['name' => 'UI Hardening 08 bis 16', 'policy' => [
         'windows' => array_fill(1, 7, [['start' => '08:00', 'end' => '16:00']]),
@@ -429,6 +465,12 @@ try {
         'UI_TEST_MATERIAL_EMAIL' => 'ui-material@example.test',
         'UI_TEST_MATERIAL_PROJECT_A' => (string) $materialProjects['A'],
         'UI_TEST_MATERIAL_PROJECT_B' => (string) $materialProjects['B'],
+        'UI_TEST_PAUSE_WORK_DATE' => $pauseShiftStart->format('Y-m-d'),
+        'UI_TEST_PAUSE_WORK_START' => $pauseShiftStart->format('H:i'),
+        'UI_TEST_PAUSE_FIRST_START' => $pauseShiftStart->modify('+30 minutes')->format('Y-m-d\TH:i'),
+        'UI_TEST_PAUSE_FIRST_END' => $pauseShiftStart->modify('+45 minutes')->format('Y-m-d\TH:i'),
+        'UI_TEST_PAUSE_SECOND_START' => $pauseShiftStart->modify('+60 minutes')->format('Y-m-d\TH:i'),
+        'UI_TEST_PAUSE_SECOND_END' => $pauseShiftStart->modify('+90 minutes')->format('Y-m-d\TH:i'),
         'UI_TEST_EMPLOYEE_EMAIL' => 'ui-employee@example.test',
         'UI_TEST_EMPLOYEE_PASSWORD' => $password,
         'UI_TEST_EMPLOYEE_ID' => (string) $employeeId,
@@ -451,6 +493,10 @@ try {
         'UI_TEST_WORKTIME_WORK_DATE' => $workTimeStart->format('Y-m-d'),
         'UI_TEST_WORKTIME_END' => $workTimeEnd->format('H:i:s'),
         'UI_TEST_WORKTIME_NOW_END' => $workTimeNow->format('H:i'),
+        'UI_TEST_WORKTIME_HISTORY_USER_ID' => (string) $historyEmployeeId,
+        'UI_TEST_WORKTIME_HISTORY_VERSION_ID' => (string) $historyTemplate['version']['id'],
+        'UI_TEST_WORKTIME_HISTORY_DATE' => $historyWorkDate,
+        'UI_TEST_WORKTIME_HISTORY_BOOKING_ID' => (string) $historyBookingId,
         'UI_TEST_HARDENING_DATE' => $hardeningDate,
         'UI_TEST_HARDENING_FUTURE_DATE' => (new DateTimeImmutable('tomorrow'))->format('Y-m-d'),
         'UI_TEST_HARDENING_VERSION_ID' => (string) $hardeningTemplate['version']['id'],
@@ -467,13 +513,16 @@ try {
         'tests/e2e/work-time-hardening.real.spec.js',
         'tests/e2e/admin-project-forms.real.spec.js',
         'tests/e2e/project-material-context.real.spec.js',
+        'tests/e2e/pause-models.real.spec.js',
+        'tests/e2e/pause-controls.real.spec.js',
     ];
     $selectedSpec = trim((string) getenv('UI_REAL_TEST_SPEC'));
     if ($selectedSpec !== '') {
         if (!in_array($selectedSpec, $realSpecs, true)) { throw new RuntimeException('Unbekannte isolierte Browser-Testdatei.'); }
         $realSpecs = [$selectedSpec];
     }
-    fwrite(STDOUT, $run([$playwright, 'test', ...$realSpecs, '--trace=retain-on-failure', '--output=' . $outputDirectory], $playwrightEnvironment));
+    $browserConfig = getenv('UI_REAL_TEST_BROWSER') === 'webkit' ? ['--config=playwright.webkit.config.js'] : [];
+    fwrite(STDOUT, $run([$playwright, 'test', ...$browserConfig, ...$realSpecs, '--trace=retain-on-failure', '--output=' . $outputDirectory], $playwrightEnvironment));
     $exitCode = 0;
 } catch (Throwable $exception) {
     fwrite(STDERR, $exception->getMessage() . PHP_EOL);

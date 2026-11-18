@@ -1106,6 +1106,9 @@ HTML;
                 $this->authService->currentUser() ?? [], (int) $user['id']
             ))
             : '';
+        $pausePolicyLink = $isEdit && ($this->authService->hasPermission('pause_policies.view') || $this->authService->hasPermission('pause_policies.manage'))
+            ? '<p class="full-span"><a class="button button-secondary" href="/admin/work-time?user_id=' . (int) $user['id'] . '#pausenmodelle">Pausenregeln des Mitarbeiters</a></p>'
+            : '';
 
         foreach ($roles as $role) {
             $roleId = (int) ($role['id'] ?? 0);
@@ -1159,6 +1162,7 @@ HTML;
     <div{$this->fieldWrapperClass($formErrors, 'target_hours_month')}><label for="target_hours_month">Sollstunden / Monat</label><input id="target_hours_month" name="target_hours_month" type="number" step="0.01" value="{$this->field($user, 'target_hours_month')}"{$this->fieldInvalidAttribute($formErrors, 'target_hours_month')}>{$this->fieldErrorMarkup($formErrors, 'target_hours_month')}</div>
     <div{$this->fieldWrapperClass($formErrors, 'target_hours_week')}><label for="target_hours_week">Sollstunden / Woche</label><input id="target_hours_week" name="target_hours_week" type="number" step="0.01" value="{$this->field($user, 'target_hours_week')}"{$this->fieldInvalidAttribute($formErrors, 'target_hours_week')}><p class="muted">Bei Wochensoll ist ein Wert groesser als 0 erforderlich. Fuer die Zeitkontoberechnung wird dann das Wochensoll verwendet; das Monatssoll bleibt als gueltiger Stammdatenwert gespeichert.</p>{$this->fieldErrorMarkup($formErrors, 'target_hours_week')}</div>
     {$workTimeSummary}
+    {$pausePolicyLink}
     <div{$this->fieldWrapperClass($formErrors, 'vacation_days_year')}><label for="vacation_days_year">Jahresurlaub</label><input id="vacation_days_year" name="vacation_days_year" type="number" step="0.5" value="{$this->field($user, 'vacation_days_year')}"{$this->fieldInvalidAttribute($formErrors, 'vacation_days_year')}>{$this->fieldErrorMarkup($formErrors, 'vacation_days_year')}</div>
     <div{$this->fieldWrapperClass($formErrors, 'vacation_carryover_days')}><label for="vacation_carryover_days">Urlaubsuebertrag</label><input id="vacation_carryover_days" name="vacation_carryover_days" type="number" step="0.5" value="{$this->field($user, 'vacation_carryover_days')}"{$this->fieldInvalidAttribute($formErrors, 'vacation_carryover_days')}>{$this->fieldErrorMarkup($formErrors, 'vacation_carryover_days')}</div>
     <div class="full-span field-group{$this->fieldGroupErrorClass($formErrors, 'workdays_mask')}" role="group" aria-labelledby="workdays_mask_label"{$this->fieldInvalidAttribute($formErrors, 'workdays_mask')}>

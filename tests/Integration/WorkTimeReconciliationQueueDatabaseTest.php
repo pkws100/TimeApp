@@ -175,6 +175,10 @@ final class WorkTimeReconciliationQueueDatabaseTest extends MariaDbTestCase
             proc_terminate($process, 9);
             fclose($pipes[1]); fclose($pipes[2]);
             proc_close($process); $process = null;
+            // MariaDB can release the worker lock after the local process has exited.
+            $lock = ['name' => $queue->workerLockName()];
+            self::assertSame(1, (int) $this->connection()->fetchColumn('SELECT GET_LOCK(:name, 5)', $lock));
+            self::assertSame(1, (int) $this->connection()->fetchColumn('SELECT RELEASE_LOCK(:name)', $lock));
             $recovered = $queue->processBatch();
             self::assertSame(1, $recovered['recovered']);
             self::assertSame(1, $recovered['processed']);

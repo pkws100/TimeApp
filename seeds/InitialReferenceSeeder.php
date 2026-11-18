@@ -12,6 +12,8 @@ final class InitialReferenceSeeder extends AbstractSeed
     public static function permissions(): array
     {
         return [
+            ['code' => 'pause_policies.view', 'label' => 'Pausenmodelle ansehen', 'scope' => 'timesheets'],
+            ['code' => 'pause_policies.manage', 'label' => 'Pausenmodelle verwalten', 'scope' => 'timesheets'],
             ['code' => 'work_time_policies.view', 'label' => 'Arbeitszeitfenster ansehen', 'scope' => 'timesheets'],
             ['code' => 'work_time_policies.manage', 'label' => 'Arbeitszeitfenster verwalten', 'scope' => 'timesheets'],
             ['code' => 'work_time_deviations.view', 'label' => 'Arbeitszeitabweichungen ansehen', 'scope' => 'timesheets'],

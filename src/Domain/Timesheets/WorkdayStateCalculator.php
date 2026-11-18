@@ -13,7 +13,7 @@ final class WorkdayStateCalculator
         $currentBreak = null;
 
         foreach ($breaks as $break) {
-            if (($break['break_ended_at'] ?? null) === null || ($break['break_ended_at'] ?? '') === '') {
+            if (!empty($break['break_started_at']) && empty($break['break_ended_at'])) {
                 $currentBreak = $break;
             }
         }
@@ -23,19 +23,24 @@ final class WorkdayStateCalculator
 
     public function completedBreakMinutes(array $breaks): int
     {
-        $minutes = 0;
+        return intdiv($this->completedBreakSeconds($breaks), 60);
+    }
+
+    public function completedBreakSeconds(array $breaks): int
+    {
+        $seconds = 0;
 
         foreach ($breaks as $break) {
-            $minutes += $this->breakDurationMinutes($break);
+            $seconds += $this->breakDurationSeconds($break);
         }
 
-        return $minutes;
+        return $seconds;
     }
 
     public function effectiveBreakMinutes(?array $workEntry, array $breaks): int
     {
         foreach ($breaks as $break) {
-            if (($break['break_ended_at'] ?? null) !== null && ($break['break_ended_at'] ?? '') !== '') {
+            if (!empty($break['break_ended_at']) || (empty($break['break_started_at']) && !empty($break['duration_minutes']))) {
                 return $this->completedBreakMinutes($breaks);
             }
         }
@@ -45,6 +50,14 @@ final class WorkdayStateCalculator
 
     public function breakDurationMinutes(array $break): int
     {
+        return intdiv($this->breakDurationSeconds($break), 60);
+    }
+
+    private function breakDurationSeconds(array $break): int
+    {
+        if (empty($break['break_started_at']) && empty($break['break_ended_at'])) {
+            return max(0, (int) ($break['duration_minutes'] ?? 0)) * 60;
+        }
         $startedAt = $this->parseDateTime($break['break_started_at'] ?? null);
         $endedAt = $this->parseDateTime($break['break_ended_at'] ?? null);
 
@@ -52,7 +65,7 @@ final class WorkdayStateCalculator
             return 0;
         }
 
-        return (int) floor(($endedAt->getTimestamp() - $startedAt->getTimestamp()) / 60);
+        return $endedAt->getTimestamp() - $startedAt->getTimestamp();
     }
 
     public function status(?array $workEntry, ?array $statusEntry, ?array $currentBreak): string

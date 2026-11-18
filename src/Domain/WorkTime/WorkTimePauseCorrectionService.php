@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\WorkTime;
 
 use App\Domain\Timesheets\TimesheetAuditService;
+use App\Domain\Timesheets\TimesheetPauseService;
 use App\Domain\Timesheets\TimesheetWriteGuard;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
@@ -21,7 +22,8 @@ final class WorkTimePauseCorrectionService
         private DatabaseConnection $connection,
         private WorkTimePolicyService $policies,
         private WorkTimePreviewService $preview,
-        ?TimesheetWriteGuard $guard = null
+        ?TimesheetWriteGuard $guard = null,
+        private ?TimesheetPauseService $pauses = null
     ) {
         $this->guard = $guard ?? new TimesheetWriteGuard($connection);
     }
@@ -30,6 +32,9 @@ final class WorkTimePauseCorrectionService
     {
         $entry = $this->entry($timesheetId, $forUpdate);
         $breaks = $this->breaks($timesheetId, $forUpdate);
+        $pauseModel = $this->pauses?->snapshot($timesheetId);
+        $durationRecords = $this->pauses?->unplacedDurations($timesheetId) ?? [];
+        $durationSeconds = array_sum(array_column($durationRecords, 'duration_minutes')) * 60;
         $policy = $this->policies->policyFor((int) $entry['user_id'], (string) $entry['work_date']);
         $calculation = $this->preview->forTimesheet($entry, $policy)['calculation'];
         $documentedSeconds = 0;
@@ -61,11 +66,11 @@ final class WorkTimePauseCorrectionService
             $block = $exception->getMessage();
         }
         $signed = $this->hasActiveSignature($timesheetId, $forUpdate);
-        if (!$this->policies->enabled()) {
+        if (!$this->policies->enabled() && $pauseModel === null) {
             $block = 'Arbeitszeitfenster sind global deaktiviert.';
         } elseif (!$this->auditAvailable()) {
             $block = 'Die Migration fuer revisionsfaehige Pausennachweise wurde noch nicht angewendet.';
-        } elseif ($policy === null) {
+        } elseif ($policy === null && $pauseModel === null) {
             $block = 'Fuer den Originalarbeitstag besteht keine individuelle Arbeitszeitregel.';
         } elseif ((int) ($entry['is_deleted'] ?? 0) === 1 || $entry['entry_type'] !== 'work') {
             $block = 'Archivierte Buchungen und Abwesenheiten werden hier nicht bearbeitet.';
@@ -79,17 +84,19 @@ final class WorkTimePauseCorrectionService
         } catch (InvalidArgumentException $exception) {
             $block = $exception->getMessage();
         }
-        $missing = max(0, (int) $entry['break_minutes'] * 60 - $documentedSeconds);
+        $missing = $pauseModel !== null ? $durationSeconds : max(0, (int) $entry['break_minutes'] * 60 - $documentedSeconds);
         if ($block === '' && $missing === 0) {
             $block = 'Die gespeicherte Pausendauer ist bereits vollstaendig belegt. Vorhandene Intervalle werden in diesem Nachweisweg nicht ersetzt.';
         }
-        $snapshot = ['timesheet' => $entry, 'breaks' => $breaks, 'calculation' => $calculation];
-        $source = ['timesheet' => $entry, 'breaks' => $breaks, 'signed' => $signed, 'policy_version_id' => $policy['policy_version_id'] ?? null];
+        $snapshot = ['timesheet' => $entry, 'breaks' => $breaks, 'calculation' => $calculation, 'duration_records' => $durationRecords];
+        $source = ['timesheet' => $entry, 'breaks' => $breaks, 'signed' => $signed, 'policy_version_id' => $policy['policy_version_id'] ?? null, 'duration_records' => $durationRecords];
 
         return [
             ...$snapshot,
             'stored_break_minutes' => (int) $entry['break_minutes'],
-            'documented_break_minutes' => round($documentedSeconds / 60, 2),
+            'documented_break_minutes' => round(($documentedSeconds + $durationSeconds) / 60, 2),
+            'break_assessment' => $pauseModel === null ? null : $this->pauses->assessmentForDay((int) $entry['user_id'], $entry['work_date']),
+            'pause_model_version_id' => $pauseModel['version_id'] ?? null,
             'missing_break_minutes' => round($missing / 60, 2),
             'clarification_reason' => $calculation['clarification_reason'] ?? ($missing > 0 ? 'Die Lage der gespeicherten Pausendauer ist noch nicht vollstaendig belegt.' : 'Die gespeicherte Pausendauer ist durch konkrete Intervalle belegt; offene Aussenzeiten werden separat geprueft.'),
             'can_document' => $block === '', 'blocked_reason' => $block, 'has_active_signature' => $signed,
@@ -100,7 +107,7 @@ final class WorkTimePauseCorrectionService
 
     public function listForUser(int $userId, string $dateFrom, string $dateTo): array
     {
-        if (!$this->policies->enabled()) {
+        if (!$this->policies->enabled() && $this->pauses === null) {
             return [];
         }
         $this->date($dateFrom);
@@ -112,7 +119,8 @@ final class WorkTimePauseCorrectionService
         $result = [];
         foreach ($rows as $row) {
             $detail = $this->details((int) $row['id']);
-            if (($detail['calculation']['calculation_status'] ?? '') === 'needs_clarification' || $detail['history'] !== []) {
+            if (($detail['calculation']['calculation_status'] ?? '') === 'needs_clarification' || $detail['history'] !== []
+                || $detail['duration_records'] !== [] || ($detail['break_assessment']['calculation_status'] ?? '') === 'needs_clarification') {
                 $result[] = $detail;
             }
         }
@@ -122,7 +130,7 @@ final class WorkTimePauseCorrectionService
     /** Calling controllers must additionally authorize both employee scope and timesheet management. */
     public function document(int $timesheetId, array $intervals, int $actorId, string $reason, string $requestId, string $sourceToken): array
     {
-        if (!$this->policies->enabled()) {
+        if (!$this->policies->enabled() && $this->pauses?->snapshot($timesheetId) === null) {
             throw new InvalidArgumentException('Arbeitszeitfenster sind global deaktiviert.');
         }
         if (!$this->auditAvailable()) {
@@ -183,11 +191,18 @@ final class WorkTimePauseCorrectionService
                 }
                 $this->assertNoOverlap($all);
                 $seconds = array_sum(array_map(static fn (array $i): int => $i[1] - $i[0], $all));
-                if ($seconds !== (int) $entry['break_minutes'] * 60) {
+                $newSeconds = array_sum(array_map(static fn (array $interval): int => WorkTimeLocalTime::parse($interval['end'])->getTimestamp() - WorkTimeLocalTime::parse($interval['start'])->getTimestamp(), $normalized));
+                $matches = $before['pause_model_version_id'] !== null
+                    ? $newSeconds === array_sum(array_column($before['duration_records'], 'duration_minutes')) * 60
+                    : $seconds === (int) $entry['break_minutes'] * 60;
+                if (!$matches) {
                     throw new InvalidArgumentException('Die belegten Pausen muessen zusammen exakt der gespeicherten Dauer von ' . (int) $entry['break_minutes'] . ' Minuten entsprechen. Rechnerische Abzuege duerfen nicht als tatsaechliche Pause unterstellt werden.');
                 }
                 foreach ($normalized as $interval) {
                     $this->connection->execute('INSERT INTO timesheet_breaks (timesheet_id, user_id, break_started_at, break_ended_at, source, note, created_at, updated_at) VALUES (:timesheet, :user_id, :starts_at, :ends_at, "admin_evidence", :note, NOW(), NOW())', ['timesheet' => $timesheetId, 'user_id' => $entry['user_id'], 'starts_at' => $interval['start'], 'ends_at' => $interval['end'], 'note' => mb_substr('Nachweis: ' . $reason, 0, 255)]);
+                }
+                if ($before['duration_records'] !== []) {
+                    $this->pauses->markDurationsPlaced($timesheetId);
                 }
                 $after = $this->details($timesheetId);
                 $this->connection->execute('INSERT INTO work_time_pause_corrections (timesheet_id, user_id, actor_user_id, request_id, reason, source_token, intervals_json, before_json, after_json) VALUES (:timesheet, :user_id, :actor, :request_id, :reason, :source_token, :intervals, :before_json, :after_json)', ['timesheet' => $timesheetId, 'user_id' => $entry['user_id'], 'actor' => $actorId, 'request_id' => $requestId, 'reason' => $reason, 'source_token' => $sourceToken, 'intervals' => $this->json($normalized), 'before_json' => $this->json($this->snapshot($before)), 'after_json' => $this->json($this->snapshot($after))]);
@@ -242,7 +257,7 @@ final class WorkTimePauseCorrectionService
 
     private function snapshot(array $details): array
     {
-        return array_intersect_key($details, array_flip(['timesheet', 'breaks', 'calculation', 'stored_break_minutes', 'documented_break_minutes', 'missing_break_minutes', 'clarification_reason', 'has_active_signature']));
+        return array_intersect_key($details, array_flip(['timesheet', 'breaks', 'calculation', 'stored_break_minutes', 'documented_break_minutes', 'missing_break_minutes', 'clarification_reason', 'has_active_signature', 'duration_records', 'break_assessment']));
     }
 
     private function date(string $value): void

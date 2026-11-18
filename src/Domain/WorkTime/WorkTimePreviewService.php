@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace App\Domain\WorkTime;
 
 use App\Domain\Timesheets\TimesheetWriteGuard;
+use App\Domain\Timesheets\TimesheetPauseService;
+use App\Domain\Timesheets\PauseAssessmentCalculator;
+use App\Domain\Timesheets\WorkdayStateCalculator;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
 use DateTimeZone;
@@ -14,6 +17,7 @@ use InvalidArgumentException;
 final class WorkTimePreviewService
 {
     private WorkTimeWindowCalculator $calculator;
+    private ?TimesheetPauseService $pauses = null;
 
     public function __construct(private DatabaseConnection $connection, private WorkTimePolicyService $policies, ?WorkTimeWindowCalculator $calculator = null)
     {
@@ -21,6 +25,11 @@ final class WorkTimePreviewService
     }
 
     public function enabled(): bool { return $this->policies->enabled(); }
+
+    public function setPauseService(TimesheetPauseService $service): void
+    {
+        $this->pauses = $service;
+    }
 
     public function forUserPeriod(int $userId, string $dateFrom, string $dateTo): array
     {
@@ -55,12 +64,23 @@ final class WorkTimePreviewService
             $policy ??= $this->policies->policyFor((int) $entry['user_id'], (string) $entry['work_date']);
         }
         $row = ['timesheet_id' => (int) $entry['id'], 'user_id' => (int) $entry['user_id'], 'work_date' => $entry['work_date'], 'policy' => $policy, 'recorded_net_minutes' => (int) ($entry['net_minutes'] ?? 0), 'calculation_hash' => null];
+        $breaks = $sourceData['breaks'] ?? $this->connection->fetchAll('SELECT break_started_at, break_ended_at FROM timesheet_breaks WHERE timesheet_id = :id ORDER BY break_started_at, id', ['id' => $entry['id']]);
+        $durationRecords = $sourceData['duration_breaks'] ?? $this->pauses?->unplacedDurations((int) $entry['id']) ?? [];
+        $pauseModel = $sourceData['pause_model'] ?? $this->pauses?->snapshot((int) $entry['id']);
         if ($policy === null) {
-            $row['calculation'] = ['actual_work_minutes' => (int) ($entry['net_minutes'] ?? 0), 'inside_window_minutes' => (int) ($entry['net_minutes'] ?? 0), 'outside_before_minutes' => 0, 'outside_after_minutes' => 0, 'outside_gap_minutes' => 0, 'outside_pending_minutes' => 0, 'outside_approved_minutes' => 0, 'outside_rejected_minutes' => 0, 'outside_disputed_minutes' => 0, 'accountable_work_minutes' => (int) ($entry['net_minutes'] ?? 0), 'calculation_status' => 'no_policy', 'unresolved' => false, 'preview_only' => true, 'outside_segments' => []];
+            $documented = [...$breaks, ...$durationRecords];
+            $known = (new WorkdayStateCalculator())->completedBreakMinutes($documented);
+            $legacy = $pauseModel === null ? max(0, (int) ($entry['break_minutes'] ?? 0) - $known) : 0;
+            $assessment = (new PauseAssessmentCalculator())->assess([$entry + ['breaks' => $documented, 'legacy_deduction_minutes' => $legacy]], $pauseModel ?? []);
+            $row['calculation'] = ['actual_work_minutes' => empty($entry['end_time']) ? null : $assessment['actual_work_minutes'], 'inside_window_minutes' => 0, 'outside_before_minutes' => 0, 'outside_after_minutes' => 0, 'outside_gap_minutes' => 0, 'outside_pending_minutes' => 0, 'outside_approved_minutes' => 0, 'outside_rejected_minutes' => 0, 'outside_disputed_minutes' => 0, 'accountable_work_minutes' => (int) ($entry['net_minutes'] ?? 0), 'calculation_status' => 'no_policy', 'unresolved' => false, 'preview_only' => true, 'outside_segments' => [], 'documented_break_minutes' => $assessment['documented_break_minutes'], 'unplaced_break_minutes' => $assessment['unplaced_break_minutes'] + $legacy];
             return $row;
         }
-        $breaks = $sourceData['breaks'] ?? $this->connection->fetchAll('SELECT break_started_at, break_ended_at FROM timesheet_breaks WHERE timesheet_id = :id ORDER BY break_started_at, id', ['id' => $entry['id']]);
-        $hash = hash('sha256', json_encode(['id' => (int) $entry['id'], 'date' => $entry['work_date'], 'start' => $entry['start_time'], 'end' => $entry['end_time'], 'break_minutes' => (int) $entry['break_minutes'], 'net_minutes' => (int) $entry['net_minutes'], 'breaks' => $breaks, 'source_revision' => $entry['work_time_source_revision'] ?? null, 'policy' => array_intersect_key($policy, array_flip(['windows', 'timezone', 'early_check_in_mode', 'policy_version_id', 'assignment_id']))], JSON_THROW_ON_ERROR));
+        $calculationPolicy = array_intersect_key($policy, array_flip(['windows', 'timezone', 'early_check_in_mode', 'policy_version_id', 'assignment_id']));
+        if (isset($policy['carried_from_assignment_id'])) {
+            // A temporary override leaves the resumed policy and existing decisions intact.
+            $calculationPolicy['assignment_id'] = $policy['carried_from_assignment_id'];
+        }
+        $hash = hash('sha256', json_encode(['id' => (int) $entry['id'], 'date' => $entry['work_date'], 'start' => $entry['start_time'], 'end' => $entry['end_time'], 'break_minutes' => (int) $entry['break_minutes'], 'net_minutes' => (int) $entry['net_minutes'], 'breaks' => $breaks, 'source_revision' => $entry['work_time_source_revision'] ?? null, 'policy' => $calculationPolicy, ...($durationRecords === [] ? [] : ['duration_breaks' => $durationRecords])], JSON_THROW_ON_ERROR));
         $row['calculation_hash'] = $hash;
         $fallback = ['actual_work_minutes' => null, 'inside_window_minutes' => null, 'outside_before_minutes' => null, 'outside_after_minutes' => null, 'outside_gap_minutes' => null, 'outside_pending_minutes' => null, 'outside_approved_minutes' => null, 'outside_rejected_minutes' => null, 'outside_disputed_minutes' => null, 'accountable_work_minutes' => null, 'calculation_status' => 'needs_clarification', 'unresolved' => true, 'preview_only' => true, 'outside_segments' => []];
         if (empty($entry['start_time']) || empty($entry['end_time'])) {
@@ -85,8 +105,11 @@ final class WorkTimePreviewService
                     // Legacy break_minutes also includes automatic legal deductions. Without
                     // interval evidence we cannot label the resulting net as proven actual work.
                     $row['calculation']['duration_based_work_minutes'] = $row['calculation']['actual_work_minutes'];
-                    $row['calculation']['actual_work_minutes'] = null;
-                    $row['calculation']['clarification_reason'] = 'Die gespeicherte Pausendauer kann automatische Abzuege enthalten; tatsaechliche Dauer und Lage sind noch zu klaeren.';
+                    $known = $pauseModel !== null || array_sum(array_column($durationRecords, 'duration_minutes')) >= $row['calculation']['unplaced_break_minutes'];
+                    $row['calculation']['actual_work_minutes'] = $pauseModel !== null ? (int) $entry['net_minutes'] : ($known ? $row['calculation']['actual_work_minutes'] : null);
+                    $row['calculation']['clarification_reason'] = $known
+                        ? 'Die Pausendauer ist dokumentiert. Die zeitliche Lage für die Fenstervorschau ist noch offen.'
+                        : 'Die gespeicherte Pausendauer kann automatische Abzuege enthalten; tatsaechliche Dauer und Lage sind noch zu klaeren.';
                 }
             }
         } catch (InvalidArgumentException $error) {
@@ -170,9 +193,11 @@ final class WorkTimePreviewService
         $policy = $entry !== null ? $freshPolicies->policyFor((int) $entry['user_id'], (string) $entry['work_date']) : null;
         $breaks = $entry !== null ? $this->connection->fetchAll('SELECT break_started_at, break_ended_at FROM timesheet_breaks WHERE timesheet_id = :id ORDER BY break_started_at, id', ['id' => $timesheetId]) : [];
         $deviations = $this->connection->fetchAll('SELECT * FROM work_time_deviations WHERE timesheet_id = :id AND superseded_at IS NULL ORDER BY id', ['id' => $timesheetId]);
-        $sourceHash = hash('sha256', json_encode([$entry, $policy, $breaks, $deviations], JSON_THROW_ON_ERROR));
+        $durationBreaks = $entry !== null ? ($this->pauses?->unplacedDurations($timesheetId) ?? []) : [];
+        $pauseModel = $entry !== null ? $this->pauses?->snapshot($timesheetId) : null;
+        $sourceHash = hash('sha256', json_encode([$entry, $policy, $breaks, $deviations, $durationBreaks, $pauseModel], JSON_THROW_ON_ERROR));
 
-        return ['timesheet_id' => $timesheetId, 'entry' => $entry, 'policy' => $policy, 'breaks' => $breaks, 'deviations' => $deviations, 'source_hash' => $sourceHash];
+        return ['timesheet_id' => $timesheetId, 'entry' => $entry, 'policy' => $policy, 'breaks' => $breaks, 'deviations' => $deviations, 'duration_breaks' => $durationBreaks, 'pause_model' => $pauseModel, 'source_hash' => $sourceHash];
     }
 
     /** Worker-only materialization. Reading a preview never creates or changes audit records. */

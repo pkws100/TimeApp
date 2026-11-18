@@ -128,13 +128,15 @@ final class TerminalPunchService
         }
 
         $workDate = (new DateTimeImmutable('today'))->format('Y-m-d');
-        if ($this->syncService->workTimeWindowsEnabled()) {
+        $windowEnabled = $this->syncService->workTimeWindowsEnabled();
+        $pauseModeActive = $this->syncService->hasOpenPauseModelBooking((int) $user['id']);
+        if ($windowEnabled || $pauseModeActive) {
             $presence = $this->syncService->openPresenceForUser((int) $user['id']);
             if ($presence !== null) {
                 $workDate = (string) $presence['work_date'];
             } else {
                 $activeEntries = $this->connection->fetchAll('SELECT id, work_date FROM timesheets WHERE user_id = :user_id AND entry_type = "work" AND start_time IS NOT NULL AND end_time IS NULL AND COALESCE(is_deleted, 0) = 0 ORDER BY work_date, id LIMIT 2', ['user_id' => (int) $user['id']]);
-                if ($activeEntries !== [] && ($this->syncService->workTimeAppliesToUser((int) $user['id'], $workDate) || $this->syncService->workTimeAppliesToUser((int) $user['id'], (string) $activeEntries[0]['work_date']))) {
+                if ($activeEntries !== [] && ($pauseModeActive || $this->syncService->workTimeAppliesToUser((int) $user['id'], $workDate) || $this->syncService->workTimeAppliesToUser((int) $user['id'], (string) $activeEntries[0]['work_date']))) {
                     if (count($activeEntries) > 1) {
                         return $this->failure('ambiguous_work_session', 'Mehrere Arbeitseinsaetze sind offen. Bitte im Admin pruefen.', 409, $terminal, $tag, $user, $projectId, null, $payload);
                     }
@@ -144,7 +146,7 @@ final class TerminalPunchService
         }
         $action = $this->nextAction((int) $user['id'], $workDate);
         $expectedTimesheetId = null;
-        if ($action === 'check_out' && $this->syncService->workTimeWindowsEnabled()) {
+        if ($action === 'check_out' && ($windowEnabled || $pauseModeActive)) {
             $expectedTimesheetId = $this->connection->fetchColumn('SELECT id FROM timesheets WHERE user_id = :user_id AND work_date = :work_date AND entry_type = "work" AND start_time IS NOT NULL AND end_time IS NULL AND COALESCE(is_deleted, 0) = 0 ORDER BY id DESC LIMIT 1', ['user_id' => (int) $user['id'], 'work_date' => $workDate]);
         }
 

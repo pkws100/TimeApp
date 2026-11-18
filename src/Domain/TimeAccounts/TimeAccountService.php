@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\TimeAccounts;
 
 use App\Domain\Calendar\CalendarPolicyService;
+use App\Domain\Timesheets\TimesheetPauseService;
 use App\Domain\WorkTime\WorkTimePreviewService;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateInterval;
@@ -21,6 +22,7 @@ final class TimeAccountService
     private const PER_PAGE_OPTIONS = [25, 50, 75, 100];
 
     private ?WorkTimePreviewService $workTimePreviewService = null;
+    private ?TimesheetPauseService $pauses = null;
 
     public function __construct(
         private DatabaseConnection $connection,
@@ -37,6 +39,11 @@ final class TimeAccountService
     public function setWorkTimePreviewService(WorkTimePreviewService $service): void
     {
         $this->workTimePreviewService = $service;
+    }
+
+    public function setPauseService(TimesheetPauseService $service): void
+    {
+        $this->pauses = $service;
     }
 
     public function monthlyAccount(int $userId, int $year, int $month, ?string $asOfDate = null, bool $includeEntries = false): array
@@ -139,6 +146,14 @@ final class TimeAccountService
             $previewEnd = $targetEnd?->format('Y-m-d') ?? $calculationStart->modify('-1 day')->format('Y-m-d');
             $account = $this->withWorkTimePreview($account, $calculationStart->format('Y-m-d'), $previewEnd, $cutoverDate);
         }
+        if ($this->pauses !== null && $targetEnd !== null) {
+            $days = $this->pauses->assessmentsForPeriod($userId, $cutoverDate ?? $calculationStart->format('Y-m-d'), $targetEnd->format('Y-m-d'));
+            if ($days !== []) {
+                $account['pause_assessment_days'] = $days;
+                $account['balance_is_provisional'] = !empty($account['balance_is_provisional'])
+                    || (bool) array_filter($days, static fn (array $day): bool => $day['actual_work_minutes'] === null || $day['is_running']);
+            }
+        }
 
         return $account;
     }
@@ -188,6 +203,12 @@ final class TimeAccountService
         if (isset($account['work_time_window_preview'])) {
             $account['employee_balance']['is_provisional'] = (bool) ($account['balance_is_provisional'] ?? false);
             $account['employee_balance']['work_time_window_message'] = $account['window_accounting_message'];
+        }
+        if (isset($account['pause_assessment_days'])) {
+            $account['employee_balance']['is_provisional'] = (bool) ($account['balance_is_provisional'] ?? false);
+            if ($account['employee_balance']['is_provisional']) {
+                $account['employee_balance']['pause_accounting_message'] = 'Pausennachweise oder Arbeitseinsätze im Zeitraum benötigen noch eine Klärung.';
+            }
         }
 
         return $account;

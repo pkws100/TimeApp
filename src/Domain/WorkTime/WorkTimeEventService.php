@@ -185,6 +185,9 @@ final class WorkTimeEventService
                             continue;
                         }
                         $startedAt = WorkTimeLocalTime::parse($entry['work_date'] . ' ' . $entry['start_time']);
+                        if ($startedAt->getTimestamp() < (int) ($policy['live_from_unix'] ?? 0)) {
+                            continue;
+                        }
                         if (!empty($policy['outside_window_notifications_enabled'])
                             && WorkTimeEventWindows::startedOutsideAfterWindow($policy, $startedAt)
                             && $startedAt->modify('+' . (int) ($policy['outside_window_delay_minutes'] ?? 5) . ' minutes') <= $now) {

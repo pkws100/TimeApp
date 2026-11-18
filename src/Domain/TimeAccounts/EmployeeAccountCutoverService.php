@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\TimeAccounts;
 
 use App\Domain\Timesheets\TimesheetWriteGuard;
+use App\Domain\Timesheets\TimesheetPauseService;
 use App\Domain\WorkTime\WorkTimePreviewService;
 use App\Infrastructure\Database\DatabaseConnection;
 use App\Support\MpdfFactory;
@@ -24,6 +25,7 @@ final class EmployeeAccountCutoverService
 
     private ?VacationAccountYearService $vacationYearService = null;
     private ?WorkTimePreviewService $workTimePreviewService = null;
+    private ?TimesheetPauseService $pauses = null;
 
     public function setVacationYearService(VacationAccountYearService $vacationYearService): void
     {
@@ -33,6 +35,11 @@ final class EmployeeAccountCutoverService
     public function setWorkTimePreviewService(WorkTimePreviewService $service): void
     {
         $this->workTimePreviewService = $service;
+    }
+
+    public function setPauseService(TimesheetPauseService $service): void
+    {
+        $this->pauses = $service;
     }
 
     public function preview(array $payload): array
@@ -147,6 +154,15 @@ final class EmployeeAccountCutoverService
 
     private function assertWorkTimeWindowsResolved(int $userId, string $effectiveFrom): void
     {
+        $until = (new DateTimeImmutable($effectiveFrom))->modify('-1 day')->format('Y-m-d');
+        $firstPauseDay = $this->pauses?->firstModelDayBefore($userId, $effectiveFrom);
+        if ($firstPauseDay !== null) {
+            foreach ($this->pauses->assessmentsForPeriod($userId, $firstPauseDay, $until) as $day) {
+                if ($day['actual_work_minutes'] === null || $day['is_running']) {
+                    throw new InvalidArgumentException('Vor der Stichtagsfinalisierung muss die tatsächliche Arbeit an Tagen mit ungeklärten Pausennachweisen belegt sein.');
+                }
+            }
+        }
         if (!$this->workTimePreviewService?->enabled()) {
             return;
         }
@@ -157,7 +173,6 @@ final class EmployeeAccountCutoverService
         if (!is_string($firstAssignment) || $firstAssignment === '') {
             return;
         }
-        $until = (new DateTimeImmutable($effectiveFrom))->modify('-1 day')->format('Y-m-d');
         $windowPreview = $this->workTimePreviewService->forUserPeriod($userId, $firstAssignment, $until);
         if (!empty($windowPreview['unresolved'])) {
             throw new InvalidArgumentException('Vor der Stichtagsfinalisierung muessen ungeklärte Aussenzeiten und Pausenzuordnungen im Altzeitraum dokumentiert geklaert werden.');

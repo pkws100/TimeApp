@@ -2,7 +2,13 @@
 
 Optionale Kernarbeitszeit und separater Ereignisworker:
 [WORK_TIME_WINDOWS.md](WORK_TIME_WINDOWS.md). Standardmaessig deaktiviert;
-abweichende Anrechnung bleibt eine ausdrueckliche Vorschau.
+abweichende Anrechnung bleibt eine ausdrueckliche Vorschau. Unter `/admin/work-time`
+koennen historische Zuordnungen begruendet und nach Vorschau bestaetigt werden.
+Der Bereich `/admin/work-time#pausenmodelle` verwaltet eigenstaendige Pausenmodelle
+mit Betriebsstandard, individuellen Regeln und unveraenderlichen Versionen.
+Neue Buchungen unter einer aktiven Regel weisen dokumentierte Pausen, Pflichtdauer
+und fehlende Nachweise separat aus. Vor der Nutzung die drei neuen Phinx-Migrationen
+in Reihenfolge anwenden und die Regel fuer die vorgesehenen Mitarbeiter freigeben.
 
 ## Ueberblick
 Monolithische PHP-Anwendung fuer Admin-Backend, API und mobile Mitarbeiter-WebApp.

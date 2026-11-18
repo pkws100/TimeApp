@@ -20,6 +20,7 @@ test.describe('real revisable account workflow', () => {
     const cutoverForm = page.locator('form[action="/admin/time-accounts/cutovers/preview"]');
     const cutoverUserSelect = cutoverForm.locator('select[name="user_id"]');
     const employeeId = await cutoverUserSelect.locator('option', { hasText: 'UI Mitarbeiter' }).getAttribute('value');
+    const accountRow = page.getByRole('row').filter({ has: page.getByRole('cell', { name: 'UI Mitarbeiter', exact: true }) });
     await cutoverUserSelect.selectOption(employeeId);
     await cutoverForm.locator('input[name="effective_from"]').fill(accountDate('01-01'));
     await cutoverForm.locator('input[name="opening_time_balance"]').fill('0:00');
@@ -40,7 +41,7 @@ test.describe('real revisable account workflow', () => {
     await expect(page.locator('input[name="phone"]')).toHaveValue('+49 123 456');
     await page.goto('/admin/time-accounts');
 
-    const protocolLink = page.getByRole('link', { name: 'Protokoll' }).first();
+    const protocolLink = accountRow.getByRole('link', { name: 'Protokoll' });
     const protocolResponse = await page.context().request.get(await protocolLink.getAttribute('href'));
     expect(protocolResponse.ok()).toBeTruthy();
     expect(protocolResponse.headers()['content-type']).toContain('application/pdf');
@@ -112,7 +113,7 @@ test.describe('real revisable account workflow', () => {
     await expect(balancedVacationRow.getByRole('button', { name: 'Ausgleichen' })).toHaveCount(0);
     await page.goto('/admin/time-accounts');
 
-    const reverseCutover = page.locator('form[action^="/admin/time-accounts/cutovers/"][action$="/reverse"]').first();
+    const reverseCutover = accountRow.locator('form[action^="/admin/time-accounts/cutovers/"][action$="/reverse"]');
     await reverseCutover.locator('input[name="reason"]').fill('Playwright Neuanlage');
     await reverseCutover.getByRole('button', { name: 'Revidieren' }).click();
     await expect(page.getByText('Stichtag wurde revidiert.')).toBeVisible();
@@ -128,12 +129,12 @@ test.describe('real revisable account workflow', () => {
     await page.getByRole('button', { name: 'Stichtag verbindlich finalisieren' }).click();
     await page.locator('details').filter({ hasText: 'opening_balance +15:00' }).locator('summary').click();
     await expect(page.getByText('+15:00').first()).toBeVisible();
-    await page.getByRole('link', { name: 'Detailhistorie' }).click();
+    await accountRow.getByRole('link', { name: 'Detailhistorie' }).click();
     await expect(page.getByRole('heading', { name: 'Detailhistorie' })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Zeitkonto-Journal' })).toBeVisible();
     await page.getByRole('link', { name: 'Zur Zeitkonto-Uebersicht' }).click();
 
-    await page.getByRole('link', { name: 'Stichtagshistorie' }).first().click();
+    await accountRow.getByRole('link', { name: 'Stichtagshistorie' }).click();
     await expect(page.getByRole('heading', { name: 'Stichtagshistorie' })).toBeVisible();
     const historyRows = page.locator('tbody tr');
     await expect(historyRows).toHaveCount(2);

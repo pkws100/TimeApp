@@ -348,7 +348,7 @@ final class TimesheetSignatureService
         return $grouped;
     }
 
-    public function findActiveForTimesheet(int $timesheetId): ?array
+    public function findActiveForTimesheet(int $timesheetId, bool $forUpdate = false): ?array
     {
         if (!$this->connection->tableExists('timesheet_customer_signatures')) {
             return null;
@@ -360,7 +360,7 @@ final class TimesheetSignatureService
              WHERE timesheet_id = :timesheet_id
                AND archived_at IS NULL
              ORDER BY signed_at DESC, id DESC
-             LIMIT 1',
+             LIMIT 1' . ($forUpdate ? ' FOR UPDATE' : ''),
             ['timesheet_id' => $timesheetId]
         );
     }

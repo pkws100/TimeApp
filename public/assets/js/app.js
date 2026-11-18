@@ -2,6 +2,7 @@
     const THEME_KEY = 'app.theme';
     const CHECK_IN_PROJECT_KEY = 'app.checkInProjectId';
     const VIEWED_PROJECT_KEY = 'app.viewedProjectId';
+    const PAUSE_ACTIONS = ['pause_start', 'pause_end', 'pause_record'];
     const TIMESHEET_FILTER_SCOPE_KEY = 'app.timesheetFilterScope';
     const TIMESHEET_FILTER_PROJECT_KEY = 'app.timesheetFilterProjectId';
     const TIMESHEET_FILTER_MONTH_KEY = 'app.timesheetFilterMonth';
@@ -97,6 +98,8 @@
         workTime: null,
         workTimeBusy: false,
         workTimeDrafts: {},
+        pauseSyncUncertain: false,
+        pauseConflicts: [],
         vacationRequests: [],
         vacationLoading: false,
         vacationOffline: false,
@@ -505,6 +508,8 @@
         state.workTime = null;
         state.workTimeBusy = false;
         state.workTimeDrafts = {};
+        state.pauseSyncUncertain = false;
+        state.pauseConflicts = [];
         state.vacationRequests = [];
         state.vacationLoading = false;
         state.vacationOffline = false;
@@ -650,9 +655,11 @@
 
     function closeDialog() {
         const projectAssignment = state.dialog?.type === 'confirm-project-assignment';
+        const pauseTrigger = state.dialog?.type === 'pause-record' ? state.dialog.payload.returnFocus : null;
         state.dialog = null;
         render();
         if (projectAssignment) document.getElementById('assignTimeBookingProject')?.focus();
+        if (pauseTrigger) document.getElementById(pauseTrigger)?.focus({ preventScroll: true });
     }
 
     function friendlyMessage(message, fallback) {
@@ -1081,6 +1088,29 @@
                 + '</div>'
                 + '</section>'
                 + '</div>';
+        }
+
+        if (state.dialog.type === 'pause-record') {
+            const busy = state.pendingAction === 'pause_record' ? ' disabled' : '';
+            const error = state.dialog.error || '';
+            const interval = state.dialog.mode === 'interval';
+            return '<div class="app-dialog-layer">'
+                + '<button type="button" class="app-dialog-overlay" id="dialogCancel" tabindex="-1" aria-label="Dialog schließen"' + busy + '></button>'
+                + '<section class="app-dialog app-pause-dialog" role="dialog" aria-modal="true" aria-labelledby="pauseRecordTitle">'
+                + '<h2 id="pauseRecordTitle">Tatsächlich genommene Pause nachtragen</h2>'
+                + '<form id="pauseRecordForm" class="app-grid">'
+                + '<label class="app-field"><span>Zeitangabe</span><select id="pauseRecordMode"' + busy + '><option value="duration">Nur die Dauer ist bekannt</option><option value="interval"' + (interval ? ' selected' : '') + '>Beginn und Ende sind bekannt</option></select></label>'
+                + '<div id="pauseRecordDurationFields" class="app-grid"' + (interval ? ' hidden' : '') + '>'
+                + '<div class="app-choice-grid">' + [15, 30, 45, 60].map((minutes) => '<button type="button" class="app-button-secondary" data-pause-record-minutes="' + minutes + '"' + busy + '>' + minutes + ' Minuten</button>').join('') + '</div>'
+                + '<label class="app-field"><span>Dauer in Minuten</span><input id="pauseRecordDuration" type="number" inputmode="numeric" min="1" max="1440" step="1"' + (interval ? ' disabled' : ' required' + busy) + '></label>'
+                + '<p class="muted">Die Dauer wird ohne Uhrzeiten dokumentiert.</p></div>'
+                + '<div id="pauseRecordIntervalFields" class="app-grid"' + (interval ? '' : ' hidden') + '>'
+                + '<label class="app-field"><span>Beginn (Europe/Berlin)</span><input id="pauseRecordStart" type="datetime-local"' + (interval ? ' required' + busy : ' disabled') + '></label>'
+                + '<label class="app-field"><span>Ende (Europe/Berlin)</span><input id="pauseRecordEnd" type="datetime-local"' + (interval ? ' required' + busy : ' disabled') + '></label></div>'
+                + (error ? '<p id="pauseRecordError" class="app-empty" role="alert" tabindex="-1">' + escapeHtml(error) + '</p>' : '')
+                + '<div class="app-inline-actions"><button type="submit"' + busy + '>Pause speichern</button>'
+                + '<button type="button" class="app-button-secondary" id="pauseRecordCancel"' + busy + '>Abbrechen</button></div>'
+                + '</form></section></div>';
         }
 
         if (state.dialog.type === 'signature-prompt') {
@@ -1524,7 +1554,7 @@
     }
 
     function currentStatus() {
-        if (hasOpenWorkTimeCarryover()) return 'previous_work_open';
+        if (hasOpenWorkTimeCarryover() || previousPauseEntry()) return 'previous_work_open';
         if (hasOpenWorkTimePresence()) return 'presence_only';
         return currentProjectDayView().status || 'not_started';
     }
@@ -1540,6 +1570,10 @@
         const entry = data && data.enabled && data.active_work_entry;
         const today = state.today && state.today.today;
         return entry && Number(entry.id) > 0 && entry.start_time && !entry.end_time && today && entry.work_date < today ? entry : null;
+    }
+
+    function previousPauseEntry() {
+        return state.today?.pause_active_entry || null;
     }
 
     function hasOpenWorkTimeCarryover() {
@@ -1571,7 +1605,7 @@
 
     function runningWorkEntry() {
         const entry = globalWorkEntry();
-        return entry && entry.start_time && !entry.end_time ? entry : previousWorkTimeEntry();
+        return entry && entry.start_time && !entry.end_time ? entry : (previousPauseEntry() || previousWorkTimeEntry());
     }
 
     function currentStartTimeValue() {
@@ -1583,10 +1617,14 @@
     }
 
     function currentTotalBreakMinutes() {
+        if (state.today?.break_assessment) return breakMinutesFromCollection(breaksToday());
         return Number(currentProjectDayView().total_break_minutes || 0);
     }
 
     function todayTotalBreakMinutes() {
+        if (state.today?.break_assessment) {
+            return Number(state.today.break_assessment.documented_break_minutes || 0);
+        }
         return projectDaySummaries().reduce((minutes, view) => {
             return minutes + Number(view.total_break_minutes || 0);
         }, 0);
@@ -1594,28 +1632,30 @@
 
     function currentBreakFromCollection(items) {
         return items.reduce((current, item) => {
-            return item && (item.break_ended_at === null || item.break_ended_at === '')
+            return item && item.break_started_at && !item.break_ended_at
                 ? item
                 : current;
         }, null);
     }
 
+    function breakDurationMilliseconds(item) {
+        const startedAt = parseDateTime(item.break_started_at);
+        const endedAt = parseDateTime(item.break_ended_at);
+        if (startedAt && endedAt) return Math.max(0, endedAt - startedAt);
+        return !item.break_started_at && !item.break_ended_at ? Math.max(0, Number(item.duration_minutes) || 0) * 60000 : 0;
+    }
+
+    function breakDurationMinutes(item) {
+        return Math.floor(breakDurationMilliseconds(item) / 60000);
+    }
+
     function breakMinutesFromCollection(items) {
-        return items.reduce((minutes, item) => {
-            const startedAt = parseDateTime(item.break_started_at);
-            const endedAt = parseDateTime(item.break_ended_at);
-
-            if (!startedAt || !endedAt || endedAt <= startedAt) {
-                return minutes;
-            }
-
-            return minutes + Math.max(0, Math.floor((endedAt.getTime() - startedAt.getTime()) / 60000));
-        }, 0);
+        return Math.floor(items.reduce((milliseconds, item) => milliseconds + breakDurationMilliseconds(item), 0) / 60000);
     }
 
     function completedBreakMinutesForEntry(entry, breaks) {
         const hasCompletedBreak = Array.isArray(breaks) && breaks.some((item) => {
-            return item && item.break_ended_at !== null && item.break_ended_at !== '';
+            return item && (item.break_ended_at || Number(item.duration_minutes) > 0);
         });
 
         return hasCompletedBreak
@@ -1689,8 +1729,8 @@
 
         const todayState = state.today.today_state || {};
         const entry = todayState.work_entry || null;
-        const stateBreaks = Array.isArray(state.today.breaks_today) ? state.today.breaks_today : [];
-        const activeBreak = currentBreakFromCollection(stateBreaks) || currentBreak();
+        const stateBreaks = Array.isArray(state.today.breaks_today) ? state.today.breaks_today : null;
+        const activeBreak = stateBreaks ? currentBreakFromCollection(stateBreaks) : (todayState.current_break || currentBreak());
         let status = todayState.status_entry && todayState.status_entry.entry_type
             ? todayState.status_entry.entry_type
             : (todayState.is_missing ? 'missing' : 'not_started');
@@ -1707,7 +1747,7 @@
         todayState.status = status;
         state.today.current_break = activeBreak;
         state.today.today_state = todayState;
-        rebuildTodayLiveBasis(entry, activeBreak, status, stateBreaks);
+        rebuildTodayLiveBasis(entry, activeBreak, status, stateBreaks || []);
     }
 
     function syncSelectedProjectSummaryFromTodayState(previousProjectId) {
@@ -1862,9 +1902,7 @@
         return liveWorkMinutesForView(currentProjectDayView());
     }
 
-    function liveCurrentBreakMinutes() {
-        const activeBreak = currentBreak();
-
+    function liveCurrentBreakMinutes(activeBreak = currentBreak()) {
         if (!activeBreak || !activeBreak.break_started_at) {
             return 0;
         }
@@ -1935,7 +1973,7 @@
 
     function topbarStatusContext(status) {
         if (status === 'previous_work_open') {
-            const entry = previousWorkTimeEntry();
+            const entry = previousPauseEntry() || previousWorkTimeEntry();
             return { project: entry ? formatDate(entry.work_date) : 'Mehrere Einsätze', detail: 'Bitte prüfen und abschließen' };
         }
         if (status === 'presence_only') {
@@ -2101,15 +2139,23 @@
             + '<p class="muted">' + (!data.policy
                 ? 'Die noch offene Anwesenheit, der laufende Einsatz oder der Vorschlag gehört zu einer früher gültigen Regel.'
                 : 'Nur für Sie aktivierte Regel. Tatsächliche Arbeit außerhalb des Fensters bleibt erfasst.') + '</p>';
+        if (policy.template_name && policy.revision) {
+            const validity = policy.effective_from ? ' · ab ' + formatDate(policy.effective_from) : '';
+            const until = policy.effective_to ? ' bis ' + formatDate(policy.effective_to) : '';
+            html += '<p class="muted">' + escapeHtml(policy.template_name + ' · Version ' + policy.revision + validity + until) + '</p>';
+        }
         if (completedRows.length) {
             html += '<div class="app-stat-list"><div class="app-stat-row"><span>Tatsächliche Arbeit (abgeschlossen)</span><strong>' + escapeHtml(duration(preview.actual_work_minutes)) + '</strong></div>'
                 + '<div class="app-stat-row"><span>Fensteranrechnung (unverbindliche Vorschau)</span><strong>' + escapeHtml(duration(preview.accountable_work_minutes)) + '</strong></div>'
                 + '<div class="app-stat-row"><span>Außenzeit offen</span><strong>' + escapeHtml(duration(preview.outside_pending_minutes)) + '</strong></div></div>'
                 + '<p class="muted">Vorschau zur Prüfung; die bestehende Kontoberechnung bleibt maßgeblich. Bei ungeklärter Pausenlage ist keine genaue Zuordnung möglich.</p>';
         }
+        if (completedRows.some((row) => row.calculation?.unresolved)) {
+            html += '<p role="status" class="app-empty">Vorläufig: Offene Abweichungen oder Pausen müssen noch geklärt werden.</p>';
+        }
         if (hasOpenWork) html += '<p role="status">Laufender Einsatz: siehe Timer. Die Fensteraufteilung folgt nach bestätigtem Arbeitsende.</p>';
         const previousEntry = previousWorkTimeEntry();
-        if (previousEntry) {
+        if (previousEntry && !previousPauseEntry()) {
             const canEnd = canEndPreviousWorkTimeEntry(previousEntry);
             html += '<section class="app-grid app-empty" role="region" aria-label="Laufender Einsatz aus früherem Tag"><h3>Laufender Einsatz vom ' + escapeHtml(formatDate(previousEntry.work_date)) + '</h3>'
                 + '<p>Beginn: ' + escapeHtml(formatTime(previousEntry.start_time)) + ' Uhr. Dieser Einsatz ist noch offen. Bestätigen Sie das tatsächliche Arbeitsende mit „Jetzt beenden“.</p>';
@@ -2168,7 +2214,7 @@
         try {
             await syncQueue();
             if (!isCurrentSessionContext(context)) return false;
-            state.pendingCount = (await queueAll()).length;
+            updatePendingQueue(await queueAll());
             if (state.pendingCount > 0) throw new Error('Bitte zuerst die wartenden Buchungen klären und synchronisieren.');
             const result = await apiJson(url, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2679,13 +2725,59 @@
 
         return '<div class="app-history-breaks">'
             + breaks.map((breakItem) => {
-                const start = breakItem.break_started_at ? formatDateTimeStamp(breakItem.break_started_at) : '-';
-                const end = breakItem.break_ended_at ? formatDateTimeStamp(breakItem.break_ended_at) : 'laeuft';
+                const duration = formatDurationMinutes(breakDurationMinutes(breakItem));
+                const start = breakItem.break_started_at ? formatBerlinPauseTime(breakItem.break_started_at) : '';
+                const end = breakItem.break_ended_at ? formatBerlinPauseTime(breakItem.break_ended_at) : '';
+                const range = start ? (end ? start + ' bis ' + end : 'Seit ' + start + ' · läuft') : 'Uhrzeiten unbekannt';
+                const isOpen = start && !end;
                 const note = breakItem.note ? '<small>' + escapeHtml(breakItem.note) + '</small>' : '';
 
-                return '<div><strong>' + escapeHtml(start) + '</strong><span>' + escapeHtml(end) + '</span>' + note + '</div>';
+                return '<div>' + (isOpen ? '' : '<strong>' + escapeHtml(duration) + '</strong>') + '<span>' + escapeHtml(range) + '</span>' + note + '</div>';
             }).join('')
             + '</div>';
+    }
+
+    function formatBerlinPauseTime(value) {
+        const local = String(value).match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::\d{2})?$/);
+        if (local) return formatDate(local[1]) + ' ' + local[2];
+        const instant = parseDateTime(value);
+        return instant ? new Intl.DateTimeFormat('de-DE', {
+            timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+        }).format(instant) : '—';
+    }
+
+    function breakAssessmentMarkup(assessment) {
+        if (!assessment) return '';
+        const values = [
+            ['Dokumentierte Pause', assessment.documented_break_minutes],
+            ['Erforderliche Pause', assessment.required_break_minutes],
+            ['Fehlende oder ungeklärte Pause', assessment.missing_break_minutes],
+            ['Tatsächliche Arbeitszeit', assessment.actual_work_minutes],
+            ['Längste ununterbrochene Arbeitszeit', assessment.longest_uninterrupted_work_minutes],
+        ];
+        const rows = values.map(([label, value]) => '<div class="app-stat-row"><span>' + label + '</span><strong>'
+            + (value === null || value === undefined ? '—' : escapeHtml(formatDurationMinutes(value))) + '</strong></div>').join('');
+        const statuses = {
+            pending: 'Vorläufig · Auswertung während des laufenden Einsatzes',
+            needs_clarification: 'Klärungsbedarf · Pausendauer oder zeitliche Lage prüfen',
+            pending_sync: 'Vorläufig · Pausen warten auf Synchronisierung',
+        };
+        const status = statuses[assessment.calculation_status];
+        const revision = assessment.revision ? ' · Version ' + assessment.revision
+            : (assessment.version_id ? ' · Versions-ID ' + assessment.version_id : '');
+        const version = assessment.template_name
+            ? '<p class="muted">' + escapeHtml(assessment.template_name + revision) + '</p>'
+            : '';
+        const windows = Array.isArray(assessment.planned_windows) ? assessment.planned_windows : [];
+        const plan = windows.length ? '<p class="muted">Geplante Pausenfenster: '
+            + escapeHtml(windows.map((window) => window.start + '–' + window.end + ' Uhr').join(', ')) + '</p>' : '';
+        const dates = assessment.linked_work_dates || [];
+        const period = dates.length > 1 ? '<p class="muted">Gemeinsame Prüfung für ' + escapeHtml(dates.map(formatDate).join(' und ')) + '</p>' : '';
+        const legacy = assessment.legacy ? '<p class="muted">Die gespeicherte Buchung kann einen rechnerischen Pausenabzug enthalten.</p>' : '';
+        const unplaced = Number(assessment.unplaced_break_minutes) > 0
+            ? '<p class="muted">Ohne belegte Uhrzeit: ' + escapeHtml(formatDurationMinutes(assessment.unplaced_break_minutes)) + '</p>' : '';
+        return '<div class="app-grid app-break-assessment">' + version + period + '<div class="app-stat-list">' + rows + '</div>'
+            + (status ? '<p class="app-empty" role="status">' + status + '</p>' : '') + unplaced + plan + legacy + '</div>';
     }
 
     function timesheetGeoMarkup(item) {
@@ -2774,8 +2866,11 @@
         const attachmentDetails = showFiles
             ? '<details class="app-history-detail"><summary>Anhaenge anzeigen</summary>' + attachmentMarkup + '</details>'
             : '';
+        const canRecord = item.entry_type === 'work' && item.break_assessment && item.break_assessment.can_record !== false
+            && item.start_time && item.end_time && !item.customer_signature_present && hasPermission('timesheets.create');
+        const recordButton = canRecord ? pauseRecordButton('pauseRecordHistory' + Number(item.id), String(Number(item.id))) : '';
 
-        return '<article class="app-timesheet-card app-history-entry">'
+        return '<article class="app-timesheet-card app-history-entry" data-render-key="timesheet-' + Number(item.id) + '">'
             + '<div class="app-history-entry-head">'
             + '<div><p class="muted">' + escapeHtml(entryTypeLabel(item.entry_type)) + '</p><h3>' + escapeHtml(projectName) + '</h3></div>'
             + '<div class="app-timesheet-type">' + escapeHtml(formatDurationMinutes(Number(item.net_minutes || 0))) + '</div>'
@@ -2783,12 +2878,15 @@
             + '<div class="app-timesheet-card-grid">'
             + '<div><span class="muted">Start</span><strong>' + escapeHtml(formatTime(item.start_time)) + '</strong></div>'
             + '<div><span class="muted">Ende</span><strong>' + escapeHtml(formatTime(item.end_time)) + '</strong></div>'
-            + '<div><span class="muted">Pause</span><strong>' + escapeHtml(formatDurationMinutes(Number(item.break_minutes || 0))) + '</strong></div>'
+            + '<div><span class="muted">' + (item.break_assessment?.legacy ? 'Gespeicherter Pausenabzug' : 'Pause')
+            + '</span><strong>' + escapeHtml(formatDurationMinutes(Number(item.break_minutes || 0))) + '</strong></div>'
             + filesStat
             + geoStat
             + '</div>'
             + note
-            + '<details class="app-history-detail"><summary>Pausen anzeigen</summary>' + timesheetBreaksMarkup(item) + '</details>'
+            + '<details class="app-history-detail" id="pauseHistoryDetails' + Number(item.id) + '"><summary>Pausen anzeigen</summary>'
+            + (item.break_assessment ? '<h4>Pausenprüfung des Arbeitstags</h4>' + breakAssessmentMarkup(item.break_assessment) : '')
+            + timesheetBreaksMarkup(item) + recordButton + '</details>'
             + geoDetails
             + signatureDetails
             + attachmentDetails
@@ -3004,14 +3102,90 @@
         return '<span data-live-pending-count>' + escapeHtml(String(state.pendingCount)) + '</span>';
     }
 
+    function pauseRecordButton(id, target, secondary = true) {
+        return '<button type="button" id="' + id + '" data-record-pause="' + target + '"'
+            + (secondary ? ' class="app-button-secondary"' : '') + (state.pendingAction || state.pauseSyncUncertain ? ' disabled' : '')
+            + '>Pause nachtragen</button>';
+    }
+
+    function pauseActionsMarkup(status, entry) {
+        const assessment = state.today?.break_assessment;
+        if (!assessment) {
+            return status === 'working'
+                ? '<button type="button" data-action="pause" ' + (isBusy('pause') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('pause', 'Pause buchen')) + '</button>' : '';
+        }
+        if (!hasPermission('timesheets.create') || !entry?.start_time) return '';
+        const disabled = state.pendingAction || state.pauseSyncUncertain ? ' disabled' : '';
+        if (status === 'paused') return '<button type="button" data-action="pause_end"' + disabled + '>Pause beenden</button>';
+        if (status !== 'working' && status !== 'completed') return '';
+        const manual = assessment.can_record === false || entry.customer_signature_present ? ''
+            : pauseRecordButton('pauseRecordTrigger', 'current', assessment.capture_mode !== 'manual');
+        if (status === 'completed') return manual;
+        const stamped = '<button type="button" data-action="pause_start"' + disabled
+            + (assessment.capture_mode === 'manual' ? ' class="app-button-secondary"' : '') + '>Pause starten</button>';
+        return assessment.capture_mode === 'manual' ? manual + stamped : stamped + manual;
+    }
+
+    function pauseDetailsMarkup() {
+        const assessment = state.today?.break_assessment;
+        if (!assessment) return '';
+        const breaks = breaksToday();
+        const label = (assessment.linked_work_dates || []).length > 1 ? 'Pausen über Mitternacht' : 'Pausen heute';
+        return '<section class="app-card app-grid app-pause-details" aria-label="' + label + '">'
+            + '<h2>' + label + '</h2>'
+            + (currentBreak() ? '<p role="status">Pause läuft · <strong data-live-break-duration>' + escapeHtml(formatDurationMinutes(liveCurrentBreakMinutes())) + '</strong></p>' : '')
+            + breakAssessmentMarkup(assessment)
+            + (breaks.length ? '<details class="app-history-detail" id="pauseCurrentDetails"><summary>Pausen dieses Einsatzes anzeigen</summary>' + timesheetBreaksMarkup({ breaks }) + '</details>' : '')
+            + pauseSyncMarkup() + '</section>';
+    }
+
+    function pauseSyncMarkup() {
+        const retry = state.pauseSyncUncertain
+            ? '<p role="status">Eine Pausenaktion wartet auf Bestätigung.</p><button type="button" id="retryPauseSync"'
+                + (!state.online || state.pendingAction ? ' disabled' : '') + '>Pausen erneut synchronisieren</button>' : '';
+        if (!state.pauseConflicts.length) return retry;
+
+        const labels = { pause_start: 'Pausenbeginn', pause_end: 'Pausenende', pause_record: 'Pausennachtrag' };
+        const conflicts = state.pauseConflicts.map((item) => {
+            const payload = item.payload;
+            const heading = labels[payload.action] + ' vom ' + formatDate(payload.work_date);
+            const time = [payload.break_started_at, payload.break_ended_at].filter(Boolean).map(formatBerlinPauseTime).join(' bis ');
+            const duration = payload.manual_break_minutes ? String(payload.manual_break_minutes) + ' Minuten · Uhrzeiten unbekannt' : '';
+            return '<article class="app-empty app-grid"><h4>' + escapeHtml(heading) + '</h4>'
+                + '<p>' + escapeHtml(time || duration) + '</p><p>' + escapeHtml(item.error) + '</p>'
+                + '<button type="button" class="app-button-secondary" data-discard-pause-conflict="' + escapeHtml(item.id) + '">Lokale Aktion verwerfen</button></article>';
+        }).join('');
+        return retry + '<section class="app-grid app-pause-conflicts" aria-label="Pausenaktionen zur Prüfung">'
+            + '<h3>Pausenaktionen zur Prüfung</h3>' + conflicts + '</section>';
+    }
+
+    function previousPauseEntryMarkup() {
+        const entry = previousPauseEntry();
+        if (!entry) return '';
+        const disabled = state.pendingAction || state.pauseSyncUncertain || !hasPermission('timesheets.create') ? ' disabled' : '';
+        const canEnd = canEndPreviousWorkTimeEntry(entry);
+        const actions = entry.current_break
+            ? '<p role="status">Pause läuft · <strong data-live-prior-break-duration>' + escapeHtml(formatDurationMinutes(liveCurrentBreakMinutes(entry.current_break))) + '</strong></p>'
+                + '<button type="button" data-prior-pause-action="pause_end"' + disabled + '>Pause des laufenden Einsatzes beenden</button>'
+            : '<button type="button" data-prior-pause-action="pause_start"' + disabled + '>Pause starten</button>'
+                + pauseRecordButton('pauseRecordPrior', 'prior');
+        return '<section class="app-card app-grid app-pause-details" aria-label="Laufender Einsatz aus früherem Tag"><h2>Laufender Einsatz vom '
+            + escapeHtml(formatDate(entry.work_date)) + '</h2>' + actions + breakAssessmentMarkup(entry.break_assessment)
+            + (entry.breaks?.length ? '<details class="app-history-detail" id="pausePriorDetails"><summary>Pausen dieses Einsatzes anzeigen</summary>' + timesheetBreaksMarkup(entry) + '</details>' : '')
+            + '<button type="button" data-prior-pause-action="check_out"'
+            + (entry.current_break || !canEnd || !state.online ? ' disabled' : disabled) + '>Jetzt beenden</button>'
+            + (!canEnd ? '<p role="alert">Bitte das tatsächliche Arbeitsende dieses Einsatzes im Büro klären.</p>' : '') + '</section>';
+    }
+
     function todayView() {
         const today = state.today || {};
         const entry = workEntry();
         const status = currentStatus();
-        const canCheckIn = status !== 'working' && status !== 'paused' && status !== 'presence_only' && !hasOpenWorkTimeCarryover();
-        const canPause = status === 'working';
+        const canCheckIn = !['working', 'paused', 'presence_only', 'previous_work_open'].includes(status);
         const canCheckOut = (status === 'working' || status === 'paused');
         const totalBreakMinutes = todayTotalBreakMinutes();
+        const breakTotalLabel = (today.break_assessment?.linked_work_dates || []).length > 1 ? 'Dokumentierte Pausen über Mitternacht'
+            : (today.break_assessment ? 'Dokumentierte Pausen heute' : 'Pausen heute');
         const todayTotalRow = showAppWidget('show_today_total_minutes')
             ? '<div class="app-stat-row"><span class="muted">Heute gesamt</span><strong data-live-today-duration>' + escapeHtml(formatDurationMinutes(todayTotalWorkMinutes())) + '</strong></div>'
             : '';
@@ -3026,7 +3200,7 @@
             : '';
 
         return shell(
-            '<section class="app-grid app-metrics">'
+            previousPauseEntryMarkup() + '<section class="app-grid app-metrics">'
             + statusMetric(today, status)
             + metric('Aktuelle Aufgabe', projectStatusValueMarkup(), entry && entry.start_time ? 'Aktueller Arbeitseinsatz' : 'Noch kein Arbeitseinsatz gestartet')
             + metric('Offline Queue', pendingCountValueMarkup(), state.online ? 'Wird automatisch synchronisiert' : 'Wird spaeter gesendet')
@@ -3039,29 +3213,29 @@
             + '<div class="app-stat-row"><span class="muted">Start aktuelles Projekt</span><strong data-live-start-time>' + escapeHtml(currentStartTimeValue()) + '</strong></div>'
             + '<div class="app-stat-row"><span class="muted">Ende aktuelles Projekt</span><strong data-live-end-time>' + escapeHtml(currentEndTimeValue()) + '</strong></div>'
             + '<div class="app-stat-row"><span class="muted">Aktueller Einsatz</span><strong data-live-work-duration>' + escapeHtml(formatDurationMinutes(currentEntryWorkMinutes())) + '</strong></div>'
-            + '<div class="app-stat-row"><span class="muted">Pausen heute</span><strong data-live-today-break-total>' + escapeHtml(formatDurationMinutes(totalBreakMinutes)) + '</strong></div>'
+            + '<div class="app-stat-row"><span class="muted">' + breakTotalLabel
+            + '</span><strong data-live-today-break-total>' + escapeHtml(formatDurationMinutes(totalBreakMinutes)) + '</strong></div>'
             + '<div class="app-stat-row"><span class="muted">Projekt</span><strong data-live-project-name>' + escapeHtml(currentProjectName()) + '</strong></div>'
             + '</div>'
             + '<div class="app-inline-actions app-today-actions">'
             + (canCheckIn ? '<button type="button" data-action="check_in" ' + (isBusy('check_in') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('check_in', 'Check-in')) + '</button>' : '')
-            + (canPause ? '<button type="button" data-action="pause" ' + (isBusy('pause') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('pause', 'Pause buchen')) + '</button>' : '')
-            + (canCheckOut ? '<button type="button" data-action="check_out" ' + (isBusy('check_out') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('check_out', 'Check-out')) + '</button>' : '')
+            + pauseActionsMarkup(status, entry)
+            + (canCheckOut ? '<button type="button" data-action="check_out" ' + (isBusy('check_out') || status === 'paused' ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('check_out', 'Check-out')) + '</button>' : '')
             + '</div>'
             + '<div class="app-grid">'
             + projectSelectMarkup(runningWorkEntry() ? 'Projekt für den nächsten Check-in' : 'Projekt für die Zeiterfassung')
             + '<label class="app-field"><span>Notiz</span><textarea id="timesheetNote" rows="4">' + escapeHtml(entry && entry.note ? entry.note : '') + '</textarea></label>'
-            + '<button type="button" id="saveUpsert" ' + (isBusy('upsert') || !canEditTimeContext() || status === 'presence_only' || hasOpenWorkTimeCarryover() ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Stand speichern')) + '</button>'
+            + '<button type="button" id="saveUpsert" ' + (isBusy('upsert') || !canEditTimeContext() || status === 'presence_only' || status === 'previous_work_open' ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Stand speichern')) + '</button>'
             + '</div>'
             + '</section>'
-            + geoSection
+            + pauseDetailsMarkup() + geoSection
         );
     }
 
     function timesView() {
         const entry = workEntry();
         const status = currentStatus();
-        const canCheckIn = status !== 'working' && status !== 'paused' && status !== 'presence_only' && !hasOpenWorkTimeCarryover();
-        const canPause = status === 'working';
+        const canCheckIn = !['working', 'paused', 'presence_only', 'previous_work_open'].includes(status);
         const canCheckOut = (status === 'working' || status === 'paused');
         const optionalMetrics = [
             showAppWidget('show_current_shift_minutes')
@@ -3076,13 +3250,13 @@
         ].join('');
 
         return shell(
-            '<section class="app-card app-grid">'
+            previousPauseEntryMarkup() + '<section class="app-card app-grid">'
             + '<div><p class="muted">Zeiterfassung</p><h1>Arbeitszeiten</h1></div>'
             + '<div class="app-grid app-metrics">'
             + metric('Status', statusValueMarkup(), 'Aktueller Tagesstatus')
             + optionalMetrics
-            + metric('Pause gesamt', totalBreakValueMarkup(), 'Abgeschlossene Pausen')
-            + metric('Laufende Pause', '<span data-live-break-duration>' + escapeHtml(currentBreak() ? formatDurationMinutes(liveCurrentBreakMinutes()) : '--:--') + '</span>', 'Wird waehrend der Pause live aktualisiert')
+            + metric('Pause gesamt', totalBreakValueMarkup(), state.today?.break_assessment ? 'Dokumentiert im aktuellen Einsatz' : 'Abgeschlossene Pausen')
+            + (state.today?.break_assessment ? '' : metric('Laufende Pause', '<span data-live-break-duration>' + escapeHtml(currentBreak() ? formatDurationMinutes(liveCurrentBreakMinutes()) : '--:--') + '</span>', 'Wird waehrend der Pause live aktualisiert'))
             + '</div>'
             + '<div class="app-stat-list">'
             + '<div class="app-stat-row"><span class="muted">Projekt</span><strong data-live-project-name>' + escapeHtml(currentProjectName()) + '</strong></div>'
@@ -3096,12 +3270,12 @@
             + manualTimeMarkup(entry)
             + '<div class="app-inline-actions">'
             + (canCheckIn ? '<button type="button" data-action="check_in" ' + (isBusy('check_in') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('check_in', 'Start jetzt')) + '</button>' : '')
-            + (canPause ? '<button type="button" data-action="pause" ' + (isBusy('pause') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('pause', 'Pause buchen')) + '</button>' : '')
-            + (canCheckOut ? '<button type="button" data-action="check_out" ' + (isBusy('check_out') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('check_out', 'Ende jetzt')) + '</button>' : '')
-            + '<button type="button" id="saveUpsert" ' + (isBusy('upsert') || !canEditTimeContext() || status === 'presence_only' || hasOpenWorkTimeCarryover() ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Zeiten speichern')) + '</button>'
+            + pauseActionsMarkup(status, entry)
+            + (canCheckOut ? '<button type="button" data-action="check_out" ' + (isBusy('check_out') || status === 'paused' ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('check_out', 'Ende jetzt')) + '</button>' : '')
+            + '<button type="button" id="saveUpsert" ' + (isBusy('upsert') || !canEditTimeContext() || status === 'presence_only' || status === 'previous_work_open' ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Zeiten speichern')) + '</button>'
             + '</div>'
             + '</section>'
-            + attachmentSectionMarkup()
+            + pauseDetailsMarkup() + attachmentSectionMarkup()
         );
     }
 
@@ -3117,6 +3291,7 @@
         return shell(
             '<section class="app-card app-grid">'
             + '<div><p class="muted">Historie</p><h1>Meine Zeiten</h1><p>Ihre erfassten Zeiten bleiben mit dem letzten bekannten Stand auch offline sichtbar.</p></div>'
+            + pauseSyncMarkup()
             + '</section>'
             + timesheetHistoryMarkup()
         );
@@ -4086,6 +4261,7 @@
         resetForm = resetForm || (current.tagName === 'FORM' && projectFormsToReset.has(current.id));
         const field = current.matches('input, textarea, select');
         const preservedAttribute = (name) => (field && ['value', 'checked', 'selected'].includes(name))
+            || (name === 'open' && current.matches('details[id^="pause"]'))
             || (current.tagName === 'TEXTAREA' && name === 'style' && !desired.hasAttribute('style'));
 
         Array.from(current.attributes).forEach((attribute) => {
@@ -4223,6 +4399,9 @@
         // person is signing in. Keep credentials in their existing input nodes;
         // session or authentication changes still replace the whole subtree.
         const keepLoginDom = samePage && !context.authenticated;
+        const keepPauseDom = samePage && context.authenticated
+            && (state.dialog?.type === 'pause-record'
+                || root.querySelector('#pauseRecordForm, details[id^="pause"][open]'));
         const scrollPosition = samePage ? captureAppScrollPosition() : null;
         const restoreTimeAccountDetailsFocus = document.activeElement
             && document.activeElement.id === 'timeAccountDetailsSummary';
@@ -4249,7 +4428,7 @@
             html = todayView();
         }
 
-        if (keepProjectDom || keepLoginDom) {
+        if (keepProjectDom || keepLoginDom || keepPauseDom) {
             const desired = document.createElement('template');
             desired.innerHTML = html;
             patchProjectRenderChildren(root, desired.content, false);
@@ -4268,7 +4447,7 @@
         bindInteractions();
         bindProjectWorkReportInteractions();
 
-        if (searchFocus && !keepProjectDom) {
+        if (searchFocus && !keepProjectDom && !keepPauseDom) {
             const search = document.getElementById('projectSearch');
             if (search) {
                 search.focus({ preventScroll: true });
@@ -4290,6 +4469,7 @@
     }
 
     function bindInteractions() {
+        bindPauseInteractions();
         document.querySelectorAll('[data-worktime-end]').forEach(function (input) {
             bindInteraction(input, 'input', function () { state.workTimeDrafts[input.dataset.worktimeEnd] = input.value; });
         });
@@ -4866,6 +5046,98 @@
         });
     }
 
+    function bindPauseInteractions() {
+        document.querySelectorAll('[data-record-pause]').forEach((button) => {
+            bindInteraction(button, 'click', function () {
+                const targetKey = button.dataset.recordPause;
+                const entry = targetKey === 'current' ? workEntry() : (targetKey === 'prior' ? previousPauseEntry()
+                    : state.timesheetList.find((item) => Number(item.id) === Number(targetKey)));
+                if (!entry?.start_time || state.pendingAction || state.pauseSyncUncertain) return;
+                const breaks = targetKey === 'current' ? breaksToday() : (entry.breaks || []);
+                openDialog('pause-record', {
+                    target: { ...entry }, returnFocus: button.id,
+                    documentedBreakMinutes: breakMinutesFromCollection(breaks),
+                });
+                document.getElementById('pauseRecordMode')?.focus({ preventScroll: true });
+            });
+        });
+        document.querySelectorAll('[data-prior-pause-action]').forEach((button) => {
+            bindInteraction(button, 'click', function () {
+                const entry = previousPauseEntry();
+                const action = button.dataset.priorPauseAction;
+                if (!entry) return;
+                if (action !== 'check_out') return submitPauseStamp(action, entry);
+                if (!canEndPreviousWorkTimeEntry(entry)) return;
+                const actualEnd = workTimeNowLocal();
+                return submitAction(action, { end_time: actualEnd.slice(11, 16), actual_end_at: actualEnd }, entry);
+            });
+        });
+        const retry = document.getElementById('retryPauseSync');
+        if (retry) bindInteraction(retry, 'click', () => syncQueue());
+        document.querySelectorAll('[data-discard-pause-conflict]').forEach((button) => {
+            bindInteraction(button, 'click', async function () {
+                if (!window.confirm('Diese lokal vorgemerkte Pausenaktion verwerfen?')) return;
+                const context = sessionContext();
+                const items = await queueAll();
+                const conflict = items.find((item) => item.id === button.dataset.discardPauseConflict
+                    && item.status === 'conflict' && item.userPart === context.userPart);
+                if (!conflict || !isCurrentSessionContext(context)) return;
+                await queueRemove(conflict.id);
+                const remaining = await queueAll();
+                if (!isCurrentSessionContext(context)) return;
+                updatePendingQueue(remaining);
+                render();
+            });
+        });
+
+        const form = document.getElementById('pauseRecordForm');
+        if (!form) return;
+        const mode = document.getElementById('pauseRecordMode');
+        const duration = document.getElementById('pauseRecordDuration');
+        const start = document.getElementById('pauseRecordStart');
+        const end = document.getElementById('pauseRecordEnd');
+        bindInteraction(mode, 'change', function () {
+            state.dialog.mode = mode.value;
+            render();
+        });
+        form.querySelectorAll('[data-pause-record-minutes]').forEach((button) => {
+            bindInteraction(button, 'click', function () {
+                duration.value = button.dataset.pauseRecordMinutes;
+                duration.focus();
+            });
+        });
+        bindInteraction(document.getElementById('pauseRecordCancel'), 'click', closeDialog);
+        bindInteraction(form, 'submit', async function (event) {
+            event.preventDefault();
+            if (state.pendingAction || state.pauseSyncUncertain) return;
+            const dialog = state.dialog;
+            const interval = mode.value === 'interval';
+            if (interval && end.value <= start.value) {
+                dialog.error = 'Das Pausenende muss nach dem Pausenbeginn liegen.';
+                render();
+                document.getElementById('pauseRecordError')?.focus();
+                return;
+            }
+            dialog.error = '';
+            const payload = interval
+                ? { break_started_at: start.value, break_ended_at: end.value }
+                : {
+                    manual_break_minutes: Number(duration.value),
+                    expected_documented_break_minutes: dialog.payload.documentedBreakMinutes,
+                };
+            const accepted = await submitAction('pause_record', payload, dialog.payload.target);
+            if (state.dialog !== dialog) return;
+            if (accepted) {
+                closeDialog();
+            } else {
+                dialog.error = state.feedback?.kind === 'error' ? state.feedback.message : 'Die Pause konnte nicht gespeichert werden.';
+                state.feedback = null;
+                render();
+                document.getElementById('pauseRecordError')?.focus();
+            }
+        });
+    }
+
     function bindExclusiveFileInputs(inputIds) {
         inputIds.forEach((inputId) => {
             const input = document.getElementById(inputId);
@@ -5118,7 +5390,7 @@
         }
 
         if (!current()) return;
-        state.pendingCount = (await queueAll()).length;
+        updatePendingQueue(await queueAll());
         if (!current()) return;
         render();
     }
@@ -6463,7 +6735,27 @@
             return;
         }
 
+        if (action === 'pause_start' || action === 'pause_end') {
+            await submitPauseStamp(action);
+            return;
+        }
+
         await submitAction(action, {});
+    }
+
+    function submitPauseStamp(action, target = null) {
+        const recordedAt = new Date().toISOString();
+        if (action === 'pause_start') return submitAction(action, { break_started_at: recordedAt }, target);
+        const active = target ? target.current_break : currentBreak();
+        if (!active?.break_started_at) {
+            showFeedback('error', 'Bitte zuerst den aktuellen Stand der Pause laden.');
+            return false;
+        }
+        return submitAction(action, {
+            break_ended_at: recordedAt,
+            expected_break_started_at: active.break_started_at,
+            ...(Number(active.id) > 0 ? { expected_break_id: Number(active.id) } : {}),
+        }, target);
     }
 
     async function handleProjectBookingAction() {
@@ -6518,19 +6810,22 @@
         };
     }
 
-    async function submitAction(action, overrides) {
+    async function submitAction(action, overrides, target = null) {
         if (!state.session.authenticated) {
             showFeedback('error', 'Bitte zuerst anmelden.');
             return false;
         }
 
         const context = sessionContext();
+        const pauseAction = PAUSE_ACTIONS.includes(action);
+        if ((pauseAction || target) && (state.pendingAction || state.pauseSyncUncertain)) return false;
 
         if (hasOpenWorkTimePresence() && ['check_in', 'upsert', 'pause', 'check_out', 'day_close'].includes(action)) {
             showFeedback('error', 'Ihre Anwesenheit ist erfasst. Bitte bestätigen Sie zuerst den tatsächlichen Arbeitsbeginn oben.');
             return false;
         }
-        if (hasOpenWorkTimeCarryover() && ['check_in', 'upsert', 'pause', 'check_out', 'day_close'].includes(action)) {
+        if (!target && (hasOpenWorkTimeCarryover() || previousPauseEntry())
+            && ['check_in', 'upsert', 'pause', 'check_out', 'day_close', ...PAUSE_ACTIONS].includes(action)) {
             showFeedback('error', 'Bitte prüfen und beenden Sie zuerst den noch offenen Einsatz aus einem früheren Tag oben.');
             return false;
         }
@@ -6556,14 +6851,14 @@
         }
 
         const noteField = document.getElementById('timesheetNote');
-        const entry = workEntry();
+        const entry = target || workEntry();
         const manualTimes = manualTimesOverride();
         const payload = {
             action: action,
-            work_date: state.today ? state.today.today : new Date().toISOString().slice(0, 10),
-            project_id: action === 'check_in' ? checkInProjectId() : timeContextProjectId(),
+            work_date: target?.work_date || state.today?.today || berlinToday(),
         };
-        if (action !== 'select_project') {
+        if (action !== 'select_project' && !pauseAction && !target) {
+            payload.project_id = action === 'check_in' ? checkInProjectId() : timeContextProjectId();
             payload.note = noteField ? noteField.value : (entry ? entry.note : '');
             payload.manual_break_minutes = entry ? entry.break_minutes : 0;
         }
@@ -6583,14 +6878,14 @@
 
         Object.assign(payload, overrides || {});
 
-        if (state.today?.work_time_windows_enabled && entry?.start_time && action !== 'check_in' && action !== 'select_project') {
+        if ((state.today?.work_time_windows_enabled || pauseAction || target) && entry?.start_time && action !== 'check_in' && action !== 'select_project') {
             // Bind delayed/offline changes to the session the employee actually saw.
             // A later confirmed proposal and new check-in must not redirect this action.
             if (Number(entry.id) > 0) payload.expected_timesheet_id = Number(entry.id);
             payload.expected_start_time = entry.start_time;
         }
 
-        const geo = action === 'select_project' ? null : await currentGeoPayload();
+        const geo = action === 'select_project' || pauseAction || target ? null : await currentGeoPayload();
 
         if (geo) {
             payload.geo = geo;
@@ -6608,6 +6903,7 @@
             if (typeof clientRequestId !== 'string' || clientRequestId.trim() === '') {
                 throw new Error('Die Aktion konnte nicht vorbereitet werden. Bitte erneut versuchen.');
             }
+            if (action === 'pause_record' && state.dialog?.type === 'pause-record') state.dialog.requestId = clientRequestId;
 
             const queuedPayload = { ...payload };
             const usesSelectedProject = action === 'check_in' || action === 'select_project'
@@ -6623,10 +6919,14 @@
 
             const pending = await queueAll();
             if (!isCurrentSessionContext(context)) return false;
-            state.pendingCount = pending.length;
+            updatePendingQueue(pending);
             if (action !== 'select_project') {
-                applyOptimisticPayload(payload);
-                await cacheSet(todayCacheKey(), state.today, () => isCurrentSessionContext(context));
+                if (pauseAction && target && Number(target.id) === Number(previousPauseEntry()?.id)) {
+                    applyOptimisticPriorPause(payload);
+                } else if (!target || Number(target.id) === Number(globalWorkEntry()?.id) && payload.work_date === state.today?.today) {
+                    applyOptimisticPayload(payload);
+                }
+                await cacheTimeSyncDay(context);
             }
             render();
             const syncResult = await syncQueue(clientRequestId);
@@ -6638,7 +6938,9 @@
             if (action === 'select_project' && syncResult.deferred) {
                 showFeedback('info', 'Die Projektzuordnung wartet auf eine Verbindung. Bis zur Bestätigung bleibt die bisherige Zeitbuchung sichtbar.', true);
             }
-            succeeded = action !== 'select_project' || syncResult.deferred || syncResult.requestedCompleted;
+            const requiresResult = action === 'select_project' || pauseAction || target;
+            const pendingRetry = pauseAction && syncResult.pendingRequestIds?.has(clientRequestId);
+            succeeded = !requiresResult || syncResult.deferred || syncResult.requestedCompleted || pendingRetry;
         } catch (error) {
             if (isCurrentSessionContext(context)) showFeedback('error', friendlyMessage(error.message, 'Die Aktion konnte nicht vorbereitet werden. Bitte erneut versuchen.'), true);
         } finally {
@@ -6687,7 +6989,9 @@
             net_minutes: 0,
             note: null
         });
-        const todayBreaks = breaksToday().slice();
+        const previousBreaks = startsFreshEntry ? [] : (PAUSE_ACTIONS.includes(payload.action) && Array.isArray(state.today.breaks_today)
+            ? state.today.breaks_today : breaksToday());
+        const todayBreaks = optimisticBreaks(previousBreaks, payload);
 
         if (payload.project_id !== undefined) {
             workEntry.project_id = payload.project_id ? Number(payload.project_id) : null;
@@ -6726,24 +7030,6 @@
             todayBreaks.length = 0;
         }
 
-        if (payload.action === 'pause_start') {
-            todayBreaks.push({
-                id: Date.now() * -1,
-                break_started_at: payload.break_started_at || new Date().toISOString(),
-                break_ended_at: null,
-                source: 'app',
-                note: null
-            });
-        }
-
-        if (payload.action === 'pause_end') {
-            const openBreak = todayBreaks.find((item) => !item.break_ended_at);
-
-            if (openBreak) {
-                openBreak.break_ended_at = payload.break_ended_at || new Date().toISOString();
-            }
-        }
-
         todayState.work_entry = workEntry;
         state.today.breaks_today = todayBreaks;
         state.today.attachments = workEntry.attachments || [];
@@ -6754,11 +7040,78 @@
             : (collectedBreakMinutes > 0
                 ? collectedBreakMinutes
                 : Number(payload.manual_break_minutes || workEntry.break_minutes || 0));
+        const assessment = state.today.break_assessment;
+        if (assessment && (PAUSE_ACTIONS.includes(payload.action) || ['check_in', 'check_out', 'upsert'].includes(payload.action))) {
+            const addedMinutes = collectedBreakMinutes - breakMinutesFromCollection(previousBreaks);
+            state.today.break_assessment = {
+                ...assessment,
+                documented_break_minutes: Math.max(0, Number(assessment.documented_break_minutes || 0) + addedMinutes),
+                required_break_minutes: null,
+                missing_break_minutes: null,
+                actual_work_minutes: null,
+                longest_uninterrupted_work_minutes: null,
+                unplaced_break_minutes: null,
+                calculation_status: 'pending_sync',
+            };
+        }
         if (workEntry.start_time && workEntry.end_time) {
             workEntry.net_minutes = calculatedNetMinutesForEntry(workEntry, todayBreaks);
         }
         syncTodayStateStatus();
         syncSelectedProjectSummaryFromTodayState(summaryPreviousProjectId);
+    }
+
+    function optimisticBreaks(breaks, payload) {
+        const items = breaks.map((item) => ({ ...item }));
+        if (payload.action === 'pause_end') {
+            const active = currentBreakFromCollection(items);
+            if (active) active.break_ended_at = payload.break_ended_at;
+        } else if (payload.action === 'pause_start' || payload.action === 'pause_record') {
+            items.push({
+                id: -Date.now(),
+                break_started_at: payload.break_started_at || null,
+                break_ended_at: payload.break_ended_at || null,
+                duration_minutes: payload.manual_break_minutes ?? null,
+                source: 'app',
+                note: null,
+            });
+        }
+        return items;
+    }
+
+    function applyOptimisticPriorPause(payload) {
+        const entry = previousPauseEntry();
+        if (!entry) return;
+        const breaks = Array.isArray(entry.breaks) ? entry.breaks : (entry.current_break ? [entry.current_break] : []);
+        const items = optimisticBreaks(breaks, payload);
+        state.today.pause_active_entry = { ...entry, current_break: currentBreakFromCollection(items), breaks: items };
+        if (entry.break_assessment) {
+            state.today.pause_active_entry.break_assessment = {
+                ...entry.break_assessment,
+                documented_break_minutes: Math.max(0, Number(entry.break_assessment.documented_break_minutes || 0)
+                    + breakMinutesFromCollection(items) - breakMinutesFromCollection(breaks)),
+                calculation_status: 'pending_sync',
+            };
+        }
+    }
+
+    function updatePendingQueue(items) {
+        const pending = items.filter((item) => item.status !== 'conflict');
+        const userPart = currentSessionUserCachePart();
+        state.pendingCount = pending.length;
+        state.pauseSyncUncertain = pending.some((item) => PAUSE_ACTIONS.includes(item.payload?.action))
+            && pending.some((item) => item.status === 'failed');
+        state.pauseConflicts = items.filter((item) => item.status === 'conflict'
+            && item.userPart === userPart && PAUSE_ACTIONS.includes(item.payload?.action));
+    }
+
+    async function cacheTimeSyncDay(context) {
+        try {
+            await cacheSet(todayCacheKey(), state.today, () => isCurrentSessionContext(context));
+        } catch (error) {
+            // The queue and API confirmation are independent of this display cache.
+            console.warn('Lokaler Tagesstand konnte nicht gespeichert werden.', error);
+        }
     }
 
     function syncPayloadForCurrentSettings(payload) {
@@ -6804,6 +7157,7 @@
 
         for (const item of items) {
             if (!isCurrentSessionContext(context)) break;
+            if (item.status === 'conflict') continue;
             try {
                 const sanitizedPayload = syncPayloadForCurrentSettings(item.payload);
                 await queueUpdate({ ...item, payload: sanitizedPayload, status: 'syncing' });
@@ -6821,47 +7175,13 @@
                 if (!isCurrentSessionContext(context)) break;
                 completedAny = true;
                 syncedRequestIds.add(item.client_request_id);
-                if (item.payload.action === 'select_project') {
+                const pauseMutation = PAUSE_ACTIONS.includes(item.payload.action);
+                if (item.payload.action === 'select_project' || pauseMutation) {
                     onlineDataRequestCounter += 1;
                     activeOnlineDataLoad = null;
                 }
 
-                if (state.today && payload.data) {
-                    const previousProjectId = globalWorkEntry()?.project_id;
-                    if (payload.data.today_state) {
-                        state.today.today_state = payload.data.today_state;
-                    }
-
-                    if (Array.isArray(payload.data.breaks_today)) {
-                        state.today.breaks_today = payload.data.breaks_today;
-                    }
-
-                    if (Object.prototype.hasOwnProperty.call(payload.data, 'current_break')) {
-                        state.today.current_break = payload.data.current_break;
-                    }
-
-                    if (payload.data.tracked_minutes_live_basis) {
-                        state.today.tracked_minutes_live_basis = payload.data.tracked_minutes_live_basis;
-                    } else if (payload.data.today_state && payload.data.today_state.tracked_minutes_live_basis) {
-                        state.today.tracked_minutes_live_basis = payload.data.today_state.tracked_minutes_live_basis;
-                    }
-
-                    if (payload.data.timesheet) {
-                        state.today.today_state = state.today.today_state || {};
-                        state.today.today_state.work_entry = payload.data.timesheet;
-                    }
-
-                    if (payload.data.timesheet && Array.isArray(payload.data.timesheet.attachments)) {
-                        state.today.attachments = payload.data.timesheet.attachments;
-                    }
-
-                    if (payload.data.server_time) {
-                        state.today.server_time = payload.data.server_time;
-                    }
-
-                    syncTodayStateStatus();
-                    if (item.payload.action === 'select_project') syncSelectedProjectSummaryFromTodayState(previousProjectId);
-                }
+                applySyncResponse(payload.data, item.payload, pauseMutation);
 
                 maybePromptForSignatureAfterSync(item, payload);
                 showFeedback('success', friendlyMessage(payload.message || (payload.data ? payload.data.message : ''), 'Aenderung erfolgreich gespeichert.'));
@@ -6875,21 +7195,28 @@
 
                 const message = friendlyMessage(error.message, 'Synchronisierung fehlgeschlagen.');
 
-                if (item.payload.action === 'select_project' && error.httpStatus === 422) {
+                const rejected = [403, 409, 422].includes(error.httpStatus);
+                const pauseMutation = PAUSE_ACTIONS.includes(item.payload.action);
+                const editable = item.payload.action === 'pause_record' && state.dialog?.type === 'pause-record'
+                    && state.dialog.requestId === item.client_request_id;
+                if (rejected && (item.payload.action === 'select_project' || editable)) {
                     await queueRemove(item.id);
                 } else {
-                    await queueUpdate({ ...item, status: 'failed', error: message });
+                    await queueUpdate({ ...item, status: rejected && pauseMutation ? 'conflict' : 'failed', error: message });
                 }
+                completed = false;
                 if (!isCurrentSessionContext(context)) break;
                 showFeedback('error', message, true);
+                // A later stamp may depend on the uncertain check-in or pause start.
+                if (!error.httpStatus || error.httpStatus >= 500 || [408, 429].includes(error.httpStatus)) break;
             }
         }
 
         if (!isCurrentSessionContext(context)) return { completed: false, deferred: false, sessionExpired: true };
         const pending = await queueAll();
         if (!isCurrentSessionContext(context)) return { completed: false, deferred: false, sessionExpired: true };
-        state.pendingCount = pending.length;
-        await cacheSet(todayCacheKey(), state.today, () => isCurrentSessionContext(context));
+        updatePendingQueue(pending);
+        await cacheTimeSyncDay(context);
         if (completedAny) {
             markTimesheetHistoryDirty();
         }
@@ -6899,8 +7226,49 @@
             completed,
             deferred: false,
             sessionExpired,
-            syncedRequestIds
+            syncedRequestIds,
+            pendingRequestIds: new Set(pending.filter((item) => item.status !== 'conflict').map((item) => item.client_request_id)),
         };
+    }
+
+    function applySyncResponse(data, command, pauseMutation) {
+        if (!state.today || !data) return;
+        const affected = data.timesheet || data.today_state?.work_entry;
+        const workDate = affected?.work_date || command.work_date;
+        const currentDay = !workDate || workDate === state.today.today;
+        if (currentDay && Object.prototype.hasOwnProperty.call(data, 'break_assessment')) {
+            state.today.break_assessment = data.break_assessment;
+        }
+        const currentId = Number(globalWorkEntry()?.id);
+        const affectedId = Number(affected?.id);
+        const sameWorkEntry = !pauseMutation || !currentId || !affectedId || currentId === affectedId;
+        if (!currentDay || !sameWorkEntry) {
+            const prior = previousPauseEntry();
+            if (prior && Number(prior.id) === affectedId) {
+                state.today.pause_active_entry = affected.end_time ? null : {
+                    ...prior, ...affected, current_break: data.current_break,
+                    breaks: data.breaks_today, break_assessment: data.break_assessment || prior.break_assessment,
+                };
+            }
+            return;
+        }
+
+        const previousProjectId = globalWorkEntry()?.project_id;
+        if (data.today_state) state.today.today_state = data.today_state;
+        if (Array.isArray(data.breaks_today)) state.today.breaks_today = data.breaks_today;
+        if (Object.prototype.hasOwnProperty.call(data, 'current_break')) state.today.current_break = data.current_break;
+        if (data.tracked_minutes_live_basis || data.today_state?.tracked_minutes_live_basis) {
+            state.today.tracked_minutes_live_basis = data.tracked_minutes_live_basis || data.today_state.tracked_minutes_live_basis;
+        }
+        if (data.timesheet) {
+            state.today.today_state = state.today.today_state || {};
+            state.today.today_state.work_entry = data.timesheet;
+            if (Array.isArray(data.timesheet.attachments)) state.today.attachments = data.timesheet.attachments;
+        }
+        if (data.server_time) state.today.server_time = data.server_time;
+        syncTodayStateStatus();
+        if (command.action === 'select_project') syncSelectedProjectSummaryFromTodayState(previousProjectId);
+        if (pauseMutation) syncSelectedProjectSummaryFromTodayState();
     }
 
     async function currentGeoPayload() {
@@ -7608,7 +7976,7 @@
                 const payload = await publicJson('/api/v1/auth/session');
 
                 if (!payload.authenticated && hadCachedAuthenticatedSession) {
-                    state.pendingCount = (await queueAll()).length;
+                    updatePendingQueue(await queueAll());
                     await handleExpiredSession('Ihre Sitzung ist abgelaufen. Bitte erneut anmelden. Wartende Buchungen bleiben erhalten.');
                     return;
                 }
@@ -7622,7 +7990,7 @@
         }
 
         restoreUserProjectPreferences();
-        state.pendingCount = (await queueAll()).length;
+        updatePendingQueue(await queueAll());
         await loadOnlineData(true);
         render();
     }
@@ -7662,6 +8030,9 @@
 
         document.querySelectorAll('[data-live-break-duration]').forEach((element) => {
             element.textContent = currentBreak() ? formatDurationMinutes(liveCurrentBreakMinutes()) : '--:--';
+        });
+        document.querySelectorAll('[data-live-prior-break-duration]').forEach((element) => {
+            element.textContent = formatDurationMinutes(liveCurrentBreakMinutes(previousPauseEntry()?.current_break));
         });
 
         refreshProjectDisplays();
@@ -7755,15 +8126,20 @@
     });
 
     window.addEventListener('keydown', function (event) {
-        if (state.dialog?.type !== 'confirm-project-assignment') return;
+        if (!['confirm-project-assignment', 'pause-record'].includes(state.dialog?.type)) return;
         if (event.key === 'Escape') {
+            if (state.pendingAction === 'pause_record') return;
+            event.preventDefault();
             closeDialog();
         } else if (event.key === 'Tab') {
-            const primary = document.getElementById('dialogConfirmPrimary');
-            const secondary = document.getElementById('dialogConfirmSecondary');
-            if (document.activeElement === (event.shiftKey ? primary : secondary)) {
+            const dialog = root.querySelector('.app-dialog[aria-modal="true"]');
+            const controls = Array.from(dialog?.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled)') || [])
+                .filter((element) => element.getClientRects().length > 0);
+            const first = controls[0];
+            const last = controls.at(-1);
+            if (document.activeElement === (event.shiftKey ? first : last)) {
                 event.preventDefault();
-                (event.shiftKey ? secondary : primary)?.focus();
+                (event.shiftKey ? last : first)?.focus();
             }
         }
     });

@@ -52,7 +52,7 @@ final class AdminContextService
     {
         $items = [
             ['href' => '/admin', 'label' => 'Dashboard', 'active_prefix' => '/admin', 'permission' => 'dashboard.view'],
-            ['href' => '/admin/work-time', 'label' => 'Kernarbeitszeit', 'active_prefix' => '/admin/work-time', 'any_permissions' => ['work_time_policies.view', 'work_time_deviations.view', 'work_time_notifications.manage']],
+            ['href' => '/admin/work-time', 'label' => 'Kernarbeitszeit', 'active_prefix' => '/admin/work-time', 'any_permissions' => ['work_time_policies.view', 'work_time_deviations.view', 'work_time_notifications.manage', 'pause_policies.view', 'pause_policies.manage']],
             [
                 'href' => '/admin/calendar',
                 'label' => 'Kalender',

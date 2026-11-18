@@ -72,4 +72,23 @@ final class TimesheetCalculator
 
         return 0;
     }
+
+    /** Calculate persisted actuals for a booking that opted into documented pauses. */
+    public function calculateDocumented(string $date, string $start, ?string $end, array $breaks): array
+    {
+        $paused = (new WorkdayStateCalculator())->completedBreakSeconds($breaks);
+        $gross = 0;
+        if ($end !== null && $end !== '') {
+            [$from, $to] = PauseAssessmentCalculator::bounds($date, $start, $end, new DateTimeImmutable());
+            $gross = $to - $from;
+            if ($paused > $gross) {
+                throw new InvalidArgumentException('Die nachgewiesenen Pausen sind laenger als der Arbeitseinsatz.');
+            }
+        }
+        return [
+            'gross_minutes' => intdiv($gross, 60),
+            'break_minutes' => intdiv($paused, 60),
+            'net_minutes' => intdiv(max(0, $gross - $paused), 60),
+        ];
+    }
 }

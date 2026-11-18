@@ -54,6 +54,8 @@ use App\Domain\Timesheets\AbsencePeriodService;
 use App\Domain\Timesheets\AppTimesheetSyncService;
 use App\Domain\Timesheets\TimesheetDayConflictService;
 use App\Domain\Timesheets\TimesheetAuditService;
+use App\Domain\Timesheets\PausePolicyService;
+use App\Domain\Timesheets\TimesheetPauseService;
 use App\Domain\Timesheets\TimesheetCalculator;
 use App\Domain\Timesheets\TimesheetGeoLocationService;
 use App\Domain\Timesheets\TimesheetSignatureService;
@@ -99,6 +101,7 @@ use App\Http\Controllers\AppTimesheetAttachmentController;
 use App\Http\Controllers\AppTimesheetController;
 use App\Http\Controllers\AppWorkTimeController;
 use App\Http\Controllers\AdminWorkTimeController;
+use App\Http\Controllers\AdminPausePolicyController;
 use App\Http\Controllers\AdminWorkTimeNotificationController;
 use App\Http\Controllers\AppTimesheetSignatureController;
 use App\Http\Controllers\AppVacationRequestController;
@@ -131,7 +134,12 @@ require_once __DIR__ . '/autoload.php';
 
 (new EnvironmentLoader())->load(base_path('.env'));
 
-if (session_status() !== PHP_SESSION_ACTIVE) {
+$request = Request::capture();
+$isPublicAppResource = $request->method() === 'GET'
+    && (in_array($request->path(), ['/app/sw.js', '/app/manifest.json'], true)
+        || ($request->path() === '/app' && $request->query(AppController::OFFLINE_SHELL_QUERY) === '1'));
+
+if (!$isPublicAppResource && session_status() !== PHP_SESSION_ACTIVE) {
     $sessionCandidates = [];
     $projectSessionPath = storage_path('cache/sessions');
     $projectSessionParent = dirname($projectSessionPath);
@@ -269,20 +277,29 @@ $accountingDocumentExportService = new AccountingDocumentExportService($companyS
 $backupService = new BackupService($connection, $config->get('uploads', []));
 $smtpTestService = new SmtpTestService();
 $nfcTagService = new NfcTagService($connection, (string) $config->get('app.settings_encryption_key', ''));
-$mobileAppService = new MobileAppService($connection, $projectService, $companySettingsService, $workdayStateCalculator, $fileService, $timesheetGeoLocationService, $calendarPolicyService, $timesheetSignatureService, $personnelEventService, $personnelLabelService, $nfcTagService, $userWorkdayPolicy);
+$pausePolicies = new PausePolicyService($connection);
+$timesheetPauses = new TimesheetPauseService($connection, $pausePolicies);
+$adminBookingService->setPauseService($timesheetPauses);
+$mobileAppService = new MobileAppService($connection, $projectService, $companySettingsService, $workdayStateCalculator, $fileService, $timesheetGeoLocationService, $calendarPolicyService, $timesheetSignatureService, $personnelEventService, $personnelLabelService, $nfcTagService, $userWorkdayPolicy, $timesheetPauses);
 $appTimesheetSyncService = new AppTimesheetSyncService($connection, $timesheetCalculator, $companySettingsService, $workdayStateCalculator, $timesheetSignatureService, $timesheetDayConflictService);
 $workTimePolicies = new WorkTimePolicyService($connection, (bool) $config->get('app.work_time_windows_enabled', false));
 $workTimePreview = new WorkTimePreviewService($connection, $workTimePolicies);
+$workTimePreview->setPauseService($timesheetPauses);
+$workTimePolicies->setAssignmentImpactSources($workTimePreview, $timesheetPauses);
 $workTimePresence = new WorkTimePresenceService($connection, $workTimePolicies);
 $appTimesheetSyncService->setWorkTimePresenceService($workTimePresence);
+$appTimesheetSyncService->setPauseService($timesheetPauses);
 $workTimeEvents = new WorkTimeEventService($connection, $workTimePolicies, $appTimesheetSyncService, new WorkTimePushChannel($pushSubscriptionService, $pushNotificationService), null, $workTimePreview);
 $projectMaterialService = new ProjectMaterialService($connection, $projectAccessService, $workTimeEvents);
 $workTimeDeviations = new WorkTimeDeviationService($connection, $workTimePolicies);
-$workTimePauseCorrections = new WorkTimePauseCorrectionService($connection, $workTimePolicies, $workTimePreview, $timesheetWriteGuard);
+$workTimePauseCorrections = new WorkTimePauseCorrectionService($connection, $workTimePolicies, $workTimePreview, $timesheetWriteGuard, $timesheetPauses);
 $workTimeUserSummary = new WorkTimeUserSummaryService($connection, $workTimePolicies);
 $timeAccountService->setWorkTimePreviewService($workTimePreview);
 $accountingClosureService->setWorkTimePreviewService($workTimePreview);
 $employeeAccountCutoverService->setWorkTimePreviewService($workTimePreview);
+$timeAccountService->setPauseService($timesheetPauses);
+$accountingClosureService->setPauseService($timesheetPauses);
+$employeeAccountCutoverService->setPauseService($timesheetPauses);
 $timeAccountExportService = new TimeAccountExportService($timeAccountService);
 $vacationRequestService = new VacationRequestService($connection, $calendarPolicyService, $timesheetWriteGuard, $dailyTargetService, $timesheetDayConflictService, $absencePeriodService);
 $terminalService = new TerminalService($connection, $companySettingsService);
@@ -318,7 +335,8 @@ $adminAuthController = new AdminAuthController($authService, $companySettingsSer
 $appController = new AppController($appView, $authService, $appDisplayName, $companySettingsService);
 $appApiController = new AppApiController($mobileAppService, $authService, $workTimePolicies, $workTimeEvents);
 $appWorkTimeController = new AppWorkTimeController($authService, $csrfService, $workTimePolicies, $workTimePreview, $workTimeEvents);
-$adminWorkTimeController = new AdminWorkTimeController($adminView, $authService, $csrfService, $userService, $workTimePolicies, $workTimePreview, $workTimeDeviations, new WorkTimeAccessService($workTimePolicies), $workTimeEvents, $workTimePauseCorrections);
+$adminPausePolicyController = new AdminPausePolicyController($pausePolicies, $authService, $csrfService, $userService);
+$adminWorkTimeController = new AdminWorkTimeController($adminView, $authService, $csrfService, $userService, $workTimePolicies, $workTimePreview, $workTimeDeviations, new WorkTimeAccessService($workTimePolicies), $workTimeEvents, $workTimePauseCorrections, pausePolicies: $adminPausePolicyController);
 $adminWorkTimeNotificationController = new AdminWorkTimeNotificationController($adminView, $authService, $csrfService, $userService, $workTimePolicies, $workTimeEvents->notifications(), new WorkTimeAccessService($workTimePolicies));
 $appPushController = new AppPushController($pushSettingsService, $pushSubscriptionService, $pushNotificationService, $authService);
 $appTimeAccountController = new AppTimeAccountController($timeAccountService, $authService);
@@ -419,6 +437,12 @@ $router->post('/admin/work-time/assignments', $admin([$adminWorkTimeController, 
 $router->post('/admin/work-time/assignments/{id}/end', $admin([$adminWorkTimeController, 'endAssignment'], 'work_time_policies.manage'));
 $router->post('/admin/work-time/deviations/{id}/decide', $admin([$adminWorkTimeController, 'decide'], 'work_time_deviations.manage'));
 $router->post('/admin/work-time/timesheets/{id}/pauses', $admin([$adminWorkTimeController, 'documentPauses'], 'work_time_deviations.manage'));
+$router->post('/admin/work-time/pause-models/templates', $admin([$adminPausePolicyController, 'saveTemplate'], PausePolicyService::MANAGE));
+$router->post('/admin/work-time/pause-models/templates/{id}/archive', $admin([$adminPausePolicyController, 'archiveTemplate'], PausePolicyService::MANAGE));
+$router->post('/admin/work-time/pause-models/assignments', $admin([$adminPausePolicyController, 'assign'], PausePolicyService::MANAGE));
+$router->post('/admin/work-time/pause-models/defaults', $admin([$adminPausePolicyController, 'scheduleDefault'], PausePolicyService::MANAGE));
+$router->post('/admin/work-time/pause-models/{scope}/{id}/end', $admin([$adminPausePolicyController, 'endSchedule'], PausePolicyService::MANAGE));
+$router->post('/admin/work-time/pause-models/preview', $admin([$adminPausePolicyController, 'preview'], null));
 $router->get('/api/v1/app/me/work-time', $api([$appWorkTimeController, 'status']));
 $router->post('/api/v1/app/work-time/proposals/{id}/respond', $api([$appWorkTimeController, 'respond'], 'timesheets.create'));
 $router->get('/favicon.ico', static fn (): Response => Response::redirect('/assets/app-icon.svg'));
@@ -665,4 +689,4 @@ $router->post('/api/v1/settings/database', $api([new SettingsController($databas
 $router->get('/api/v1/system/backup/export', $api([$backupController, 'export'], 'settings.database.manage'));
 $router->post('/api/v1/system/backup/import/validate', $api([$backupController, 'validateImport'], 'settings.database.manage'));
 
-return [Request::capture(), $router];
+return [$request, $router];

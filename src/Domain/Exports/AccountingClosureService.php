@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Exports;
 
 use App\Domain\Timesheets\AdminBookingService;
+use App\Domain\Timesheets\TimesheetPauseService;
 use App\Domain\WorkTime\WorkTimePreviewService;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
@@ -16,6 +17,7 @@ final class AccountingClosureService
     private const ACCOUNTING_WRITE_LOCK = 'accounting-timesheet-write';
 
     private ?WorkTimePreviewService $workTimePreviewService = null;
+    private ?TimesheetPauseService $pauses = null;
 
     public function __construct(
         private DatabaseConnection $connection,
@@ -26,6 +28,11 @@ final class AccountingClosureService
     public function setWorkTimePreviewService(WorkTimePreviewService $service): void
     {
         $this->workTimePreviewService = $service;
+    }
+
+    public function setPauseService(TimesheetPauseService $service): void
+    {
+        $this->pauses = $service;
     }
 
     public function selectionFromInput(array $input): array
@@ -227,6 +234,9 @@ final class AccountingClosureService
         if ($this->hasUnresolvedWindowTimes($activeRows)) {
             $errors[] = 'Arbeitszeitfenster: Aussenzeiten oder Pausenzuordnungen sind noch ungeklärt. Ein verbindlicher Abschluss ist erst nach dokumentierter Klaerung moeglich.';
         }
+        if ($this->hasUndeterminedActualTime($activeRows)) {
+            $errors[] = 'Mindestens eine Arbeitszeit mit aktivem Pausenmodell kann aus den vorhandenen Nachweisen nicht eindeutig ermittelt werden.';
+        }
 
         return [
             'ok' => $errors === [],
@@ -266,6 +276,27 @@ final class AccountingClosureService
             }
         }
 
+        return false;
+    }
+
+    private function hasUndeterminedActualTime(array $rows): bool
+    {
+        if ($this->pauses === null) {
+            return false;
+        }
+        $dates = [];
+        foreach ($rows as $row) {
+            if (($row['entry_type'] ?? '') === 'work') {
+                $dates[(int) $row['user_id']][(string) $row['work_date']] = true;
+            }
+        }
+        foreach ($dates as $userId => $days) {
+            foreach ($this->pauses->assessmentsForPeriod($userId, min(array_keys($days)), max(array_keys($days))) as $date => $assessment) {
+                if (isset($days[$date]) && ($assessment['actual_work_minutes'] === null || $assessment['is_running'])) {
+                    return true;
+                }
+            }
+        }
         return false;
     }
 

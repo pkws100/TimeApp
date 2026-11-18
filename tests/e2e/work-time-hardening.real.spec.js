@@ -40,8 +40,11 @@ test.describe('real hardening release candidate workflow', () => {
     await expect(assignment.locator('[name="outside_window_delay_minutes"]')).toHaveValue('5');
     await expect(assignment.locator('[name="notify_employee_push"]')).toBeChecked();
     await assignment.locator('[name="effective_from"]').fill(process.env.UI_TEST_HARDENING_FUTURE_DATE);
-    await assignment.getByRole('button', { name: 'Beispiel prüfen', exact: true }).click();
-    await expect(assignment.locator('[data-worktime-result]')).toContainText('Tatsächliche Arbeit: 503 Min.');
+    await assignment.getByLabel('Begründung für die Zuordnung').fill('UI-Abnahme einer künftigen Kernarbeitszeit');
+    await expect(assignment.locator('[data-worktime-save]')).toBeDisabled();
+    await assignment.getByRole('button', { name: 'Auswirkungen prüfen', exact: true }).click();
+    await expect(assignment.locator('[data-worktime-result]')).toContainText('0 Buchungen an 0 Arbeitstagen.');
+    await expect(assignment.getByLabel('Rückwirkende Änderung nach dieser Vorschau bestätigen')).toBeHidden();
     await assignment.locator('[data-worktime-save]').click();
     await expect(page.locator('.notice-success')).toContainText('Gespeichert.');
     const activated = fixture('activate', userId);

@@ -12,6 +12,8 @@ use App\Presentation\App\AppView;
 
 final class AppController
 {
+    public const OFFLINE_SHELL_QUERY = 'offline-shell';
+
     public function __construct(
         private AppView $view,
         private AuthService $authService,
@@ -23,9 +25,13 @@ final class AppController
     public function shell(Request $request): Response
     {
         $route = $request->path();
+        $offlineShell = $route === '/app' && $request->query(self::OFFLINE_SHELL_QUERY) === '1';
+        $session = $offlineShell
+            ? ['authenticated' => false, 'user' => null, 'bootstrap_required' => $this->authService->bootstrapRequired()]
+            : $this->authService->sessionPayload();
         $bootstrap = [
             'route' => $route,
-            'session' => $this->authService->sessionPayload(),
+            'session' => $session,
             'app_name' => $this->appName,
             'company_logo_url' => $this->companySettingsService?->publicLogoUrl(),
         ];
@@ -88,12 +94,13 @@ final class AppController
         $maskableIconUrl = AppView::versionedAssetUrl('/assets/app-icon-maskable-512.png');
         $appleTouchIconUrl = AppView::versionedAssetUrl('/assets/apple-touch-icon.png');
         $appName = json_encode($this->appName, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+        $offlineShellQuery = self::OFFLINE_SHELL_QUERY;
         $script = <<<JS
-const CACHE_NAME = 'zeiterfassung-app-v8';
+const CACHE_NAME = 'zeiterfassung-app-v9';
 const APP_NAME = {$appName};
 const APP_FALLBACK_URL = '/app';
 const APP_SHELL = [
-  APP_FALLBACK_URL,
+  APP_FALLBACK_URL + '?{$offlineShellQuery}=1',
   '{$cssUrl}',
   '{$jsUrl}',
   '{$icon192Url}',
@@ -103,7 +110,12 @@ const APP_SHELL = [
 ];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
+  const publicShell = APP_SHELL.map((url) => new Request(url, { credentials: 'omit' }));
+  event.waitUntil(caches.open(CACHE_NAME).then(async (cache) => {
+    await cache.addAll(publicShell);
+    const fallback = await cache.match(publicShell[0]);
+    await cache.put(APP_FALLBACK_URL, new Response(fallback.body, { headers: fallback.headers }));
+  }));
   self.skipWaiting();
 });
 
@@ -133,16 +145,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   if (isAppShellRequest) {
-    event.respondWith(
-      fetch(request).then((response) => {
-        if (response.ok) {
-          const cloned = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, cloned));
-        }
-
-        return response;
-      }).catch(() => caches.match(request).then((cached) => cached || caches.match(APP_FALLBACK_URL)))
-    );
+    event.respondWith(fetch(request).catch(() => caches.match(APP_FALLBACK_URL)));
     return;
   }
 

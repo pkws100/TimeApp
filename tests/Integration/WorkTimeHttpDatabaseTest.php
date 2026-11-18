@@ -87,8 +87,10 @@ final class WorkTimeHttpDatabaseTest extends MariaDbTestCase
             $form['effective_from'] = (new \DateTimeImmutable('tomorrow'))->format('Y-m-d');
             $form['supervisor_user_ids'] = [$supervisor];
             $form['csrf_token'] = $_SESSION['_csrf_token'];
-            $preview = $this->json($this->call($router, 'POST', '/admin/work-time/preview', $form));
-            $form['preview_token'] = $preview['preview_token'];
+            $form['reason'] = 'Unzulässige Mitarbeiterzuordnung';
+            $preview = $this->call($router, 'POST', '/admin/work-time/preview', $form);
+            self::assertSame(403, $preview->status());
+            self::assertArrayNotHasKey('preview_token', $this->json($preview));
             self::assertSame(403, $this->call($router, 'POST', '/admin/work-time/assignments', $form)->status());
             self::assertSame(0, (int) $this->connection()->fetchColumn('SELECT COUNT(*) FROM employee_work_time_assignments'));
         });

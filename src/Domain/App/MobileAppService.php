@@ -14,6 +14,7 @@ use App\Domain\Terminals\NfcTagService;
 use App\Domain\Timesheets\TimesheetGeoLocationService;
 use App\Domain\Timesheets\TimesheetSignatureService;
 use App\Domain\Timesheets\WorkdayStateCalculator;
+use App\Domain\Timesheets\TimesheetPauseService;
 use App\Domain\Users\UserWorkdayPolicy;
 use App\Infrastructure\Database\DatabaseConnection;
 use InvalidArgumentException;
@@ -34,7 +35,8 @@ final class MobileAppService
         private ?PersonnelEventService $personnelEventService = null,
         private ?PersonnelLabelService $personnelLabelService = null,
         private ?NfcTagService $nfcTagService = null,
-        ?UserWorkdayPolicy $userWorkdayPolicy = null
+        ?UserWorkdayPolicy $userWorkdayPolicy = null,
+        private ?TimesheetPauseService $pauses = null
     ) {
         $this->userWorkdayPolicy = $userWorkdayPolicy ?? new UserWorkdayPolicy();
     }
@@ -108,6 +110,10 @@ final class MobileAppService
             ],
             'current_break' => $currentBreak,
             'breaks_today' => $breaksToday,
+            ...(!$this->pauses?->available() ? [] : [
+                'break_assessment' => $this->pauses->assessmentForDay((int) $user['id'], $today),
+                'pause_active_entry' => $this->pauses->openCarryover((int) $user['id'], $today),
+            ]),
             'tracked_minutes_live_basis' => $trackedMinutesLiveBasis,
             'attachments' => $attachments,
             'project_day_summaries' => $projectDaySummaries,
@@ -260,13 +266,16 @@ final class MobileAppService
             $breaksByTimesheet = $this->findBreaksForTimesheets($timesheetIds);
             $geoByTimesheet = $this->geoLocationService?->listForTimesheetsGrouped($timesheetIds, (int) ($user['id'] ?? 0)) ?? [];
             $signatureByTimesheet = $this->signatureService?->listForTimesheetsGrouped($timesheetIds, false) ?? [];
+            $dates = array_column($rows, 'work_date');
+            $breakAssessments = $dates === [] ? [] : ($this->pauses?->assessmentsForPeriod((int) $user['id'], min($dates), max($dates), true) ?? []);
             $items = array_map(
                 fn (array $row): array => $this->normalizeHistoryItem(
                     $row,
                     $attachmentsByTimesheet[(int) ($row['id'] ?? 0)] ?? [],
                     $breaksByTimesheet[(int) ($row['id'] ?? 0)] ?? [],
                     $geoByTimesheet[(int) ($row['id'] ?? 0)] ?? [],
-                    $signatureByTimesheet[(int) ($row['id'] ?? 0)] ?? null
+                    $signatureByTimesheet[(int) ($row['id'] ?? 0)] ?? null,
+                    $breakAssessments[$row['work_date']] ?? null
                 ),
                 $rows
             );
@@ -291,7 +300,7 @@ final class MobileAppService
         ];
     }
 
-    private function normalizeHistoryItem(array $row, array $attachments, array $breaks, array $geoRecords = [], ?array $customerSignature = null): array
+    private function normalizeHistoryItem(array $row, array $attachments, array $breaks, array $geoRecords = [], ?array $customerSignature = null, ?array $breakAssessment = null): array
     {
         $id = (int) ($row['id'] ?? 0);
         $storedEntryType = (string) ($row['entry_type'] ?? 'work');
@@ -319,6 +328,7 @@ final class MobileAppService
             'note' => self::nullableTrimmed($row['note'] ?? null),
             'updated_at' => self::dateTimeOrNull($row['updated_at'] ?? null),
             'breaks' => $breaks,
+            ...($entryType === 'work' && $breakAssessment !== null ? ['break_assessment' => $breakAssessment] : []),
             'attachments' => $attachments,
             'attachment_count' => count($attachments),
             'geo_records' => $geoRecords,
@@ -475,6 +485,9 @@ final class MobileAppService
 
     private function findBreaksForTimesheet(int $timesheetId): array
     {
+        if ($this->pauses !== null) {
+            return $this->pauses->breaks($timesheetId);
+        }
         if ($timesheetId <= 0 || !$this->connection->tableExists('timesheet_breaks')) {
             return [];
         }
@@ -501,6 +514,9 @@ final class MobileAppService
 
     private function findBreaksForTimesheets(array $timesheetIds): array
     {
+        if ($this->pauses !== null) {
+            return $this->pauses->groupedBreaks($timesheetIds);
+        }
         $timesheetIds = array_values(array_unique(array_filter(
             array_map(static fn (mixed $id): int => (int) $id, $timesheetIds),
             static fn (int $id): bool => $id > 0

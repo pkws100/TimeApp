@@ -52,7 +52,7 @@
 
 ## Zeiterfassungslogik
 - Arbeitsbloecke speichern Brutto-, Pausen- und Netto-Minuten.
-- Gesetzliche Pausen werden serverseitig automatisch auf mindestens 30 Minuten bei mehr als 6 Stunden und 45 Minuten bei mehr als 9 Stunden angehoben.
+- Das Legacy-Verfahren speichert rechnerische Mindestabzuege. Neue Buchungen mit aktivem Pausenmodell speichern dokumentierte Pausen und die daraus ermittelte Arbeitszeit. Die gesetzliche Mindestpause sowie fehlende Minuten sind eigene berechnete Felder.
 - Spesen werden ueber `expenses_amount` erfasst, damit PDF- und Exportberichte dieselbe Datenbasis verwenden.
 - Tatsaechliche Arbeitszeit (`net_minutes` bei `work`) und Zeitgutschrift (`credited_minutes` bei bezahlten Abwesenheiten) sind getrennte Groessen.
 - Zeitkontostand = Eroeffnungssaldo + Arbeitszeit ab Stichtag + bezahlte Abwesenheitsgutschriften - effektives Soll ab Stichtag + Journal-Korrekturen.
@@ -89,6 +89,13 @@
 - `work_time_notification_attempts`, `work_time_notification_retry_requests` und `work_time_notification_history` ergaenzen Versandereignisse um Providerannahme, sichere Fehlerklassen und begruendete Wiederholungsanfragen. Unklare/teilweise angenommene Sendungen werden nicht wiederholt. Bestehende Versandzustaende bleiben als Legacy-Snapshot erhalten; alte Fehler werden vorsichtig als unklar eingeordnet.
 - `work_time_pause_corrections` dokumentiert nachgewiesene Intervallnachtraege mit Vorher-/Nachher-Snapshot, Akteur, Begruendung, Quellenbindung und Request-ID. Nettozeit und versionierte Buchungszeile bleiben unveraendert; bestehende Signaturen und Periodensperren blockieren Nachtraege.
 - Aeltere Buchungswege pruefen einen vorhandenen Pausenauditmarker bzw. `timesheet_breaks.source = admin_evidence` vor Writes innerhalb Accounting-Lock und Transaktion. Geschuetzte Stempel-/Dauer-/Herkunftsdaten und Intervalle sind dort nicht veraenderbar; der Schutz gilt auch bei deaktiviertem WorkTime. Metadaten und logisch archivierte Nachweise behalten ihre Historie.
+- Die Migration `20261118131000_work_time_assignment_history.php` erhaelt ersetzte Zuordnungsintervalle, referenziert fortgefuehrte Regelabschnitte und bindet die Freigabe neuer Live-Ereignisse an den Erfassungszeitpunkt. Das zeitlich gebundene Vorschautoken wird unter dem Mitarbeiter- und Accounting-Lock erneut geprueft.
+
+## Pausenmodelle und Nachweise
+
+- `20261118150000_pause_policy_models.php` legt Vorlagen, unveraenderliche Versionen, zeitliche Standard- und Mitarbeiterzuordnungen sowie deren Audit an. Die Migration aktiviert keine Regel.
+- `20261118160000_timesheet_pause_records.php` fuehrt `timesheet_pause_policy_snapshots` und `timesheet_pause_durations` ein. Der Snapshot bindet die effektive Regelversion an eine neu erstellte Buchung. Datierte Pausen bleiben in `timesheet_breaks`. Bestaetigte Dauern ohne Uhrzeiten werden separat gespeichert. Eine spaeter nachgewiesene Lage markiert die Dauer als zugeordnet und protokolliert das Intervall im vorhandenen Korrekturaudit.
+- Die neuen Tabellen veraendern weder das Schema von `timesheets` noch vorhandene Buchungen, Journale oder Abschluesse. In neuen Buchungen mit Pausenmodell sind `net_minutes` die aus den tatsaechlichen Nachweisen ermittelten Arbeitsminuten. Die Pflichtpause und Fehlmenge entstehen in der Leseauswertung.
 
 ## Material-Erfassungskontext und Anfrage-IDs
 
