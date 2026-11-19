@@ -23,6 +23,13 @@ use App\Domain\Exports\ReportService;
 use App\Domain\Exports\TimeAccountExportService;
 use App\Domain\Files\DocumentStatusService;
 use App\Domain\Files\FileAttachmentService;
+use App\Domain\Personnel\Compliance\EmploymentContextService;
+use App\Domain\Personnel\Compliance\PersonnelAccessService;
+use App\Domain\Personnel\Compliance\PersonnelAdminQueryService;
+use App\Domain\Personnel\Compliance\PersonnelComplianceCatalogService;
+use App\Domain\Personnel\Compliance\PersonnelDocumentService;
+use App\Domain\Personnel\Compliance\PersonnelFileRuntime;
+use App\Domain\Personnel\Compliance\PersonnelSyntheticHttpBoundary;
 use App\Domain\Personnel\PersonnelEventService;
 use App\Domain\Personnel\PersonnelLabelService;
 use App\Domain\Personnel\PersonnelReminderService;
@@ -85,6 +92,7 @@ use App\Http\Controllers\AdminBookingController;
 use App\Http\Controllers\AdminCalendarController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminManagementController;
+use App\Http\Controllers\AdminPersonnelDocumentsController;
 use App\Http\Controllers\AdminPushController;
 use App\Http\Controllers\AdminTimesheetAttachmentController;
 use App\Http\Controllers\AdminTimesheetSignatureController;
@@ -124,15 +132,18 @@ use App\Http\Controllers\TerminalApiController;
 use App\Http\Controllers\TimesheetController;
 use App\Http\Controllers\UserController;
 use App\Http\Request;
+use App\Http\PersonnelAdminFileTransfer;
 use App\Http\Response;
 use App\Http\Router;
 use App\Infrastructure\Database\DatabaseConnection;
 use App\Presentation\Admin\AdminView;
+use App\Presentation\Admin\PersonnelDocumentsView;
 use App\Presentation\App\AppView;
 
 require_once __DIR__ . '/autoload.php';
 
 (new EnvironmentLoader())->load(base_path('.env'));
+$personnelHttp = PersonnelSyntheticHttpBoundary::discover();
 
 $request = Request::capture();
 $isPublicAppResource = $request->method() === 'GET'
@@ -140,7 +151,7 @@ $isPublicAppResource = $request->method() === 'GET'
         || ($request->path() === '/app' && $request->query(AppController::OFFLINE_SHELL_QUERY) === '1'));
 
 if (!$isPublicAppResource && session_status() !== PHP_SESSION_ACTIVE) {
-    $sessionCandidates = [];
+    $sessionCandidates = $personnelHttp === null ? [] : [$personnelHttp->sessionDirectory()];
     $projectSessionPath = storage_path('cache/sessions');
     $projectSessionParent = dirname($projectSessionPath);
 
@@ -180,11 +191,11 @@ if (!$isPublicAppResource && session_status() !== PHP_SESSION_ACTIVE) {
     $sessionSecureDefault = str_starts_with(strtolower((string) env('APP_URL', '')), 'https://');
     $sessionSecure = (bool) env('SESSION_SECURE_COOKIE', $sessionSecureDefault);
 
-    session_name((string) env('SESSION_NAME', 'baustelle_session'));
+    session_name($personnelHttp?->sessionName() ?? (string) env('SESSION_NAME', 'baustelle_session'));
     session_start([
         'cookie_httponly' => true,
         'cookie_secure' => $sessionSecure,
-        'cookie_samesite' => 'Lax',
+        'cookie_samesite' => $personnelHttp === null ? 'Lax' : 'Strict',
         'use_strict_mode' => true,
     ]);
 }
@@ -198,6 +209,7 @@ $databaseSettings = new DatabaseSettingsManager(
     $databaseOverridePath
 );
 $connection = new DatabaseConnection($databaseSettings->current());
+$personnelHttpEnabled = $personnelHttp !== null && $personnelHttp->bind($connection);
 $permissionMatrix = new PermissionMatrix($config->get('permissions.roles', []), $config->get('permissions.available', []));
 $storageUsage = new StorageUsageService(storage_path());
 
@@ -278,7 +290,8 @@ $bookingExportService = new BookingExportService($adminBookingService);
 $accountingExportService = new AccountingExportService($adminBookingService);
 $accountingClosureService = new AccountingClosureService($connection, $adminBookingService);
 $accountingDocumentExportService = new AccountingDocumentExportService($companySettingsService, $config->get('exports', []));
-$backupService = new BackupService($connection, $config->get('uploads', []), runtimeOverridePath: $databaseOverridePath);
+$backupService = new BackupService($connection, $config->get('uploads', []),
+    backupRoot: $personnelHttp?->generalBackupDirectory(), runtimeOverridePath: $databaseOverridePath);
 $smtpTestService = new SmtpTestService();
 $nfcTagService = new NfcTagService($connection, (string) $config->get('app.settings_encryption_key', ''));
 $pausePolicies = new PausePolicyService($connection);
@@ -326,7 +339,8 @@ $adminContextService = new AdminContextService(
     $personnelEventService,
     $terminalService,
     $authService,
-    (string) $config->get('app.name')
+    (string) $config->get('app.name'),
+    $personnelHttpEnabled,
 );
 $adminView = new AdminView(
     (string) $config->get('app.name'),
@@ -432,6 +446,31 @@ $admin = static fn (callable $handler, ?string $permission = 'dashboard.view'): 
 $api = static fn (callable $handler, ?string $permission = null): callable => $routeGuard->forApi($handler, $permission);
 
 $router = new Router();
+if ($personnelHttpEnabled) {
+    $personnelAccess = new PersonnelAccessService($connection, $authService);
+    $personnelDocuments = new PersonnelDocumentService(
+        $connection,
+        $personnelAccess,
+        fileRuntimeFactory: static fn (): PersonnelFileRuntime => PersonnelFileRuntime::fromSyntheticHttp($connection, $personnelHttp),
+    );
+    $personnelAdmin = new AdminPersonnelDocumentsController(
+        $authService,
+        $csrfService,
+        $personnelAccess,
+        $personnelDocuments,
+        new PersonnelAdminQueryService(
+            $connection,
+            $personnelAccess,
+            new EmploymentContextService($connection, $personnelAccess),
+            $personnelDocuments,
+            new PersonnelComplianceCatalogService($connection, $personnelAccess),
+        ),
+        new PersonnelAdminFileTransfer($personnelHttp, $personnelDocuments),
+        new PersonnelDocumentsView($adminView),
+        $personnelHttp->origin(),
+    );
+    $personnelAdmin->register($router);
+}
 $router->get('/admin/work-time', $admin([$adminWorkTimeController, 'index'], null));
 $router->get('/admin/work-time/notifications', $admin([$adminWorkTimeNotificationController, 'index'], 'work_time_notifications.manage'));
 $router->post('/admin/work-time/notifications/{id}/retry', $admin([$adminWorkTimeNotificationController, 'retry'], 'work_time_notifications.manage'));
@@ -610,7 +649,9 @@ $router->post('/admin/settings/document-statuses', $admin([$documentStatusContro
 $router->post('/admin/settings/document-statuses/{id}', $admin([$documentStatusController, 'update'], 'settings.manage'));
 $router->post('/admin/settings/document-statuses/{id}/archive', $admin([$documentStatusController, 'archive'], 'settings.manage'));
 $router->get('/admin/settings/database', $admin([$adminController, 'databaseSettings'], 'settings.database.manage'));
-$router->post('/admin/settings/database', $admin([$databaseSettingsController, 'saveFromAdmin'], 'settings.database.manage'));
+if ($personnelHttp === null) {
+    $router->post('/admin/settings/database', $admin([$databaseSettingsController, 'saveFromAdmin'], 'settings.database.manage'));
+}
 $router->get('/admin/settings/push', $admin([$adminPushController, 'show'], 'push.manage'));
 $router->post('/admin/settings/push', $admin([$adminPushController, 'save'], 'push.manage'));
 $router->post('/admin/settings/push/subscriptions/{id}', $admin([$adminPushController, 'updateDevice'], 'push.manage'));
@@ -690,7 +731,9 @@ $router->get('/api/v1/reports/accounting-export', $api([$accountingExportControl
 $router->get('/api/v1/settings/company', [$companySettingsController, 'publicProfile']);
 $router->get('/api/v1/settings/company/logo', [$companySettingsController, 'publicLogo']);
 $router->get('/api/v1/settings/database', $api([$databaseSettingsController, 'show'], 'settings.database.manage'));
-$router->post('/api/v1/settings/database', $api([$databaseSettingsController, 'store'], 'settings.database.manage'));
+if ($personnelHttp === null) {
+    $router->post('/api/v1/settings/database', $api([$databaseSettingsController, 'store'], 'settings.database.manage'));
+}
 $router->get('/api/v1/system/backup/export', $api([$backupController, 'export'], 'settings.database.manage'));
 $router->post('/api/v1/system/backup/import/validate', $api([$backupController, 'validateImport'], 'settings.database.manage'));
 

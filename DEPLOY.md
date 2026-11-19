@@ -313,6 +313,16 @@ php bin/personnel-private-backup.php restore-scratch /geschuetzt/operator.json "
 
 Das Ziel hat das Namensmuster `timeapp_personnel_restore_<12-hex>` und eine eigene Kennung `timeapp_pr_<12-hex>` mit gleichem Suffix. MariaDB darf ihr nur `SELECT, INSERT` auf das exakt eingegrenzte Schema gewähren. Unterstriche müssen bei einem Schema-Grant als Literal maskiert sein. Verwende einen separat gemigrierten Scratch-Stand mit passendem Katalog und Mitarbeiter-/Akteurbezug aus der Basissicherung. Der Fachbestand und Zielordner sind für den ersten Restore leer. Ein separat abgesicherter betrieblicher Wiederanlauf bleibt Voraussetzung für echte Unterlagen. Der CLI-Bericht liefert Sicherungskennung, Schema, Prüfsummen und Zähler. Ein Fehler bricht mit technischem Code ab. [Phase-2B-Implementierung](docs/COMPLIANCE_2027_PHASE2B_IMPLEMENTATION.md)
 
+### Admin-HTTP-Test der Personalakte in Phase 2C
+
+`PERSONNEL_HTTP_MODE=disabled` ist der Standard. Apache und der normale App-Server laden keine Personalaktenrouten. Der isolierte Test läuft über den PHP-Entwicklungsserver auf `127.0.0.1`, MariaDB ohne Netzwerklistener und ClamAV über einen eigenen Unix-Socket. Der Test legt seine eigene Datenbank, Sessions, temporären Uploads, Testschlüssel und private Objekte in getrennten Verzeichnissen an.
+
+```bash
+bash tests/Support/run-personnel-admin-ui.sh
+```
+
+Die Pakete PHP 8.2 mit Sodium und GD, MariaDB 10.11, qpdf ab Version 11, `util-linux`, ClamAV und die installierten Playwright-Browser werden vorausgesetzt. `PERSONNEL_TEST_QPDF` und `PERSONNEL_TEST_CLAMD` können auf verfügbare Testbinaries zeigen. Die Testvorrichtung erzeugt alle freigegebenen PDF-, JPEG- und PNG-Muster selbst. Die geschützte Fixture-Datei erlaubt Uploads ausschließlich mit den Hashes dieser Muster. Einen Internetzugang oder eine Weiterleitung für den Testserver nicht bereitstellen. Ablage und Browserablauf mit realen Unterlagen benötigen einen gesondert freigegebenen Betriebsadapter. [Phase-2C-Implementierung](docs/COMPLIANCE_2027_PHASE2C_IMPLEMENTATION.md)
+
 ### Allgemeine Sicherungen
 
 Regelmaessig sichern:

@@ -43,6 +43,20 @@ final class PersonnelComplianceCatalogService
         return $this->connection->fetchAll('SELECT id, code, label, category FROM personnel_document_types ORDER BY code');
     }
 
+    /** @return array{types:list<array>,rules:list<array>} */
+    public function assignmentOptions(int $employeeId): array
+    {
+        $this->access->requireEmployee(PersonnelAccessService::MANAGE, $employeeId);
+
+        return [
+            'types' => $this->connection->fetchAll('SELECT id, code, label, category FROM personnel_document_types ORDER BY label, id'),
+            'rules' => $this->connection->fetchAll(
+                'SELECT id, rule_code, revision, document_type_id, citation, valid_from, valid_until, applicability_mode
+                 FROM personnel_document_requirements ORDER BY rule_code, revision DESC, id'
+            ),
+        ];
+    }
+
     public function ruleRevision(int $ruleId, ?int $documentTypeId = null): array
     {
         $this->access->requirePermission(PersonnelAccessService::CATALOG);

@@ -7,6 +7,7 @@
     "ui:test:smoke": "REAL_ACCOUNT_UI=0 UI_ISOLATED_ACCOUNT_RUNNER=0 playwright test",
     "ui:test:webkit": "REAL_ACCOUNT_UI=0 UI_ISOLATED_ACCOUNT_RUNNER=0 playwright test --config=playwright.webkit.config.js",
     "ui:test:real": "php bin/run-revisable-account-ui-tests.php",
+    "ui:test:personnel": "bash tests/Support/run-personnel-admin-ui.sh",
     "ui:test:headed": "playwright test --headed"
   },
   "devDependencies": {

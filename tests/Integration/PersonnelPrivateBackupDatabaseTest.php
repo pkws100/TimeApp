@@ -81,6 +81,7 @@ final class PersonnelPrivateBackupDatabaseTest extends MariaDbTestCase
         $id = $archive['backup_id'];
         self::assertSame(2, $archive['objects']);
         self::assertSame(3, $archive['tables']['employee_document_versions'][0]);
+        self::assertSame(1, $archive['tables']['employee_document_evidence_reviews'][0]);
         self::assertSame(2, $archive['tables']['employee_employment_contexts'][0]);
         self::assertSame(2, $archive['basis_user_count']);
         self::assertSame('archive-v1', $archive['backup_key_id']);
@@ -410,6 +411,11 @@ final class PersonnelPrivateBackupDatabaseTest extends MariaDbTestCase
             $originals[$key] = $original;
         }
         $lastVersion = $db->lastInsertId();
+        $db->execute("INSERT INTO employee_document_evidence_reviews
+            (document_id, document_version_id, actor_user_id, `procedure`, procedure_version, outcome, original_kind,
+             paper_status, signature_status, reason, legible, matches_record, created_at)
+            VALUES (?, ?, ?, 'manual_visual', 1, 'confirmed_internal', 'paper', 'retained', 'unresolved',
+                    'visual_checks_confirmed', 1, 1, UTC_TIMESTAMP())", [$document, $lastVersion, $this->actorId]);
         $db->execute("INSERT INTO employee_document_audit (document_id, document_version_id, action, actor_user_id, reason)
             VALUES (?, ?, 'version.upload', ?, 'technical_fixture')", [$document, $lastVersion, $this->actorId]);
         $db->execute("INSERT INTO employee_document_access_log (document_id, document_version_id, employee_user_id, action, actor_user_id, outcome)

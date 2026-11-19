@@ -19,6 +19,8 @@ final class PersonnelAccessService
     public const DELEGATE = 'personnel_documents.delegate';
     public const CATALOG = 'personnel_compliance.manage';
 
+    private bool $auditingRead = false;
+
     public function __construct(private DatabaseConnection $connection, private AuthService $auth)
     {
         if (!$this->auth->usesConnection($this->connection)) {
@@ -71,6 +73,17 @@ final class PersonnelAccessService
         }
 
         return $actorId;
+    }
+
+    /** Null denotes a system administrator's unrestricted employee scope for this exact right. */
+    public function employeeDirectoryScope(string $permission): ?int
+    {
+        if (!in_array($permission, [self::VIEW, self::MANAGE], true)) {
+            throw new PersonnelAccessDenied();
+        }
+        $actorId = $this->requirePermission($permission);
+
+        return $this->auth->isSystemAdministrator() ? null : $actorId;
     }
 
     public function changeEmployeeScope(int $employeeId, int $granteeId, bool $grant, string $reason, string $requestId): array
@@ -151,28 +164,38 @@ final class PersonnelAccessService
     }
 
     /** @param callable(): array{0:mixed,1:?int,2:?int,3?:?int} $read */
-    public function auditedRead(string $action, callable $read): mixed
+    public function auditedRead(string $action, callable $read, bool $requiresOwnTransaction = false): mixed
     {
         $pdo = $this->connection->pdo();
+        if (!$requiresOwnTransaction && $this->auditingRead && $pdo?->inTransaction()) {
+            return $this->performAuditedRead($action, $read);
+        }
         if ($pdo === null || $pdo->inTransaction()) {
             throw new RuntimeException('Ein protokollierter Personalaktenzugriff ist momentan nicht möglich.');
         }
 
+        $this->auditingRead = true;
         try {
             $pdo->exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
-            return $this->connection->transaction(function () use ($action, $read): mixed {
-                $access = $read();
-                [$result, $documentId, $versionId] = $access;
-                $this->auditAccess($action, true, $documentId, $versionId, $access[3] ?? null);
-
-                return $result;
-            });
+            return $this->connection->transaction(fn (): mixed => $this->performAuditedRead($action, $read));
         } catch (PersonnelAccessDenied $exception) {
             $this->auditAccess($action, false);
             throw $exception;
         } catch (PDOException) {
             throw new RuntimeException('Ein protokollierter Personalaktenzugriff ist momentan nicht möglich.');
+        } finally {
+            $this->auditingRead = false;
         }
+    }
+
+    /** @param callable(): array{0:mixed,1:?int,2:?int,3?:?int} $read */
+    private function performAuditedRead(string $action, callable $read): mixed
+    {
+        $access = $read();
+        [$result, $documentId, $versionId] = $access;
+        $this->auditAccess($action, true, $documentId, $versionId, $access[3] ?? null);
+
+        return $result;
     }
 
     private function latestScope(int $employeeId, int $granteeId, bool $forUpdate = false): ?array

@@ -16,6 +16,7 @@ final class PersonnelBackupTables
         'employee_employment_contexts' => ['user_id', 'employment_key', 'revision'],
         'employee_documents' => ['id'],
         'employee_document_versions' => ['document_id', 'version_number'],
+        'employee_document_evidence_reviews' => ['id'],
         'employee_document_audit' => ['id'],
         'employee_document_access_log' => ['id'],
         'employee_personnel_scope_events' => ['id'],
@@ -32,6 +33,7 @@ final class PersonnelBackupTables
         'employee_employment_contexts' => ['user_id', 'created_by_user_id'],
         'employee_documents' => ['user_id', 'created_by_user_id', 'updated_by_user_id', 'archived_by_user_id'],
         'employee_document_versions' => ['created_by_user_id'],
+        'employee_document_evidence_reviews' => ['actor_user_id'],
         'employee_document_audit' => ['actor_user_id'],
         'employee_document_access_log' => ['actor_user_id', 'employee_user_id'],
         'employee_personnel_scope_events' => ['employee_user_id', 'grantee_user_id', 'changed_by_user_id'],
@@ -59,7 +61,7 @@ final class PersonnelBackupTables
         $latest = end($migrations);
         $version = $latest === false ? '' : (string) $latest['version'];
         $checks = $this->connection->fetchOne('SELECT @@foreign_key_checks AS foreign_keys, @@check_constraint_checks AS constraints');
-        if ((int) $version < 20261118207000 || (int) ($checks['foreign_keys'] ?? 0) !== 1 || (int) ($checks['constraints'] ?? 0) !== 1) {
+        if ((int) $version < 20261118208000 || (int) ($checks['foreign_keys'] ?? 0) !== 1 || (int) ($checks['constraints'] ?? 0) !== 1) {
             throw new PersonnelBackupFailure('incompatible_schema');
         }
 
@@ -88,6 +90,7 @@ final class PersonnelBackupTables
             'protect_employee_document_identity' => ['employee_documents', 'UPDATE', 'BEFORE'],
             'protect_employee_document_source' => ['employee_documents', 'UPDATE', 'BEFORE'],
             'require_personnel_private_object' => ['employee_document_versions', 'INSERT', 'BEFORE'],
+            'require_personnel_verified_review_version' => ['employee_document_evidence_reviews', 'INSERT', 'BEFORE'],
         ];
         foreach (array_merge(array_keys(self::TABLES), self::CATALOG) as $table) {
             $required['deny_delete_' . $table] = [$table, 'DELETE', 'BEFORE'];

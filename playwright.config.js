@@ -7,6 +7,7 @@ const chromiumExecutablePath = configuredChromium
 
 module.exports = defineConfig({
   testDir: './tests/e2e',
+  testIgnore: '**/personnel-admin*.real.spec.js',
   timeout: 30000,
   expect: {
     timeout: 5000

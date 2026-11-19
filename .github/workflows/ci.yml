@@ -208,6 +208,39 @@ jobs:
             ${{ runner.temp }}/timeapp-real-account-diagnostics/**/*-server*.log
           retention-days: 5
 
+  personnel-admin-http:
+    name: Isolated personnel admin in Chromium and WebKit
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: curl, gd, mbstring, pdo_mysql, posix, sodium, zip
+          coverage: none
+          tools: composer:v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install isolated-test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mariadb-server qpdf clamav-daemon
+          composer install --prefer-dist --no-interaction --no-progress
+          npm ci
+          npx playwright install --with-deps chromium webkit
+
+      - name: Run isolated personnel admin checks
+        run: npm run ui:test:personnel
+
   docker-production-smoke:
     name: Production Docker image smoke
     runs-on: ubuntu-latest

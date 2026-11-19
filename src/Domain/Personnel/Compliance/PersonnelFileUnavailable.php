@@ -8,7 +8,7 @@ use RuntimeException;
 
 final class PersonnelFileUnavailable extends RuntimeException
 {
-    public function __construct()
+    public function __construct(public readonly string $reason = 'unavailable')
     {
         parent::__construct('Die Personalaktendatei kann nicht sicher verarbeitet werden.');
     }

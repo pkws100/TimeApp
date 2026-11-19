@@ -7,6 +7,7 @@ namespace App\Domain\Admin;
 use App\Domain\Assets\AssetService;
 use App\Domain\Attendance\AttendanceService;
 use App\Domain\Auth\AuthService;
+use App\Domain\Personnel\Compliance\PersonnelAccessService;
 use App\Domain\Personnel\PersonnelEventService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Settings\CompanySettingsService;
@@ -28,7 +29,8 @@ final class AdminContextService
         private PersonnelEventService $personnelEventService,
         private TerminalService $terminalService,
         private AuthService $authService,
-        private string $defaultAppName
+        private string $defaultAppName,
+        private bool $personnelDocumentsEnabled = false,
     ) {
     }
 
@@ -104,6 +106,13 @@ final class AdminContextService
                 'active_prefix' => '/admin/personnel',
                 'badge' => (int) ($this->personnelEventService->overview()['overdue_events'] ?? 0),
                 'permission' => 'personnel.view',
+            ],
+            [
+                'href' => '/admin/personnel-documents',
+                'label' => 'Digitale Personalakte',
+                'active_prefix' => '/admin/personnel-documents',
+                'permission' => PersonnelAccessService::VIEW,
+                'enabled' => $this->personnelDocumentsEnabled,
             ],
             [
                 'href' => '/admin/users',

@@ -24,13 +24,24 @@ final class PersonnelFileRuntime
         public readonly PersonnelStreamCipher $cipher,
         public readonly PersonnelFileValidator $validator,
         public readonly PersonnelMalwareScanner $scanner,
+        private readonly ?PersonnelSyntheticHttpBoundary $httpBoundary = null,
     ) {
     }
 
     public static function fromConfiguration(DatabaseConnection $connection): self
     {
         self::assertSyntheticEnvironment($connection);
-        $config = require config_path('personnel_storage.php');
+
+        return self::create($connection, require config_path('personnel_storage.php'));
+    }
+
+    public static function fromSyntheticHttp(DatabaseConnection $connection, PersonnelSyntheticHttpBoundary $boundary): self
+    {
+        return self::create($connection, $boundary->fileConfiguration($connection), $boundary);
+    }
+
+    private static function create(DatabaseConnection $connection, array $config, ?PersonnelSyntheticHttpBoundary $boundary = null): self
+    {
         $forbidden = array_values(array_filter($config['forbidden_roots']));
         PersonnelPrivatePath::requireSeparate($config['keyring'], [...$forbidden, $config['root']]);
         $storage = new PersonnelPrivateStorage($config['root'], $forbidden, self::MAX_BYTES);
@@ -41,7 +52,7 @@ final class PersonnelFileRuntime
         $validator->assertReady();
         $scanner->assertReady();
 
-        return new self($connection, $storage, new PersonnelStreamCipher($keys), $validator, $scanner);
+        return new self($connection, $storage, new PersonnelStreamCipher($keys), $validator, $scanner, $boundary);
     }
 
     public static function forSyntheticTests(
@@ -61,7 +72,11 @@ final class PersonnelFileRuntime
         if ($connection !== $this->connection) {
             throw new PersonnelFileUnavailable();
         }
-        self::assertSyntheticEnvironment($connection);
+        if ($this->httpBoundary === null) {
+            self::assertSyntheticEnvironment($connection);
+        } else {
+            $this->httpBoundary->assertBound($connection);
+        }
     }
 
     public static function objectContext(string $storageKey): string

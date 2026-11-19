@@ -19,7 +19,9 @@ final class BackupService
     private const PERSONNEL_PHASE_TWO_SCHEMA = '20261118205000_personnel_phase_two_foundation';
     private const PERSONNEL_EMPLOYEE_ACCESS_SCHEMA = '20261118206000_personnel_temporal_history_and_access';
     private const PERSONNEL_PRIVATE_STORAGE_SCHEMA = '20261118207000_personnel_private_storage';
+    private const PERSONNEL_EVIDENCE_REVIEWS_SCHEMA = '20261118208000_personnel_evidence_reviews';
     private const PHASE_TWO_PRIVATE_TABLES = ['employee_personnel_scope_events', 'personnel_command_receipts'];
+    private const PERSONNEL_EVIDENCE_REVIEWS_TABLE = 'employee_document_evidence_reviews';
     private const REDACTED_SECRET = '[redacted:backup-secret]';
     private const RUNTIME_OVERRIDE_EXCLUDED_WARNING = 'Eine Runtime-Datenbankkonfiguration ist vorhanden und benoetigt eine separate geschuetzte Sicherung.';
     private const LEGACY_RUNTIME_OVERRIDE_EXCLUDED_WARNING = 'storage/config/database.override.php wurde erkannt, aber nicht ins Backup-Archiv aufgenommen.';
@@ -36,6 +38,7 @@ final class BackupService
         'employee_document_audit',
         'employee_document_access_log',
         ...self::PHASE_TWO_PRIVATE_TABLES,
+        self::PERSONNEL_EVIDENCE_REVIEWS_TABLE,
     ];
     private const PERSONNEL_CATALOG_TABLES = [
         'personnel_compliance_sources',
@@ -470,7 +473,8 @@ final class BackupService
         $currentSchema = $this->schemaVersion();
         // These releases only changed the excluded personnel rows after their original table layouts were published.
         $personnelSchemaOrder = [self::PREVIOUS_PERSONNEL_SCHEMA, self::PERSONNEL_TRIGGER_MIGRATION,
-            self::PERSONNEL_PHASE_TWO_SCHEMA, self::PERSONNEL_EMPLOYEE_ACCESS_SCHEMA, self::PERSONNEL_PRIVATE_STORAGE_SCHEMA];
+            self::PERSONNEL_PHASE_TWO_SCHEMA, self::PERSONNEL_EMPLOYEE_ACCESS_SCHEMA, self::PERSONNEL_PRIVATE_STORAGE_SCHEMA,
+            self::PERSONNEL_EVIDENCE_REVIEWS_SCHEMA];
         $archivePosition = array_search($schemaVersion, $personnelSchemaOrder, true);
         $currentPosition = array_search($currentSchema, $personnelSchemaOrder, true);
         $previousPersonnelSchema = $archivePosition !== false && $currentPosition !== false && $archivePosition < $currentPosition
@@ -493,10 +497,19 @@ final class BackupService
 
         $databaseTables = $this->validateDatabaseFiles($tables, $zip, $legacy);
         $databaseFiles = array_column($databaseTables, 'filename');
+        $tablesAddedSinceArchive = [];
+        if ($previousPersonnelSchema) {
+            if ($archivePosition < 2 && $currentPosition >= 2) {
+                $tablesAddedSinceArchive = self::PHASE_TWO_PRIVATE_TABLES;
+            }
+            if ($currentSchema === self::PERSONNEL_EVIDENCE_REVIEWS_SCHEMA) {
+                $tablesAddedSinceArchive[] = self::PERSONNEL_EVIDENCE_REVIEWS_TABLE;
+            }
+        }
         $this->assertExpectedTables(
             $databaseTables,
             !$legacy || $previousPersonnelSchema,
-            $previousPersonnelSchema && $archivePosition < 2 && $currentPosition >= 2 ? self::PHASE_TWO_PRIVATE_TABLES : []
+            $tablesAddedSinceArchive
         );
         $this->assertPersonnelArchiveEntries($archiveEntries, $databaseFiles);
 

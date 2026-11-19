@@ -2,7 +2,7 @@
 
 Die Entwicklung von Phase 2 kann mit synthetischen Daten beginnen. Für einen Pilot mit echten Beschäftigtendaten müssen unter anderem Rollendelegation, private Ablage, Sicherung, Wiederanlauf und Auditzugriff abgenommen sein. Die Produktivfreigabe erfordert zusätzlich die rechtliche, organisatorische und betriebliche Abnahme. [Anforderungsmatrix](COMPLIANCE_2027_REQUIREMENTS.md) · [Datenmodell](COMPLIANCE_2027_DATA_MODEL.md)
 
-Phase 2A stellt die internen Metadaten-, Audit-, Revisions- und Berechtigungsdienste bereit. Phase 2B integriert privaten Speicher, getrennte Sicherung und Scratch-Restore im synthetischen Testmodus. Phase 2C führt die freigegebenen Admin-Workflows ein. [Phase-2A-Implementierung](COMPLIANCE_2027_PHASE2A_IMPLEMENTATION.md) · [Phase-2B-Implementierung](COMPLIANCE_2027_PHASE2B_IMPLEMENTATION.md)
+Phase 2A stellt die internen Metadaten-, Audit-, Revisions- und Berechtigungsdienste bereit. Phase 2B integriert privaten Speicher, getrennte Sicherung und Scratch-Restore im synthetischen Testmodus. Phase 2C ergänzt die isolierte Admin-Oberfläche mit versionsgebundener Sichtung. Der Betriebsadapter für echte Unterlagen und die fachliche Freigabe stehen aus. [Phase-2A-Implementierung](COMPLIANCE_2027_PHASE2A_IMPLEMENTATION.md) · [Phase-2B-Implementierung](COMPLIANCE_2027_PHASE2B_IMPLEMENTATION.md) · [Phase-2C-Implementierung](COMPLIANCE_2027_PHASE2C_IMPLEMENTATION.md)
 
 | ID / Priorität | Arbeitspaket und Abhängigkeit | Abnahmekriterium |
 | --- | --- | --- |

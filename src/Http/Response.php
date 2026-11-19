@@ -42,6 +42,14 @@ final class Response
         return $this->headers;
     }
 
+    public function withHeaders(array $headers): self
+    {
+        $response = clone $this;
+        $response->headers = [...$response->headers, ...$headers];
+
+        return $response;
+    }
+
     public function send(bool $withoutBody = false): void
     {
         http_response_code($this->status);

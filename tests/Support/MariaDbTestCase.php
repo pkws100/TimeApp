@@ -22,6 +22,7 @@ abstract class MariaDbTestCase extends TestCase
         'employee_document_versions',
         'employee_document_audit',
         'employee_document_access_log',
+        'employee_document_evidence_reviews',
         'employee_personnel_scope_events',
         'personnel_command_receipts',
     ];

@@ -21,6 +21,7 @@ final class PersonnelComplianceDatabaseTest extends TestCase
     private const PHASE_ONE_BASELINE = '20261118202000';
     private const HARDENING = '20261118203000';
     private const PHASE_TWO_PRIVATE_TABLES = ['employee_personnel_scope_events', 'personnel_command_receipts'];
+    private const PERSONNEL_EVIDENCE_TABLE = 'employee_document_evidence_reviews';
     private const CATALOG_TABLES = [
         'personnel_compliance_sources', 'personnel_document_types', 'personnel_document_requirements',
     ];
@@ -447,7 +448,21 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         $this->assertSqlRejected('DELETE FROM employee_personnel_scope_events', [], '45000');
         $this->assertSqlRejected('UPDATE personnel_command_receipts SET operation = "other"', [], '45000');
 
-        [$user] = $this->createDocumentFixture();
+        [$user, , $document] = $this->createDocumentFixture();
+        $this->connection->execute(
+            'INSERT INTO employee_document_versions (document_id, version_number, supersedes_version_number, storage_key, sha256,
+                mime_type, size_bytes, storage_key_id, storage_format, format_verified_at, malware_scanned_at, created_by_user_id)
+             VALUES (:document, 2, 1, :storage_key, :hash, "image/png", 8, "fixture", 1, UTC_TIMESTAMP(), UTC_TIMESTAMP(), :actor)',
+            ['document' => $document, 'storage_key' => str_repeat('a', 64), 'hash' => str_repeat('b', 64), 'actor' => $user]
+        );
+        $fileVersion = $this->connection->lastInsertId();
+        $this->connection->execute(
+            'INSERT INTO employee_document_evidence_reviews (document_id, document_version_id, actor_user_id, `procedure`,
+                procedure_version, outcome, original_kind, paper_status, signature_status, reason, legible, matches_record, created_at)
+             VALUES (:document, :version, :actor, "manual_visual", 1, "confirmed_internal", "paper", "retained", "unresolved",
+                "visual_checks_confirmed", 1, 1, UTC_TIMESTAMP())',
+            ['document' => $document, 'version' => $fileVersion, 'actor' => $user]
+        );
         $this->connection->execute(
             'INSERT INTO timesheets (user_id, created_by_user_id, work_date, start_time, end_time,
                 gross_minutes, break_minutes, net_minutes, entry_type, source, note)
@@ -466,11 +481,12 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         $manifest = json_decode($zip->getFromName('manifest.json'), true, flags: JSON_THROW_ON_ERROR);
         self::assertSame(2, $manifest['backup_version']);
         self::assertFalse($zip->locateName('database/timesheets.json'));
-        self::assertEqualsCanonicalizing([...self::PRIVATE_TABLES, ...self::PHASE_TWO_PRIVATE_TABLES], $manifest['security']['excluded_database_table_rows']);
+        $privateTables = [...self::PRIVATE_TABLES, ...self::PHASE_TWO_PRIVATE_TABLES, self::PERSONNEL_EVIDENCE_TABLE];
+        self::assertEqualsCanonicalizing($privateTables, $manifest['security']['excluded_database_table_rows']);
         foreach (self::CATALOG_TABLES as $table) {
             self::assertNotEmpty(json_decode($zip->getFromName('database/' . $table . '.json'), true, flags: JSON_THROW_ON_ERROR));
         }
-        foreach ([...self::PRIVATE_TABLES, ...self::PHASE_TWO_PRIVATE_TABLES] as $table) {
+        foreach ($privateTables as $table) {
             self::assertSame('[]', $zip->getFromName('database/' . $table . '.json'));
         }
         $zip->close();
@@ -487,12 +503,22 @@ final class PersonnelComplianceDatabaseTest extends TestCase
             ], $validation['coverage']['excluded_areas'][$scope]);
         }
         self::assertStringNotContainsString('SYNTHETIC-AUDIT-FIXTURE', json_encode($validation, JSON_THROW_ON_ERROR));
+        self::assertStringNotContainsString('visual_checks_confirmed', json_encode($validation, JSON_THROW_ON_ERROR));
         self::assertSame(1, (int) $this->connection->fetchColumn('SELECT COUNT(*) FROM employee_documents'));
 
         $legacyPath = $this->temporaryDirectory . '/legacy-backup.zip';
         self::assertTrue(copy($path, $legacyPath));
         self::assertTrue($zip->open($legacyPath));
         $legacyManifest = $manifest;
+        $legacyManifest['schema_version'] = '20261118207000_personnel_private_storage';
+        $legacyManifest['database']['tables'] = array_values(array_filter($legacyManifest['database']['tables'], static fn (array $entry): bool => $entry['table'] !== self::PERSONNEL_EVIDENCE_TABLE));
+        $legacyManifest['security']['excluded_database_table_rows'] = array_values(array_diff($legacyManifest['security']['excluded_database_table_rows'], [self::PERSONNEL_EVIDENCE_TABLE]));
+        self::assertTrue($zip->deleteName('database/' . self::PERSONNEL_EVIDENCE_TABLE . '.json'));
+        self::assertTrue($zip->addFromString('manifest.json', json_encode($legacyManifest, JSON_THROW_ON_ERROR)));
+        self::assertTrue($zip->close());
+        self::assertFalse($service->validateImport(['tmp_name' => $legacyPath])['apply_supported']);
+
+        self::assertTrue($zip->open($legacyPath));
         $legacyManifest['schema_version'] = '20261118203000_harden_personnel_compliance_history';
         $legacyManifest['database']['tables'] = array_values(array_filter($legacyManifest['database']['tables'], static fn (array $entry): bool => !in_array($entry['table'], self::PHASE_TWO_PRIVATE_TABLES, true)));
         $legacyManifest['security']['excluded_database_table_rows'] = array_values(array_diff($legacyManifest['security']['excluded_database_table_rows'], self::PHASE_TWO_PRIVATE_TABLES));

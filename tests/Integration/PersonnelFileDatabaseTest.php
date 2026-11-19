@@ -15,6 +15,7 @@ use App\Domain\Personnel\Storage\PersonnelPrivatePath;
 use App\Domain\Personnel\Storage\PersonnelStorageException;
 use App\Infrastructure\Database\DatabaseConnection;
 use FilesystemIterator;
+use InvalidArgumentException;
 use PDOException;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
@@ -324,6 +325,112 @@ final class PersonnelFileDatabaseTest extends MariaDbTestCase
             unlink($keyFile);
             rmdir($keyDirectory);
         }
+    }
+
+    public function testEvidenceIsAnImmutableInternalReviewOfOneVerifiedVersion(): void
+    {
+        $first = Fixture::upload($this->documents, $this->document, 0, Fixture::png(), 'evidence-file');
+        $input = [
+            'outcome' => 'confirmed_internal', 'reason' => 'visual_checks_confirmed',
+            'original_kind' => 'digital_copy', 'paper_status' => 'retained',
+            'legible' => true, 'matches_record' => true,
+        ];
+        $revision = $first['lock_version'];
+        $version = $first['version_id'];
+        $this->failure(InvalidArgumentException::class, fn () => $this->documents->recordEvidenceReview(
+            $this->document, $version, $revision, [...$input, 'signature_status' => 'verified'], 'manufactured-signature'
+        ));
+        $this->failure(InvalidArgumentException::class, fn () => $this->documents->recordEvidenceReview(
+            $this->document, $version, $revision, [...$input, 'paper_status' => 'unknown'], 'unknown-original'
+        ));
+        $this->failure(InvalidArgumentException::class, fn () => $this->documents->recordEvidenceReview(
+            $this->document, $version, $revision, [...$input, 'matches_record' => false], 'unchecked-evidence'
+        ));
+        $confirmed = $this->documents->recordEvidenceReview($this->document, $version, $revision, $input, 'evidence-review');
+        self::assertSame($confirmed, $this->documents->recordEvidenceReview($this->document, $version, $revision, $input, 'evidence-review'));
+        $this->failure(PersonnelConflict::class, fn () => $this->documents->recordEvidenceReview(
+            $this->document, $version, $revision, [...$input, 'paper_status' => 'seen'], 'evidence-review'
+        ));
+        self::assertSame($revision + 1, $confirmed['lock_version']);
+        self::assertSame('pending', $this->documents->get($this->document)['review_status']);
+        self::assertFalse($this->documents->get($this->document)['evidence_verified']);
+        self::assertFalse($this->documents->version($this->document, $version)['evidence_verified']);
+        $this->failure(InvalidArgumentException::class, fn () => $this->documents->changeStatus(
+            $this->document, 'reviewed', $confirmed['lock_version'], 'visual_checks_confirmed', 'unsafe-head-review'
+        ));
+        $events = $this->documents->history($this->document);
+        self::assertSame('document_evidence_confirmed', end($events)['action']);
+        self::assertSame($version, (int) end($events)['document_version_id']);
+
+        $history = $this->documents->evidenceHistory($this->document);
+        self::assertCount(1, $history);
+        self::assertSame($this->actor, (int) $history[0]['actor_user_id']);
+        self::assertSame('manual_visual', $history[0]['procedure']);
+        self::assertSame(1, (int) $history[0]['procedure_version']);
+        self::assertSame('unresolved', $history[0]['signature_status']);
+        self::assertSame('retained', $history[0]['paper_status']);
+        self::assertArrayNotHasKey('storage_key', $history[0]);
+        self::assertArrayNotHasKey('sha256', $history[0]);
+        self::assertSame(1, (int) $this->connection()->fetchColumn(
+            'SELECT COUNT(*) FROM employee_document_access_log WHERE employee_user_id = :id AND action = "document.evidence_history"',
+            ['id' => $this->employee]
+        ));
+
+        $this->failure(PDOException::class, fn () => $this->connection()->execute('UPDATE employee_document_evidence_reviews SET outcome = "objected"'));
+        $this->failure(PDOException::class, fn () => $this->connection()->execute('DELETE FROM employee_document_evidence_reviews'));
+        $next = Fixture::upload($this->documents, $this->document, 1, Fixture::png(100), 'evidence-replacement');
+        $this->failure(PersonnelConflict::class, fn () => $this->documents->recordEvidenceReview(
+            $this->document, $version, $next['lock_version'], $input, 'review-old-version'
+        ));
+        $this->documents->recordEvidenceReview($this->document, $next['version_id'], $next['lock_version'], [
+            'outcome' => 'objected', 'reason' => 'illegible', 'original_kind' => 'unknown', 'paper_status' => 'unknown',
+        ], 'evidence-objection');
+        $history = $this->documents->evidenceHistory($this->document);
+        self::assertSame(['objected', 'confirmed_internal'], array_column($history, 'outcome'));
+        self::assertSame([$next['version_id'], $version], array_map('intval', array_column($history, 'document_version_id')));
+        $this->documents->archive($this->document, $next['lock_version'] + 1, 'duplicate', 'archive-evidence-document');
+        self::assertSame($history, $this->documents->evidenceHistory($this->document));
+    }
+
+    public function testEvidenceRequiresScopeAndAuthenticatedStoredBytesBeforePublishingReview(): void
+    {
+        $open = ['outcome' => 'open', 'reason' => 'form_unresolved', 'original_kind' => 'unknown', 'paper_status' => 'unknown'];
+        $empty = $this->documents->addVersion($this->document, 0, 'metadata_recorded', 'empty-evidence-source');
+        $this->failure(PersonnelFileUnavailable::class, fn () => $this->documents->recordEvidenceReview(
+            $this->document, $empty['version_id'], $empty['lock_version'], $open, 'empty-evidence-review'
+        ));
+        $this->failure(PDOException::class, fn () => $this->connection()->execute(
+            'INSERT INTO employee_document_evidence_reviews (document_id, document_version_id, actor_user_id, `procedure`,
+                procedure_version, outcome, original_kind, paper_status, signature_status, reason, legible, matches_record, created_at)
+             VALUES (:document, :version, :actor, "manual_visual", 1, "open", "unknown", "unknown", "unresolved", "form_unresolved", 0, 0, UTC_TIMESTAMP())',
+            ['document' => $this->document, 'version' => $empty['version_id'], 'actor' => $this->actor]
+        ));
+        $stored = Fixture::upload($this->documents, $this->document, 1, Fixture::png(), 'scope-evidence-source');
+        $viewer = $this->createUser();
+        $this->giveRights($viewer, [PersonnelAccessService::VIEW]);
+        $this->scope($viewer, true);
+        Fixture::login($this->connection(), $viewer);
+        $this->failure(PersonnelAccessDenied::class, fn () => $this->documents->recordEvidenceReview(
+            $this->document, $stored['version_id'], $stored['lock_version'], $open, 'view-only-review'
+        ));
+        self::assertSame([], $this->documents->evidenceHistory($this->document));
+        $this->scope($viewer, false);
+        $this->failure(PersonnelAccessDenied::class, fn () => $this->documents->evidenceHistory($this->document));
+        self::assertSame(0, (int) $this->connection()->fetchColumn(
+            'SELECT COUNT(*) FROM employee_document_access_log WHERE outcome = "denied" AND (employee_user_id IS NOT NULL OR document_id IS NOT NULL OR document_version_id IS NOT NULL)'
+        ));
+
+        Fixture::login($this->connection(), $this->actor);
+        $this->failure(PersonnelAccessDenied::class, fn () => $this->documents->recordEvidenceReview(
+            $this->document, 999999, $stored['lock_version'], $open, 'wrong-evidence-version'
+        ));
+        $cipherPath = $this->testPathFor($this->versionRow($stored['version_id'])['storage_key']);
+        self::assertNotFalse(file_put_contents($cipherPath, 'synthetic corrupted object'));
+        $this->failure(PersonnelFileUnavailable::class, fn () => $this->documents->recordEvidenceReview(
+            $this->document, $stored['version_id'], $stored['lock_version'], $open, 'corrupt-evidence-review'
+        ));
+        self::assertSame([], $this->documents->evidenceHistory($this->document));
+        self::assertSame($stored['lock_version'], (int) $this->documents->get($this->document)['lock_version']);
     }
 
     private function versionRow(int $id): array
