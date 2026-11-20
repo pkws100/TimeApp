@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace App\Domain\Users;
 
+use FilesystemIterator;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
-use FilesystemIterator;
+use RuntimeException;
+use UnexpectedValueException;
 
 final class StorageUsageService
 {
@@ -20,13 +22,27 @@ final class StorageUsageService
             return ['bytes' => 0, 'human' => '0 B'];
         }
 
-        $bytes = 0;
+        try {
+            $directory = new RecursiveDirectoryIterator($this->rootPath, FilesystemIterator::SKIP_DOTS);
+        } catch (UnexpectedValueException) {
+            return ['bytes' => 0, 'human' => '0 B'];
+        }
+
         $iterator = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($this->rootPath, FilesystemIterator::SKIP_DOTS)
+            $directory,
+            RecursiveIteratorIterator::LEAVES_ONLY,
+            RecursiveIteratorIterator::CATCH_GET_CHILD
         );
 
+        $bytes = 0;
         foreach ($iterator as $file) {
-            $bytes += $file->getSize();
+            if ($file->isFile()) {
+                try {
+                    $bytes += $file->getSize();
+                } catch (RuntimeException) {
+                    // Temporary files can disappear while the dashboard is counting them.
+                }
+            }
         }
 
         return ['bytes' => $bytes, 'human' => $this->formatBytes($bytes)];

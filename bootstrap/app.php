@@ -291,7 +291,8 @@ $accountingExportService = new AccountingExportService($adminBookingService);
 $accountingClosureService = new AccountingClosureService($connection, $adminBookingService);
 $accountingDocumentExportService = new AccountingDocumentExportService($companySettingsService, $config->get('exports', []));
 $backupService = new BackupService($connection, $config->get('uploads', []),
-    backupRoot: $personnelHttp?->generalBackupDirectory(), runtimeOverridePath: $databaseOverridePath);
+    backupRoot: $personnelHttp?->generalBackupDirectory() ?? (string) env('BACKUP_TEMP_PATH', storage_path('cache/backups')),
+    runtimeOverridePath: $databaseOverridePath);
 $smtpTestService = new SmtpTestService();
 $nfcTagService = new NfcTagService($connection, (string) $config->get('app.settings_encryption_key', ''));
 $pausePolicies = new PausePolicyService($connection);

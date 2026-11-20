@@ -28,4 +28,20 @@ final class StorageUsageServiceTest extends TestCase
             rmdir($root);
         }
     }
+
+    public function testMissingFileTargetDoesNotHideRemainingUsage(): void
+    {
+        $root = sys_get_temp_dir() . '/timeapp-storage-usage-' . uniqid('', true);
+        mkdir($root, 0700);
+        file_put_contents($root . '/available.jpg', str_repeat('x', 128));
+        symlink($root . '/missing', $root . '/stale');
+
+        try {
+            self::assertSame(['bytes' => 128, 'human' => '128,00 B'], (new StorageUsageService($root))->usage());
+        } finally {
+            unlink($root . '/stale');
+            unlink($root . '/available.jpg');
+            rmdir($root);
+        }
+    }
 }

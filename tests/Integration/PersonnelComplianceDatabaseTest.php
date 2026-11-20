@@ -591,9 +591,12 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         $this->grantRole($employee, 'bauleiter');
         $this->grantRole($manager, 'administrator');
         $override = $this->writePrivateConfig('database.php', MariaDbScratchConfig::connection($this->database));
+        $backupWorkDirectory = $this->temporaryDirectory . '/http-backups';
         $previousOverride = getenv('DB_OVERRIDE_FILE');
+        $previousBackupWorkDirectory = $_ENV['BACKUP_TEMP_PATH'] ?? null;
         $previousSession = $_SESSION ?? [];
         putenv('DB_OVERRIDE_FILE=' . $override);
+        $_ENV['BACKUP_TEMP_PATH'] = $backupWorkDirectory;
 
         try {
             [, $router] = require base_path('bootstrap/app.php');
@@ -607,12 +610,18 @@ final class PersonnelComplianceDatabaseTest extends TestCase
             self::assertSame(403, $status('POST', '/api/v1/system/backup/import/validate'));
             $_SESSION['auth']['user_id'] = $manager;
             self::assertSame(503, $status('GET', '/api/v1/system/backup/export', ['require_complete' => '1']));
+            self::assertSame(['.', '..'], scandir($backupWorkDirectory));
             self::assertSame(404, $status('GET', '/admin/personnel-documents'));
             self::assertSame(404, $status('GET', '/api/v1/personnel-documents'));
             self::assertSame(404, $status('POST', '/api/v1/personnel-documents'));
         } finally {
             $_SESSION = $previousSession;
             putenv($previousOverride === false ? 'DB_OVERRIDE_FILE' : 'DB_OVERRIDE_FILE=' . $previousOverride);
+            if ($previousBackupWorkDirectory === null) {
+                unset($_ENV['BACKUP_TEMP_PATH']);
+            } else {
+                $_ENV['BACKUP_TEMP_PATH'] = $previousBackupWorkDirectory;
+            }
         }
     }
 
