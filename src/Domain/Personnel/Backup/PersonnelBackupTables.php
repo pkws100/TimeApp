@@ -44,6 +44,12 @@ final class PersonnelBackupTables
     {
     }
 
+    /** @return list<string> */
+    public static function liveSourceTables(): array
+    {
+        return ['users', 'phinxlog', 'personnel_schema_trigger_manifest', ...self::CATALOG, ...array_keys(self::TABLES)];
+    }
+
     public function pdo(): PDO
     {
         $pdo = $this->connection->pdo();

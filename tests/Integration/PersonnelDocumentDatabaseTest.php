@@ -237,6 +237,28 @@ final class PersonnelDocumentDatabaseTest extends MariaDbTestCase
         self::assertSame($unknown, $this->assertFailure(PersonnelAccessDenied::class, fn () => $this->documents->get($document)));
     }
 
+    public function testProductionPolicyRejectsDelegatedUsersEvenWithDocumentAndEmployeeScope(): void
+    {
+        $connection = $this->connection();
+        $config = require base_path('config/permissions.php');
+        $auth = new AuthService($connection, new PermissionMatrix($config['roles'], $config['available']));
+        $access = new PersonnelAccessService($connection, $auth, systemAdministratorsOnly: true);
+        self::assertSame($this->actor, $access->requireEmployee(PersonnelAccessService::VIEW, $this->employee));
+        self::assertSame($this->actor, $connection->transaction(
+            fn (): int => $access->requireEmployee(PersonnelAccessService::MANAGE, $this->employee, true)
+        ));
+
+        $delegate = $this->createUser();
+        $this->grant($delegate, [PersonnelAccessService::VIEW, PersonnelAccessService::MANAGE]);
+        $this->scope($delegate, $this->employee);
+        $this->login($delegate);
+        $this->assertFailure(PersonnelAccessDenied::class, fn () => $access->employeeDirectoryScope(PersonnelAccessService::VIEW));
+        $this->assertFailure(PersonnelAccessDenied::class, fn () => $access->requireEmployee(PersonnelAccessService::VIEW, $this->employee));
+        $this->assertFailure(PersonnelAccessDenied::class, fn () => $connection->transaction(
+            fn (): int => $access->requireEmployee(PersonnelAccessService::MANAGE, $this->employee, true)
+        ));
+    }
+
     public function testVersionsHaveServerNumbersAndNoFileClaimsAndUnchangedHistory(): void
     {
         $id = $this->newDocument($this->employee, 'version-doc');

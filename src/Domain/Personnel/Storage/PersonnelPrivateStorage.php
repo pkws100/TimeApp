@@ -13,6 +13,9 @@ final class PersonnelPrivateStorage
 
     private readonly string $root;
     private readonly string $identity;
+    private readonly ?string $quarantineRoot;
+    private readonly ?string $quarantineIdentity;
+    private readonly ?int $quarantineDevice;
     private ?bool $exclusive = null;
 
     /** @param list<string> $forbiddenRoots */
@@ -23,15 +26,25 @@ final class PersonnelPrivateStorage
         private readonly int $maxConcurrent = 4,
         private readonly int $minFreeBytes = 67108864,
         private readonly int $timeoutSeconds = 45,
+        ?string $quarantineRoot = null,
     ) {
         if ($maxBytes < 1 || $maxBytes > 33554432 || $maxConcurrent < 1 || $maxConcurrent > 32
             || $minFreeBytes < 0 || $timeoutSeconds < 1 || $timeoutSeconds > 120) {
             throw new PersonnelStorageException('Ungültige Grenzwerte für den privaten Speicher.');
         }
         $this->root = PersonnelPrivatePath::requireRoot($root, $forbiddenRoots);
-        $this->identity = $this->readRootIdentity();
+        $this->identity = $this->readRootIdentity($this->root);
+        $this->quarantineRoot = $quarantineRoot === null
+            ? null
+            : PersonnelPrivatePath::requireRoot($quarantineRoot, [...$forbiddenRoots, $this->root]);
+        $this->quarantineIdentity = $this->quarantineRoot === null ? null : $this->readRootIdentity($this->quarantineRoot);
+        $this->quarantineDevice = $this->quarantineRoot === null ? null : PersonnelPrivatePath::requireTmpfs($this->quarantineRoot);
 
-        foreach ([self::OBJECTS, self::STAGING, self::QUARANTINE, self::LOCKS] as $directory) {
+        $directories = [self::OBJECTS, self::STAGING, self::LOCKS];
+        if ($this->quarantineRoot === null) {
+            $directories[] = self::QUARANTINE;
+        }
+        foreach ($directories as $directory) {
             $path = $this->root . '/' . $directory;
             if (@lstat($path) === false && @mkdir($path, 0700)) {
                 PersonnelPrivatePath::syncDirectory($this->root);
@@ -51,6 +64,9 @@ final class PersonnelPrivateStorage
     {
         $this->assertCurrentRoot();
         PersonnelPrivatePath::requireSeparate($this->root, [$otherRoot]);
+        if ($this->quarantineRoot !== null) {
+            PersonnelPrivatePath::requireSeparate($this->quarantineRoot, [$otherRoot]);
+        }
     }
 
     public function maxUploadBytes(): int
@@ -101,15 +117,20 @@ final class PersonnelPrivateStorage
             throw new PersonnelStorageException('Ungültige Größe für die private Datei.');
         }
         $this->requireCompleteInput($source, $expectedBytes);
-        $lease = $this->reserveUploadSlot();
         $path = $this->entry(self::QUARANTINE, $this->newStorageKey());
+        $lease = $this->reserveUploadSlot();
         $output = null;
         try {
-            $freeBytes = @disk_free_space($this->root);
-            if ($freeBytes === false || $freeBytes < $this->minFreeBytes + $this->maxConcurrent * ($expectedBytes * 2 + 65536)) {
-                throw new PersonnelStorageException('Der private Speicher hat nicht genügend freie Kapazität.');
+            $separateDevice = $this->quarantineDevice !== null && !str_starts_with($this->identity, $this->quarantineDevice . ':');
+            $reservedBytes = $expectedBytes * ($separateDevice ? 1 : 2);
+            $this->requireCapacity($this->root, $reservedBytes);
+            if ($this->quarantineRoot !== null) {
+                $this->requireCapacity($this->quarantineRoot, $reservedBytes);
             }
             $output = PersonnelPrivatePath::createExclusive($path);
+            if ($this->quarantineDevice !== null && (fstat($output)['dev'] ?? null) !== $this->quarantineDevice) {
+                throw new PersonnelStorageException('Der private Quarantänepfad wurde geändert.');
+            }
             $hash = hash_init('sha256');
             $total = 0;
             $deadline = hrtime(true) + ($this->timeoutSeconds * 1_000_000_000);
@@ -258,18 +279,35 @@ final class PersonnelPrivateStorage
     private function assertCurrentRoot(): void
     {
         PersonnelPrivatePath::requireRoot($this->root, $this->forbiddenRoots);
-        if ($this->identity !== $this->readRootIdentity()) {
+        if ($this->identity !== $this->readRootIdentity($this->root)) {
             throw new PersonnelStorageException('Der private Speicherpfad wurde geändert.');
         }
         foreach ([self::OBJECTS, self::STAGING, self::QUARANTINE, self::LOCKS] as $directory) {
-            PersonnelPrivatePath::requireDirectory($this->root . '/' . $directory);
+            $this->directoryPath($directory);
         }
     }
 
-    private function readRootIdentity(): string
+    private function directoryPath(string $directory): string
     {
-        clearstatcache(true, $this->root);
-        $stat = @lstat($this->root);
+        if ($directory === self::QUARANTINE && $this->quarantineRoot !== null) {
+            PersonnelPrivatePath::requireRoot($this->quarantineRoot, [...$this->forbiddenRoots, $this->root]);
+            if (PersonnelPrivatePath::requireTmpfs($this->quarantineRoot) !== $this->quarantineDevice
+                || $this->readRootIdentity($this->quarantineRoot) !== $this->quarantineIdentity) {
+                throw new PersonnelStorageException('Der private Quarantänepfad wurde geändert.');
+            }
+
+            return $this->quarantineRoot;
+        }
+        $path = $this->root . '/' . $directory;
+        PersonnelPrivatePath::requireDirectory($path);
+
+        return $path;
+    }
+
+    private function readRootIdentity(string $path): string
+    {
+        clearstatcache(true, $path);
+        $stat = @lstat($path);
         if ($stat === false) {
             throw new PersonnelStorageException('Der private Speicherpfad wurde geändert.');
         }
@@ -277,15 +315,20 @@ final class PersonnelPrivateStorage
         return $stat['dev'] . ':' . $stat['ino'];
     }
 
+    private function requireCapacity(string $path, int $reservedBytes): void
+    {
+        $freeBytes = @disk_free_space($path);
+        if ($freeBytes === false || $freeBytes < $this->minFreeBytes + $this->maxConcurrent * ($reservedBytes + 65536)) {
+            throw new PersonnelStorageException('Der private Speicher hat nicht genügend freie Kapazität.');
+        }
+    }
+
     private function entry(string $directory, string $key): string
     {
         if (!self::validStorageKey($key)) {
             throw new PersonnelStorageException('Ungültige private Speicherkennung.');
         }
-        $path = $this->root . '/' . $directory;
-        PersonnelPrivatePath::requireDirectory($path);
-
-        return $path . '/' . $key;
+        return $this->directoryPath($directory) . '/' . $key;
     }
 
     private function removeEntry(string $directory, string $key): void
@@ -307,8 +350,7 @@ final class PersonnelPrivateStorage
     private function listEntries(string $directory): array
     {
         $this->requireExclusive();
-        PersonnelPrivatePath::requireDirectory($this->root . '/' . $directory);
-        $entries = @scandir($this->root . '/' . $directory);
+        $entries = @scandir($this->directoryPath($directory));
         if ($entries === false) {
             throw new PersonnelStorageException('Der private Speicher konnte nicht geprüft werden.');
         }

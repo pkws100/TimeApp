@@ -21,8 +21,11 @@ final class PersonnelAccessService
 
     private bool $auditingRead = false;
 
-    public function __construct(private DatabaseConnection $connection, private AuthService $auth)
-    {
+    public function __construct(
+        private DatabaseConnection $connection,
+        private AuthService $auth,
+        private readonly bool $systemAdministratorsOnly = false,
+    ) {
         if (!$this->auth->usesConnection($this->connection)) {
             throw new LogicException('Authentifizierung und Personalakte benötigen dieselbe Datenbankverbindung.');
         }
@@ -46,7 +49,8 @@ final class PersonnelAccessService
     public function requirePermission(string $permission): int
     {
         if (!in_array($permission, [self::VIEW, self::MANAGE, self::EXPORT, self::DELEGATE, self::CATALOG], true)
-            || !$this->auth->hasPermission($permission)) {
+            || !$this->auth->hasPermission($permission)
+            || ($this->systemAdministratorsOnly && !$this->auth->isSystemAdministrator())) {
             throw new PersonnelAccessDenied();
         }
 
@@ -65,6 +69,9 @@ final class PersonnelAccessService
         }
         $actorId = $lockedAuthority['actor_id'] ?? $this->requirePermission($permission);
         $systemAdministrator = $lockedAuthority['system_administrator'] ?? $this->auth->isSystemAdministrator();
+        if ($this->systemAdministratorsOnly && !$systemAdministrator) {
+            throw new PersonnelAccessDenied();
+        }
         if (!$systemAdministrator && (int) ($this->latestScope($employeeId, $actorId, $lockScope)['is_granted'] ?? 0) !== 1) {
             throw new PersonnelAccessDenied();
         }

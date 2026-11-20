@@ -57,6 +57,19 @@ final class PersonnelPrivateBackup
         ) !== 1) {
             throw new PersonnelBackupFailure('synthetic_source_required');
         }
+
+        return $this->createArchive($source, $sourceStorage);
+    }
+
+    public function createLive(PersonnelLiveBackupSource $source): array
+    {
+        $this->authority->assertLiveOperator();
+
+        return $this->createArchive($source->connection(), $source);
+    }
+
+    private function createArchive(DatabaseConnection $source, PersonnelPrivateStorage|PersonnelLiveBackupSource $sourceStorage): array
+    {
         $this->assertSeparateStorage($sourceStorage);
         $tables = new PersonnelBackupTables($source);
         $id = bin2hex(random_bytes(16));
@@ -126,7 +139,7 @@ final class PersonnelPrivateBackup
 
     private function backupRecords(
         PersonnelBackupTables $tables,
-        PersonnelPrivateStorage $storage,
+        PersonnelPrivateStorage|PersonnelLiveBackupSource $storage,
         string $id,
         array $schema,
         array &$result,
@@ -162,7 +175,7 @@ final class PersonnelPrivateBackup
         yield ['manifest', $result];
     }
 
-    private function objectRecords(PersonnelPrivateStorage $storage, array $metadata): Generator
+    private function objectRecords(PersonnelPrivateStorage|PersonnelLiveBackupSource $storage, array $metadata): Generator
     {
         $source = null;
         $copy = null;
@@ -559,7 +572,7 @@ final class PersonnelPrivateBackup
         return $this->archiveDirectory . '/' . $id . '.tpb';
     }
 
-    private function assertSeparateStorage(PersonnelPrivateStorage $storage): void
+    private function assertSeparateStorage(PersonnelPrivateStorage|PersonnelLiveBackupSource $storage): void
     {
         try {
             PersonnelPrivatePath::requireRoot($this->archiveDirectory, $this->forbiddenRoots);

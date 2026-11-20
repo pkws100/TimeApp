@@ -111,6 +111,7 @@ final class AdminContextService
                 'href' => '/admin/personnel-documents',
                 'label' => 'Digitale Personalakte',
                 'active_prefix' => '/admin/personnel-documents',
+                'badge' => 'BETA',
                 'permission' => PersonnelAccessService::VIEW,
                 'enabled' => $this->personnelDocumentsEnabled,
             ],

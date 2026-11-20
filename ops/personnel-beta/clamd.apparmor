@@ -1,0 +1,2 @@
+  /run/timeapp-personnel/scanner/ rw,
+  /run/timeapp-personnel/scanner/** krw,

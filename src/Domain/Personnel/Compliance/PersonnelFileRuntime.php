@@ -24,7 +24,7 @@ final class PersonnelFileRuntime
         public readonly PersonnelStreamCipher $cipher,
         public readonly PersonnelFileValidator $validator,
         public readonly PersonnelMalwareScanner $scanner,
-        private readonly ?PersonnelSyntheticHttpBoundary $httpBoundary = null,
+        private readonly PersonnelSyntheticHttpBoundary|PersonnelProductionHttpBoundary|null $httpBoundary = null,
     ) {
     }
 
@@ -40,11 +40,20 @@ final class PersonnelFileRuntime
         return self::create($connection, $boundary->fileConfiguration($connection), $boundary);
     }
 
-    private static function create(DatabaseConnection $connection, array $config, ?PersonnelSyntheticHttpBoundary $boundary = null): self
+    public static function fromProductionHttp(DatabaseConnection $connection, PersonnelProductionHttpBoundary $boundary): self
+    {
+        return self::create($connection, $boundary->fileConfiguration($connection), $boundary);
+    }
+
+    private static function create(
+        DatabaseConnection $connection,
+        array $config,
+        PersonnelSyntheticHttpBoundary|PersonnelProductionHttpBoundary|null $boundary = null,
+    ): self
     {
         $forbidden = array_values(array_filter($config['forbidden_roots']));
         PersonnelPrivatePath::requireSeparate($config['keyring'], [...$forbidden, $config['root']]);
-        $storage = new PersonnelPrivateStorage($config['root'], $forbidden, self::MAX_BYTES);
+        $storage = new PersonnelPrivateStorage($config['root'], $forbidden, self::MAX_BYTES, quarantineRoot: $config['quarantine_root'] ?? null);
         $keys = PersonnelKeyring::fromFile($config['keyring']);
         $keys->assertSeparateFromSecrets((string) env('APP_SECRET', ''), (string) env('SETTINGS_ENCRYPTION_KEY', ''));
         $scanner = new ClamAvPersonnelScanner($config['scanner_socket']);

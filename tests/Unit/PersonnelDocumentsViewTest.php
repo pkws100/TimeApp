@@ -10,6 +10,25 @@ use PHPUnit\Framework\TestCase;
 
 final class PersonnelDocumentsViewTest extends TestCase
 {
+    public function testSyntheticModeNoticesAreLimitedToTheTestView(): void
+    {
+        $data = $this->document();
+        $data['can_manage'] = true;
+        $state = ['file_available' => false];
+        $layout = new AdminView('Personalakte', 'http://127.0.0.1');
+        $synthetic = (new PersonnelDocumentsView($layout))->document($data, $state);
+        $live = (new PersonnelDocumentsView($layout, synthetic: false))->document($data, $state);
+
+        self::assertStringContainsString('Synthetischer Testbetrieb', $synthetic);
+        self::assertStringContainsString('Nur vorbereitete synthetische Testdateien.', $synthetic);
+        self::assertStringContainsString('Die Dateiablage ist für diesen Testlauf zurzeit gesperrt.', $synthetic);
+        self::assertStringNotContainsString('Synthetischer Testbetrieb', $live);
+        self::assertStringNotContainsString('synthetische Testdateien', $live);
+        self::assertStringNotContainsString('für diesen Testlauf', $live);
+        self::assertStringContainsString('Die Dateiablage ist zurzeit gesperrt.', $live);
+        self::assertStringContainsString('PDF, JPEG oder PNG · höchstens 16 MiB.', $live);
+    }
+
     public function testScopedOverviewUsesPostForPersonSearchAndEscapesVisibleData(): void
     {
         $page = $this->view()->index([

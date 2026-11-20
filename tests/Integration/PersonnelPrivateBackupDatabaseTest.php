@@ -293,6 +293,11 @@ final class PersonnelPrivateBackupDatabaseTest extends MariaDbTestCase
         self::assertSame('', $stdout);
         chmod($configuration, 0600);
 
+        [$exit, $stdout, $stderr] = $this->executeCli('create-live', $configuration);
+        self::assertSame(1, $exit);
+        self::assertSame('', $stdout);
+        self::assertStringContainsString('(operator_denied)', $stderr);
+
         [$exit, $stdout, $stderr] = $this->executeCli('create', $configuration);
         self::assertSame(0, $exit, $stderr);
         $id = json_decode($stdout, true, 8, JSON_THROW_ON_ERROR)['backup_id'];

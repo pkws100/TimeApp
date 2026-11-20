@@ -24,4 +24,12 @@ final class PersonnelBackupAuthority
             throw new PersonnelBackupFailure('operator_denied');
         }
     }
+
+    public function assertLiveOperator(): void
+    {
+        $this->assertAllowed();
+        if ($this->operatorUid !== 0) {
+            throw new PersonnelBackupFailure('operator_denied');
+        }
+    }
 }

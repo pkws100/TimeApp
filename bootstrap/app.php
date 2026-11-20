@@ -29,6 +29,7 @@ use App\Domain\Personnel\Compliance\PersonnelAdminQueryService;
 use App\Domain\Personnel\Compliance\PersonnelComplianceCatalogService;
 use App\Domain\Personnel\Compliance\PersonnelDocumentService;
 use App\Domain\Personnel\Compliance\PersonnelFileRuntime;
+use App\Domain\Personnel\Compliance\PersonnelProductionHttpBoundary;
 use App\Domain\Personnel\Compliance\PersonnelSyntheticHttpBoundary;
 use App\Domain\Personnel\PersonnelEventService;
 use App\Domain\Personnel\PersonnelLabelService;
@@ -211,11 +212,13 @@ $databaseSettings = new DatabaseSettingsManager(
     $config->get('database.connections.mysql', []),
     $databaseOverridePath
 );
-$connection = new DatabaseConnection($databaseSettings->current());
+$databaseConfiguration = $databaseSettings->current();
+$connection = new DatabaseConnection($databaseConfiguration);
 if ($personnelHttp !== null && !$personnelHttp->bind($connection)) {
     return [$request, new Router()];
 }
-$personnelHttpEnabled = $personnelHttp !== null;
+$personnelProduction = $personnelHttp === null ? PersonnelProductionHttpBoundary::discover($request, $connection, $databaseConfiguration) : null;
+$personnelBoundary = $personnelHttp ?? $personnelProduction;
 $permissionMatrix = new PermissionMatrix($config->get('permissions.roles', []), $config->get('permissions.available', []));
 $storageUsage = new StorageUsageService(storage_path());
 
@@ -334,6 +337,9 @@ $terminalTrustBundleService = new TerminalTrustBundleService(
 );
 $terminalPunchService = new TerminalPunchService($connection, $terminalService, $nfcTagService, $appTimesheetSyncService, $terminalTrustBundleService, $timeAccountService);
 $appDisplayName = trim((string) ($companySettingsService->current()['app_display_name'] ?? '')) ?: (string) $config->get('app.name');
+$personnelConnection = $personnelProduction?->connection() ?? $connection;
+$personnelAuth = $personnelProduction === null ? $authService : new AuthService($personnelConnection, $permissionMatrix);
+$personnelMenuEnabled = $personnelHttp !== null || ($personnelProduction !== null && $personnelAuth->isSystemAdministrator());
 
 $adminContextService = new AdminContextService(
     $companySettingsService,
@@ -347,7 +353,7 @@ $adminContextService = new AdminContextService(
     $terminalService,
     $authService,
     (string) $config->get('app.name'),
-    $personnelHttpEnabled,
+    $personnelMenuEnabled,
 );
 $adminView = new AdminView(
     (string) $config->get('app.name'),
@@ -453,28 +459,30 @@ $admin = static fn (callable $handler, ?string $permission = 'dashboard.view'): 
 $api = static fn (callable $handler, ?string $permission = null): callable => $routeGuard->forApi($handler, $permission);
 
 $router = new Router();
-if ($personnelHttpEnabled) {
-    $personnelAccess = new PersonnelAccessService($connection, $authService);
+if ($personnelBoundary !== null) {
+    $personnelAccess = new PersonnelAccessService($personnelConnection, $personnelAuth, systemAdministratorsOnly: $personnelProduction !== null);
     $personnelDocuments = new PersonnelDocumentService(
-        $connection,
+        $personnelConnection,
         $personnelAccess,
-        fileRuntimeFactory: static fn (): PersonnelFileRuntime => PersonnelFileRuntime::fromSyntheticHttp($connection, $personnelHttp),
+        fileRuntimeFactory: static fn (): PersonnelFileRuntime => $personnelBoundary instanceof PersonnelProductionHttpBoundary
+            ? PersonnelFileRuntime::fromProductionHttp($personnelConnection, $personnelBoundary)
+            : PersonnelFileRuntime::fromSyntheticHttp($personnelConnection, $personnelBoundary),
     );
     $personnelAdmin = new AdminPersonnelDocumentsController(
-        $authService,
+        $personnelAuth,
         $csrfService,
         $personnelAccess,
         $personnelDocuments,
         new PersonnelAdminQueryService(
-            $connection,
+            $personnelConnection,
             $personnelAccess,
-            new EmploymentContextService($connection, $personnelAccess),
+            new EmploymentContextService($personnelConnection, $personnelAccess),
             $personnelDocuments,
-            new PersonnelComplianceCatalogService($connection, $personnelAccess),
+            new PersonnelComplianceCatalogService($personnelConnection, $personnelAccess),
         ),
-        new PersonnelAdminFileTransfer($personnelHttp, $personnelDocuments),
-        new PersonnelDocumentsView($adminView),
-        $personnelHttp->origin(),
+        new PersonnelAdminFileTransfer($personnelBoundary, $personnelDocuments),
+        new PersonnelDocumentsView($adminView, synthetic: $personnelProduction === null),
+        $personnelBoundary->origin(),
     );
     $personnelAdmin->register($router);
 }
@@ -656,7 +664,7 @@ $router->post('/admin/settings/document-statuses', $admin([$documentStatusContro
 $router->post('/admin/settings/document-statuses/{id}', $admin([$documentStatusController, 'update'], 'settings.manage'));
 $router->post('/admin/settings/document-statuses/{id}/archive', $admin([$documentStatusController, 'archive'], 'settings.manage'));
 $router->get('/admin/settings/database', $admin([$adminController, 'databaseSettings'], 'settings.database.manage'));
-if ($personnelHttp === null) {
+if ($personnelHttp === null && env('PERSONNEL_HTTP_MODE') !== 'production_beta') {
     $router->post('/admin/settings/database', $admin([$databaseSettingsController, 'saveFromAdmin'], 'settings.database.manage'));
 }
 $router->get('/admin/settings/push', $admin([$adminPushController, 'show'], 'push.manage'));
@@ -738,7 +746,7 @@ $router->get('/api/v1/reports/accounting-export', $api([$accountingExportControl
 $router->get('/api/v1/settings/company', [$companySettingsController, 'publicProfile']);
 $router->get('/api/v1/settings/company/logo', [$companySettingsController, 'publicLogo']);
 $router->get('/api/v1/settings/database', $api([$databaseSettingsController, 'show'], 'settings.database.manage'));
-if ($personnelHttp === null) {
+if ($personnelHttp === null && env('PERSONNEL_HTTP_MODE') !== 'production_beta') {
     $router->post('/api/v1/settings/database', $api([$databaseSettingsController, 'store'], 'settings.database.manage'));
 }
 $router->get('/api/v1/system/backup/export', $api([$backupController, 'export'], 'settings.database.manage'));

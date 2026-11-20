@@ -34,6 +34,7 @@ final class PersonnelComplianceDatabaseTest extends TestCase
     private string $database;
     private string $temporaryDirectory;
     private DatabaseConnection $connection;
+    private ?string $backupPrincipal = null;
 
     protected function setUp(): void
     {
@@ -60,6 +61,9 @@ final class PersonnelComplianceDatabaseTest extends TestCase
     protected function tearDown(): void
     {
         try {
+            if ($this->backupPrincipal !== null) {
+                $this->server->exec('DROP USER IF EXISTS ' . $this->backupPrincipal);
+            }
             if (isset($this->database)) {
                 $this->server->exec('DROP DATABASE IF EXISTS ' . MariaDbScratchConfig::quoteIdentifier($this->database));
             }
@@ -406,12 +410,46 @@ final class PersonnelComplianceDatabaseTest extends TestCase
     public function testSystemBackupIncludesCatalogAndOnlyEmptyPrivateTables(): void
     {
         $this->phinx('migrate');
+        $privateTables = [...self::PRIVATE_TABLES, ...self::PHASE_TWO_PRIVATE_TABLES, self::PERSONNEL_EVIDENCE_TABLE];
+        $username = 'timeapp_pb_' . bin2hex(random_bytes(6));
+        $password = bin2hex(random_bytes(24));
+        $this->backupPrincipal = "'{$username}'@'%'";
+        $this->server->exec('CREATE USER ' . $this->backupPrincipal . ' IDENTIFIED BY ' . $this->server->quote($password));
+        $schema = MariaDbScratchConfig::quoteIdentifier($this->database);
+        $tables = $this->connection->fetchAll('SELECT table_name FROM information_schema.tables
+            WHERE table_schema = DATABASE() AND table_type IN ("BASE TABLE", "SYSTEM VERSIONED")');
+        foreach (array_diff(array_column($tables, 'table_name'), $privateTables) as $table) {
+            $this->server->exec('GRANT SELECT ON ' . $schema . '.' . MariaDbScratchConfig::quoteIdentifier($table)
+                . ' TO ' . $this->backupPrincipal);
+        }
+        $backupConnection = new DatabaseConnection(array_replace(MariaDbScratchConfig::connection($this->database), [
+            'username' => $username, 'password' => $password,
+        ]));
         $service = new BackupService(
-            $this->connection,
+            $backupConnection,
             ['root' => $this->temporaryDirectory . '/no-uploads'],
             backupRoot: $this->temporaryDirectory . '/backup',
             runtimeOverridePath: $this->temporaryDirectory . '/no-runtime-override'
         );
+        try {
+            $service->export();
+            self::fail('The restricted principal must read the coverage view to export.');
+        } catch (\RuntimeException $exception) {
+            self::assertSame('Das installierte Datenbankschema ist fuer das Systembackup nicht vollstaendig sichtbar.', $exception->getMessage());
+        }
+        $this->server->exec('GRANT SELECT ON ' . $schema . '.personnel_backup_presence TO ' . $this->backupPrincipal);
+        $presence = $backupConnection->fetchAll('SELECT * FROM personnel_backup_presence');
+        self::assertCount(1, $presence);
+        self::assertEqualsCanonicalizing($privateTables, array_keys($presence[0]));
+        self::assertSame([0], array_unique(array_map('intval', array_values($presence[0]))));
+        foreach ($privateTables as $table) {
+            try {
+                $backupConnection->fetchAll('SELECT * FROM ' . MariaDbScratchConfig::quoteIdentifier($table));
+                self::fail('The general backup principal could read a private table.');
+            } catch (PDOException $exception) {
+                self::assertSame(1142, $exception->errorInfo[1]);
+            }
+        }
         $path = $this->temporaryDirectory . '/backup.zip';
         $this->connection->execute('RENAME TABLE employee_document_access_log TO hidden_backup_access_log');
         try {
@@ -480,8 +518,9 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         self::assertTrue($zip->open($path));
         $manifest = json_decode($zip->getFromName('manifest.json'), true, flags: JSON_THROW_ON_ERROR);
         self::assertSame(2, $manifest['backup_version']);
+        self::assertSame('20261118209000_personnel_backup_presence', $manifest['schema_version']);
         self::assertFalse($zip->locateName('database/timesheets.json'));
-        $privateTables = [...self::PRIVATE_TABLES, ...self::PHASE_TWO_PRIVATE_TABLES, self::PERSONNEL_EVIDENCE_TABLE];
+        self::assertFalse($zip->locateName('database/personnel_backup_presence.json'));
         self::assertEqualsCanonicalizing($privateTables, $manifest['security']['excluded_database_table_rows']);
         foreach (self::CATALOG_TABLES as $table) {
             self::assertNotEmpty(json_decode($zip->getFromName('database/' . $table . '.json'), true, flags: JSON_THROW_ON_ERROR));
@@ -510,6 +549,12 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         self::assertTrue(copy($path, $legacyPath));
         self::assertTrue($zip->open($legacyPath));
         $legacyManifest = $manifest;
+        $legacyManifest['schema_version'] = '20261118208000_personnel_evidence_reviews';
+        self::assertTrue($zip->addFromString('manifest.json', json_encode($legacyManifest, JSON_THROW_ON_ERROR)));
+        self::assertTrue($zip->close());
+        self::assertFalse($service->validateImport(['tmp_name' => $legacyPath])['apply_supported']);
+
+        self::assertTrue($zip->open($legacyPath));
         $legacyManifest['schema_version'] = '20261118207000_personnel_private_storage';
         $legacyManifest['database']['tables'] = array_values(array_filter($legacyManifest['database']['tables'], static fn (array $entry): bool => $entry['table'] !== self::PERSONNEL_EVIDENCE_TABLE));
         $legacyManifest['security']['excluded_database_table_rows'] = array_values(array_diff($legacyManifest['security']['excluded_database_table_rows'], [self::PERSONNEL_EVIDENCE_TABLE]));

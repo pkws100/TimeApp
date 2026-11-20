@@ -315,7 +315,7 @@ Das Ziel hat das Namensmuster `timeapp_personnel_restore_<12-hex>` und eine eige
 
 ### Admin-HTTP-Test der Personalakte in Phase 2C
 
-`PERSONNEL_HTTP_MODE=disabled` ist der Standard. Apache und der normale App-Server laden keine Personalaktenrouten. Der isolierte Test läuft über den PHP-Entwicklungsserver auf `127.0.0.1`, MariaDB ohne Netzwerklistener und ClamAV über einen eigenen Unix-Socket. Der Test legt seine eigene Datenbank, Sessions, temporären Uploads, Testschlüssel und private Objekte in getrennten Verzeichnissen an.
+`PERSONNEL_HTTP_MODE=disabled` ist der Standard. Der [native Apache-BETA-Betrieb](ops/personnel-beta/README.md) verwendet den getrennten Modus `production_beta`. Der isolierte Test läuft über den PHP-Entwicklungsserver auf `127.0.0.1`, MariaDB ohne Netzwerklistener und ClamAV über einen eigenen Unix-Socket. Der Test legt seine eigene Datenbank, Sessions, temporären Uploads, Testschlüssel und private Objekte in getrennten Verzeichnissen an.
 
 ```bash
 bash tests/Support/run-personnel-admin-ui.sh

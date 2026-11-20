@@ -76,8 +76,10 @@ final class PersonnelDocumentsView
         'document.evidence.history' => 'Fachliche Nachweise', 'document.evidence_history' => 'Fachliche Nachweise',
     ];
 
-    public function __construct(private readonly AdminView $layout)
-    {
+    public function __construct(
+        private readonly AdminView $layout,
+        private readonly bool $synthetic = true,
+    ) {
     }
 
     /** @param array{csrf?:string, error?:string, notice?:string, old?:array, active_form?:string, request_ids?:array} $state */
@@ -318,7 +320,9 @@ HTML;
         }
         $tokens = $this->commandFields($state, 'upload', $revision) . $this->hidden('expected_predecessor', $latest);
         $disabled = $fileAvailable ? '' : ' disabled';
-        $readiness = $fileAvailable ? '' : '<p class="notice warn">Die Dateiablage ist für diesen Testlauf zurzeit gesperrt.</p>';
+        $readinessMessage = 'Die Dateiablage ist ' . ($this->synthetic ? 'für diesen Testlauf ' : '') . 'zurzeit gesperrt.';
+        $readiness = $fileAvailable ? '' : '<p class="notice warn">' . $readinessMessage . '</p>';
+        $uploadGuidance = $this->synthetic ? 'Nur vorbereitete synthetische Testdateien. ' : '';
 
         return <<<HTML
 <section class="card stack" id="upload" aria-labelledby="personnel-upload-heading">
@@ -330,7 +334,7 @@ HTML;
             <span>Lokale Datei</span>
             <input type="file" name="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" aria-describedby="personnel-upload-requirements personnel-file-description" required{$disabled}>
         </label>
-        <p class="muted personnel-form-help" id="personnel-upload-requirements">Nur vorbereitete synthetische Testdateien. PDF, JPEG oder PNG · höchstens 16 MiB. Eine erfolgreiche Übertragung legt eine neue Version an.</p>
+        <p class="muted personnel-form-help" id="personnel-upload-requirements">{$uploadGuidance}PDF, JPEG oder PNG · höchstens 16 MiB. Eine erfolgreiche Übertragung legt eine neue Version an.</p>
         <p id="personnel-file-description" class="muted personnel-form-help" data-personnel-file-description aria-live="polite"></p>
         <progress data-personnel-upload-progress max="100" aria-label="Dateiübertragung" hidden></progress>
         <p data-personnel-upload-status role="status" tabindex="-1" hidden></p>
@@ -669,6 +673,7 @@ HTML;
         $heading = $this->e($heading);
         $path = $this->e($path);
         $activeForm = $this->e($state['active_form'] ?? '');
+        $testMode = $this->synthetic ? '<span class="badge neutral">Synthetischer Testbetrieb</span>' : '';
         $notice = '';
         if (!empty($state['error'])) {
             $notice = '<p class="notice error" role="alert" tabindex="-1" data-personnel-error>' . $this->e($state['error']) . '</p>';
@@ -681,7 +686,7 @@ HTML;
     {$breadcrumb}
     <header class="page-header personnel-header">
         <h1>{$heading}</h1>
-        <span class="badge neutral">Synthetischer Testbetrieb</span>
+        {$testMode}
     </header>
     {$notice}
     {$content}

@@ -7,6 +7,7 @@ namespace App\Http;
 use App\Domain\Personnel\Compliance\PersonnelDocumentService;
 use App\Domain\Personnel\Compliance\PersonnelFileRuntime;
 use App\Domain\Personnel\Compliance\PersonnelFileUnavailable;
+use App\Domain\Personnel\Compliance\PersonnelProductionHttpBoundary;
 use App\Domain\Personnel\Compliance\PersonnelSyntheticHttpBoundary;
 use App\Domain\Personnel\Storage\PersonnelPrivatePath;
 
@@ -14,8 +15,10 @@ final class PersonnelAdminFileTransfer
 {
     private const EXTENSIONS = ['application/pdf' => 'pdf', 'image/jpeg' => 'jpg', 'image/png' => 'png'];
 
-    public function __construct(private PersonnelSyntheticHttpBoundary $boundary, private PersonnelDocumentService $documents)
-    {
+    public function __construct(
+        private PersonnelSyntheticHttpBoundary|PersonnelProductionHttpBoundary $boundary,
+        private PersonnelDocumentService $documents,
+    ) {
     }
 
     public function upload(Request $request, int $documentId, int $predecessor, int $revision, string $requestId): array
@@ -51,7 +54,9 @@ final class PersonnelAdminFileTransfer
         $extension = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
         $stream = PersonnelPrivatePath::openPrivateFile($temporary);
         try {
-            $this->boundary->assertSyntheticUpload($stream, $size);
+            if ($this->boundary instanceof PersonnelSyntheticHttpBoundary) {
+                $this->boundary->assertSyntheticUpload($stream, $size);
+            }
 
             return $this->documents->uploadFile($documentId, $predecessor, $stream, $size, $requestId, $mime, $extension, $revision);
         } finally {

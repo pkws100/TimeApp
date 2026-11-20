@@ -189,6 +189,59 @@ final class PersonnelStoragePrimitivesTest extends TestCase
         $this->rejected(fn () => $storage->assertSeparateFrom($root . '/objects'));
     }
 
+    public function testVolatileQuarantineStagesAndRecoversFilesOutsideTheObjectRoot(): void
+    {
+        $root = $this->makeFolder('private');
+        $quarantine = '/dev/shm/timeapp-test-quarantine-' . bin2hex(random_bytes(8));
+        self::assertTrue(mkdir($quarantine, 0700));
+        $orphan = bin2hex(random_bytes(32));
+        try {
+            $storage = new PersonnelPrivateStorage($root, [base_path('public')], minFreeBytes: 0, quarantineRoot: $quarantine);
+            self::assertDirectoryDoesNotExist($root . '/quarantine');
+            $this->rejected(fn () => $storage->assertSeparateFrom($quarantine));
+            $storage->withLock(false, function () use ($storage, $quarantine): void {
+                $source = $this->memory('synthetic');
+                try {
+                    $staged = $storage->stageUpload($source, 9);
+                    self::assertSame($quarantine, dirname($staged->path()));
+                    self::assertSame('synthetic', file_get_contents($staged->path()));
+                    self::assertSame(0600, fileperms($staged->path()) & 0777);
+                    $staged->discard();
+                } finally {
+                    fclose($source);
+                }
+            });
+
+            fclose(PersonnelPrivatePath::createExclusive($quarantine . '/' . $orphan));
+            $storage->withLock(true, function () use ($storage, $orphan): void {
+                self::assertSame([$orphan], array_keys($storage->listQuarantineKeys()));
+                $storage->removeQuarantine($orphan);
+                $storage->assertEmpty();
+            });
+
+            self::assertTrue(rename($quarantine, $quarantine . '-original'));
+            try {
+                self::assertTrue(mkdir($quarantine, 0700));
+                $this->rejected(fn () => $storage->withLock(false, static fn () => null));
+            } finally {
+                if (is_dir($quarantine)) {
+                    rmdir($quarantine);
+                }
+                rename($quarantine . '-original', $quarantine);
+            }
+        } finally {
+            @unlink($quarantine . '/' . $orphan);
+            rmdir($quarantine);
+        }
+    }
+
+    public function testVolatileQuarantineRejectsNonTmpfsAndOverlappingRoots(): void
+    {
+        $root = $this->makeFolder('private');
+        $this->rejected(fn () => PersonnelPrivatePath::requireTmpfs('/proc'));
+        $this->rejected(fn () => new PersonnelPrivateStorage($root, [base_path('public')], quarantineRoot: $root));
+    }
+
     public function testStagingRejectsIncompleteOverlongAndCapacityLimitedStreams(): void
     {
         $storage = new PersonnelPrivateStorage($this->makeFolder('private'), [base_path('public')], maxBytes: 16, maxConcurrent: 1);

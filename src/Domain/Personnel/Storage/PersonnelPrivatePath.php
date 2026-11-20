@@ -55,6 +55,27 @@ final class PersonnelPrivatePath
         }
     }
 
+    public static function requireTmpfs(string $path): int
+    {
+        $path = self::canonical(self::absolute($path));
+        $mount = self::mountFor($path, self::mounts());
+        clearstatcache(true, $path);
+        $stat = @lstat($path);
+        if ($stat === false || $mount['type'] !== 'tmpfs') {
+            throw self::invalidLocation();
+        }
+
+        $device = $stat['dev'];
+        // Linux dev_t encodes the device number reported by /proc/self/mountinfo.
+        $major = (($device >> 8) & 0xfff) | (($device >> 32) & 0xfffff000);
+        $minor = ($device & 0xff) | (($device >> 12) & 0xffffff00);
+        if ($mount['device'] !== $major . ':' . $minor) {
+            throw self::invalidLocation();
+        }
+
+        return $device;
+    }
+
     /** @return array{int,int,int,int,int} */
     public static function scannerSocketIdentity(string $path): array
     {
@@ -238,7 +259,7 @@ final class PersonnelPrivatePath
         return $resolved;
     }
 
-    /** @return list<array{device:string, root:string, point:string}> */
+    /** @return list<array{device:string, root:string, point:string, type:string}> */
     private static function mounts(): array
     {
         $lines = @file('/proc/self/mountinfo', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
@@ -249,10 +270,16 @@ final class PersonnelPrivatePath
         $mounts = [];
         foreach ($lines as $line) {
             $fields = explode(' ', $line, 7);
-            if (count($fields) !== 7 || preg_match('/\A\d+:\d+\z/', $fields[2]) !== 1) {
+            $separator = strpos($line, ' - ');
+            if ($separator === false || count($fields) !== 7 || preg_match('/\A\d+:\d+\z/', $fields[2]) !== 1) {
                 throw self::invalidLocation();
             }
-            $mounts[] = ['device' => $fields[2], 'root' => self::unescapeMountPath($fields[3]), 'point' => self::unescapeMountPath($fields[4])];
+            $mounts[] = [
+                'device' => $fields[2],
+                'root' => self::unescapeMountPath($fields[3]),
+                'point' => self::unescapeMountPath($fields[4]),
+                'type' => explode(' ', substr($line, $separator + 3), 2)[0],
+            ];
         }
 
         return $mounts;
@@ -266,6 +293,16 @@ final class PersonnelPrivatePath
     /** @return array{string,string} */
     private static function physicalLocation(string $path, array $mounts): array
     {
+        $mount = self::mountFor($path, $mounts);
+        $suffix = ltrim(substr($path, strlen($mount['point'])), '/');
+        $physical = $suffix === '' ? $mount['root'] : rtrim($mount['root'], '/') . '/' . $suffix;
+
+        return [$mount['device'], $physical];
+    }
+
+    /** @return array{device:string, root:string, point:string, type:string} */
+    private static function mountFor(string $path, array $mounts): array
+    {
         $match = null;
         foreach ($mounts as $mount) {
             if (self::isWithin($path, $mount['point'])
@@ -276,10 +313,7 @@ final class PersonnelPrivatePath
         if ($match === null) {
             throw self::invalidLocation();
         }
-        $suffix = ltrim(substr($path, strlen($match['point'])), '/');
-        $physical = $suffix === '' ? $match['root'] : rtrim($match['root'], '/') . '/' . $suffix;
-
-        return [$match['device'], $physical];
+        return $match;
     }
 
     private static function sameTree(array $a, array $b): bool

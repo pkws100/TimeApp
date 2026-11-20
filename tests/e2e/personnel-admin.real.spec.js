@@ -28,6 +28,10 @@ test.describe('Digitale Personalakte im isolierten Testbetrieb', () => {
     await page.goto(routes);
     const heading = page.getByRole('heading', { name: 'Digitale Personalakte', exact: true });
     await expect(heading).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Digitale Personalakte BETA', exact: true })).toBeVisible();
+    const header = page.locator('.personnel-header');
+    await expect(header.getByText('BETA', { exact: true })).toHaveCount(0);
+    await expect(header.getByText('Synthetischer Testbetrieb', { exact: true })).toBeVisible();
     await expect(page.getByText(employee.name, { exact: true })).toBeVisible();
     await expect(page.getByText(foreign.name, { exact: true })).toHaveCount(0);
     const search = page.locator('form[action$="/search"]');
