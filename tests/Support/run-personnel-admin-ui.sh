@@ -104,8 +104,9 @@ export APP_DEBUG=false
 export APP_SECRET=$(php -r 'echo bin2hex(random_bytes(32));')
 export SETTINGS_ENCRYPTION_KEY=$(php -r 'echo bin2hex(random_bytes(32));')
 export PERSONNEL_BACKUP_ROOT="$fixture_root/backup"
-export UPLOAD_ROOT="../../../${fixture_root#/}/uploads"
-export EXPORT_TEMP_PATH="../../../${fixture_root#/}/exports"
+UPLOAD_ROOT=$(realpath --relative-to="$checkout" -- "$fixture_root/uploads")
+EXPORT_TEMP_PATH=$(realpath --relative-to="$checkout" -- "$fixture_root/exports")
+export UPLOAD_ROOT EXPORT_TEMP_PATH
 
 phase='http-infrastructure'
 APP_ENV=test APP_URL="$UI_BASE_URL" PHP_CLI_SERVER_WORKERS=4 setsid php \
