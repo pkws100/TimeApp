@@ -323,6 +323,10 @@ bash tests/Support/run-personnel-admin-ui.sh
 
 Die Pakete PHP 8.2 mit Sodium und GD, MariaDB 10.11, qpdf ab Version 11, `util-linux`, ClamAV und die installierten Playwright-Browser werden vorausgesetzt. `PERSONNEL_TEST_QPDF` und `PERSONNEL_TEST_CLAMD` können auf verfügbare Testbinaries zeigen. Die Testvorrichtung erzeugt alle freigegebenen PDF-, JPEG- und PNG-Muster selbst. Die geschützte Fixture-Datei erlaubt Uploads ausschließlich mit den Hashes dieser Muster. Einen Internetzugang oder eine Weiterleitung für den Testserver nicht bereitstellen. Ablage und Browserablauf mit realen Unterlagen benötigen einen gesondert freigegebenen Betriebsadapter. [Phase-2C-Implementierung](docs/COMPLIANCE_2027_PHASE2C_IMPLEMENTATION.md)
 
+PHPUnit und Playwright verwenden denselben isolierten ClamAV-Start. Konfiguration, synthetische Signaturdatenbank, Scanner-Temp und Unix-Socket liegen in `/tmp/timeapp-personnel-clamd-<id>`, einem privaten Verzeichnis innerhalb der vom Ubuntu-AppArmor-Profil erlaubten Pfade. Die HTTP-Fixture mit Datenbank, Testschlüsseln und Akten bleibt unter `/var/tmp/timeapp-personnel-http-<id>`. Vor dem Browserstart muss der Scanner auf `PING` antworten, ein sauberes PNG akzeptieren und ein synthetisches Prüfmuster mit hinterlegter ClamAV-Signatur erkennen. Für PHPUnit mit echtem Scanner lässt sich `PERSONNEL_TEST_QPDF=/usr/bin/qpdf bash tests/Support/run-with-personnel-scanner.sh composer test` gegen eine Scratch-Datenbank ausführen.
+
+`PERSONNEL_TEST_DIAGNOSTICS_FILE` kann auf eine Ausgabedatei für den bereinigten Fehlerbericht zeigen. GitHub Actions lädt nur diese Datei mit Fehlerphase, Exitcode und standardisierten Scanner-Meldungen hoch. Beide temporären Verzeichnisse werden auch beim regulär abgefangenen Fehlschlag entfernt.
+
 ### Allgemeine Sicherungen
 
 Regelmaessig sichern:

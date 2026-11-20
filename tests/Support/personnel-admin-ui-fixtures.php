@@ -6,6 +6,7 @@ use App\Domain\Personnel\Compliance\EmploymentContextService;
 use App\Domain\Personnel\Compliance\PersonnelAccessService;
 use App\Domain\Personnel\Compliance\PersonnelDocumentService;
 use App\Domain\Personnel\Compliance\PersonnelFileRuntime;
+use App\Domain\Personnel\Compliance\PersonnelSyntheticHttpBoundary;
 use App\Domain\Personnel\Storage\ClamAvPersonnelScanner;
 use App\Domain\Personnel\Storage\PersonnelFileValidator;
 use App\Domain\Personnel\Storage\PersonnelKeyring;
@@ -93,7 +94,7 @@ $admin = $seedUser('PC-001', 'Administrator');
 $manager = $seedUser('PC-002', 'Manager');
 $viewer = $seedUser('PC-003', 'Viewer');
 $outsider = $seedUser('PC-004', 'Outsider');
-$employee = $seedUser('PC-101', 'Scoped');
+$employee = $seedUser('PC-101', str_repeat('Mitarbeiteraktenname', 5));
 $foreign = $seedUser('PC-102', 'Foreign');
 $archived = $seedUser('PC-103', 'Archived', true);
 
@@ -155,11 +156,17 @@ $document = $documents->create($employee['id'], [
     'period_from' => '2026-06-01', 'period_until' => '2026-06-30',
 ], 'ui-own-fixture-document')['document_id'];
 $foreignDocument = $documents->create($foreign['id'], ['document_type_id' => $type], 'ui-foreign-fixture-document')['document_id'];
+for ($day = 1; $day <= 24; $day++) {
+    $documents->create($employee['id'], [
+        'document_type_id' => $type,
+        'period_from' => sprintf('2026-03-%02d', $day),
+    ], 'ui-document-list-fixture-' . $day);
+}
 
 $storage = new PersonnelPrivateStorage($root . '/private-store', [base_path(), $root . '/incoming']);
 $cipher = new PersonnelStreamCipher(PersonnelKeyring::fromFile($root . '/file-keys.json'));
 $validator = new PersonnelFileValidator($qpdf);
-$scanner = new ClamAvPersonnelScanner($root . '/scanner/clamd.sock');
+$scanner = new ClamAvPersonnelScanner(PersonnelSyntheticHttpBoundary::scannerDirectory($fixtureId) . '/clamd.sock');
 $validator->assertReady();
 $scanner->assertReady();
 $seedVersion = static function (int $documentId, string $bytes) use ($db, $storage, $cipher, $validator, $scanner, $admin): int {
@@ -213,6 +220,7 @@ $file = static function (string $filename, string $bytes) use ($root, $write, &$
 $file('synthetic.png', $pngBytes);
 $file('synthetic-180.png', PersonnelFileTestFixture::png(180));
 $file('synthetic-220.png', PersonnelFileTestFixture::png(220));
+$file('synthetic-malware.png', PersonnelFileTestFixture::scannerRejectedPng());
 $file('invalid.png', 'synthetic invalid file');
 
 $image = imagecreatetruecolor(4, 4);
@@ -242,4 +250,7 @@ $write($root . '/fixture.json', $json([
 ]));
 
 $write($root . '/ui.json', $json(compact('admin', 'manager', 'viewer', 'outsider', 'employee', 'foreign', 'archived', 'document',
-    'version', 'foreignDocument', 'foreignVersion', 'type', 'requirement', 'database', 'files') + ['scratchRoot' => $root]));
+    'version', 'foreignDocument', 'foreignVersion', 'type', 'requirement', 'database', 'files') + [
+    'scratchRoot' => $root,
+    'scannerSocket' => PersonnelSyntheticHttpBoundary::scannerDirectory($fixtureId) . '/clamd.sock',
+]));

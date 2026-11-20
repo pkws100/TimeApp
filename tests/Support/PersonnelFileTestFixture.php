@@ -75,6 +75,11 @@ final class PersonnelFileTestFixture implements PersonnelMalwareScanner
         return (string) ob_get_clean();
     }
 
+    public static function scannerRejectedPng(): string
+    {
+        return self::png(85);
+    }
+
     public static function upload(PersonnelDocumentService $service, int $id, int $predecessor, string $bytes, string $request, ?string $mime = 'image/png', string $extension = 'png'): array
     {
         $stream = fopen('php://memory', 'w+b');

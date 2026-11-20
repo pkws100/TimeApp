@@ -592,10 +592,10 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         $this->grantRole($manager, 'administrator');
         $override = $this->writePrivateConfig('database.php', MariaDbScratchConfig::connection($this->database));
         $backupWorkDirectory = $this->temporaryDirectory . '/http-backups';
-        $previousOverride = getenv('DB_OVERRIDE_FILE');
+        $previousOverride = $_ENV['DB_OVERRIDE_FILE'] ?? null;
         $previousBackupWorkDirectory = $_ENV['BACKUP_TEMP_PATH'] ?? null;
         $previousSession = $_SESSION ?? [];
-        putenv('DB_OVERRIDE_FILE=' . $override);
+        $_ENV['DB_OVERRIDE_FILE'] = $override;
         $_ENV['BACKUP_TEMP_PATH'] = $backupWorkDirectory;
 
         try {
@@ -616,7 +616,11 @@ final class PersonnelComplianceDatabaseTest extends TestCase
             self::assertSame(404, $status('POST', '/api/v1/personnel-documents'));
         } finally {
             $_SESSION = $previousSession;
-            putenv($previousOverride === false ? 'DB_OVERRIDE_FILE' : 'DB_OVERRIDE_FILE=' . $previousOverride);
+            if ($previousOverride === null) {
+                unset($_ENV['DB_OVERRIDE_FILE']);
+            } else {
+                $_ENV['DB_OVERRIDE_FILE'] = $previousOverride;
+            }
             if ($previousBackupWorkDirectory === null) {
                 unset($_ENV['BACKUP_TEMP_PATH']);
             } else {

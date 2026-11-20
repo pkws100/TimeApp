@@ -4,24 +4,18 @@ umask 077
 
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.."
 checkout=$(pwd -P)
-qpdf_binary=${PERSONNEL_TEST_QPDF:-$(command -v qpdf || true)}
-clamd_binary=${PERSONNEL_TEST_CLAMD:-$(command -v clamd || true)}
-if [[ ! -x "$qpdf_binary" || ! -x "$clamd_binary" ]]; then
-    printf '%s\n' 'qpdf and clamd are required for the isolated personnel browser tests.' >&2
-    exit 1
-fi
-qpdf_binary=$(realpath -- "$qpdf_binary")
-clamd_binary=$(realpath -- "$clamd_binary")
-fixture_id=$(php -r 'echo bin2hex(random_bytes(6));')
-fixture_root="/var/tmp/timeapp-personnel-http-$fixture_id"
-mkdir -m 0700 -- "$fixture_root"
+source tests/Support/isolated-personnel-scanner.sh
 
+phase='prerequisites'
+fixture_root=''
 database_pid=''
-scanner_pid=''
 server_pid=''
 disabled_pid=''
 cleanup() {
     local result=$?
+    if (( result != 0 )); then
+        report_personnel_failure "$phase" "$result"
+    fi
     if [[ -n "$server_pid" ]]; then
         kill -TERM -- "-$server_pid" 2>/dev/null || kill "$server_pid" 2>/dev/null || true
         wait "$server_pid" 2>/dev/null || true
@@ -30,67 +24,56 @@ cleanup() {
         kill "$disabled_pid" 2>/dev/null || true
         wait "$disabled_pid" 2>/dev/null || true
     fi
-    if [[ -n "$scanner_pid" ]]; then
-        kill "$scanner_pid" 2>/dev/null || true
-        wait "$scanner_pid" 2>/dev/null || true
-    fi
     if [[ -n "$database_pid" ]]; then
         mariadb-admin --no-defaults --socket="$fixture_root/mariadb.sock" --user=root shutdown >/dev/null 2>&1 || kill "$database_pid" 2>/dev/null || true
         wait "$database_pid" 2>/dev/null || true
     fi
-    if [[ "$result" -ne 0 && "${UI_PERSONNEL_KEEP_FAILURE:-0}" == 1 ]]; then
-        printf 'Isolated synthetic test diagnostics: %s\n' "$fixture_root" >&2
-        return
+    local cleanup_status=0
+    stop_personnel_scanner || cleanup_status=$?
+    if [[ -n "$fixture_root" ]]; then
+        rm -rf --one-file-system -- "$fixture_root" || cleanup_status=$?
     fi
-    php -r '
-        $directory = $argv[1];
-        foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($directory, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST) as $entry) {
-            $entry->isDir() && !$entry->isLink() ? rmdir($entry->getPathname()) : unlink($entry->getPathname());
-        }
-        rmdir($directory);
-    ' "$fixture_root"
+    if (( cleanup_status != 0 )); then
+        if (( result == 0 )); then
+            report_personnel_failure cleanup "$cleanup_status"
+            exit "$cleanup_status"
+        fi
+        printf 'Personnel fixture cleanup also failed (exit %s).\n' "$cleanup_status" >&2
+    fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
-mkdir -m 0700 -- "$fixture_root"/{sessions,sessions-disabled,incoming,private-store,database,database-tmp,scanner,uploads,exports,general-backup,playwright,backup}
-mkdir -m 0700 -- "$fixture_root/scanner/signatures"
+qpdf_binary=${PERSONNEL_TEST_QPDF:-$(command -v qpdf || true)}
+if [[ ! -x "$qpdf_binary" ]]; then
+    printf '%s\n' 'qpdf is required for the isolated personnel browser tests.' >&2
+    exit 1
+fi
+qpdf_binary=$(realpath -- "$qpdf_binary")
+fixture_id=$(php -r 'echo bin2hex(random_bytes(6));')
+directory="/var/tmp/timeapp-personnel-http-$fixture_id"
+mkdir -m 0700 -- "$directory"
+fixture_root=$directory
+mkdir -m 0700 -- "$fixture_root"/{sessions,sessions-disabled,incoming,private-store,database,database-tmp,uploads,exports,general-backup,playwright,backup}
 
+phase='scanner-infrastructure'
+start_personnel_scanner "$fixture_id"
+
+phase='mariadb-install'
 mariadb-install-db --no-defaults --datadir="$fixture_root/database" --auth-root-authentication-method=normal --skip-test-db > "$fixture_root/database-install.log" 2>&1
+phase='mariadb-start'
 mariadbd --no-defaults --user="$(id -un)" --datadir="$fixture_root/database" --socket="$fixture_root/mariadb.sock" --pid-file="$fixture_root/mariadb.pid" --skip-networking --tmpdir="$fixture_root/database-tmp" --innodb-flush-log-at-trx-commit=2 --log-error="$fixture_root/mariadb.log" &
 database_pid=$!
 for _ in $(seq 1 100); do
     if mariadb-admin --no-defaults --socket="$fixture_root/mariadb.sock" --user=root ping --silent >/dev/null 2>&1; then break; fi
-    kill -0 "$database_pid"
+    kill -0 "$database_pid" 2>/dev/null
     sleep 0.1
 done
 mariadb-admin --no-defaults --socket="$fixture_root/mariadb.sock" --user=root ping --silent >/dev/null
 
-signature_marker='synthetic-file-for-signature-guard'
-signature_hash=$(printf '%s' "$signature_marker" | sha256sum | cut -d ' ' -f 1)
-printf '%s:%s:TimeApp.Synthetic\n' "$signature_hash" "${#signature_marker}" > "$fixture_root/scanner/signatures/synthetic.hsb"
-cat > "$fixture_root/scanner/clamd.conf" <<EOF
-Foreground yes
-LocalSocket $fixture_root/scanner/clamd.sock
-LocalSocketMode 600
-DatabaseDirectory $fixture_root/scanner/signatures
-TemporaryDirectory $fixture_root/scanner
-StreamMaxLength 16M
-MaxFileSize 16M
-MaxScanSize 16M
-AlertExceedsMax yes
-EOF
-"$clamd_binary" --config-file="$fixture_root/scanner/clamd.conf" > "$fixture_root/scanner/clamd.log" 2>&1 &
-scanner_pid=$!
-for _ in $(seq 1 100); do
-    if [[ -S "$fixture_root/scanner/clamd.sock" ]]; then break; fi
-    kill -0 "$scanner_pid"
-    sleep 0.1
-done
-test -S "$fixture_root/scanner/clamd.sock"
-
+phase='fixture-prepare'
 ports=$(php -r '
     $first = stream_socket_server("tcp://127.0.0.1:0");
     $second = stream_socket_server("tcp://127.0.0.1:0");
@@ -104,7 +87,9 @@ primary_port=${listeners[0]}
 disabled_port=${listeners[1]}
 
 php tests/Support/personnel-admin-ui-fixtures.php prepare "$fixture_root" "$primary_port" "$qpdf_binary"
+phase='fixture-migrate'
 vendor/bin/phinx migrate -c "$fixture_root/phinx.php" -e test > "$fixture_root/migrate.log" 2>&1
+phase='fixture-seed'
 vendor/bin/phinx seed:run -c "$fixture_root/phinx.php" -e test -s InitialReferenceSeeder > "$fixture_root/seed.log" 2>&1
 php tests/Support/personnel-admin-ui-fixtures.php seed "$fixture_root" "$primary_port" "$qpdf_binary"
 
@@ -122,6 +107,7 @@ export PERSONNEL_BACKUP_ROOT="$fixture_root/backup"
 export UPLOAD_ROOT="../../../${fixture_root#/}/uploads"
 export EXPORT_TEMP_PATH="../../../${fixture_root#/}/exports"
 
+phase='http-infrastructure'
 APP_ENV=test APP_URL="$UI_BASE_URL" PHP_CLI_SERVER_WORKERS=4 setsid php \
     -d "session.save_path=$fixture_root/sessions" -d "upload_tmp_dir=$fixture_root/incoming" \
     -d sys_temp_dir=/tmp -d post_max_size=18M -d upload_max_filesize=17M -d display_errors=0 \
@@ -154,7 +140,7 @@ for _ in $(seq 1 100); do
         [[ "$(http_status "$UI_PERSONNEL_DISABLED_BASE_URL/admin/personnel-documents")" == 404 ]]; then
         break
     fi
-    kill -0 "$server_pid" "$disabled_pid"
+    kill -0 "$server_pid" "$disabled_pid" 2>/dev/null
     sleep 0.1
 done
 if [[ "$(http_status "$UI_BASE_URL/admin/personnel-documents")" != 302 ]] || \
@@ -163,4 +149,6 @@ if [[ "$(http_status "$UI_BASE_URL/admin/personnel-documents")" != 302 ]] || \
     exit 1
 fi
 
+phase='playwright'
+printf '%s\n' 'Isolated infrastructure ready. Starting personnel Playwright tests.'
 node_modules/.bin/playwright test --config=playwright.personnel.config.js --output="$fixture_root/playwright" "$@"

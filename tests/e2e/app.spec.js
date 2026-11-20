@@ -147,6 +147,7 @@ async function mockProjectOrderApp(page, options = {}) {
 }
 
 test('employee vacation page explains completed-day balance and vacation arithmetic', async ({ page }) => {
+  await page.clock.setFixedTime(new Date('2026-07-29T12:00:00+02:00'));
   await page.addInitScript(() => localStorage.setItem('app.theme', 'dark'));
   await mockProjectOrderApp(page);
   let balanceStatus = 'positive';

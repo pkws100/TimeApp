@@ -146,6 +146,9 @@ require_once __DIR__ . '/autoload.php';
 $personnelHttp = PersonnelSyntheticHttpBoundary::discover();
 
 $request = Request::capture();
+if ($personnelHttp === null && PersonnelSyntheticHttpBoundary::isRequested()) {
+    return [$request, new Router()];
+}
 $isPublicAppResource = $request->method() === 'GET'
     && (in_array($request->path(), ['/app/sw.js', '/app/manifest.json'], true)
         || ($request->path() === '/app' && $request->query(AppController::OFFLINE_SHELL_QUERY) === '1'));
@@ -209,7 +212,10 @@ $databaseSettings = new DatabaseSettingsManager(
     $databaseOverridePath
 );
 $connection = new DatabaseConnection($databaseSettings->current());
-$personnelHttpEnabled = $personnelHttp !== null && $personnelHttp->bind($connection);
+if ($personnelHttp !== null && !$personnelHttp->bind($connection)) {
+    return [$request, new Router()];
+}
+$personnelHttpEnabled = $personnelHttp !== null;
 $permissionMatrix = new PermissionMatrix($config->get('permissions.roles', []), $config->get('permissions.available', []));
 $storageUsage = new StorageUsageService(storage_path());
 

@@ -22,10 +22,15 @@ final class PersonnelSyntheticHttpBoundary
     ) {
     }
 
+    public static function isRequested(): bool
+    {
+        return PHP_SAPI === 'cli-server' && getenv('APP_ENV', true) === 'test'
+            && getenv('PERSONNEL_HTTP_MODE', true) === 'synthetic';
+    }
+
     public static function discover(): ?self
     {
-        if (PHP_SAPI !== 'cli-server' || getenv('APP_ENV', true) !== 'test'
-            || getenv('PERSONNEL_HTTP_MODE', true) !== 'synthetic') {
+        if (!self::isRequested()) {
             return null;
         }
 
@@ -68,9 +73,10 @@ final class PersonnelSyntheticHttpBoundary
             if (!$boundary->isLocalServer()) {
                 return null;
             }
-            foreach (['sessions', 'incoming', 'private-store', 'database', 'scanner', 'uploads', 'exports', 'general-backup'] as $directory) {
+            foreach (['sessions', 'incoming', 'private-store', 'database', 'uploads', 'exports', 'general-backup'] as $directory) {
                 PersonnelPrivatePath::requireDirectory($root . '/' . $directory);
             }
+            PersonnelPrivatePath::requireRoot(self::scannerDirectory($name[1]), [base_path(), '/var/www', $root]);
             if (ini_get('upload_tmp_dir') !== $boundary->incomingDirectory()
                 || ini_get('session.save_path') !== $boundary->sessionDirectory()
                 || getenv('DB_OVERRIDE_FILE', true) !== $root . '/database.php') {
@@ -159,6 +165,15 @@ final class PersonnelSyntheticHttpBoundary
         return $this->root . '/general-backup';
     }
 
+    public static function scannerDirectory(string $fixtureId): string
+    {
+        if (preg_match('/\A[a-f0-9]{12}\z/', $fixtureId) !== 1) {
+            throw new PersonnelFileUnavailable();
+        }
+
+        return '/tmp/timeapp-personnel-clamd-' . $fixtureId;
+    }
+
     public function origin(): string
     {
         return 'http://127.0.0.1:' . $this->port;
@@ -178,13 +193,14 @@ final class PersonnelSyntheticHttpBoundary
     {
         $this->assertBound($connection);
         $config = require config_path('personnel_storage.php');
+        $scannerDirectory = self::scannerDirectory($this->fixtureId);
 
         return [
             'root' => $this->root . '/private-store',
             'keyring' => $this->root . '/file-keys.json',
-            'scanner_socket' => $this->root . '/scanner/clamd.sock',
+            'scanner_socket' => $scannerDirectory . '/clamd.sock',
             'qpdf' => $this->qpdf,
-            'forbidden_roots' => [...$config['forbidden_roots'], $this->sessionDirectory(), $this->root . '/database', $this->root . '/scanner'],
+            'forbidden_roots' => [...$config['forbidden_roots'], $this->sessionDirectory(), $this->root . '/database', $scannerDirectory],
         ];
     }
 

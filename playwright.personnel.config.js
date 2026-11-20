@@ -11,7 +11,8 @@ module.exports = defineConfig({
   use: {
     ...base.use,
     acceptDownloads: true,
-    trace: 'retain-on-failure'
+    screenshot: 'off',
+    trace: 'off'
   },
   projects: [
     {

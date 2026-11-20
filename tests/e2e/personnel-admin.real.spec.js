@@ -52,6 +52,13 @@ test.describe('Digitale Personalakte im isolierten Testbetrieb', () => {
       await page.goto(`${routes}/users/${employee.id}`);
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+      for (const selector of ['.personnel-header', '#dokumente', '.content']) {
+        expect(await page.locator(selector).evaluate(element => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+      }
+      const links = page.locator('#dokumente').getByRole('link', { name: 'Dokument öffnen', exact: true });
+      expect(await links.count()).toBeGreaterThanOrEqual(25);
+      await links.last().scrollIntoViewIfNeeded();
+      await expect(links.last()).toBeInViewport();
     }
 
     await page.goto(routes);
@@ -93,13 +100,19 @@ test.describe('Digitale Personalakte im isolierten Testbetrieb', () => {
     await input.setInputFiles(oversized);
     await expect(status).toContainText('höchstens 16 MiB');
     await expect(versions).toHaveCount(0);
+    const review = page.locator('form[action$="/review"]');
+    await openAction(review);
+    const reviewReason = review.locator('select[name="reason"]');
+    await reviewReason.selectOption('insufficient_evidence');
     await input.setInputFiles({ name: 'invalid.png', mimeType: 'image/png', buffer: Buffer.from('synthetic invalid file') });
     const badUpload = page.waitForResponse(response => response.url().endsWith('/upload') && response.request().method() === 'POST');
     await uploadButton.click();
     expect((await badUpload).status()).toBe(422);
     await expect(status).toBeVisible();
     await expect.poll(() => input.evaluate(element => element.files[0]?.name)).toBe('invalid.png');
+    await expect(reviewReason).toHaveValue('insufficient_evidence');
     await expect(versions).toHaveCount(0);
+    await reviewReason.selectOption('');
 
     const first = path.join(scratchRoot, 'synthetic.png');
     await input.setInputFiles(first);
@@ -179,7 +192,6 @@ test.describe('Digitale Personalakte im isolierten Testbetrieb', () => {
     await expect(page.locator('#nachweise')).toContainText('Signatur ungeklärt');
     await expect(page.locator('#nachweise')).toContainText('Version 3');
 
-    const review = page.locator('form[action$="/review"]');
     await openAction(review);
     await review.locator('select[name="reason"]').selectOption('insufficient_evidence');
     await review.getByRole('button', { name: 'Dokument beanstanden' }).click();

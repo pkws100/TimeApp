@@ -67,7 +67,7 @@ test.beforeEach(() => {
     expect(fixture, 'Run through tests/Support/run-personnel-admin-ui.sh').not.toBeNull();
 });
 
-test('disabled mode, incorrect host or proxy headers cannot expose the module', async ({ request: api, baseURL }) => {
+test('disabled mode and failed synthetic boundaries cannot expose private or fallback routes', async ({ request: api, baseURL }) => {
     const anonymous = await api.get(root, { maxRedirects: 0 });
     expect(anonymous.status()).toBe(302);
     expect(anonymous.headers().location).toBe('/admin/login?next=%2Fadmin%2Fpersonnel-documents');
@@ -81,12 +81,28 @@ test('disabled mode, incorrect host or proxy headers cannot expose the module', 
         await disabled.dispose();
     }
     await signIn(api, fixture.admin);
-    expect((await api.get(root, { headers: { 'X-Forwarded-For': '127.0.0.1' } })).status()).toBe(404);
-    expect((await api.get(root, { headers: { Host: `localhost:${new URL(baseURL).port}` } })).status()).toBe(404);
+    for (const headers of [{ 'X-Forwarded-For': '127.0.0.1' }, { Host: `localhost:${new URL(baseURL).port}` }]) {
+        expect((await api.get(root, { headers })).status()).toBe(404);
+        expect((await api.get('/admin/login', { headers })).status()).toBe(404);
+        expect((await api.post('/admin/settings/database', { headers })).status()).toBe(404);
+        expect((await api.post('/api/v1/settings/database', { headers })).status()).toBe(404);
+    }
     expect((await api.get('/api/v1/personnel/documents')).status()).toBe(404);
     expect((await api.get(`/app/personnel-documents/${fixture.document}`)).status()).toBe(404);
     expect((await api.post('/admin/settings/database', { form: { database: 'should-not-change' } })).status()).toBe(404);
     expect((await api.post('/api/v1/settings/database', { data: { database: 'should-not-change' } })).status()).toBe(404);
+
+    const fixtureId = fixture.database.match(/^timeapp_personnel_http_([a-f0-9]{12})$/)[1];
+    const principal = `'timeapp_ph_${fixtureId}'@'localhost'`;
+    const schema = '`' + fixture.database.replaceAll('_', '\\_') + '`.*';
+    scratchSql(`REVOKE DELETE ON ${schema} FROM ${principal}`);
+    try {
+        expect((await api.get(root)).status()).toBe(404);
+        expect((await api.get('/admin/login')).status()).toBe(404);
+    } finally {
+        scratchSql(`GRANT DELETE ON ${schema} TO ${principal}`);
+    }
+    expect((await api.get(root)).status()).toBe(200);
 });
 
 test('viewer is scoped, foreign and missing links are indistinguishable, and sensitive responses do not cache', async ({ request: api }) => {
@@ -202,6 +218,12 @@ test('upload enforces actual content, readiness and byte limits and arbitrates c
     const unlisted = await upload(api, document, token, png(250), key(), 0);
     expect(unlisted.status()).toBe(422);
     expect((await unlisted.json()).message).toContain('vorbereitete synthetische Dateien');
+    const malware = fs.readFileSync(fixture.files['synthetic-malware.png']);
+    const rejected = await upload(api, document, token, malware, key(), 0);
+    expect(rejected.status()).toBe(422);
+    expect(await rejected.json()).toEqual({ ok: false, message: 'Die Schadsoftwareprüfung hat die Datei nicht freigegeben.' });
+    expect(scratchSql(`SELECT COUNT(*) FROM employee_document_versions WHERE document_id=${document}`)).toBe('0');
+    expect(scratchSql(`SELECT COUNT(*) FROM employee_document_audit WHERE document_id=${document} AND action='file_version_created'`)).toBe('0');
     expect((await upload(api, document, token, first, key(), 0, 'image/png', 'synthetic.png', 2)).status()).toBe(409);
     expect((await upload(api, document, token, Buffer.alloc(16 * 1024 * 1024 + 1), key(), 0)).status()).toBe(413);
 
@@ -213,7 +235,9 @@ test('upload enforces actual content, readiness and byte limits and arbitrates c
     } finally {
         fs.renameSync(hiddenFileKey, fileKey);
     }
-    const scanner = path.join(fixture.scratchRoot, 'scanner/clamd.sock');
+    const scanner = fixture.scannerSocket;
+    const fixtureId = path.basename(fixture.scratchRoot).slice('timeapp-personnel-http-'.length);
+    expect(scanner).toBe(`/tmp/timeapp-personnel-clamd-${fixtureId}/clamd.sock`);
     const hiddenScanner = `${scanner}.test-offline`;
     fs.renameSync(scanner, hiddenScanner);
     try {
@@ -235,9 +259,21 @@ test('upload enforces actual content, readiness and byte limits and arbitrates c
         expect((await upload(winner.api, document, winner.token, png(220), winner.id, 0)).status()).toBe(409);
         expect(scratchSql(`SELECT COUNT(*) FROM employee_document_versions WHERE document_id=${document}`)).toBe('1');
         const version = numeric(scratchSql(`SELECT id FROM employee_document_versions WHERE document_id=${document}`));
+        const objectKey = scratchSql(`SELECT storage_key FROM employee_document_versions WHERE id=${version}`);
+        expect(/^[a-f0-9]{64}$/.test(objectKey)).toBe(true);
+        const ciphertext = fs.readFileSync(path.join(fixture.scratchRoot, 'private-store', 'objects', objectKey));
+        expect(ciphertext.subarray(0, 8).toString()).toBe('TAPPPS1\n');
+        expect(ciphertext.includes(winner.bytes)).toBe(false);
+        const detail = await api.get(`${root}/${document}`);
+        expect(detail.status()).toBe(200);
+        expect((await detail.text()).includes(objectKey)).toBe(false);
         const file = await api.post(download(document), { form: { csrf_token: token, version_id: version } });
         expect(file.ok()).toBe(true);
         expect(await file.body()).toEqual(winner.bytes);
+        const actor = numeric(fixture.manager.id);
+        const employee = numeric(fixture.employee.id);
+        expect(scratchSql(`SELECT COUNT(*) FROM employee_document_access_log WHERE document_id=${document} AND document_version_id=${version}
+            AND actor_user_id=${actor} AND employee_user_id=${employee} AND action='document.download_file' AND outcome='allowed'`)).toBe('1');
     } finally {
         await other.dispose();
     }
