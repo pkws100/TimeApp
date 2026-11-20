@@ -88,10 +88,6 @@ test.describe('Digitale Personalakte im isolierten Testbetrieb', () => {
     await expect(create.getByLabel('Gesetzliche Regelrevision')).toHaveValue(String(requirement));
     await expect(create.getByLabel('Zeitraum ab')).toHaveValue('2027-02-01');
     await create.getByLabel('Zeitraum ab').fill('2027-01-01');
-    await create.getByRole('button', { name: 'Dokument anlegen', exact: true }).click();
-    await expect(page.getByText('Dokumentmetadaten angelegt.', { exact: true })).toBeVisible();
-    await expect(page).toHaveURL(/\/admin\/personnel-documents\/\d+$/);
-    const documentPage = page.url();
     const upload = page.locator('[data-personnel-upload]');
     const input = upload.getByLabel('Lokale Datei');
     const uploadButton = upload.getByRole('button', { name: 'Datei hochladen', exact: true });
@@ -101,7 +97,24 @@ test.describe('Digitale Personalakte im isolierten Testbetrieb', () => {
     const oversized = path.join(scratchRoot, 'oversize.png');
     fs.closeSync(fs.openSync(oversized, 'w', 0o600));
     fs.truncateSync(oversized, 16 * 1024 * 1024 + 1);
-    await input.setInputFiles(oversized);
+    // The file picker is usable before its deferred script finishes loading.
+    let releaseUploadScript;
+    const uploadScript = new Promise(resolve => { releaseUploadScript = resolve; });
+    await page.waitForLoadState('load');
+    await page.route('**/assets/js/admin-personnel-documents.js', async route => {
+      await uploadScript;
+      await route.continue();
+    }, { times: 1 });
+    try {
+      await create.getByRole('button', { name: 'Dokument anlegen', exact: true }).click();
+      await expect(page.getByText('Dokumentmetadaten angelegt.', { exact: true })).toBeVisible();
+      await expect(page).toHaveURL(/\/admin\/personnel-documents\/\d+$/);
+      await input.setInputFiles(oversized);
+      await expect(status).toBeHidden();
+    } finally {
+      releaseUploadScript();
+    }
+    const documentPage = page.url();
     await expect(status).toContainText('höchstens 16 MiB');
     await expect(versions).toHaveCount(0);
     const review = page.locator('form[action$="/review"]');

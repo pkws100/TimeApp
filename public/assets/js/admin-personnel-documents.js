@@ -117,7 +117,7 @@
         }
     }
 
-    fileInput.addEventListener('change', () => {
+    function updateFileSelection() {
         fileInput.setCustomValidity('');
         description.textContent = '';
         status.hidden = true;
@@ -127,7 +127,10 @@
             announce('Die Datei muss mindestens 1 Byte und höchstens 16 MiB groß sein.', 'error');
         }
         void inspectFile(file);
-    });
+    }
+
+    fileInput.addEventListener('change', updateFileSelection);
+    updateFileSelection();
 
     function allowRetry(message) {
         inProgress = false;
