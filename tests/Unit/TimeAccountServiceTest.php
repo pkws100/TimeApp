@@ -117,6 +117,32 @@ final class TimeAccountServiceTest extends TestCase
         self::assertSame('negative', $employee['employee_balance']['status']);
     }
 
+    public function testEmployeeAccountShowsOpeningBalanceOnCutoverEffectiveDate(): void
+    {
+        $pdo = new TimeAccountPdoDouble();
+        $pdo->users[1] = $pdo->user();
+        $pdo->cutovers[] = [
+            'id' => 17,
+            'user_id' => 1,
+            'effective_from' => '2026-07-15',
+            'opening_time_balance_minutes' => 90,
+            'leave_year' => 2026,
+            'annual_leave_entitlement_days' => '30.00',
+            'leave_carryover_days' => '0.00',
+            'opening_remaining_leave_days' => '30.00',
+            'status' => 'final',
+            'active_final_user_id' => 1,
+        ];
+
+        $account = $this->service($pdo)->employeeMonthlyAccount(1, 2026, 7, '2026-07-15');
+
+        self::assertSame('2026-07-14', $account['employee_balance']['as_of_date']);
+        self::assertSame(90, $account['employee_balance']['minutes']);
+        self::assertSame('+01:30', $account['employee_balance']['label']);
+        self::assertSame('positive', $account['employee_balance']['status']);
+        self::assertFalse($account['employee_balance']['current_day_included']);
+    }
+
     public function testEmployeeAccountKeepsPreviousClosingBalanceOnFirstDayOfMonth(): void
     {
         $pdo = new TimeAccountPdoDouble();
@@ -200,7 +226,7 @@ final class TimeAccountServiceTest extends TestCase
         $pdo->cutovers[] = [
             'id' => 13,
             'user_id' => 1,
-            'effective_from' => '2026-08-01',
+            'effective_from' => '2026-07-16',
             'opening_time_balance_minutes' => 0,
             'leave_year' => 2026,
             'annual_leave_entitlement_days' => '30.00',
@@ -209,11 +235,17 @@ final class TimeAccountServiceTest extends TestCase
             'status' => 'final',
             'active_final_user_id' => 1,
         ];
-        $future = $service->employeeMonthlyAccount(1, 2026, 8, '2026-07-15');
+        $future = $service->employeeMonthlyAccount(1, 2026, 7, '2026-07-15');
 
         self::assertSame('not_active', $future['employee_balance']['status']);
         self::assertNull($future['employee_balance']['minutes']);
         self::assertNull($future['employee_balance']['label']);
+
+        $periodBeforeCutover = $service->employeeMonthlyAccount(1, 2026, 6, '2026-08-15');
+
+        self::assertSame('not_active_in_period', $periodBeforeCutover['cutover_status']);
+        self::assertSame('not_active', $periodBeforeCutover['employee_balance']['status']);
+        self::assertNull($periodBeforeCutover['employee_balance']['minutes']);
     }
 
     public function testEmployeeAccountClampsFutureMonthToCurrentBerlinMonth(): void
