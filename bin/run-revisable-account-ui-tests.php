@@ -5,6 +5,7 @@ declare(strict_types=1);
 
 use App\Infrastructure\Database\DatabaseConnection;
 use App\Domain\Calendar\CalendarPolicyService;
+use App\Domain\Personnel\PersonnelEventService;
 use App\Domain\Settings\CompanySettingsService;
 use App\Domain\TimeAccounts\AccountJournalService;
 use App\Domain\TimeAccounts\EmployeeAccountCutoverService;
@@ -40,6 +41,9 @@ while ((int) $restoreDateValue->format('N') !== 1) {
     $restoreDateValue = $restoreDateValue->modify('+1 day');
 }
 $restoreDate = $restoreDateValue->format('Y-m-d');
+$appointmentSpec = 'tests/e2e/appointments.real.spec.js';
+$selectedSpec = trim((string) getenv('UI_REAL_TEST_SPEC'));
+$withAppointments = $selectedSpec === '' || $selectedSpec === $appointmentSpec;
 $vacationDate = null;
 $vacationYear = null;
 $absenceEarliest = new DateTimeImmutable('+35 days midnight');
@@ -118,7 +122,6 @@ try {
     if (!str_starts_with($databaseName, 'timeapp_ui_')) {
         throw new RuntimeException('Unsicherer Scratch-Datenbankname wurde abgewiesen.');
     }
-
     $serverPdo = MariaDbScratchConfig::connectServer();
     $serverPdo->exec('CREATE DATABASE ' . MariaDbScratchConfig::quoteIdentifier($databaseName) . ' CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
     $connectionConfig = MariaDbScratchConfig::connection($databaseName);
@@ -347,6 +350,43 @@ try {
             ['project' => $materialProjects[$key], 'user' => $materialUserId]
         );
     }
+    $appointmentEnvironment = [];
+    if ($withAppointments) {
+        $day = (new DateTimeImmutable('+9 days'))->format('Y-m-d');
+        $connection->execute(
+            'INSERT INTO timesheets (user_id, project_id, work_date, start_time, end_time, gross_minutes,
+                break_minutes, net_minutes, entry_type, source, note, updated_at, is_deleted)
+             VALUES (:user, :project, :date, "07:00:00", "08:00:00", 60, 0, 60, "work", "admin",
+                "UI-Terminregression Arbeitsbuchung", NOW(), 0)',
+            ['user' => $employeeId, 'project' => $projectId, 'date' => $day]
+        );
+        $eventTitle = 'UI-Terminregression UVV-Fälligkeit';
+        $events = new PersonnelEventService($connection);
+        $type = $events->createEventType(['name' => 'UI UVV Prüftyp', 'slug' => 'ui-appointment-uvv']);
+        $events->createEvent(['user_id' => $employeeId, 'event_type_id' => $type['id'], 'title' => $eventTitle, 'due_on' => $day]);
+
+        foreach (['viewer' => ['appointments.view'], 'denied' => []] as $scope => $permissions) {
+            $slug = 'ui_appointment_' . $scope;
+            $email = $slug . '@example.test';
+            $connection->execute('INSERT INTO roles (slug, name, is_system_role, is_deleted) VALUES (:slug, :name, 0, 0)', ['slug' => $slug, 'name' => $slug]);
+            $roleId = $connection->lastInsertId();
+            foreach (['dashboard.view', ...$permissions] as $permission) {
+                $connection->execute('INSERT INTO role_permissions (role_id, permission_id) SELECT :role, id FROM permissions WHERE code = :permission', ['role' => $roleId, 'permission' => $permission]);
+            }
+            $connection->execute(
+                'INSERT INTO users (employee_number, first_name, last_name, email, password_hash, employment_status, time_tracking_required, is_deleted)
+                 VALUES (:number, "UI", :last, :email, :hash, "active", 0, 0)',
+                ['number' => 'UI-APPOINTMENT-' . strtoupper($scope), 'last' => $slug, 'email' => $email, 'hash' => $passwordHash]
+            );
+            $connection->execute('INSERT INTO user_roles (user_id, role_id) VALUES (:user, :role)', ['user' => $connection->lastInsertId(), 'role' => $roleId]);
+            $appointmentEnvironment['UI_TEST_APPOINTMENT_' . strtoupper($scope) . '_EMAIL'] = $email;
+        }
+        $appointmentEnvironment += [
+            'UI_TEST_APPOINTMENT_DAY' => $day,
+            'UI_TEST_APPOINTMENT_EVENT' => $eventTitle,
+            'UI_TEST_APPOINTMENT_PROJECT' => (string) $formProjectId,
+        ];
+    }
     $connection->execute(
         'INSERT INTO timesheets (
             user_id, project_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes,
@@ -457,7 +497,7 @@ try {
         throw new RuntimeException('Der deaktivierte PHP-Testserver ist nicht erreichbar.');
     }
 
-    $playwrightEnvironment = array_merge($environment, [
+    $playwrightEnvironment = array_merge($environment, $appointmentEnvironment, [
         'REAL_ACCOUNT_UI' => '1',
         'UI_ISOLATED_ACCOUNT_RUNNER' => '1',
         'UI_BASE_URL' => $baseUrl,
@@ -520,8 +560,8 @@ try {
         'tests/e2e/project-material-context.real.spec.js',
         'tests/e2e/pause-models.real.spec.js',
         'tests/e2e/pause-controls.real.spec.js',
+        $appointmentSpec,
     ];
-    $selectedSpec = trim((string) getenv('UI_REAL_TEST_SPEC'));
     if ($selectedSpec !== '') {
         if (!in_array($selectedSpec, $realSpecs, true)) { throw new RuntimeException('Unbekannte isolierte Browser-Testdatei.'); }
         $realSpecs = [$selectedSpec];

@@ -20,6 +20,8 @@ final class InitialReferenceSeeder extends AbstractSeed
             ['code' => 'work_time_deviations.manage', 'label' => 'Arbeitszeitabweichungen pruefen', 'scope' => 'timesheets'],
             ['code' => 'work_time_notifications.manage', 'label' => 'Arbeitszeitbenachrichtigungen verwalten', 'scope' => 'timesheets'],
             ['code' => 'dashboard.view', 'label' => 'Dashboard ansehen', 'scope' => 'backend'],
+            ['code' => 'appointments.view', 'label' => 'Termine ansehen', 'scope' => 'backend'],
+            ['code' => 'appointments.manage', 'label' => 'Termine verwalten', 'scope' => 'backend'],
             ['code' => 'attendance.view', 'label' => 'Anwesenheit ansehen', 'scope' => 'backend'],
             ['code' => 'users.manage', 'label' => 'Benutzer verwalten', 'scope' => 'backend'],
             ['code' => 'roles.manage', 'label' => 'Rollen verwalten', 'scope' => 'backend'],
@@ -84,6 +86,8 @@ final class InitialReferenceSeeder extends AbstractSeed
             'administrator' => $allPermissions,
             'geschaeftsfuehrung' => [
                 'dashboard.view',
+                'appointments.view',
+                'appointments.manage',
                 'attendance.view',
                 'users.manage',
                 'roles.manage',
@@ -111,6 +115,8 @@ final class InitialReferenceSeeder extends AbstractSeed
             ],
             'bauleiter' => [
                 'dashboard.view',
+                'appointments.view',
+                'appointments.manage',
                 'attendance.view',
                 'projects.manage',
                 'files.upload',
@@ -143,6 +149,8 @@ final class InitialReferenceSeeder extends AbstractSeed
             ],
             'disposition' => [
                 'dashboard.view',
+                'appointments.view',
+                'appointments.manage',
                 'attendance.view',
                 'projects.manage',
                 'assets.manage',

@@ -6,6 +6,7 @@ namespace App\Http\Controllers;
 
 use App\Domain\Auth\AuthService;
 use App\Domain\Auth\CsrfService;
+use App\Domain\Calendar\AppointmentCalendarFeed;
 use App\Domain\Files\DocumentStatusService;
 use App\Domain\Files\FileAttachmentService;
 use App\Domain\Projects\ProjectService;
@@ -20,9 +21,17 @@ use App\Presentation\Admin\AdminView;
 use App\Presentation\Admin\AbsencePeriodModalRenderer;
 use App\Presentation\Admin\BookingModalRenderer;
 use DateTimeImmutable;
+use InvalidArgumentException;
 
 final class AdminCalendarController
 {
+    private const VIEWS = [
+        'bookings' => ['Buchungen', 'timesheets.view'],
+        'appointments' => ['Termine', 'appointments.view'],
+        'personnel' => ['Personal', 'personnel.view'],
+    ];
+    private const INVALID_DATE = 'Der Kalender kann den gewählten Datumsbereich nicht anzeigen.';
+
     public function __construct(
         private AdminView $view,
         private AdminCalendarService $calendarService,
@@ -34,27 +43,26 @@ final class AdminCalendarController
         private TimesheetGeoLocationService $geoLocationService,
         private AuthService $authService,
         private CsrfService $csrfService,
-        private ?TimesheetSignatureService $timesheetSignatureService = null
+        private ?TimesheetSignatureService $timesheetSignatureService = null,
+        private ?AppointmentCalendarFeed $appointmentFeed = null,
     ) {
     }
 
     public function index(Request $request): Response
     {
+        $calendar = $this->calendarView($request);
+        if ($calendar === null) {
+            return Response::html($this->view->render('Kalender', '<h1>Kalender</h1><p>Keine Berechtigung für diese Ansicht.</p>'), 403);
+        }
+
         $selectedDate = $this->selectedDate($request);
-        $month = $this->calendarService->month((string) $request->query('month', substr($selectedDate, 0, 7)));
-        $day = $this->calendarService->day($selectedDate);
-        $canViewPersonnel = $this->authService->hasPermission('personnel.view');
-        $month = $this->filterPersonnelMonth($month, $canViewPersonnel);
-        $day = $this->filterPersonnelDay($day, $canViewPersonnel);
-        $day['bookings'] = $this->withTimesheetAttachments(is_array($day['bookings'] ?? null) ? $day['bookings'] : []);
-        $day['summary']['personnel_event_count'] = count(is_array($day['personnel_events'] ?? null) ? $day['personnel_events'] : []);
-        $projects = $this->projectService->list('all');
-        $users = $this->userService->list('active');
-        $returnTo = $this->calendarReturnTo($selectedDate);
-        $renderer = new BookingModalRenderer();
-        $csrfToken = $this->csrfService->token();
-        $canManage = $this->authService->hasPermission('timesheets.manage');
-        $canArchive = $this->authService->hasPermission('timesheets.archive');
+        try {
+            $month = $this->monthData($this->queryString($request, 'month', substr($selectedDate, 0, 7)), $calendar);
+            $day = $this->dayData($selectedDate, $calendar);
+        } catch (InvalidArgumentException) {
+            return Response::html($this->view->render('Kalender', '<h1>Kalender</h1><p>' . self::INVALID_DATE . '</p>'), 422);
+        }
+        [$projects, $users, $returnTo, $csrfToken, $canManage, $canArchive] = $this->bookingContext($selectedDate, $calendar);
         $content = $this->renderPage(
             $month,
             $day,
@@ -64,9 +72,25 @@ final class AdminCalendarController
             $returnTo,
             $csrfToken,
             $canManage,
-            $canArchive
+            $canArchive,
+            $calendar,
         );
-        $content .= $renderer->renderModal(
+
+        if ($calendar['bookings']) {
+            $content .= $this->renderBookingModals($request, $selectedDate, $projects, $users, $returnTo, $csrfToken, $canManage, $canArchive);
+        }
+
+        return Response::html($this->view->render(
+            'Kalender',
+            $content,
+            '<script src="/assets/js/admin-calendar.js"></script><script src="/assets/js/admin-absence-periods.js"></script>'
+        ), headers: ['Cache-Control' => 'private, no-store']);
+    }
+
+    private function renderBookingModals(Request $request, string $selectedDate, array $projects, array $users, string $returnTo, string $csrfToken, bool $canManage, bool $canArchive): string
+    {
+        $canManageVacation = $this->authService->hasPermission('vacation_requests.manage');
+        $modal = (new BookingModalRenderer())->renderModal(
             $projects,
             $this->bookingService->entryTypeOptions(),
             [
@@ -74,46 +98,51 @@ final class AdminCalendarController
                 'csrf_token' => $csrfToken,
                 'can_manage' => $canManage,
                 'can_archive' => $canArchive,
-                'can_manage_vacation' => $this->authService->hasPermission('vacation_requests.manage'),
-                'can_archive_vacation' => $this->authService->hasPermission('vacation_requests.manage'),
+                'can_manage_vacation' => $canManageVacation,
+                'can_archive_vacation' => $canManageVacation,
                 'can_view_attachments' => true,
                 'document_statuses' => $this->documentStatusService->activeList(),
                 'selected_booking' => $this->selectedBooking($request),
                 'absence_reason_options' => $this->bookingService->absenceReasonOptions(),
             ]
         );
-        $content .= (new AbsencePeriodModalRenderer())->render($users, $csrfToken, [
+        return $modal . (new AbsencePeriodModalRenderer())->render($users, $csrfToken, [
             'selected_date' => $selectedDate,
             'can_archive' => $canArchive,
-            'allow_vacation' => $this->authService->hasPermission('vacation_requests.manage'),
+            'allow_vacation' => $canManageVacation,
         ]);
-
-        return Response::html($this->view->render(
-            'Kalender',
-            $content,
-            '<script src="/assets/js/admin-calendar.js"></script><script src="/assets/js/admin-absence-periods.js"></script>'
-        ));
     }
 
     public function month(Request $request): Response
     {
-        $month = $this->calendarService->month((string) $request->query('month', ''));
+        $calendar = $this->calendarView($request);
+        if ($calendar === null) {
+            return $this->deniedJson();
+        }
 
-        return Response::json([
-            'data' => $this->filterPersonnelMonth($month, $this->authService->hasPermission('personnel.view')),
-        ]);
+        try {
+            $month = $this->monthData($this->queryString($request, 'month'), $calendar);
+        } catch (InvalidArgumentException) {
+            return $this->invalidDateJson();
+        }
+
+        return Response::json(['data' => $month], headers: ['Cache-Control' => 'private, no-store']);
     }
 
     public function day(Request $request): Response
     {
-        $day = $this->calendarService->day((string) $request->query('date', ''));
-        $day = $this->filterPersonnelDay($day, $this->authService->hasPermission('personnel.view'));
-        $day['bookings'] = $this->withTimesheetAttachments(is_array($day['bookings'] ?? null) ? $day['bookings'] : []);
-        $day['summary']['personnel_event_count'] = count(is_array($day['personnel_events'] ?? null) ? $day['personnel_events'] : []);
+        $calendar = $this->calendarView($request);
+        if ($calendar === null) {
+            return $this->deniedJson();
+        }
+
+        try {
+            $day = $this->dayData($this->queryString($request, 'date'), $calendar);
+        } catch (InvalidArgumentException) {
+            return $this->invalidDateJson();
+        }
         $date = (string) $day['date'];
-        $projects = $this->projectService->list('all');
-        $users = $this->userService->list('active');
-        $returnTo = $this->calendarReturnTo($date);
+        [$projects, $users, $returnTo, $csrfToken, $canManage, $canArchive] = $this->bookingContext($date, $calendar);
 
         return Response::json([
             'data' => [
@@ -125,31 +154,117 @@ final class AdminCalendarController
                     $projects,
                     $users,
                     $returnTo,
-                    $this->csrfService->token(),
-                    $this->authService->hasPermission('timesheets.manage'),
-                    $this->authService->hasPermission('timesheets.archive')
+                    $csrfToken,
+                    $canManage,
+                    $canArchive,
+                    $calendar,
                 ),
             ],
-        ]);
+        ], headers: ['Cache-Control' => 'private, no-store']);
     }
 
-    private function renderPage(array $month, array $day, array $projects, array $users, string $notice, string $returnTo, string $csrfToken, bool $canManage, bool $canArchive): string
+    private function calendarView(Request $request): ?array
+    {
+        $actor = $this->authService->currentUser();
+        $permissions = $actor['permissions'] ?? [];
+        $allowed = static fn (string $permission): bool => in_array('*', $permissions, true) || in_array($permission, $permissions, true);
+        $available = [];
+        foreach (self::VIEWS as $key => [$label, $permission]) {
+            if ($allowed($permission) && ($key !== 'appointments' || $this->appointmentFeed !== null)) {
+                $available[$key] = $label;
+            }
+        }
+
+        $input = $this->queryString($request, 'view');
+        $mode = isset(self::VIEWS[$input]) ? $input : 'all';
+        if ($available === [] || ($mode !== 'all' && !isset($available[$mode]))) {
+            return null;
+        }
+
+        $visible = static fn (string $view): bool => isset($available[$view]) && ($mode === 'all' || $mode === $view);
+        return [
+            'mode' => $mode,
+            'available' => ['all' => 'Alle'] + $available,
+            'actor' => $actor,
+            'bookings' => $visible('bookings'),
+            'appointments' => $visible('appointments'),
+            'personnel' => $visible('personnel'),
+            'manage_appointments' => $visible('appointments') && $allowed('appointments.manage'),
+        ];
+    }
+
+    private function monthData(string $input, array $calendar): array
+    {
+        $month = $this->calendarService->month($input, $calendar['bookings'], $calendar['personnel']);
+
+        return $calendar['appointments'] ? $this->appointmentFeed->month($calendar['actor'], $month) : $month;
+    }
+
+    private function dayData(string $input, array $calendar): array
+    {
+        $day = $this->calendarService->day($input, $calendar['bookings'], $calendar['personnel']);
+        if ($calendar['bookings']) {
+            $day['bookings'] = $this->withTimesheetAttachments($day['bookings']);
+        }
+        $day['summary']['personnel_event_count'] = count($day['personnel_events']);
+        if ($calendar['appointments']) {
+            $day['appointments'] = $this->appointmentFeed->day($calendar['actor'], $day['date']);
+            $day['summary']['appointment_count'] = count($day['appointments']);
+        }
+
+        return $day;
+    }
+
+    private function bookingContext(string $date, array $calendar): array
+    {
+        $returnTo = $this->calendarReturnTo($date);
+        if (!$calendar['bookings']) {
+            return [[], [], $returnTo, '', false, false];
+        }
+
+        return [
+            $this->projectService->list('all'),
+            $this->userService->list('active'),
+            $returnTo . ($calendar['mode'] === 'bookings' ? '&view=bookings' : ''),
+            $this->csrfService->token(),
+            $this->authService->hasPermission('timesheets.manage'),
+            $this->authService->hasPermission('timesheets.archive'),
+        ];
+    }
+
+    private function deniedJson(): Response
+    {
+        return Response::json(['error' => 'Keine Berechtigung für diese Kalenderansicht.'], 403, ['Cache-Control' => 'private, no-store']);
+    }
+
+    private function invalidDateJson(): Response
+    {
+        return Response::json(['error' => self::INVALID_DATE], 422, ['Cache-Control' => 'private, no-store']);
+    }
+
+    private function renderPage(array $month, array $day, array $projects, array $users, string $notice, string $returnTo, string $csrfToken, bool $canManage, bool $canArchive, array $calendar = []): string
     {
         $monthJson = $this->dataJson($month);
         $selectedDate = $this->e((string) ($day['date'] ?? (new DateTimeImmutable())->format('Y-m-d')));
-        $dayPanel = $this->renderDayPanel($day, $projects, $users, $returnTo, $csrfToken, $canManage, $canArchive);
+        $dayPanel = $this->renderDayPanel($day, $projects, $users, $returnTo, $csrfToken, $canManage, $canArchive, $calendar);
+        $mode = $this->e($calendar['mode'] ?? 'all');
+        $tabs = $this->renderViewLinks((string) $month['month'], (string) $day['date'], $calendar);
+        $legend = $this->renderLegend($calendar);
+        $appointmentLink = isset($calendar['available']['appointments'])
+            ? '<a class="button button-secondary" href="/admin/appointments">Zur Terminliste</a>'
+            : '';
 
         return <<<HTML
 <header class="page-header">
     <div>
-        <p class="eyebrow">Zeitbuchungen</p>
         <h1>Kalender</h1>
-        <p>Monatliche Sicht auf Arbeitszeiten, Abwesenheiten, offene Buchungen und zugeordnete Fahrzeuge.</p>
     </div>
+    {$appointmentLink}
 </header>
 {$notice}
-<section class="calendar-shell" data-admin-calendar data-month="{$this->e((string) $month['month'])}" data-selected-date="{$selectedDate}" data-month-payload="{$monthJson}">
+<section class="calendar-shell" data-admin-calendar data-view="{$mode}" data-month="{$this->e((string) $month['month'])}" data-selected-date="{$selectedDate}" data-month-payload="{$monthJson}">
     <div class="calendar-main">
+        {$tabs}
         <div class="calendar-toolbar">
             <button type="button" class="button button-secondary calendar-nav-button" data-calendar-prev aria-label="Vorherigen Monat anzeigen">&lt;</button>
             <div>
@@ -158,15 +273,7 @@ final class AdminCalendarController
             </div>
             <button type="button" class="button button-secondary calendar-nav-button" data-calendar-next aria-label="Naechsten Monat anzeigen">&gt;</button>
         </div>
-        <div class="calendar-legend" aria-label="Kalenderstatus">
-            <span><i class="calendar-dot is-ok"></i>Sauber</span>
-            <span><i class="calendar-dot is-empty"></i>Keine Buchung</span>
-            <span><i class="calendar-dot is-absence"></i>Abwesenheit</span>
-            <span><i class="calendar-dot is-missing"></i>Fehlend</span>
-            <span><i class="calendar-dot is-holiday"></i>Feiertag</span>
-            <span><i class="calendar-dot is-closure"></i>Betriebsurlaub</span>
-            <span><i class="calendar-dot is-issue"></i>Pruefen</span>
-        </div>
+        {$legend}
         <div class="calendar-weekdays" aria-hidden="true">
             <span>Mo</span><span>Di</span><span>Mi</span><span>Do</span><span>Fr</span><span>Sa</span><span>So</span>
         </div>
@@ -179,6 +286,40 @@ final class AdminCalendarController
     </aside>
 </section>
 HTML;
+    }
+
+    private function renderViewLinks(string $month, string $date, array $calendar): string
+    {
+        $links = '';
+        foreach ($calendar['available'] ?? [] as $key => $label) {
+            $active = $key === $calendar['mode'];
+            $url = '/admin/calendar?' . http_build_query(['month' => $month, 'date' => $date, 'view' => $key]);
+            $links .= '<a class="button' . ($active ? '' : ' button-secondary') . '" href="' . $this->e($url)
+                . '" data-calendar-view="' . $this->e($key) . '"' . ($active ? ' aria-current="page"' : '') . '>' . $this->e($label) . '</a>';
+        }
+
+        return $links === '' ? '' : '<nav class="toolbar-actions calendar-views" aria-label="Kalenderansichten">' . $links . '</nav>';
+    }
+
+    private function renderLegend(array $calendar): string
+    {
+        $items = ($calendar['bookings'] ?? true) ? [
+            'ok' => 'Sauber', 'empty' => 'Keine Buchung', 'absence' => 'Abwesenheit', 'missing' => 'Fehlend',
+            'holiday' => 'Feiertag', 'closure' => 'Betriebsurlaub', 'issue' => 'Prüfen',
+        ] : [];
+        if ($calendar['appointments'] ?? false) {
+            $items['appointment'] = 'Geplanter Termin';
+        }
+        if ($calendar['personnel'] ?? false) {
+            $items['personnel'] = 'Personal-Event';
+        }
+
+        $html = '';
+        foreach ($items as $key => $label) {
+            $html .= '<span><i aria-hidden="true" class="calendar-dot is-' . $key . '"></i>' . $this->e($label) . '</span>';
+        }
+
+        return $html === '' ? '' : '<div class="calendar-legend" aria-label="Kalenderstatus">' . $html . '</div>';
     }
 
     private function renderCalendarGrid(array $month, string $selectedDate): string
@@ -228,24 +369,105 @@ HTML;
                 $meta[] = (int) $day['personnel_event_count'] . ' Pers.';
             }
 
+            $appointmentCount = (int) ($day['appointment_count'] ?? 0);
+            $appointments = '';
+            if ($appointmentCount > 0) {
+                $titles = $day['appointment_titles'] ?? [];
+                $remaining = $appointmentCount - count($titles);
+                $appointments = '<span class="calendar-day__appointments"><strong>'
+                    . $appointmentCount . ($appointmentCount === 1 ? ' Termin' : ' Termine') . '</strong>';
+                foreach ($titles as $title) {
+                    $appointments .= '<span>' . $this->e($title) . '</span>';
+                }
+                $appointments .= ($remaining > 0 ? '<span>+' . $remaining . ' weitere</span>' : '') . '</span>';
+            }
+
             $html .= '<button type="button" class="' . trim(implode(' ', array_filter($classes))) . '" data-calendar-date="' . $this->e($date) . '" aria-pressed="' . ($date === $selectedDate ? 'true' : 'false') . '">'
                 . '<span class="calendar-day__number">' . $this->e((string) ($day['day_number'] ?? '')) . '</span>'
                 . '<span class="calendar-day__status">' . $this->e((string) ($day['status_label'] ?? '')) . '</span>'
                 . '<span class="calendar-day__meta">' . $this->e(implode(' · ', $meta)) . '</span>'
+                . $appointments
                 . '</button>';
         }
 
         return $html;
     }
 
-    private function renderDayPanel(array $day, array $projects, array $users, string $returnTo, string $csrfToken, bool $canManage, bool $canArchive): string
+    private function renderDayPanel(array $day, array $projects, array $users, string $returnTo, string $csrfToken, bool $canManage, bool $canArchive, array $calendar = []): string
+    {
+        $summary = $day['summary'] ?? [];
+        $showBookings = $calendar['bookings'] ?? true;
+        $date = (string) $day['date'];
+        $label = $this->e((string) ($day['label'] ?? $date));
+        $badge = $showBookings
+            ? '<span class="badge calendar-status-badge is-' . $this->e((string) ($summary['status'] ?? 'empty')) . '">'
+                . $this->e((string) ($summary['status_label'] ?? 'Keine Buchung')) . '</span>'
+            : '';
+        $content = <<<HTML
+<div class="calendar-detail__header">
+    <div>
+        <p class="eyebrow">Tagesdetail</p>
+        <h2>{$label}</h2>
+    </div>
+    {$badge}
+</div>
+HTML;
+        if ($calendar['appointments'] ?? false) {
+            $content .= $this->renderAppointments($date, $day['appointments'] ?? [], $calendar['manage_appointments']);
+        }
+        if ($calendar['personnel'] ?? true) {
+            $content .= $this->renderPersonnelEvents($day['personnel_events'] ?? []);
+        }
+        if ($showBookings) {
+            $content .= $this->renderBookingSections($day, $projects, $users, $returnTo, $csrfToken, $canManage, $canArchive);
+        }
+
+        return $content;
+    }
+
+    private function renderAppointments(string $date, array $appointments, bool $canManage): string
+    {
+        $createLink = $canManage ? '<a class="button" href="/admin/appointments/new?date=' . rawurlencode($date) . '">Termin anlegen</a>' : '';
+        $items = '';
+
+        foreach ($appointments as $appointment) {
+            $id = (int) $appointment['id'];
+            $title = $this->e($appointment['title']);
+            $details = array_filter([
+                trim(($appointment['project_number'] ?? '') . ' ' . ($appointment['project_name'] ?? '')),
+                implode(', ', array_column($appointment['participants'], 'name')),
+                $appointment['location'] ?? '',
+            ], static fn (string $value): bool => $value !== '');
+            $status = match ($appointment['status']) {
+                'completed' => 'Erledigt',
+                'cancelled' => 'Abgesagt',
+                default => 'Geplant',
+            };
+            $meta = $this->e(implode(' · ', [$appointment['time_label'], $status, ...$details]));
+            $url = '/admin/appointments/' . $id . ($canManage ? '/edit' : '');
+            $action = $canManage ? 'Bearbeiten' : 'Details';
+            $items .= '<li><div><strong>' . $title . '</strong><span>' . $meta . '</span></div>'
+                . '<a class="button button-secondary" href="' . $url . '" aria-label="' . $action . ' · ' . $title . '">' . $action . '</a></li>';
+        }
+
+        $list = $items === '' ? '<p class="muted">Keine Termine an diesem Tag.</p>' : '<ul>' . $items . '</ul>';
+
+        return <<<HTML
+<section class="calendar-assets calendar-appointments">
+    <div class="toolbar-actions"><h3>Termine am Tag</h3>{$createLink}</div>
+    {$list}
+</section>
+HTML;
+    }
+
+    private function renderBookingSections(array $day, array $projects, array $users, string $returnTo, string $csrfToken, bool $canManage, bool $canArchive): string
     {
         $renderer = new BookingModalRenderer();
         $summary = is_array($day['summary'] ?? null) ? $day['summary'] : [];
         $bookings = $this->activeBookings(is_array($day['bookings'] ?? null) ? $day['bookings'] : []);
         $assets = is_array($day['assets'] ?? null) ? $day['assets'] : [];
-        $personnelEvents = is_array($day['personnel_events'] ?? null) ? $day['personnel_events'] : [];
         $date = (string) ($day['date'] ?? '');
+        $canManageVacation = $this->authService->hasPermission('vacation_requests.manage');
         $table = $renderer->renderTable(
             $bookings,
             $projects,
@@ -255,8 +477,8 @@ HTML;
                 'empty_message' => 'An diesem Tag sind keine aktiven Buchungen vorhanden.',
                 'can_manage' => $canManage,
                 'can_archive' => $canArchive,
-                'can_manage_vacation' => $this->authService->hasPermission('vacation_requests.manage'),
-                'can_archive_vacation' => $this->authService->hasPermission('vacation_requests.manage'),
+                'can_manage_vacation' => $canManageVacation,
+                'can_archive_vacation' => $canManageVacation,
                 'can_view_attachments' => true,
                 'document_statuses' => $this->documentStatusService->activeList(),
                 'open_booking_location' => $returnTo,
@@ -271,13 +493,6 @@ HTML;
             : '';
 
         return <<<HTML
-<div class="calendar-detail__header">
-    <div>
-        <p class="eyebrow">Tagesdetail</p>
-        <h2>{$this->e((string) ($day['label'] ?? $date))}</h2>
-    </div>
-    <span class="badge calendar-status-badge is-{$this->e((string) ($summary['status'] ?? 'empty'))}">{$this->e((string) ($summary['status_label'] ?? 'Keine Buchung'))}</span>
-</div>
 <div class="toolbar-actions">{$absenceAction}</div>
 {$policyNotice}
 <div class="calendar-stats">
@@ -289,11 +504,9 @@ HTML;
     <div><span>Feiertag</span><strong>{$this->e((string) ($summary['holiday_count'] ?? 0))}</strong></div>
     <div><span>Fehlt</span><strong>{$this->e((string) ((int) ($summary['stored_absent_count'] ?? 0) + (int) ($summary['missing_count'] ?? 0)))}</strong></div>
     <div><span>Kalender</span><strong>{$this->e(((bool) ($summary['time_tracking_required'] ?? true)) ? 'Pflicht' : 'frei')}</strong></div>
-    <div><span>Personal</span><strong>{$this->e((string) count($personnelEvents))}</strong></div>
 </div>
 {$missingUsersNotice}
 {$this->renderAssetList($assets)}
-{$this->renderPersonnelEvents($personnelEvents)}
 {$createForm}
 <section class="card stack calendar-bookings-card">
     <div>
@@ -395,32 +608,6 @@ HTML;
         return '<section class="calendar-missing-users" aria-label="Fehlende Tagesbuchungen"><h3>' . $this->e($headline) . '</h3><ul>' . $items . '</ul></section>';
     }
 
-    private function filterPersonnelMonth(array $month, bool $canViewPersonnel): array
-    {
-        if ($canViewPersonnel) {
-            return $month;
-        }
-
-        foreach ($month['days'] ?? [] as $index => $day) {
-            $month['days'][$index]['personnel_events'] = [];
-            $month['days'][$index]['personnel_event_count'] = 0;
-        }
-
-        return $month;
-    }
-
-    private function filterPersonnelDay(array $day, bool $canViewPersonnel): array
-    {
-        if ($canViewPersonnel) {
-            return $day;
-        }
-
-        $day['personnel_events'] = [];
-        $day['summary']['personnel_event_count'] = 0;
-
-        return $day;
-    }
-
     private function renderCalendarPolicyNotice(array $policy): string
     {
         $messages = [];
@@ -443,13 +630,21 @@ HTML;
 
     private function selectedDate(Request $request): string
     {
-        $date = $this->calendarService->normalizeDate((string) $request->query('date', ''))->format('Y-m-d');
+        $date = $this->queryString($request, 'date');
+        $month = $this->queryString($request, 'month');
 
-        if ((string) $request->query('date', '') === '' && (string) $request->query('month', '') !== '') {
-            return $this->calendarService->normalizeMonth((string) $request->query('month', ''))->format('Y-m-d');
+        if ($date === '' && $month !== '') {
+            return $this->calendarService->normalizeMonth($month)->format('Y-m-d');
         }
 
-        return $date;
+        return $this->calendarService->normalizeDate($date)->format('Y-m-d');
+    }
+
+    private function queryString(Request $request, string $key, string $default = ''): string
+    {
+        $value = $request->query($key, $default);
+
+        return is_string($value) ? $value : $default;
     }
 
     private function selectedBooking(Request $request): ?array

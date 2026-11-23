@@ -25,28 +25,30 @@ final class AdminCalendarService
         $this->userWorkdayPolicy = $userWorkdayPolicy ?? new UserWorkdayPolicy();
     }
 
-    public function month(string $monthInput = ''): array
+    public function month(string $monthInput = '', bool $includeBookings = true, bool $includePersonnel = true): array
     {
         $monthStart = $this->normalizeMonth($monthInput);
         $monthEnd = $monthStart->modify('last day of this month');
         $gridStart = $monthStart->modify('monday this week');
         $gridEnd = $monthEnd->modify('sunday this week');
-        $bookings = $this->bookingService->list([
+        $bookings = $includeBookings ? $this->bookingService->list([
             'date_from' => $gridStart->format('Y-m-d'),
             'date_to' => $gridEnd->format('Y-m-d'),
             'project_id' => '',
             'user_id' => '',
             'entry_type' => '',
             'scope' => 'all',
-        ]);
+        ]) : [];
         $bookingsByDate = $this->groupBookingsByDate($bookings);
-        $personnelEventsByDate = $this->groupPersonnelEventsByDate($this->personnelEventsBetween($gridStart->format('Y-m-d'), $gridEnd->format('Y-m-d')));
+        $personnelEventsByDate = $includePersonnel
+            ? $this->groupPersonnelEventsByDate($this->personnelEventsBetween($gridStart->format('Y-m-d'), $gridEnd->format('Y-m-d')))
+            : [];
         $days = [];
 
         for ($cursor = $gridStart; $cursor <= $gridEnd; $cursor = $cursor->modify('+1 day')) {
             $date = $cursor->format('Y-m-d');
             $dayBookings = $bookingsByDate[$date] ?? [];
-            $summary = $this->summarizeDay($date, $dayBookings);
+            $summary = $includeBookings ? $this->summarizeDay($date, $dayBookings) : ['date' => $date, 'status' => 'neutral'];
             $summary['personnel_events'] = $personnelEventsByDate[$date] ?? [];
             $summary['personnel_event_count'] = count($summary['personnel_events']);
             $summary['is_current_month'] = $cursor->format('Y-m') === $monthStart->format('Y-m');
@@ -66,26 +68,26 @@ final class AdminCalendarService
         ];
     }
 
-    public function day(string $dateInput = ''): array
+    public function day(string $dateInput = '', bool $includeBookings = true, bool $includePersonnel = true): array
     {
         $date = $this->normalizeDate($dateInput)->format('Y-m-d');
-        $bookings = $this->bookingService->list([
+        $bookings = $includeBookings ? $this->bookingService->list([
             'date_from' => $date,
             'date_to' => $date,
             'project_id' => '',
             'user_id' => '',
             'entry_type' => '',
             'scope' => 'all',
-        ]);
+        ]) : [];
         $activeBookings = $this->activeBookings($bookings);
 
         return [
             'date' => $date,
             'label' => $this->dateLabel(new DateTimeImmutable($date)),
-            'summary' => $this->summarizeDay($date, $bookings),
+            'summary' => $includeBookings ? $this->summarizeDay($date, $bookings) : [],
             'bookings' => $bookings,
-            'assets' => $this->assetsForDay($date, $activeBookings),
-            'personnel_events' => $this->personnelEventsBetween($date, $date),
+            'assets' => $includeBookings ? $this->assetsForDay($date, $activeBookings) : [],
+            'personnel_events' => $includePersonnel ? $this->personnelEventsBetween($date, $date) : [],
         ];
     }
 

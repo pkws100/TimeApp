@@ -12,6 +12,8 @@ return [
             'label' => 'Geschaeftsfuehrung',
             'permissions' => [
                 'dashboard.view',
+                'appointments.view',
+                'appointments.manage',
                 'attendance.view',
                 'users.manage',
                 'roles.manage',
@@ -42,6 +44,8 @@ return [
             'label' => 'Bauleiter',
             'permissions' => [
                 'dashboard.view',
+                'appointments.view',
+                'appointments.manage',
                 'attendance.view',
                 'projects.manage',
                 'files.upload',
@@ -83,6 +87,8 @@ return [
             'label' => 'Disposition',
             'permissions' => [
                 'dashboard.view',
+                'appointments.view',
+                'appointments.manage',
                 'attendance.view',
                 'projects.manage',
                 'assets.manage',
@@ -103,6 +109,8 @@ return [
         'work_time_deviations.manage',
         'work_time_notifications.manage',
         'dashboard.view',
+        'appointments.view',
+        'appointments.manage',
         'attendance.view',
         'users.manage',
         'roles.manage',

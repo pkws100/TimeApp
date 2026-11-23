@@ -6,6 +6,7 @@ use App\Config\ConfigRepository;
 use App\Config\EnvironmentLoader;
 use App\Domain\Admin\AdminContextService;
 use App\Domain\App\MobileAppService;
+use App\Domain\Appointments\AppointmentService;
 use App\Domain\Assets\AssetService;
 use App\Domain\Attendance\AttendanceService;
 use App\Domain\Attendance\AttendanceReportService;
@@ -13,6 +14,7 @@ use App\Domain\Auth\AuthService;
 use App\Domain\Auth\CsrfService;
 use App\Domain\Auth\RouteGuard;
 use App\Domain\Backup\BackupService;
+use App\Domain\Calendar\AppointmentCalendarFeed;
 use App\Domain\Calendar\CalendarPolicyService;
 use App\Domain\Dashboard\DashboardService;
 use App\Domain\Exports\AccountingClosureService;
@@ -88,6 +90,7 @@ use App\Domain\Vacation\VacationRequestService;
 use App\Http\Controllers\AccountingExportController;
 use App\Http\Controllers\AdminAccountingController;
 use App\Http\Controllers\AdminAbsencePeriodController;
+use App\Http\Controllers\AdminAppointmentController;
 use App\Http\Controllers\AdminAuthController;
 use App\Http\Controllers\AdminBookingController;
 use App\Http\Controllers\AdminCalendarController;
@@ -138,6 +141,7 @@ use App\Http\Response;
 use App\Http\Router;
 use App\Infrastructure\Database\DatabaseConnection;
 use App\Presentation\Admin\AdminView;
+use App\Presentation\Admin\AdminAppointmentsView;
 use App\Presentation\Admin\PersonnelDocumentsView;
 use App\Presentation\App\AppView;
 
@@ -240,6 +244,8 @@ $personnelLabelService = new PersonnelLabelService($connection);
 $personnelEventService = new PersonnelEventService($connection);
 $projectAccessService = new ProjectAccessService($connection);
 $projectService = new ProjectService($connection, $projectAccessService);
+$appointmentTimezone = (string) $config->get('app.timezone', 'Europe/Berlin');
+$appointmentService = new AppointmentService($connection, $projectAccessService, $appointmentTimezone);
 $assetService = new AssetService($connection);
 $timesheetCalculator = new TimesheetCalculator();
 $workdayStateCalculator = new WorkdayStateCalculator();
@@ -421,6 +427,7 @@ $adminBookingController = new AdminBookingController(
 $adminTimeAccountController = new AdminTimeAccountController($adminView, $timeAccountService, $timeAccountExportService, $userService, $employeeAccountCutoverService, $authService, $csrfService, $companySettingsService);
 $adminVacationRequestController = new AdminVacationRequestController($adminView, $vacationRequestService, $timeAccountService, $userService, $authService, $csrfService, $absencePeriodService);
 $adminAbsencePeriodController = new AdminAbsencePeriodController($absencePeriodService, $authService, $csrfService);
+$adminAppointmentController = new AdminAppointmentController(new AdminAppointmentsView($adminView), $appointmentService, $authService, $csrfService);
 $adminCalendarController = new AdminCalendarController(
     $adminView,
     $adminCalendarService,
@@ -432,7 +439,8 @@ $adminCalendarController = new AdminCalendarController(
     $timesheetGeoLocationService,
     $authService,
     $csrfService,
-    $timesheetSignatureService
+    $timesheetSignatureService,
+    new AppointmentCalendarFeed($appointmentService, $appointmentTimezone),
 );
 $adminAccountingController = new AdminAccountingController(
     $adminView,
@@ -532,9 +540,16 @@ $router->get('/app/urlaub', [$appController, 'shell']);
 $router->get('/app/profil', [$appController, 'shell']);
 
 $router->get('/admin', $admin([$adminController, 'dashboard'], 'dashboard.view'));
-$router->get('/admin/calendar', $admin([$adminCalendarController, 'index'], 'timesheets.view'));
-$router->get('/admin/calendar/month', $admin([$adminCalendarController, 'month'], 'timesheets.view'));
-$router->get('/admin/calendar/day', $admin([$adminCalendarController, 'day'], 'timesheets.view'));
+$router->get('/admin/calendar', $admin([$adminCalendarController, 'index'], null));
+$router->get('/admin/calendar/month', $admin([$adminCalendarController, 'month'], null));
+$router->get('/admin/calendar/day', $admin([$adminCalendarController, 'day'], null));
+$router->get('/admin/appointments', $admin([$adminAppointmentController, 'index'], 'appointments.view'));
+$router->get('/admin/appointments/new', $admin([$adminAppointmentController, 'new'], 'appointments.manage'));
+$router->get('/admin/appointments/{id}', $admin([$adminAppointmentController, 'show'], 'appointments.view'));
+$router->get('/admin/appointments/{id}/edit', $admin([$adminAppointmentController, 'edit'], 'appointments.manage'));
+$router->post('/admin/appointments', $admin([$adminAppointmentController, 'create'], 'appointments.manage'));
+$router->post('/admin/appointments/{id}', $admin([$adminAppointmentController, 'update'], 'appointments.manage'));
+$router->post('/admin/appointments/{id}/archive', $admin([$adminAppointmentController, 'archive'], 'appointments.manage'));
 $router->post('/admin/absence-periods/preview', $admin([$adminAbsencePeriodController, 'previewCalendar'], 'timesheets.manage'));
 $router->post('/admin/absence-periods', $admin([$adminAbsencePeriodController, 'createCalendar'], 'timesheets.manage'));
 $router->post('/admin/vacation-periods/preview', $admin([$adminAbsencePeriodController, 'previewVacation'], 'vacation_requests.manage'));

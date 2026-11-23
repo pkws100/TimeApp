@@ -1,0 +1,141 @@
+.appointments-page .page-header,
+.appointments-page .notice,
+.appointment-form-hint {
+    margin: 0;
+}
+
+.appointments-page .page-header h1,
+.appointment-description {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.appointments-page .form-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+}
+
+.appointments-page input,
+.appointments-page select,
+.appointments-page textarea {
+    min-width: 0;
+    max-width: 100%;
+}
+
+.appointment-facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+    gap: 1rem;
+    margin: 0;
+}
+
+.appointment-facts div {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.appointment-facts dt,
+.appointment-cell-label {
+    color: var(--page-muted);
+    font-weight: 700;
+}
+
+.appointment-facts dd {
+    margin: 0.25rem 0 0;
+}
+
+.appointment-participants {
+    min-inline-size: 0;
+    margin: 0;
+    padding: 0.85rem;
+    border: 1px solid var(--page-line);
+    border-radius: 0.85rem;
+}
+
+.appointment-participants legend {
+    font-weight: 700;
+}
+
+.appointment-participants [hidden] {
+    display: none !important;
+}
+
+.appointment-participant-list {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+    max-height: 20rem;
+    overflow: auto;
+}
+
+.appointment-participant-list .checkbox-item {
+    align-items: center;
+    min-height: 44px;
+    overflow-wrap: anywhere;
+}
+
+.appointment-participant-list .checkbox-item input {
+    min-height: auto;
+    margin-top: 0;
+}
+
+.appointments-table {
+    width: 100%;
+    table-layout: fixed;
+    border-collapse: collapse;
+}
+
+.appointments-table th,
+.appointments-table td {
+    padding: 0.7rem 0.5rem;
+    overflow-wrap: anywhere;
+    text-align: start;
+    vertical-align: top;
+    border-block-end: 1px solid var(--page-line);
+}
+
+.appointments-table td .button {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    padding: 0.6rem;
+}
+
+.appointment-cell-label {
+    display: none;
+}
+
+@media (max-width: 850px) {
+    .appointments-table,
+    .appointments-table tbody {
+        display: block;
+    }
+
+    .appointments-table thead {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+    }
+
+    .appointments-table tr {
+        display: grid;
+        padding: 0.6rem 0;
+        border-block-end: 1px solid var(--page-line);
+    }
+
+    .appointments-table td {
+        display: grid;
+        grid-template-columns: minmax(5rem, 0.65fr) minmax(0, 1fr);
+        gap: 0.5rem;
+        padding: 0.35rem 0;
+        border: 0;
+    }
+
+    .appointments-table td:has(.appointment-cell-label + div:empty) {
+        display: none;
+    }
+
+    .appointment-cell-label {
+        display: block;
+    }
+}

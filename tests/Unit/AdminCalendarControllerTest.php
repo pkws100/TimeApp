@@ -19,6 +19,8 @@ use App\Http\Controllers\AdminCalendarController;
 use App\Http\Request;
 use App\Infrastructure\Database\DatabaseConnection;
 use App\Presentation\Admin\AdminView;
+use PDO;
+use PDOStatement;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
 
@@ -85,7 +87,7 @@ final class AdminCalendarControllerTest extends TestCase
     public function testAjaxEndpointsReturnNormalizedCalendarPayloads(): void
     {
         $_SESSION = [];
-        $controller = $this->controller();
+        $controller = $this->controller(permissions: ['timesheets.view']);
 
         $monthResponse = $controller->month(new Request('GET', '/admin/calendar/month', ['month' => 'invalid'], [], [], [], []));
         ob_start();
@@ -117,7 +119,7 @@ final class AdminCalendarControllerTest extends TestCase
                 'email' => 'max@example.test',
                 'time_tracking_required' => 1,
             ],
-        ]);
+        ], ['timesheets.view']);
 
         $response = $controller->day(new Request('GET', '/admin/calendar/day', ['date' => '2026-05-15'], [], [], [], []));
         ob_start();
@@ -127,6 +129,39 @@ final class AdminCalendarControllerTest extends TestCase
         self::assertStringContainsString('calendar-missing-users', $payload);
         self::assertStringContainsString('Max Mustermann', $payload);
         self::assertStringContainsString('MA-071', $payload);
+    }
+
+    public function testPersonalViewDoesNotContainBookingDataAndRejectsUnavailableViews(): void
+    {
+        $_SESSION = [];
+        $controller = $this->controller(permissions: ['personnel.view']);
+        $view = $controller->day(new Request('GET', '/admin/calendar/day', ['view' => 'personnel'], [], [], [], []));
+        $denied = $controller->month(new Request('GET', '/admin/calendar/month', ['view' => 'bookings'], [], [], [], []));
+        ob_start();
+        $view->send();
+        $body = json_decode((string) ob_get_clean(), true, 512, JSON_THROW_ON_ERROR)['data'];
+
+        self::assertSame(200, $view->status());
+        self::assertSame(403, $denied->status());
+        self::assertArrayNotHasKey('active_booking_count', $body['summary']);
+        self::assertStringNotContainsString('Buchungen am Tag', $body['html']);
+        self::assertStringContainsString('Personal-Events', $body['html']);
+    }
+
+    public function testBookingViewKeepsMetricsAndRejectsProtectedPersonalView(): void
+    {
+        $_SESSION = [];
+        $controller = $this->controller(permissions: ['timesheets.view']);
+        $view = $controller->day(new Request('GET', '/admin/calendar/day', ['view' => 'bookings'], [], [], [], []));
+        $denied = $controller->month(new Request('GET', '/admin/calendar/month', ['view' => 'personnel'], [], [], [], []));
+        ob_start();
+        $view->send();
+        $body = json_decode((string) ob_get_clean(), true, 512, JSON_THROW_ON_ERROR)['data'];
+
+        self::assertSame(200, $view->status());
+        self::assertSame(403, $denied->status());
+        self::assertSame(0, $body['summary']['active_booking_count']);
+        self::assertStringNotContainsString('Personal-Events', $body['html']);
     }
 
     public function testDayPanelHidesArchivedBookingsFromCalendarBookingCard(): void
@@ -322,7 +357,7 @@ final class AdminCalendarControllerTest extends TestCase
         ];
     }
 
-    private function controller(array $activeUserRows = []): AdminCalendarController
+    private function controller(array $activeUserRows = [], array $permissions = []): AdminCalendarController
     {
         $connection = new DatabaseConnection([]);
         $bookingService = new AdminBookingService($connection, new TimesheetCalculator());
@@ -343,8 +378,33 @@ final class AdminCalendarControllerTest extends TestCase
             new FileAttachmentService($connection, []),
             new DocumentStatusService($connection),
             new TimesheetGeoLocationService($connection),
-            new AuthService($connection, new PermissionMatrix([], [])),
+            $this->auth($permissions),
             new CsrfService()
         );
+    }
+
+    private function auth(array $permissions): AuthService
+    {
+        $connection = new DatabaseConnection([]);
+        if ($permissions !== []) {
+            $_SESSION['auth']['user_id'] = 1;
+            $pdo = $this->createStub(PDO::class);
+            $pdo->method('prepare')->willReturnCallback(function (string $sql) use ($permissions): PDOStatement {
+                $statement = $this->createStub(PDOStatement::class);
+                $statement->method('execute')->willReturn(true);
+                $statement->method('fetchColumn')->willReturn(1);
+                $statement->method('fetchAll')->willReturn(match (true) {
+                    str_contains($sql, 'SELECT DISTINCT permissions.code') => array_map(static fn (string $code): array => ['code' => $code], $permissions),
+                    str_contains($sql, 'SELECT roles.slug') => [['slug' => 'calendar_test']],
+                    str_contains($sql, 'FROM users') => [['id' => 1, 'is_deleted' => 0, 'employment_status' => 'active']],
+                    default => [],
+                });
+
+                return $statement;
+            });
+            (new \ReflectionProperty(DatabaseConnection::class, 'pdo'))->setValue($connection, $pdo);
+        }
+
+        return new AuthService($connection, new PermissionMatrix([], []));
     }
 }

@@ -59,8 +59,9 @@ final class AdminContextService
                 'href' => '/admin/calendar',
                 'label' => 'Kalender',
                 'active_prefix' => '/admin/calendar',
-                'permission' => 'timesheets.view',
+                'any_permissions' => ['timesheets.view', 'appointments.view', 'personnel.view'],
             ],
+            ['href' => '/admin/appointments', 'label' => 'Termine', 'active_prefix' => '/admin/appointments', 'permission' => 'appointments.view'],
             [
                 'href' => '/admin/attendance',
                 'label' => 'Anwesenheit',

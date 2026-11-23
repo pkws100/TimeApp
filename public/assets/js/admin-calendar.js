@@ -118,10 +118,22 @@
                 meta.push(String(day.personnel_event_count) + ' Pers.');
             }
 
+            var appointmentCount = Number(day.appointment_count || 0);
+            var appointmentPreview = '';
+            if (appointmentCount > 0) {
+                var titles = Array.isArray(day.appointment_titles) ? day.appointment_titles : [];
+                var remaining = appointmentCount - titles.length;
+                appointmentPreview = '<span class="calendar-day__appointments"><strong>'
+                    + appointmentCount + (appointmentCount === 1 ? ' Termin' : ' Termine') + '</strong>'
+                    + titles.map(function (title) { return '<span>' + escapeHtml(title) + '</span>'; }).join('')
+                    + (remaining > 0 ? '<span>+' + remaining + ' weitere</span>' : '') + '</span>';
+            }
+
             return '<button type="button" class="' + escapeHtml(classes) + '" data-calendar-date="' + escapeHtml(day.date || '') + '" aria-pressed="' + (day.date === selectedDate ? 'true' : 'false') + '">'
                 + '<span class="calendar-day__number">' + escapeHtml(day.day_number || '') + '</span>'
                 + '<span class="calendar-day__status">' + escapeHtml(day.status_label || '') + '</span>'
                 + '<span class="calendar-day__meta">' + escapeHtml(meta.join(' · ')) + '</span>'
+                + appointmentPreview
                 + '</button>';
         }).join('');
     }
@@ -133,7 +145,7 @@
         setLoading(root, true);
 
         try {
-            var payload = await adminJson('/admin/calendar/month?month=' + encodeURIComponent(month));
+            var payload = await adminJson('/admin/calendar/month?' + new URLSearchParams({month: month, view: root.dataset.view || 'all'}));
 
             if (!payload.data) {
                 throw new Error('Monat konnte nicht geladen werden.');
@@ -173,11 +185,12 @@
             button.classList.toggle('is-selected', selected);
             button.setAttribute('aria-pressed', selected ? 'true' : 'false');
         });
+        syncViewLinks(root);
         panel.classList.add('is-loading');
         panel.setAttribute('aria-busy', 'true');
 
         try {
-            var payload = await adminJson('/admin/calendar/day?date=' + encodeURIComponent(date));
+            var payload = await adminJson('/admin/calendar/day?' + new URLSearchParams({date: date, view: root.dataset.view || 'all'}));
 
             if (!payload.data || typeof payload.data.html !== 'string') {
                 throw new Error('Tag konnte nicht geladen werden.');
@@ -207,6 +220,13 @@
         if (panel) {
             panel.innerHTML = '<p class="notice error">' + escapeHtml(message) + '</p>';
         }
+    }
+
+    function syncViewLinks(root) {
+        root.querySelectorAll('[data-calendar-view]').forEach(function (link) {
+            var params = new URLSearchParams({month: root.dataset.month, date: root.dataset.selectedDate, view: link.dataset.calendarView});
+            link.href = '/admin/calendar?' + params;
+        });
     }
 
     function updateUrl(root) {

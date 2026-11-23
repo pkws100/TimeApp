@@ -1837,6 +1837,19 @@ html[data-theme="dark"] .booking-card.has-booking-issue {
     gap: 0.35rem;
 }
 
+.calendar-views {
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+}
+
+.calendar-dot.is-appointment {
+    background: var(--page-accent);
+}
+
+.calendar-dot.is-personnel {
+    background: var(--page-muted);
+}
+
 .calendar-dot {
     width: 0.75rem;
     height: 0.75rem;
@@ -1971,6 +1984,45 @@ html[data-theme="dark"] .booking-card.has-booking-issue {
     color: var(--page-muted);
     font-size: 0.9rem;
     line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+.calendar-day__status:empty,
+.calendar-day__meta:empty {
+    display: none;
+}
+
+.calendar-day__appointments {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.15rem;
+    align-self: start;
+    padding-inline-start: 0.3rem;
+    border-inline-start: 0.16rem solid var(--page-accent);
+    font-size: 0.78rem;
+    line-height: 1.25;
+}
+
+.calendar-day__appointments > strong {
+    overflow-wrap: anywhere;
+}
+
+.calendar-day__appointments > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.calendar-appointments .toolbar-actions {
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 0.6rem;
+}
+
+.calendar-appointments li div {
+    min-width: 0;
     overflow-wrap: anywhere;
 }
 
