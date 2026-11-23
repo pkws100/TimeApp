@@ -21,6 +21,8 @@ final class BackupService
     private const PERSONNEL_PRIVATE_STORAGE_SCHEMA = '20261118207000_personnel_private_storage';
     private const PERSONNEL_EVIDENCE_REVIEWS_SCHEMA = '20261118208000_personnel_evidence_reviews';
     private const PERSONNEL_BACKUP_PRESENCE_SCHEMA = '20261118209000_personnel_backup_presence';
+    private const APPOINTMENTS_SCHEMA = '20261123120000_create_appointment_management';
+    private const APPOINTMENT_TABLES = ['appointments', 'appointment_participants'];
     private const PHASE_TWO_PRIVATE_TABLES = ['employee_personnel_scope_events', 'personnel_command_receipts'];
     private const PERSONNEL_EVIDENCE_REVIEWS_TABLE = 'employee_document_evidence_reviews';
     private const REDACTED_SECRET = '[redacted:backup-secret]';
@@ -177,9 +179,15 @@ final class BackupService
 
     private function assertCoverageTablesDiscoverable(array $tables, array $versionedTables): void
     {
-        if ($this->connection->isAvailable()
-            && (array_diff([...self::PERSONNEL_PRIVATE_TABLES, ...self::PERSONNEL_CATALOG_TABLES], $tables) !== []
-                || !in_array('timesheets', $versionedTables, true))) {
+        if (!$this->connection->isAvailable()) {
+            return;
+        }
+
+        $required = [...self::PERSONNEL_PRIVATE_TABLES, ...self::PERSONNEL_CATALOG_TABLES];
+        if ($this->schemaVersion() === self::APPOINTMENTS_SCHEMA) {
+            $required = [...$required, ...self::APPOINTMENT_TABLES];
+        }
+        if (array_diff($required, $tables) !== [] || !in_array('timesheets', $versionedTables, true)) {
             throw new RuntimeException('Das installierte Datenbankschema ist fuer das Systembackup nicht vollstaendig sichtbar.');
         }
     }
@@ -472,18 +480,21 @@ final class BackupService
             throw new RuntimeException('Im Backup-Manifest ist schema_version ungueltig.');
         }
         $currentSchema = $this->schemaVersion();
+        $hasAppointmentSchema = $currentSchema === self::APPOINTMENTS_SCHEMA;
         // The presence view grants access to coverage only and adds no files to the archive.
-        $archiveLayoutSchema = $currentSchema === self::PERSONNEL_BACKUP_PRESENCE_SCHEMA
+        $previousArchiveLayout = $hasAppointmentSchema || $currentSchema === self::PERSONNEL_BACKUP_PRESENCE_SCHEMA
             ? self::PERSONNEL_EVIDENCE_REVIEWS_SCHEMA : $currentSchema;
+        $previousPresenceSchema = $hasAppointmentSchema && $schemaVersion === self::PERSONNEL_BACKUP_PRESENCE_SCHEMA;
         // These releases only changed the excluded personnel rows after their original table layouts were published.
         $personnelSchemaOrder = [self::PREVIOUS_PERSONNEL_SCHEMA, self::PERSONNEL_TRIGGER_MIGRATION,
             self::PERSONNEL_PHASE_TWO_SCHEMA, self::PERSONNEL_EMPLOYEE_ACCESS_SCHEMA, self::PERSONNEL_PRIVATE_STORAGE_SCHEMA,
             self::PERSONNEL_EVIDENCE_REVIEWS_SCHEMA];
         $archivePosition = array_search($schemaVersion, $personnelSchemaOrder, true);
-        $currentPosition = array_search($archiveLayoutSchema, $personnelSchemaOrder, true);
+        $currentPosition = array_search($previousArchiveLayout, $personnelSchemaOrder, true);
         $previousPersonnelSchema = $archivePosition !== false && $currentPosition !== false && $archivePosition < $currentPosition
             && ($legacy ? $archivePosition === 0 : $archivePosition > 0);
-        if ($schemaVersion !== $currentSchema && $schemaVersion !== $archiveLayoutSchema && !$previousPersonnelSchema) {
+        if ($schemaVersion !== $currentSchema && $schemaVersion !== $previousArchiveLayout
+            && !$previousPresenceSchema && !$previousPersonnelSchema) {
             throw new RuntimeException('Die Backup-Schema-Version passt nicht zum aktuellen System.');
         }
         $this->assertCurrentSchemaApplied($currentSchema);
@@ -501,18 +512,18 @@ final class BackupService
 
         $databaseTables = $this->validateDatabaseFiles($tables, $zip, $legacy);
         $databaseFiles = array_column($databaseTables, 'filename');
-        $tablesAddedSinceArchive = [];
+        $tablesAddedSinceArchive = $hasAppointmentSchema && $schemaVersion !== $currentSchema ? self::APPOINTMENT_TABLES : [];
         if ($previousPersonnelSchema) {
             if ($archivePosition < 2 && $currentPosition >= 2) {
-                $tablesAddedSinceArchive = self::PHASE_TWO_PRIVATE_TABLES;
+                $tablesAddedSinceArchive = [...$tablesAddedSinceArchive, ...self::PHASE_TWO_PRIVATE_TABLES];
             }
-            if ($archiveLayoutSchema === self::PERSONNEL_EVIDENCE_REVIEWS_SCHEMA) {
+            if ($previousArchiveLayout === self::PERSONNEL_EVIDENCE_REVIEWS_SCHEMA) {
                 $tablesAddedSinceArchive[] = self::PERSONNEL_EVIDENCE_REVIEWS_TABLE;
             }
         }
         $this->assertExpectedTables(
             $databaseTables,
-            !$legacy || $previousPersonnelSchema,
+            !$legacy || $previousPersonnelSchema || $previousPresenceSchema,
             $tablesAddedSinceArchive
         );
         $this->assertPersonnelArchiveEntries($archiveEntries, $databaseFiles);

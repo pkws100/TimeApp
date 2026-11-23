@@ -460,6 +460,15 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         } finally {
             $this->connection->execute('RENAME TABLE hidden_backup_access_log TO employee_document_access_log');
         }
+        $this->server->exec('REVOKE SELECT ON ' . $schema . '.appointment_participants FROM ' . $this->backupPrincipal);
+        try {
+            $service->export();
+            self::fail('An invisible appointment table was silently omitted from a current backup.');
+        } catch (\RuntimeException $exception) {
+            self::assertSame('Das installierte Datenbankschema ist fuer das Systembackup nicht vollstaendig sichtbar.', $exception->getMessage());
+        } finally {
+            $this->server->exec('GRANT SELECT ON ' . $schema . '.appointment_participants TO ' . $this->backupPrincipal);
+        }
 
         $empty = $service->export(requireComplete: true);
         file_put_contents($path, $empty['content']);
@@ -510,6 +519,18 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         $this->connection->execute('DELETE FROM timesheets WHERE id = :id', ['id' => $this->connection->lastInsertId()]);
         self::assertSame(0, (int) $this->connection->fetchColumn('SELECT COUNT(*) FROM timesheets'));
         self::assertSame(1, (int) $this->connection->fetchColumn('SELECT COUNT(*) FROM timesheets FOR SYSTEM_TIME ALL'));
+        $appointmentTitle = 'Synthetic appointment backup fixture';
+        $this->connection->execute(
+            'INSERT INTO appointments (title, starts_at_utc, ends_at_utc, created_by_user_id, updated_by_user_id, created_at, updated_at)
+             VALUES (:title, "2026-11-01 08:00:00", "2026-11-01 09:00:00", :creator, :editor, UTC_TIMESTAMP(), UTC_TIMESTAMP())',
+            ['title' => $appointmentTitle, 'creator' => $user, 'editor' => $user]
+        );
+        $appointmentId = $this->connection->lastInsertId();
+        $this->connection->execute(
+            'INSERT INTO appointment_participants (appointment_id, user_id, created_at)
+             VALUES (:appointment, :participant, UTC_TIMESTAMP())',
+            ['appointment' => $appointmentId, 'participant' => $user]
+        );
 
         $result = $service->export();
         self::assertSame('partial', $result['headers']['X-TimeApp-Backup-Coverage']);
@@ -518,10 +539,25 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         self::assertTrue($zip->open($path));
         $manifest = json_decode($zip->getFromName('manifest.json'), true, flags: JSON_THROW_ON_ERROR);
         self::assertSame(2, $manifest['backup_version']);
-        self::assertSame('20261118209000_personnel_backup_presence', $manifest['schema_version']);
+        $latestMigration = (string) $this->connection->fetchColumn('SELECT MAX(version) FROM phinxlog');
+        self::assertStringStartsWith($latestMigration . '_', $manifest['schema_version']);
         self::assertFalse($zip->locateName('database/timesheets.json'));
         self::assertFalse($zip->locateName('database/personnel_backup_presence.json'));
         self::assertEqualsCanonicalizing($privateTables, $manifest['security']['excluded_database_table_rows']);
+        $appointmentTables = ['appointment_participants', 'appointments'];
+        $tablesByName = array_column($manifest['database']['tables'], null, 'table');
+        foreach ($appointmentTables as $table) {
+            self::assertArrayHasKey($table, $tablesByName);
+            self::assertSame(1, $tablesByName[$table]['rows']);
+        }
+        $appointments = json_decode($zip->getFromName('database/appointments.json'), true, flags: JSON_THROW_ON_ERROR);
+        $participants = json_decode($zip->getFromName('database/appointment_participants.json'), true, flags: JSON_THROW_ON_ERROR);
+        self::assertCount(1, $appointments);
+        self::assertCount(1, $participants);
+        self::assertSame($appointmentId, (int) $appointments[0]['id']);
+        self::assertSame($appointmentTitle, $appointments[0]['title']);
+        self::assertSame($appointmentId, (int) $participants[0]['appointment_id']);
+        self::assertSame($user, (int) $participants[0]['user_id']);
         foreach (self::CATALOG_TABLES as $table) {
             self::assertNotEmpty(json_decode($zip->getFromName('database/' . $table . '.json'), true, flags: JSON_THROW_ON_ERROR));
         }
@@ -549,6 +585,24 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         self::assertTrue(copy($path, $legacyPath));
         self::assertTrue($zip->open($legacyPath));
         $legacyManifest = $manifest;
+        $legacyManifest['schema_version'] = '20261118209000_personnel_backup_presence';
+        $legacyManifest['database']['tables'] = array_values(array_filter(
+            $legacyManifest['database']['tables'],
+            static fn (array $entry): bool => !in_array($entry['table'], $appointmentTables, true)
+        ));
+        foreach ($appointmentTables as $table) {
+            self::assertTrue($zip->deleteName('database/' . $table . '.json'));
+        }
+        self::assertTrue($zip->addFromString('manifest.json', json_encode($legacyManifest, JSON_THROW_ON_ERROR)));
+        self::assertTrue($zip->close());
+        $presenceValidation = $service->validateImport(['tmp_name' => $legacyPath]);
+        self::assertSame('valid', $presenceValidation['validation_status']);
+        self::assertSame(2, $presenceValidation['manifest']['backup_version']);
+        self::assertSame('20261118209000_personnel_backup_presence', $presenceValidation['manifest']['schema_version']);
+        self::assertTrue($presenceValidation['dry_run']);
+        self::assertFalse($presenceValidation['apply_supported']);
+
+        self::assertTrue($zip->open($legacyPath));
         $legacyManifest['schema_version'] = '20261118208000_personnel_evidence_reviews';
         self::assertTrue($zip->addFromString('manifest.json', json_encode($legacyManifest, JSON_THROW_ON_ERROR)));
         self::assertTrue($zip->close());

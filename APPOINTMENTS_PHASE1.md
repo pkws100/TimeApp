@@ -45,8 +45,10 @@ Die bestehenden Kalender-Endpunkte `/admin/calendar/month` und `/admin/calendar/
 
 1. Die effektive Entwicklungsverbindung inklusive `DB_OVERRIDE_FILE` prüfen. Auf diesem Server liegt die Produktionsinstanz im Checkout `/var/www/html`. Änderungen an Dateien dort werden direkt von Apache ausgeliefert. Für diesen Entwicklungsstand wird `/srv/timeapp-dev` verwendet.
 2. Im Entwicklungscheckout `vendor/bin/phinx migrate -c phinx.php` ausführen. `20261123120000_create_appointment_management.php` ergänzt die beiden Tabellen, Indizes, Fremdschlüssel und Rechte. Bei einem Neuaufbau danach `vendor/bin/phinx seed:run -c phinx.php -s InitialReferenceSeeder` ausführen. Der Rücklauf ist gesperrt, damit gespeicherte Termine und Zuordnungen erhalten bleiben.
-3. Bei getrennten Datenbankkonten benötigt die Laufzeit Zugriff auf beide neuen Tabellen. Für Termine sind `SELECT`, `INSERT` und `UPDATE` erforderlich. Für die Zuordnungstabelle kommen `SELECT`, `INSERT` und `DELETE` für das Ändern von Teilnehmerlisten zum Einsatz. Migration und Rechtevergabe bleiben Aufgaben des Migrationskontos.
+3. Bei getrennten Datenbankkonten benötigt die Laufzeit Zugriff auf beide neuen Tabellen. Für Termine sind `SELECT`, `INSERT` und `UPDATE` erforderlich. Für die Zuordnungstabelle kommen `SELECT`, `INSERT` und `DELETE` für das Ändern von Teilnehmerlisten zum Einsatz. Ein separates Konto für das allgemeine Systembackup benötigt `SELECT` auf beiden Tabellen. Migration und Rechtevergabe bleiben Aufgaben des Migrationskontos.
 4. Browser und Anwendung auf die Entwicklungsverbindung richten. Mit einem synthetischen Benutzer einen Termin anlegen, zuordnen, in der Liste und im Kalender prüfen, ändern, absagen und abschließend archivieren. Die automatisierten Integrationstests verwenden isolierte MariaDB-Schemata. Für lokale Tests den Test-Socket explizit über `TIMEAPP_TEST_DB_*` konfigurieren.
+
+Das allgemeine Systembackup enthält beide Termintabellen. Die Dry-Run-Prüfung unterstützt die bisherigen Archivformate aus der Zeit vor der Terminmigration weiterhin.
 
 ## Umfang weiterer Phasen
 
