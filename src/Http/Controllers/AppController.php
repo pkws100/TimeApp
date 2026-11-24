@@ -36,7 +36,9 @@ final class AppController
             'company_logo_url' => $this->companySettingsService?->publicLogoUrl(),
         ];
 
-        return Response::html($this->view->render($route, $bootstrap));
+        $headers = $route === '/app/termine' ? ['Cache-Control' => 'private, no-store'] : [];
+
+        return Response::html($this->view->render($route, $bootstrap), headers: $headers);
     }
 
     public function manifest(Request $request): Response
@@ -135,6 +137,9 @@ self.addEventListener('fetch', (event) => {
   }
 
   const url = new URL(request.url);
+  if (url.origin !== self.location.origin) {
+    return;
+  }
   const isAppShellRequest = (url.pathname === '/app' || url.pathname.startsWith('/app/'))
     && url.pathname !== '/app/sw.js'
     && url.pathname !== '/app/manifest.json';
@@ -167,6 +172,19 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
+function internalAppPath(value) {
+  if (typeof value !== 'string' || !value) return null;
+  try {
+    const url = new URL(value, self.location.origin);
+    if (url.origin === self.location.origin && (url.pathname === '/app' || url.pathname.startsWith('/app/'))) {
+      return url.pathname + url.search + url.hash;
+    }
+  } catch (error) {
+    // A malformed notification target opens the app start page.
+  }
+  return null;
+}
+
 self.addEventListener('push', (event) => {
   let payload = {};
 
@@ -185,7 +203,7 @@ self.addEventListener('push', (event) => {
     badge: '/assets/app-icon-maskable-512.png',
     tag: payload.tag || 'zeiterfassung-push',
     data: {
-      url: payload.url || '/app'
+      url: internalAppPath(payload.url) || APP_FALLBACK_URL
     }
   };
 
@@ -194,17 +212,18 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const targetUrl = event.notification.data && event.notification.data.url ? event.notification.data.url : '/app';
+  const targetUrl = internalAppPath(event.notification.data?.url) || APP_FALLBACK_URL;
+  const refreshAppointment = new URL(targetUrl, self.location.origin).pathname === '/app/termine';
 
   event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async (clientList) => {
       for (const client of clientList) {
-        if ('focus' in client && client.url.includes('/app')) {
-          if ('navigate' in client) {
-            return client.navigate(targetUrl).then(() => client.focus());
-          }
-
-          return client.focus();
+        const currentPath = internalAppPath(client.url);
+        if (!currentPath || !('focus' in client)) continue;
+        if (currentPath === targetUrl && !refreshAppointment) return client.focus();
+        if ('navigate' in client) {
+          const navigated = await client.navigate(targetUrl).catch(() => null);
+          if (navigated) return navigated.focus();
         }
       }
 

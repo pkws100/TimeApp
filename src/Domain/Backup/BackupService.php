@@ -23,6 +23,8 @@ final class BackupService
     private const PERSONNEL_BACKUP_PRESENCE_SCHEMA = '20261118209000_personnel_backup_presence';
     private const APPOINTMENTS_SCHEMA = '20261123120000_create_appointment_management';
     private const APPOINTMENT_TABLES = ['appointments', 'appointment_participants'];
+    private const APPOINTMENT_DISPATCH_SCHEMA = '20261124120000_appointment_acknowledgement_and_dispatch';
+    private const APPOINTMENT_DISPATCH_TABLES = ['appointment_dispatches', 'appointment_dispatch_recipients'];
     private const PHASE_TWO_PRIVATE_TABLES = ['employee_personnel_scope_events', 'personnel_command_receipts'];
     private const PERSONNEL_EVIDENCE_REVIEWS_TABLE = 'employee_document_evidence_reviews';
     private const REDACTED_SECRET = '[redacted:backup-secret]';
@@ -184,8 +186,12 @@ final class BackupService
         }
 
         $required = [...self::PERSONNEL_PRIVATE_TABLES, ...self::PERSONNEL_CATALOG_TABLES];
-        if ($this->schemaVersion() === self::APPOINTMENTS_SCHEMA) {
+        $schema = $this->schemaVersion();
+        if (self::schemaAtLeast($schema, self::APPOINTMENTS_SCHEMA)) {
             $required = [...$required, ...self::APPOINTMENT_TABLES];
+        }
+        if (self::schemaAtLeast($schema, self::APPOINTMENT_DISPATCH_SCHEMA)) {
+            $required = [...$required, ...self::APPOINTMENT_DISPATCH_TABLES];
         }
         if (array_diff($required, $tables) !== [] || !in_array('timesheets', $versionedTables, true)) {
             throw new RuntimeException('Das installierte Datenbankschema ist fuer das Systembackup nicht vollstaendig sichtbar.');
@@ -441,6 +447,16 @@ final class BackupService
         return pathinfo((string) end($migrations), PATHINFO_FILENAME);
     }
 
+    private static function schemaAtLeast(string $schema, string $minimum): bool
+    {
+        $number = explode('_', $schema, 2)[0];
+        $threshold = explode('_', $minimum, 2)[0];
+
+        return preg_match('/\A[0-9]{14}\z/', $number) === 1
+            && preg_match('/\A[0-9]{14}\z/', $threshold) === 1
+            && strcmp($number, $threshold) >= 0;
+    }
+
     private function assertCurrentSchemaApplied(string $schemaVersion): void
     {
         if (!$this->connection->isAvailable()) {
@@ -480,11 +496,14 @@ final class BackupService
             throw new RuntimeException('Im Backup-Manifest ist schema_version ungueltig.');
         }
         $currentSchema = $this->schemaVersion();
-        $hasAppointmentSchema = $currentSchema === self::APPOINTMENTS_SCHEMA;
+        $hasAppointmentSchema = self::schemaAtLeast($currentSchema, self::APPOINTMENTS_SCHEMA);
+        $hasDispatchSchema = self::schemaAtLeast($currentSchema, self::APPOINTMENT_DISPATCH_SCHEMA);
         // The presence view grants access to coverage only and adds no files to the archive.
         $previousArchiveLayout = $hasAppointmentSchema || $currentSchema === self::PERSONNEL_BACKUP_PRESENCE_SCHEMA
             ? self::PERSONNEL_EVIDENCE_REVIEWS_SCHEMA : $currentSchema;
         $previousPresenceSchema = $hasAppointmentSchema && $schemaVersion === self::PERSONNEL_BACKUP_PRESENCE_SCHEMA;
+        $previousAppointmentSchema = $hasDispatchSchema && $schemaVersion === self::APPOINTMENTS_SCHEMA;
+        $previousDispatchSchema = $hasDispatchSchema && $schemaVersion === self::APPOINTMENT_DISPATCH_SCHEMA;
         // These releases only changed the excluded personnel rows after their original table layouts were published.
         $personnelSchemaOrder = [self::PREVIOUS_PERSONNEL_SCHEMA, self::PERSONNEL_TRIGGER_MIGRATION,
             self::PERSONNEL_PHASE_TWO_SCHEMA, self::PERSONNEL_EMPLOYEE_ACCESS_SCHEMA, self::PERSONNEL_PRIVATE_STORAGE_SCHEMA,
@@ -494,7 +513,7 @@ final class BackupService
         $previousPersonnelSchema = $archivePosition !== false && $currentPosition !== false && $archivePosition < $currentPosition
             && ($legacy ? $archivePosition === 0 : $archivePosition > 0);
         if ($schemaVersion !== $currentSchema && $schemaVersion !== $previousArchiveLayout
-            && !$previousPresenceSchema && !$previousPersonnelSchema) {
+            && !$previousPresenceSchema && !$previousPersonnelSchema && !$previousAppointmentSchema && !$previousDispatchSchema) {
             throw new RuntimeException('Die Backup-Schema-Version passt nicht zum aktuellen System.');
         }
         $this->assertCurrentSchemaApplied($currentSchema);
@@ -512,7 +531,11 @@ final class BackupService
 
         $databaseTables = $this->validateDatabaseFiles($tables, $zip, $legacy);
         $databaseFiles = array_column($databaseTables, 'filename');
-        $tablesAddedSinceArchive = $hasAppointmentSchema && $schemaVersion !== $currentSchema ? self::APPOINTMENT_TABLES : [];
+        $tablesAddedSinceArchive = $hasAppointmentSchema && !self::schemaAtLeast($schemaVersion, self::APPOINTMENTS_SCHEMA)
+            ? self::APPOINTMENT_TABLES : [];
+        if ($hasDispatchSchema && !self::schemaAtLeast($schemaVersion, self::APPOINTMENT_DISPATCH_SCHEMA)) {
+            $tablesAddedSinceArchive = [...$tablesAddedSinceArchive, ...self::APPOINTMENT_DISPATCH_TABLES];
+        }
         if ($previousPersonnelSchema) {
             if ($archivePosition < 2 && $currentPosition >= 2) {
                 $tablesAddedSinceArchive = [...$tablesAddedSinceArchive, ...self::PHASE_TWO_PRIVATE_TABLES];
@@ -523,7 +546,7 @@ final class BackupService
         }
         $this->assertExpectedTables(
             $databaseTables,
-            !$legacy || $previousPersonnelSchema || $previousPresenceSchema,
+            !$legacy || $previousPersonnelSchema || $previousPresenceSchema || $previousAppointmentSchema || $previousDispatchSchema,
             $tablesAddedSinceArchive
         );
         $this->assertPersonnelArchiveEntries($archiveEntries, $databaseFiles);

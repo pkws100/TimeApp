@@ -6,6 +6,7 @@ use App\Config\ConfigRepository;
 use App\Config\EnvironmentLoader;
 use App\Domain\Admin\AdminContextService;
 use App\Domain\App\MobileAppService;
+use App\Domain\Appointments\AppointmentDispatchService;
 use App\Domain\Appointments\AppointmentService;
 use App\Domain\Assets\AssetService;
 use App\Domain\Attendance\AttendanceService;
@@ -42,6 +43,7 @@ use App\Domain\Projects\ProjectDispatchService;
 use App\Domain\Projects\ProjectMaterialService;
 use App\Domain\Projects\ProjectWorkReportService;
 use App\Domain\Push\PushNotificationService;
+use App\Domain\Push\PushSender;
 use App\Domain\Push\PushSettingsService;
 use App\Domain\Push\PushSubscriptionService;
 use App\Domain\Settings\CompanySettingsService;
@@ -103,6 +105,7 @@ use App\Http\Controllers\AdminTimesheetSignatureController;
 use App\Http\Controllers\AdminTimeAccountController;
 use App\Http\Controllers\AdminVacationRequestController;
 use App\Http\Controllers\AppApiController;
+use App\Http\Controllers\AppAppointmentsController;
 use App\Http\Controllers\AppController;
 use App\Http\Controllers\AppProjectAttachmentController;
 use App\Http\Controllers\AppProjectMaterialController;
@@ -268,6 +271,13 @@ $companySettingsService = new CompanySettingsService($connection, $config->get('
 $pushSettingsService = new PushSettingsService($connection, $config->get('push', []));
 $pushSubscriptionService = new PushSubscriptionService($connection);
 $pushNotificationService = new PushNotificationService($connection, $pushSettingsService, $pushSubscriptionService);
+$appointmentPushSender = PHP_SAPI === 'cli-server' && getenv('APP_ENV') === 'test'
+    && getenv('UI_APPOINTMENT_DISPATCH_FIXTURE') === '1' && $request->server('REMOTE_ADDR') === '127.0.0.1'
+    && ($appointmentPushSenderOverride ?? null) instanceof PushSender
+    ? $appointmentPushSenderOverride : $pushNotificationService;
+$appointmentDispatchService = new AppointmentDispatchService(
+    $connection, $projectAccessService, $pushSettingsService, $pushSubscriptionService, $appointmentPushSender, $appointmentTimezone,
+);
 $projectWorkReportService = new ProjectWorkReportService($connection, $projectAccessService);
 $projectDispatchService = new ProjectDispatchService(
     $connection,
@@ -377,6 +387,7 @@ $adminPausePolicyController = new AdminPausePolicyController($pausePolicies, $au
 $adminWorkTimeController = new AdminWorkTimeController($adminView, $authService, $csrfService, $userService, $workTimePolicies, $workTimePreview, $workTimeDeviations, new WorkTimeAccessService($workTimePolicies), $workTimeEvents, $workTimePauseCorrections, pausePolicies: $adminPausePolicyController);
 $adminWorkTimeNotificationController = new AdminWorkTimeNotificationController($adminView, $authService, $csrfService, $userService, $workTimePolicies, $workTimeEvents->notifications(), new WorkTimeAccessService($workTimePolicies));
 $appPushController = new AppPushController($pushSettingsService, $pushSubscriptionService, $pushNotificationService, $authService);
+$appAppointmentsController = new AppAppointmentsController($appointmentService, $authService, $csrfService);
 $appTimeAccountController = new AppTimeAccountController($timeAccountService, $authService);
 $appVacationRequestController = new AppVacationRequestController($vacationRequestService, $authService);
 $appTimesheetController = new AppTimesheetController($appTimesheetSyncService, $authService);
@@ -427,7 +438,9 @@ $adminBookingController = new AdminBookingController(
 $adminTimeAccountController = new AdminTimeAccountController($adminView, $timeAccountService, $timeAccountExportService, $userService, $employeeAccountCutoverService, $authService, $csrfService, $companySettingsService);
 $adminVacationRequestController = new AdminVacationRequestController($adminView, $vacationRequestService, $timeAccountService, $userService, $authService, $csrfService, $absencePeriodService);
 $adminAbsencePeriodController = new AdminAbsencePeriodController($absencePeriodService, $authService, $csrfService);
-$adminAppointmentController = new AdminAppointmentController(new AdminAppointmentsView($adminView), $appointmentService, $authService, $csrfService);
+$adminAppointmentController = new AdminAppointmentController(
+    new AdminAppointmentsView($adminView), $appointmentService, $authService, $csrfService, $appointmentDispatchService,
+);
 $adminCalendarController = new AdminCalendarController(
     $adminView,
     $adminCalendarService,
@@ -536,6 +549,7 @@ $router->get('/app/zeiten', [$appController, 'shell']);
 $router->get('/app/historie', [$appController, 'shell']);
 $router->get('/app/projektwahl', [$appController, 'shell']);
 $router->get('/app/personal', [$appController, 'shell']);
+$router->get('/app/termine', [$appController, 'shell']);
 $router->get('/app/urlaub', [$appController, 'shell']);
 $router->get('/app/profil', [$appController, 'shell']);
 
@@ -547,9 +561,12 @@ $router->get('/admin/appointments', $admin([$adminAppointmentController, 'index'
 $router->get('/admin/appointments/new', $admin([$adminAppointmentController, 'new'], 'appointments.manage'));
 $router->get('/admin/appointments/{id}', $admin([$adminAppointmentController, 'show'], 'appointments.view'));
 $router->get('/admin/appointments/{id}/edit', $admin([$adminAppointmentController, 'edit'], 'appointments.manage'));
+$router->get('/admin/appointments/{id}/dispatch', $admin([$adminAppointmentController, 'dispatchPreview'], 'appointments.dispatch'));
+$router->get('/admin/appointments/{id}/dispatches', $admin([$adminAppointmentController, 'dispatchHistory'], 'appointments.dispatch'));
 $router->post('/admin/appointments', $admin([$adminAppointmentController, 'create'], 'appointments.manage'));
 $router->post('/admin/appointments/{id}', $admin([$adminAppointmentController, 'update'], 'appointments.manage'));
 $router->post('/admin/appointments/{id}/archive', $admin([$adminAppointmentController, 'archive'], 'appointments.manage'));
+$router->post('/admin/appointments/{id}/dispatch', $admin([$adminAppointmentController, 'dispatch'], 'appointments.dispatch'));
 $router->post('/admin/absence-periods/preview', $admin([$adminAbsencePeriodController, 'previewCalendar'], 'timesheets.manage'));
 $router->post('/admin/absence-periods', $admin([$adminAbsencePeriodController, 'createCalendar'], 'timesheets.manage'));
 $router->post('/admin/vacation-periods/preview', $admin([$adminAbsencePeriodController, 'previewVacation'], 'vacation_requests.manage'));
@@ -704,6 +721,9 @@ $router->get('/api/v1/app/vacation-requests/preview', $api([$appVacationRequestC
 $router->post('/api/v1/app/vacation-requests', $api([$appVacationRequestController, 'store'], 'timesheets.create'));
 $router->post('/api/v1/app/vacation-requests/{id}/cancel', $api([$appVacationRequestController, 'cancel'], 'timesheets.create'));
 $router->get('/api/v1/app/push/status', $api([$appPushController, 'status']));
+$router->get('/api/v1/app/appointments', $api([$appAppointmentsController, 'index']));
+$router->get('/api/v1/app/appointments/{id}', $api([$appAppointmentsController, 'show']));
+$router->post('/api/v1/app/appointments/{id}/acknowledge', $api([$appAppointmentsController, 'acknowledge']));
 $router->post('/api/v1/app/push/subscriptions', $api([$appPushController, 'store'], 'push.receive'));
 $router->delete('/api/v1/app/push/subscriptions/{id}', $api([$appPushController, 'disable'], 'push.receive'));
 $router->post('/api/v1/app/push/test', $api([$appPushController, 'test'], 'push.receive'));

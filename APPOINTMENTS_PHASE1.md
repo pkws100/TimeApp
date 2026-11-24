@@ -4,7 +4,7 @@ Unter `/admin/appointments` stehen die Terminliste und die Formulare für betrie
 
 ## Bedienung
 
-- Die Liste beginnt mit den noch bevorstehenden, nicht archivierten Terminen. Sie sortiert nach Beginn und zeigt 25 Ergebnisse pro Seite. Die Auswahl für heute, die nächsten 7 oder 30 Tage beginnt jeweils am heutigen lokalen Kalendertag. Im benutzerdefinierten Zeitraum zählen beide angegebenen Tage mit.
+- Die Liste beginnt mit laufenden und bevorstehenden, nicht archivierten Terminen. Sie sortiert nach Beginn und zeigt 25 Ergebnisse pro Seite. Die Auswahl für heute, die nächsten 7 oder 30 Tage beginnt jeweils am heutigen lokalen Kalendertag. Im benutzerdefinierten Zeitraum zählen beide angegebenen Tage mit.
 - Zeitraum, Projekt, Mitarbeiter, Status und Suchtext lassen sich kombinieren. Die Suche berücksichtigt Titel, Beschreibung, Einsatzort, Projektname und Projektnummer. Zeiträume finden auch Termine, die vor dem ausgewählten Zeitraum beginnen und in ihn hineinreichen.
 - Beim Anlegen und Bearbeiten sind ein Titel, Beginn und Ende erforderlich. Projekt, Einsatzort und Teilnehmer sind optional. Die Mitarbeiterauswahl lässt sich durchsuchen. Neue Zuordnungen sind für aktive Mitarbeiter und zugängliche, aktive Projekte möglich. Bestehende Referenzen zu archivierten Stammdaten können erhalten oder entfernt werden, soweit die Akteure weiterhin auf den Termin zugreifen dürfen.
 - Der Standardstatus lautet **Geplant**. Beim Bearbeiten kann ein geplanter Termin auf **Erledigt** oder **Abgesagt** gesetzt werden. Erledigte und abgesagte Termine behalten ihren Status. Archivieren blendet den Termin aus Liste und Kalender aus. Die Detailseite bleibt mit Berechtigung über die Termin-ID erreichbar.

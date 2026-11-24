@@ -8,7 +8,13 @@ use App\Domain\Appointments\AppointmentAccessDeniedException;
 use App\Domain\Appointments\AppointmentConflictException;
 use App\Domain\Appointments\AppointmentNotFoundException;
 use App\Domain\Appointments\AppointmentService;
+use App\Domain\Auth\AuthService;
+use App\Domain\Auth\CsrfService;
 use App\Domain\Projects\ProjectAccessService;
+use App\Domain\Users\PermissionMatrix;
+use App\Http\Controllers\AppAppointmentsController;
+use App\Http\Request;
+use App\Http\Response;
 use App\Infrastructure\Database\DatabaseConnection;
 use InvalidArgumentException;
 use Tests\Support\MariaDbTestCase;
@@ -135,6 +141,7 @@ final class AppointmentServiceDatabaseTest extends MariaDbTestCase
         self::assertTrue($participants[$employee]);
         $this->appointments->update($this->admin, $id, ['version' => 1, 'project_id' => $project, 'participant_ids' => [$employee]]);
         self::assertSame([$employee], array_column($this->appointments->find($this->admin, $id)['participants'], 'id'));
+        self::assertSame(1, $this->appointments->find($this->admin, $id)['version']);
 
         foreach (['project_id' => $project, 'participant_ids' => [$employee]] as $field => $value) {
             try {
@@ -144,7 +151,7 @@ final class AppointmentServiceDatabaseTest extends MariaDbTestCase
                 self::assertSame(1, (int) $this->connection()->fetchColumn('SELECT COUNT(*) FROM appointments'));
             }
         }
-        $this->appointments->update($this->admin, $id, ['version' => 2, 'project_id' => null, 'participant_ids' => []]);
+        $this->appointments->update($this->admin, $id, ['version' => 1, 'project_id' => null, 'participant_ids' => []]);
         $updated = $this->appointments->find($this->admin, $id);
         self::assertNull($updated['project_id']);
         self::assertSame([], $updated['participants']);
@@ -230,6 +237,98 @@ final class AppointmentServiceDatabaseTest extends MariaDbTestCase
         $this->appointments->calendarBetween([
             'id' => $actor['id'], 'permissions' => ['timesheets.view', 'personnel.view'],
         ], '2099-07-16', '2099-07-16');
+    }
+
+    public function testUpcomingListIncludesAnOngoingAppointmentUntilItsEnd(): void
+    {
+        $running = $this->appointments->create($this->admin, $this->data(['title' => 'Laufender Termin']));
+        $finished = $this->appointments->create($this->admin, $this->data(['title' => 'Abgelaufener Termin']));
+        $future = $this->appointments->create($this->admin, $this->data(['title' => 'Späterer Termin']));
+        $this->connection()->execute(
+            'UPDATE appointments SET starts_at_utc = UTC_TIMESTAMP() - INTERVAL 2 HOUR,
+                ends_at_utc = IF(id = :running, UTC_TIMESTAMP() + INTERVAL 1 HOUR, UTC_TIMESTAMP() - INTERVAL 1 HOUR)
+             WHERE id IN (:running_id, :finished_id)',
+            ['running' => $running, 'running_id' => $running, 'finished_id' => $finished]
+        );
+
+        self::assertSame([$running, $future], array_column($this->appointments->list($this->admin, [])['items'], 'id'));
+    }
+
+    public function testEmployeeRoutesAuthorizeCurrentParticipantAndBindAcknowledgementToVersion(): void
+    {
+        $employee = $this->createUser();
+        $colleague = $this->createUser();
+        $project = $this->createProject();
+        $own = $this->appointments->create($this->admin, $this->data([
+            'title' => 'Gemeinsamer Termin', 'project_id' => $project, 'participant_ids' => [$employee, $colleague],
+        ]));
+        $foreign = $this->appointments->create($this->admin, $this->data(['participant_ids' => [$colleague]]));
+        $cancelled = $this->appointments->create($this->admin, $this->data(['status' => 'cancelled', 'participant_ids' => [$employee]]));
+        $archived = $this->appointments->create($this->admin, $this->data(['participant_ids' => [$employee]]));
+        $this->appointments->archive($this->admin, $archived, 1);
+
+        $auth = new AuthService($this->connection(), new PermissionMatrix([], []));
+        $csrf = new CsrfService();
+        $controller = new AppAppointmentsController($this->appointments, $auth, $csrf);
+        $_SESSION['auth'] = ['user_id' => $employee, 'database_realm' => $this->connection()->authenticationRealm()];
+        $response = $controller->index($this->employeeRequest(query: ['user_id' => (string) $colleague]));
+        self::assertSame(200, $response->status());
+        self::assertSame('private, no-store', $response->headers()['Cache-Control']);
+        self::assertSame([$own], array_column($this->payload($response)['data'], 'id'));
+        $past = $controller->index($this->employeeRequest(query: ['filter' => 'past']));
+        self::assertSame([$cancelled], array_column($this->payload($past)['data'], 'id'));
+        self::assertSame(404, $controller->show($this->employeeRequest(), ['id' => $foreign])->status());
+        self::assertSame(404, $controller->show($this->employeeRequest(), ['id' => $archived])->status());
+
+        $detail = $this->payload($controller->show($this->employeeRequest(), ['id' => $own]));
+        self::assertFalse($detail['data']['acknowledged']);
+        self::assertNotEmpty($detail['data']['project_number']);
+        self::assertArrayNotHasKey('participants', $detail['data']);
+        self::assertArrayNotHasKey('project_id', $detail['data']);
+        self::assertSame(403, $controller->acknowledge($this->employeeRequest(['version' => 1]), ['id' => $own])->status());
+        $request = $this->employeeRequest(['version' => 1, 'csrf_token' => $detail['csrf_token'], 'user_id' => $colleague]);
+        self::assertSame(404, $controller->acknowledge($request, ['id' => $foreign])->status());
+        self::assertTrue($this->payload($controller->acknowledge($request, ['id' => $own]))['data']['acknowledged']);
+        $states = array_column($this->appointments->acknowledgements($this->admin, $own), 'acknowledged', 'id');
+        self::assertTrue($states[$employee]);
+        self::assertFalse($states[$colleague]);
+
+        $this->connection()->execute(
+            'UPDATE appointment_participants SET acknowledged_at_utc = "2026-01-01 10:00:00" WHERE appointment_id = :id AND user_id = :employee',
+            ['id' => $own, 'employee' => $employee]
+        );
+        $replay = $this->payload($controller->acknowledge($request, ['id' => $own]));
+        self::assertSame('2026-01-01 10:00:00', $replay['data']['acknowledged_at_utc']);
+        $this->appointments->update($this->admin, $own, [
+            'version' => 1, 'title' => 'Gemeinsamer Termin', 'project_id' => (string) $project,
+            'participant_ids' => [(string) $colleague, (string) $employee],
+        ]);
+        $afterNoOp = $this->payload($controller->show($this->employeeRequest(), ['id' => $own]));
+        self::assertSame(1, $afterNoOp['data']['version']);
+        self::assertTrue($afterNoOp['data']['acknowledged']);
+        $this->appointments->update($this->admin, $own, ['version' => 1, 'location' => 'Anderer Treffpunkt']);
+        $stale = $this->payload($controller->show($this->employeeRequest(), ['id' => $own]));
+        self::assertFalse($stale['data']['acknowledged']);
+        self::assertSame(1, $stale['data']['acknowledged_version']);
+        self::assertSame(409, $controller->acknowledge($request, ['id' => $own])->status());
+        $newVersion = $this->employeeRequest(['version' => 2, 'csrf_token' => $detail['csrf_token']]);
+        self::assertSame(200, $controller->acknowledge($newVersion, ['id' => $own])->status());
+        $this->appointments->update($this->admin, $own, ['version' => 2, 'participant_ids' => [$colleague]]);
+        self::assertSame(404, $controller->show($this->employeeRequest(), ['id' => $own])->status());
+        self::assertSame(0, (int) $this->connection()->fetchColumn('SELECT COUNT(*) FROM timesheets'));
+        self::assertSame(0, (int) $this->connection()->fetchColumn('SELECT COUNT(*) FROM project_memberships'));
+    }
+
+    private function employeeRequest(array $body = [], array $query = []): Request
+    {
+        return new Request($body === [] ? 'GET' : 'POST', '/api/v1/app/appointments', $query, $body, [], [], []);
+    }
+
+    private function payload(Response $response): array
+    {
+        ob_start();
+        $response->send();
+        return json_decode((string) ob_get_clean(), true, flags: JSON_THROW_ON_ERROR);
     }
 
     private function data(array $overrides = []): array

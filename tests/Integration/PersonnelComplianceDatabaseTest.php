@@ -545,10 +545,15 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         self::assertFalse($zip->locateName('database/personnel_backup_presence.json'));
         self::assertEqualsCanonicalizing($privateTables, $manifest['security']['excluded_database_table_rows']);
         $appointmentTables = ['appointment_participants', 'appointments'];
+        $dispatchTables = ['appointment_dispatches', 'appointment_dispatch_recipients'];
         $tablesByName = array_column($manifest['database']['tables'], null, 'table');
         foreach ($appointmentTables as $table) {
             self::assertArrayHasKey($table, $tablesByName);
             self::assertSame(1, $tablesByName[$table]['rows']);
+        }
+        foreach ($dispatchTables as $table) {
+            self::assertArrayHasKey($table, $tablesByName);
+            self::assertSame('[]', $zip->getFromName('database/' . $table . '.json'));
         }
         $appointments = json_decode($zip->getFromName('database/appointments.json'), true, flags: JSON_THROW_ON_ERROR);
         $participants = json_decode($zip->getFromName('database/appointment_participants.json'), true, flags: JSON_THROW_ON_ERROR);
@@ -585,6 +590,32 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         self::assertTrue(copy($path, $legacyPath));
         self::assertTrue($zip->open($legacyPath));
         $legacyManifest = $manifest;
+        $legacyManifest['schema_version'] = '20261123120000_create_appointment_management';
+        $legacyManifest['database']['tables'] = array_values(array_filter(
+            $legacyManifest['database']['tables'],
+            static fn (array $entry): bool => !in_array($entry['table'], $dispatchTables, true)
+        ));
+        foreach ($dispatchTables as $table) {
+            self::assertTrue($zip->deleteName('database/' . $table . '.json'));
+        }
+        unset($participants[0]['acknowledged_at_utc'], $participants[0]['acknowledged_version']);
+        $legacyParticipants = json_encode($participants, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+        self::assertTrue($zip->addFromString('database/appointment_participants.json', $legacyParticipants));
+        foreach ($legacyManifest['database']['tables'] as &$table) {
+            if ($table['table'] === 'appointment_participants') {
+                $table['size_bytes'] = strlen($legacyParticipants);
+                $table['sha256'] = hash('sha256', $legacyParticipants);
+            }
+        }
+        unset($table);
+        self::assertTrue($zip->addFromString('manifest.json', json_encode($legacyManifest, JSON_THROW_ON_ERROR)));
+        self::assertTrue($zip->close());
+        $appointmentValidation = $service->validateImport(['tmp_name' => $legacyPath]);
+        self::assertSame('valid', $appointmentValidation['validation_status']);
+        self::assertTrue($appointmentValidation['dry_run']);
+        self::assertFalse($appointmentValidation['apply_supported']);
+
+        self::assertTrue($zip->open($legacyPath));
         $legacyManifest['schema_version'] = '20261118209000_personnel_backup_presence';
         $legacyManifest['database']['tables'] = array_values(array_filter(
             $legacyManifest['database']['tables'],

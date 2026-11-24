@@ -5,11 +5,27 @@ declare(strict_types=1);
 namespace App\Presentation\Admin;
 
 use DateTimeImmutable;
+use DateTimeZone;
 
 final class AdminAppointmentsView
 {
     private const ROOT = '/admin/appointments';
     private const STATUSES = ['planned' => 'Geplant', 'completed' => 'Erledigt', 'cancelled' => 'Abgesagt'];
+    private const DISPATCH_STATUSES = [
+        'ready' => 'Versand möglich',
+        'pending' => 'Ausstehend',
+        'sending' => 'In Bearbeitung',
+        'accepted' => 'Vom Push-Dienst angenommen',
+        'partially_accepted' => 'Teilweise vom Push-Dienst angenommen',
+        'failed' => 'Versand fehlgeschlagen',
+        'uncertain' => 'Annahme durch den Push-Dienst unklar',
+        'no_device' => 'Kein aktives Gerät',
+        'no_permission' => 'Keine Push-Berechtigung',
+        'inactive' => 'Mitarbeiter inaktiv',
+        'push_disabled' => 'Push ist deaktiviert',
+        'push_unconfigured' => 'Push ist noch nicht eingerichtet',
+        'appointment_changed' => 'Termin oder Zuordnung wurde geändert',
+    ];
     private const PERIODS = [
         'upcoming' => 'Kommende Termine', 'today' => 'Heute', 'week' => 'Nächste 7 Tage',
         'month' => 'Nächste 30 Tage', 'custom' => 'Benutzerdefinierter Zeitraum',
@@ -35,15 +51,7 @@ final class AdminAppointmentsView
                 $this->e($appointment['location'] ?? '—'), $this->status($appointment), $action,
             ]);
         }
-        $table = '<p class="table-empty">Für diese Auswahl wurden keine Termine gefunden.</p>';
-        if ($rows !== '') {
-            $headers = '';
-            foreach ($headings as $heading) {
-                $headers .= '<th scope="col" role="columnheader">' . $this->e($heading) . '</th>';
-            }
-            $table = '<table class="appointments-table" role="table"><thead role="rowgroup"><tr role="row">' . $headers
-                . '</tr></thead><tbody role="rowgroup">' . $rows . '</tbody></table>';
-        }
+        $table = $this->table($headings, $rows, 'Für diese Auswahl wurden keine Termine gefunden.');
         $pager = $this->pagination($result, $filters);
 
         return $this->screen('Termine', $calendar . $create, $state,
@@ -51,7 +59,14 @@ final class AdminAppointmentsView
             '<script src="/assets/js/admin-appointments.js" defer></script>');
     }
 
-    public function show(array $appointment, bool $canManage, bool $canViewCalendar, array $state): string
+    public function show(
+        array $appointment,
+        bool $canManage,
+        bool $canViewCalendar,
+        array $state,
+        bool $canDispatch = false,
+        ?array $acknowledgements = null,
+    ): string
     {
         $path = self::ROOT . '/' . (int) $appointment['id'];
         $actions = $this->button(self::ROOT, 'Zur Terminliste');
@@ -61,6 +76,12 @@ final class AdminAppointmentsView
         }
         if ($canManage && empty($appointment['archived_at'])) {
             $actions .= $this->button($path . '/edit', 'Bearbeiten', 'button');
+        }
+        if ($canDispatch) {
+            if (empty($appointment['archived_at'])) {
+                $actions .= $this->button($path . '/dispatch', 'Termin jetzt per Push senden');
+            }
+            $actions .= $this->button($path . '/dispatches', 'Versandhistorie');
         }
         $facts = '';
         foreach ([
@@ -74,8 +95,149 @@ final class AdminAppointmentsView
         $details = '<section class="card stack" aria-label="Termindetails"><dl class="appointment-facts">' . $facts . '</dl>'
             . ($description === '' ? '' : '<div class="appointment-description"><h2>Beschreibung</h2><p>' . nl2br($this->e($description), false) . '</p></div>')
             . '</section>';
+        if ($acknowledgements !== null) {
+            $details .= $this->acknowledgements($acknowledgements, (int) $appointment['version']);
+        }
 
         return $this->screen((string) $appointment['title'], $actions, $state, $details);
+    }
+
+    public function dispatchPreview(array $appointment, array $preview, string $csrf, string $requestKey): string
+    {
+        $path = self::ROOT . '/' . (int) $appointment['id'];
+        $headings = ['Mitarbeiter', 'Push-Berechtigung', 'Aktive Push-Geräte', 'Voraussichtlicher Versand'];
+        $rows = '';
+        foreach ($preview['recipients'] as $recipient) {
+            $rows .= $this->row($headings, [
+                $this->e($recipient['display_name']),
+                $recipient['has_push_permission'] ? 'Vorhanden' : 'Fehlt',
+                (int) $recipient['active_subscription_count'],
+                $this->dispatchRecipientStatus($recipient),
+            ]);
+        }
+        $unavailable = !$preview['push_available']
+            ? '<p class="notice warn">' . $this->e($preview['error_message'] ?? 'Der Push-Dienst ist derzeit nicht verfügbar.') . '</p>' : '';
+        $form = '';
+        if ($rows !== '') {
+            $label = $appointment['status'] === 'cancelled' ? 'Absage per Push senden' : 'Push-Versand bestätigen';
+            $form = '<form method="post" action="' . $path . '/dispatch" class="toolbar-actions">'
+                . $this->hidden('csrf_token', $csrf) . $this->hidden('version', $preview['appointment_version'])
+                . $this->hidden('request_key', $requestKey) . '<button type="submit" class="button">' . $label . '</button></form>';
+        }
+        $content = '<section class="card stack" aria-label="Empfängervorschau"><h2>' . $this->e($appointment['title']) . '</h2>'
+            . $this->dateRange($appointment) . ' ' . $this->status($appointment) . $unavailable
+            . $this->table($headings, $rows, 'Für diesen Termin sind keine Mitarbeiter zugewiesen.') . $form . '</section>';
+
+        return $this->screen('Empfängervorschau', $this->button($path, 'Zum Termin'), [], $content);
+    }
+
+    public function dispatchHistory(array $appointment, array $dispatches, ?int $before, ?int $older): string
+    {
+        $path = self::ROOT . '/' . (int) $appointment['id'];
+        $actions = $this->button($path, 'Zum Termin');
+        if (empty($appointment['archived_at'])) {
+            $actions .= $this->button($path . '/dispatch', 'Termin jetzt per Push senden');
+        }
+        $content = '<section class="card stack" aria-label="Versandhistorie"><h2>' . $this->e($appointment['title']) . '</h2>'
+            . '<p>Die Annahme durch den Push-Dienst gibt keine Auskunft über Zustellung, Lesen oder Terminbestätigung.</p>'
+            . ($dispatches === [] ? '<p class="table-empty">Auf dieser Seite ist kein Versand gespeichert.</p>' : '') . '</section>';
+        foreach ($dispatches as $dispatch) {
+            $content .= $this->dispatchResult($dispatch);
+        }
+        if ($before !== null || $older !== null) {
+            $content .= '<nav class="toolbar-actions" aria-label="Seitennavigation">'
+                . ($before === null ? '' : $this->button($path . '/dispatches', 'Neueste Versände'))
+                . ($older === null ? '' : $this->button($path . '/dispatches?before=' . $older, 'Ältere Versände')) . '</nav>';
+        }
+
+        return $this->screen('Versandhistorie', $actions, [], $content);
+    }
+
+    public function dispatchError(int $appointmentId, string $message, bool $linkToHistory = false): string
+    {
+        $path = self::ROOT . '/' . $appointmentId;
+        $actions = $this->button($path, 'Zum Termin');
+        if ($linkToHistory) {
+            $actions .= $this->button($path . '/dispatches', 'Versandhistorie');
+        }
+
+        return $this->screen('Terminversand', $actions, ['error' => $message], '');
+    }
+
+    private function acknowledgements(array $acknowledgements, int $currentVersion): string
+    {
+        $headings = ['Mitarbeiter', 'Bestätigungsstand', 'Zuletzt bestätigt'];
+        $rows = '';
+        foreach ($acknowledgements as $person) {
+            $version = (int) ($person['acknowledged_version'] ?? 0);
+            $status = match (true) {
+                $person['acknowledged'] && $version === $currentVersion => 'Aktuelle Version bestätigt',
+                $version > 0 => 'Ältere Version bestätigt',
+                default => 'Ausstehend',
+            };
+            $rows .= $this->row($headings, [
+                $this->e($person['name']), $status,
+                $version === 0 ? '—' : $this->utcTime($person['acknowledged_at_utc']) . ' · Version ' . $version,
+            ]);
+        }
+
+        return '<section class="card stack" aria-labelledby="appointment-acknowledgements"><h2 id="appointment-acknowledgements">Terminbestätigungen</h2>'
+            . '<p>Aktuelle Terminversion ' . $currentVersion . '</p>'
+            . $this->table($headings, $rows, 'Für diesen Termin sind keine Mitarbeiter zugewiesen.') . '</section>';
+    }
+
+    private function dispatchResult(array $dispatch): string
+    {
+        $id = (int) $dispatch['id'];
+        $headings = ['Mitarbeiter', 'Ergebnis', 'Angenommene Push-Endpunkte'];
+        $rows = '';
+        foreach ($dispatch['recipients'] as $recipient) {
+            $rows .= $this->row($headings, [
+                $this->e($recipient['display_name']),
+                $this->dispatchRecipientStatus($recipient),
+                (int) $recipient['accepted_subscription_count'],
+            ]);
+        }
+        $details = '';
+        foreach ([
+            'Terminversion' => (int) $dispatch['appointment_version'],
+            'Versandzeitpunkt' => $this->utcTime($dispatch['created_at_utc']),
+            'Ausgelöst von' => $this->e($dispatch['sender_name'] ?? '—'),
+            'Versandkanal' => $dispatch['channel'] === 'push' ? 'Web Push' : $this->e($dispatch['channel']),
+            'Empfänger' => (int) $dispatch['recipient_count'],
+            'Vom Push-Dienst angenommen (Empfänger)' => (int) $dispatch['accepted_count'],
+            'Übersprungen (Empfänger)' => (int) $dispatch['skipped_count'],
+            'Fehlgeschlagen (Empfänger)' => (int) $dispatch['failed_count'],
+            'Unklar (Empfänger)' => (int) $dispatch['uncertain_count'],
+            'Angenommene Push-Endpunkte' => (int) $dispatch['accepted_subscription_count'],
+        ] as $label => $value) {
+            $details .= '<div><dt>' . $label . '</dt><dd>' . $value . '</dd></div>';
+        }
+        $completion = empty($dispatch['completed_at_utc']) ? '<p class="notice warn">Der Versand wurde noch nicht abgeschlossen.</p>' : '';
+
+        return '<section class="card stack" id="appointment-dispatch-' . $id . '" aria-labelledby="appointment-dispatch-heading-' . $id . '">'
+            . '<h2 id="appointment-dispatch-heading-' . $id . '">Versand #' . $id . '</h2>' . $completion
+            . '<dl class="appointment-facts">' . $details . '</dl>'
+            . $this->table($headings, $rows, 'Für diesen Versand sind keine Empfänger gespeichert.') . '</section>';
+    }
+
+    private function dispatchRecipientStatus(array $recipient): string
+    {
+        $label = self::DISPATCH_STATUSES[$recipient['status']] ?? 'Unbekannt';
+        $error = empty($recipient['error_message']) ? '' : '<br><small>' . $this->e($recipient['error_message']) . '</small>';
+
+        return $label . $error;
+    }
+
+    private function utcTime(?string $value): string
+    {
+        if ($value === null || $value === '') {
+            return '—';
+        }
+        $time = new DateTimeImmutable($value, new DateTimeZone('UTC'));
+        $local = $time->setTimezone(new DateTimeZone(date_default_timezone_get()));
+
+        return '<time datetime="' . $time->format(DATE_ATOM) . '">' . $local->format('d.m.Y H:i') . '</time>';
     }
 
     public function form(?array $appointment, array $values, array $options, string $csrf, array $state): string
@@ -227,6 +389,20 @@ HTML;
         }
 
         return '<tr role="row">' . $cells . '</tr>';
+    }
+
+    private function table(array $headings, string $rows, string $empty): string
+    {
+        if ($rows === '') {
+            return '<p class="table-empty">' . $this->e($empty) . '</p>';
+        }
+        $headers = '';
+        foreach ($headings as $heading) {
+            $headers .= '<th scope="col" role="columnheader">' . $this->e($heading) . '</th>';
+        }
+
+        return '<table class="appointments-table" role="table"><thead role="rowgroup"><tr role="row">' . $headers
+            . '</tr></thead><tbody role="rowgroup">' . $rows . '</tbody></table>';
     }
 
     private function dateRange(array $appointment): string

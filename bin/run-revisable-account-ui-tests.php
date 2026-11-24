@@ -6,6 +6,8 @@ declare(strict_types=1);
 use App\Infrastructure\Database\DatabaseConnection;
 use App\Domain\Calendar\CalendarPolicyService;
 use App\Domain\Personnel\PersonnelEventService;
+use App\Domain\Push\PushSettingsService;
+use App\Domain\Push\PushSubscriptionService;
 use App\Domain\Settings\CompanySettingsService;
 use App\Domain\TimeAccounts\AccountJournalService;
 use App\Domain\TimeAccounts\EmployeeAccountCutoverService;
@@ -27,6 +29,7 @@ $phinxFile = $temporaryPrefix . '-phinx.php';
 $overrideFile = $temporaryPrefix . '-database.php';
 $serverLog = $temporaryPrefix . '-server.log';
 $disabledServerLog = $temporaryPrefix . '-server-disabled.log';
+$appointmentPushLog = $temporaryPrefix . '-appointment-push.jsonl';
 $outputDirectory = $temporaryPrefix . '-playwright';
 $serverProcess = null;
 $disabledServerProcess = null;
@@ -42,8 +45,10 @@ while ((int) $restoreDateValue->format('N') !== 1) {
 }
 $restoreDate = $restoreDateValue->format('Y-m-d');
 $appointmentSpec = 'tests/e2e/appointments.real.spec.js';
+$appointmentDispatchSpec = 'tests/e2e/appointment-dispatch.real.spec.js';
 $selectedSpec = trim((string) getenv('UI_REAL_TEST_SPEC'));
-$withAppointments = $selectedSpec === '' || $selectedSpec === $appointmentSpec;
+$withAppointmentDispatch = $selectedSpec === '' || $selectedSpec === $appointmentDispatchSpec;
+$withAppointments = $withAppointmentDispatch || $selectedSpec === $appointmentSpec;
 $vacationDate = null;
 $vacationYear = null;
 $absenceEarliest = new DateTimeImmutable('+35 days midnight');
@@ -351,6 +356,7 @@ try {
         );
     }
     $appointmentEnvironment = [];
+    $appointmentActors = [];
     if ($withAppointments) {
         $day = (new DateTimeImmutable('+9 days'))->format('Y-m-d');
         $connection->execute(
@@ -378,13 +384,49 @@ try {
                  VALUES (:number, "UI", :last, :email, :hash, "active", 0, 0)',
                 ['number' => 'UI-APPOINTMENT-' . strtoupper($scope), 'last' => $slug, 'email' => $email, 'hash' => $passwordHash]
             );
-            $connection->execute('INSERT INTO user_roles (user_id, role_id) VALUES (:user, :role)', ['user' => $connection->lastInsertId(), 'role' => $roleId]);
+            $appointmentActors[$scope] = $connection->lastInsertId();
+            $connection->execute('INSERT INTO user_roles (user_id, role_id) VALUES (:user, :role)', ['user' => $appointmentActors[$scope], 'role' => $roleId]);
             $appointmentEnvironment['UI_TEST_APPOINTMENT_' . strtoupper($scope) . '_EMAIL'] = $email;
         }
         $appointmentEnvironment += [
             'UI_TEST_APPOINTMENT_DAY' => $day,
             'UI_TEST_APPOINTMENT_EVENT' => $eventTitle,
             'UI_TEST_APPOINTMENT_PROJECT' => (string) $formProjectId,
+        ];
+    }
+    if ($withAppointmentDispatch) {
+        $connection->execute(
+            'INSERT INTO projects (project_number, name, status, created_at, updated_at, is_deleted)
+             VALUES ("UI-APPOINTMENT-PUSH", "UI Versandprüfung", "active", NOW(), NOW(), 0)'
+        );
+        $dispatchProject = $connection->lastInsertId();
+        foreach ([$employeeId, $appointmentActors['viewer'], $paginationUserId] as $member) {
+            $connection->execute('INSERT INTO project_memberships (project_id, user_id) VALUES (:project, :user)',
+                ['project' => $dispatchProject, 'user' => $member]);
+        }
+        (new PushSettingsService($connection))->save(['enabled' => '1']);
+        $subscriptions = new PushSubscriptionService($connection);
+        foreach (['accepted' => $employeeId, 'rejected' => $employeeId, 'project-only' => $paginationUserId] as $device => $recipient) {
+            $subscriptions->storeForUser(['id' => $recipient], [
+                'endpoint' => 'https://timeapp-push.example.test/' . $device,
+                'keys' => ['p256dh' => 'synthetic-ui-public-key', 'auth' => 'synthetic-ui-auth-token'],
+                'permission_status' => 'granted',
+            ]);
+        }
+        $previousUmask = umask(0077);
+        try {
+            $pushLogStream = fopen($appointmentPushLog, 'x');
+            if ($pushLogStream === false) {
+                throw new RuntimeException('Der private Termin-Push-Testnachweis konnte nicht angelegt werden.');
+            }
+            fclose($pushLogStream);
+        } finally {
+            umask($previousUmask);
+        }
+        $appointmentEnvironment += [
+            'UI_TEST_APPOINTMENT_DISPATCH_DAY' => (new DateTimeImmutable('+15 days'))->format('Y-m-d'),
+            'UI_TEST_APPOINTMENT_DISPATCH_PROJECT' => (string) $dispatchProject,
+            'UI_TEST_APPOINTMENT_DISPATCH_NON_PARTICIPANT' => 'ui-pagination@example.test',
         ];
     }
     $connection->execute(
@@ -443,8 +485,19 @@ try {
         'SESSION_SECURE_COOKIE' => 'false',
         'WORK_TIME_WINDOWS_ENABLED' => 'true',
     ]);
+    $router = 'tests/Support/php-server-router.php';
+    if ($withAppointmentDispatch) {
+        $router = 'tests/Support/appointment-dispatch-router.php';
+        $environment = array_merge($environment, [
+            'UI_APPOINTMENT_DISPATCH_FIXTURE' => '1',
+            'UI_APPOINTMENT_DISPATCH_DB' => $databaseName,
+            'UI_APPOINTMENT_DISPATCH_LOG' => $appointmentPushLog,
+            'PUSH_VAPID_PUBLIC_KEY' => 'null',
+            'PUSH_VAPID_PRIVATE_KEY' => 'null',
+        ]);
+    }
     $serverProcess = proc_open(
-        [PHP_BINARY, '-S', '127.0.0.1:' . $port, base_path('tests/Support/php-server-router.php')],
+        [PHP_BINARY, '-S', '127.0.0.1:' . $port, base_path($router)],
         [1 => ['file', $serverLog, 'a'], 2 => ['file', $serverLog, 'a']],
         $serverPipes,
         base_path(),
@@ -561,6 +614,7 @@ try {
         'tests/e2e/pause-models.real.spec.js',
         'tests/e2e/pause-controls.real.spec.js',
         $appointmentSpec,
+        $appointmentDispatchSpec,
     ];
     if ($selectedSpec !== '') {
         if (!in_array($selectedSpec, $realSpecs, true)) { throw new RuntimeException('Unbekannte isolierte Browser-Testdatei.'); }
@@ -609,7 +663,7 @@ try {
                     throw new RuntimeException('UI-Diagnoseverzeichnis konnte nicht erstellt werden.');
                 }
                 chmod($artifactDirectory, 0700);
-                foreach ([$serverLog, $disabledServerLog] as $logFile) {
+                foreach ([$serverLog, $disabledServerLog, $appointmentPushLog] as $logFile) {
                     if (is_file($logFile)) {
                         $target = $artifactDirectory . '/' . basename($logFile);
                         if (!copy($logFile, $target)) { throw new RuntimeException('UI-Serverlog konnte nicht gesichert werden.'); }
@@ -625,7 +679,7 @@ try {
                 fwrite(STDERR, $exception->getMessage() . ' Originale UI-Artefakte: ' . $outputDirectory . PHP_EOL);
             }
         }
-        foreach ([$phinxFile, $overrideFile, $serverLog, $disabledServerLog] as $file) {
+        foreach ([$phinxFile, $overrideFile, $serverLog, $disabledServerLog, $appointmentPushLog] as $file) {
             if (is_file($file)) {
                 unlink($file);
             }

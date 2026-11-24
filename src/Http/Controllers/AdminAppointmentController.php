@@ -6,6 +6,7 @@ namespace App\Http\Controllers;
 
 use App\Domain\Appointments\AppointmentAccessDeniedException;
 use App\Domain\Appointments\AppointmentConflictException;
+use App\Domain\Appointments\AppointmentDispatchService;
 use App\Domain\Appointments\AppointmentNotFoundException;
 use App\Domain\Appointments\AppointmentService;
 use App\Domain\Auth\AuthService;
@@ -15,6 +16,7 @@ use App\Http\Response;
 use App\Presentation\Admin\AdminAppointmentsView;
 use DateTimeImmutable;
 use InvalidArgumentException;
+use RuntimeException;
 
 final class AdminAppointmentController
 {
@@ -27,6 +29,7 @@ final class AdminAppointmentController
         private readonly AppointmentService $appointments,
         private readonly AuthService $auth,
         private readonly CsrfService $csrf,
+        private readonly ?AppointmentDispatchService $appointmentDispatch = null,
     ) {
     }
 
@@ -66,10 +69,94 @@ final class AdminAppointmentController
 
     public function show(Request $request, array $params): Response
     {
-        return $this->handle(fn (array $actor): Response => $this->html($this->view->show(
-            $this->find($actor, $params), $this->auth->hasPermission('appointments.manage'),
-            $this->canViewCalendar(), $this->notice($request),
-        )));
+        return $this->handle(function (array $actor) use ($request, $params): Response {
+            $appointment = $this->find($actor, $params);
+
+            return $this->html($this->view->show(
+                $appointment,
+                $this->auth->hasPermission('appointments.manage'),
+                $this->canViewCalendar(),
+                $this->notice($request),
+                $this->appointmentDispatch !== null && $this->auth->hasPermission('appointments.dispatch'),
+                $this->appointments->acknowledgements($actor, (int) $appointment['id']),
+            ));
+        });
+    }
+
+    public function dispatchPreview(Request $request, array $params): Response
+    {
+        return $this->handleDispatch(function (array $actor) use ($params): Response {
+            $service = $this->dispatchService();
+            $appointment = $this->find($actor, $params);
+            $id = (int) $appointment['id'];
+            if (!empty($appointment['archived_at'])) {
+                return $this->html($this->view->dispatchError($id, 'Archivierte Termine können nicht versendet werden.'), 409);
+            }
+            try {
+                $preview = $service->recipientPreview($actor, $id);
+            } catch (AppointmentConflictException) {
+                return $this->html($this->view->dispatchError($id,
+                    'Der Termin wurde geändert. Öffnen Sie die aktuelle Empfängervorschau.'), 409);
+            }
+            if ((int) $preview['appointment_version'] !== (int) $appointment['version']) {
+                return $this->html($this->view->dispatchError($id,
+                    'Der Termin wurde geändert. Öffnen Sie die aktuelle Empfängervorschau.'), 409);
+            }
+
+            return $this->html($this->view->dispatchPreview(
+                $appointment,
+                $preview,
+                $this->csrf->token($this->dispatchCsrfContext($actor, $id)),
+                bin2hex(random_bytes(16)),
+            ));
+        }, $params);
+    }
+
+    public function dispatch(Request $request, array $params): Response
+    {
+        return $this->handleDispatch(function (array $actor) use ($request, $params): Response {
+            $service = $this->dispatchService();
+            $appointment = $this->find($actor, $params);
+            $id = (int) $appointment['id'];
+            if (!$this->csrf->isValid($request->csrfToken(), $this->dispatchCsrfContext($actor, $id))) {
+                return $this->csrfError();
+            }
+            $version = filter_var($request->input('version'), FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => 4294967295]]);
+            $requestKey = $request->input('request_key');
+            if ($version === false || !is_string($requestKey) || preg_match('/\A[a-f0-9]{32}\z/', $requestKey) !== 1) {
+                return $this->html($this->view->dispatchError($id, 'Öffnen Sie die Empfängervorschau erneut.'), 422);
+            }
+
+            try {
+                $result = $service->dispatch($actor, $id, $version, $requestKey);
+            } catch (AppointmentConflictException) {
+                return $this->html($this->view->dispatchError($id,
+                    'Die Vorschau ist nicht mehr aktuell. Prüfen Sie den aktuellen Termin vor dem Versand.'), 409);
+            } catch (InvalidArgumentException) {
+                return $this->html($this->view->dispatchError($id,
+                    'Der Versand konnte nicht gestartet werden. Prüfen Sie die aktuelle Empfängerauswahl.'), 422);
+            }
+
+            return Response::redirect(self::ROOT . '/' . $id . '/dispatches#appointment-dispatch-' . (int) $result['id'], 303)
+                ->withHeaders(['Cache-Control' => 'no-store']);
+        }, $params, true);
+    }
+
+    public function dispatchHistory(Request $request, array $params): Response
+    {
+        return $this->handleDispatch(function (array $actor) use ($request, $params): Response {
+            $service = $this->dispatchService();
+            $appointment = $this->find($actor, $params);
+            $cursor = $request->query('before');
+            $before = $cursor === null ? null : filter_var($cursor, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+            if ($before === false) {
+                return $this->html($this->view->dispatchError((int) $appointment['id'], 'Die ausgewählte Verlaufsseite ist ungültig.'), 422);
+            }
+            $dispatches = $service->history($actor, (int) $appointment['id'], 11, $before);
+            $older = count($dispatches) > 10 ? (int) $dispatches[9]['id'] : null;
+
+            return $this->html($this->view->dispatchHistory($appointment, array_slice($dispatches, 0, 10), $before, $older));
+        }, $params);
     }
 
     public function edit(Request $request, array $params): Response
@@ -158,6 +245,22 @@ final class AdminAppointmentController
         }
     }
 
+    private function handleDispatch(callable $action, array $params, bool $confirming = false): Response
+    {
+        try {
+            return $this->handle($action);
+        } catch (RuntimeException) {
+            error_log('Terminversand: Anfrage konnte wegen eines internen Fehlers nicht abgeschlossen werden.');
+            $message = $confirming
+                ? 'Der Versandstatus konnte nicht abschließend geprüft werden. Prüfen Sie die Versandhistorie vor einem neuen Versand.'
+                : 'Die Versanddaten können derzeit nicht geladen werden.';
+            $id = filter_var($params['id'] ?? '', FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+            $content = $id === false ? $this->view->error($message) : $this->view->dispatchError($id, $message, $confirming);
+
+            return $this->html($content, 503);
+        }
+    }
+
     private function find(array $actor, array $params): array
     {
         $id = filter_var($params['id'] ?? '', FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
@@ -208,6 +311,20 @@ final class AdminAppointmentController
     private function csrfContext(array $actor): string
     {
         return 'admin-appointments:' . (int) ($actor['id'] ?? 0);
+    }
+
+    private function dispatchService(): AppointmentDispatchService
+    {
+        if (!$this->auth->hasPermission('appointments.dispatch')) {
+            throw new AppointmentAccessDeniedException();
+        }
+
+        return $this->appointmentDispatch ?? throw new AppointmentNotFoundException();
+    }
+
+    private function dispatchCsrfContext(array $actor, int $appointmentId): string
+    {
+        return 'admin-appointment-dispatch:' . (int) ($actor['id'] ?? 0) . ':' . $appointmentId;
     }
 
     private function csrfError(): Response

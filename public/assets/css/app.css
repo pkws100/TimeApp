@@ -1711,6 +1711,56 @@ html[data-theme="dark"] .app-attachment-icon {
     color: var(--app-muted);
 }
 
+.app-appointment-card {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.app-appointment-card header {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.65rem;
+}
+
+.app-appointment-card header h2,
+.app-appointment-card p {
+    margin: 0;
+}
+
+.app-appointment-facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+    gap: 0.75rem;
+    margin: 0;
+}
+
+.app-appointment-facts dt {
+    color: var(--app-muted);
+    font-size: 0.9rem;
+}
+
+.app-appointment-facts dd {
+    margin: 0.2rem 0 0;
+}
+
+.app-appointment-description {
+    white-space: pre-wrap;
+}
+
+.app-appointment-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    text-decoration: none;
+}
+
+.app-appointment-filters .app-appointment-link {
+    flex: 1 1 auto;
+}
+
 @media (min-width: 768px) {
     .app-topbar-main {
         gap: 1rem;

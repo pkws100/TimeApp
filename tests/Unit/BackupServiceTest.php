@@ -14,6 +14,19 @@ use ZipArchive;
 
 final class BackupServiceTest extends TestCase
 {
+    public function testAppointmentBackupCoverageThresholdRecognizesLaterMigrationNumbers(): void
+    {
+        $threshold = new \ReflectionMethod(BackupService::class, 'schemaAtLeast');
+        $minimum = '20261123120000_create_appointment_management';
+
+        self::assertFalse($threshold->invoke(null, '20261118209000_personnel_backup_presence', $minimum));
+        self::assertTrue($threshold->invoke(null, $minimum, $minimum));
+        self::assertTrue($threshold->invoke(null, '20261124120000_appointment_acknowledgement_and_dispatch', $minimum));
+        self::assertTrue($threshold->invoke(null, '20271201103000_later_migration', $minimum));
+        self::assertFalse($threshold->invoke(null, '999999999999999_too_many_digits', $minimum));
+        self::assertFalse($threshold->invoke(null, 'unversioned', $minimum));
+    }
+
     public function testExportRejectsPrivatePersonnelRootBelowGeneralUploads(): void
     {
         $uploadRoot = sys_get_temp_dir() . '/timeapp-backup-alias-' . bin2hex(random_bytes(8));

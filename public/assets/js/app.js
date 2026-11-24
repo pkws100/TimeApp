@@ -33,6 +33,13 @@
     const DB_NAME = 'zeiterfassung-app';
     const DB_VERSION = 1;
     const VACATION_CACHE_SCHEMA_VERSION = 2;
+    const APPOINTMENTS_PATH = '/app/termine';
+    const APPOINTMENTS_API = '/api/v1/app/appointments';
+    const APPOINTMENT_FILTERS = {
+        today: 'Heute',
+        upcoming: 'Kommende Termine',
+        past: 'Vergangene und abgesagte Termine'
+    };
     const currentRoute = window.location.pathname || '/app';
     const root = document.getElementById('appRoot');
     const bootstrap = window.__APP_BOOTSTRAP__ || {};
@@ -108,6 +115,7 @@
         vacationDetailsOpen: false,
         vacationPreview: null,
         vacationForm: { date_from: '', date_to: '', employee_note: '' },
+        appointmentView: emptyAppointmentView(),
         installPromptAvailable: false,
         fileSelectionGuardUntil: 0,
         sessionExpiredHandled: false,
@@ -129,6 +137,7 @@
     let revalidateTimer = null;
     let projectSearchSelectionTimer = null;
     let deferredInstallPrompt = null;
+    let appointmentLoginTarget = null;
 
     function getStoredThemeMode() {
         try {
@@ -518,6 +527,7 @@
         state.vacationDetailsOpen = false;
         state.vacationPreview = null;
         state.vacationForm = { date_from: '', date_to: '', employee_note: '' };
+        state.appointmentView = emptyAppointmentView();
     }
 
     function currentTimesheetFilterLabel() {
@@ -703,6 +713,8 @@
             return;
         }
 
+        const selection = appointmentSelection();
+        appointmentLoginTarget = selection ? appointmentUrl(selection) : null;
         const previousTodayCacheKey = todayCacheKey();
         const previousUserPart = currentSessionUserCachePart();
         captureProjectMaterialDraft();
@@ -797,6 +809,7 @@
         if (!response.ok) {
             const error = new Error(payload.message || payload.error || 'Bitte erneut versuchen.');
             error.httpStatus = response.status;
+            error.code = payload.code;
             throw error;
         }
 
@@ -1204,6 +1217,7 @@
             { href: '/app/zeiten', label: 'Zeiten' },
             { href: '/app/historie', label: 'Historie' },
             { href: '/app/projektwahl', label: 'Projekt' },
+            { href: APPOINTMENTS_PATH, label: 'Termine' },
             { href: '/app/urlaub', label: 'Urlaub' },
             { href: '/app/personal', label: 'Personal' },
             { href: '/app/profil', label: 'Profil' }
@@ -3447,6 +3461,130 @@
         );
     }
 
+    function emptyAppointmentView(key = null) {
+        return { key, loading: false, loaded: false, confirming: false, items: [], detail: null, csrfToken: '', hasMore: false, error: '', notice: '' };
+    }
+
+    function positiveAppointmentNumber(value) {
+        return /^[1-9]\d{0,9}$/.test(value || '') && Number(value) <= 4294967295 ? Number(value) : null;
+    }
+
+    function appointmentSelection() {
+        if (state.route !== APPOINTMENTS_PATH) return null;
+
+        const query = new URLSearchParams(window.location.search);
+        const requestedFilter = query.get('filter');
+        const filter = Object.hasOwn(APPOINTMENT_FILTERS, requestedFilter) ? requestedFilter : 'upcoming';
+        const page = positiveAppointmentNumber(query.get('page')) || 1;
+        const ids = query.getAll('id');
+        const id = ids.length === 1 ? positiveAppointmentNumber(ids[0]) : null;
+        const invalid = ids.length > 0 && id === null;
+        const key = invalid ? 'invalid' : (id === null ? 'list:' + filter + ':' + page : 'detail:' + id);
+
+        return { filter, page, id, invalid, key };
+    }
+
+    function appointmentUrl(selection) {
+        const query = new URLSearchParams();
+        if (selection.id) query.set('id', String(selection.id));
+        if (selection.filter !== 'upcoming') query.set('filter', selection.filter);
+        if (selection.page > 1) query.set('page', String(selection.page));
+        const parameters = query.toString();
+        return APPOINTMENTS_PATH + (parameters ? '?' + parameters : '');
+    }
+
+    function reconcileAppointmentView() {
+        const key = appointmentSelection()?.key ?? null;
+        if (key !== state.appointmentView.key) state.appointmentView = emptyAppointmentView(key);
+    }
+
+    function forgetAppointmentData() {
+        const selection = appointmentSelection();
+        if (!selection) return;
+
+        state.appointmentView = emptyAppointmentView(selection.key);
+        render();
+    }
+
+    function appointmentDateTime(value, includeDate = true) {
+        const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})$/.exec(value || '');
+        return match ? '<time datetime="' + match[0] + '">' + (includeDate ? formatDate(match[1]) + ', ' : '') + match[2] + ' Uhr</time>' : '—';
+    }
+
+    function appointmentCard(item, selection, detail) {
+        const labels = { planned: 'Geplant', completed: 'Erledigt', cancelled: 'Abgesagt' };
+        const status = Object.hasOwn(labels, item.status) ? labels[item.status] : 'Status unbekannt';
+        const tone = item.status === 'cancelled' ? 'danger' : (item.status === 'completed' ? 'ok' : 'warn');
+        const sameDay = String(item.starts_at || '').slice(0, 10) === String(item.ends_at || '').slice(0, 10);
+        const project = [item.project_number, item.project_name].filter(Boolean).join(' – ');
+        const acknowledged = item.acknowledged === true;
+        const confirmation = acknowledged
+            ? '<p role="status"><span class="app-badge ok">Bestätigt</span></p>'
+            : (item.acknowledged_at_utc ? '<p class="muted">Der aktuelle Terminstand ist noch nicht bestätigt.</p>' : '');
+        const data = state.appointmentView;
+        const action = detail
+            ? (!acknowledged && data.csrfToken && Number.isSafeInteger(item.version) && item.version > 0
+                ? '<button type="button" data-appointment-acknowledge' + (data.confirming || data.loading ? ' disabled' : '') + '>'
+                    + (data.confirming ? 'Bestätigung wird gespeichert …' : 'Termin zur Kenntnis genommen') + '</button>'
+                : '')
+            : '<a class="app-button app-button-secondary app-appointment-link" href="'
+                + escapeHtml(appointmentUrl({ ...selection, id: item.id })) + '" aria-label="Termin öffnen: ' + escapeHtml(item.title)
+                + '" data-app-link="1">Termin öffnen</a>';
+        const facts = '<dl class="app-appointment-facts">'
+            + (project ? '<div><dt>Projekt</dt><dd>' + escapeHtml(project) + '</dd></div>' : '')
+            + (item.location ? '<div><dt>Einsatzort</dt><dd>' + escapeHtml(item.location) + '</dd></div>' : '')
+            + (item.timezone ? '<div><dt>Zeitzone</dt><dd>' + escapeHtml(item.timezone) + '</dd></div>' : '') + '</dl>';
+        const description = item.description ? '<p class="app-appointment-description">' + escapeHtml(item.description) + '</p>' : '';
+
+        return '<article class="app-card app-grid app-appointment-card"' + (detail ? ' data-app-appointment-detail' : '') + '>'
+            + '<header><h2>' + escapeHtml(item.title) + '</h2><span class="app-badge ' + tone + '">' + status + '</span></header>'
+            + '<p>' + appointmentDateTime(item.starts_at) + ' – ' + appointmentDateTime(item.ends_at, !sameDay) + '</p>'
+            + facts + description + confirmation + action + '</article>';
+    }
+
+    function appointmentsView() {
+        const selection = appointmentSelection();
+        const view = state.appointmentView;
+        const detail = selection.id !== null || selection.invalid;
+        const controls = detail
+            ? '<a class="app-button app-button-secondary app-appointment-link" href="' + escapeHtml(appointmentUrl({ ...selection, id: null }))
+                + '" data-app-link="1">Zur Terminliste</a>'
+            : '<nav class="app-inline-actions app-appointment-filters" aria-label="Termine filtern">'
+                + Object.entries(APPOINTMENT_FILTERS).map(([key, label]) => '<a class="app-button app-appointment-link'
+                    + (key === selection.filter ? '' : ' app-button-secondary') + '" href="'
+                    + escapeHtml(appointmentUrl({ filter: key, page: 1 })) + '"'
+                    + (key === selection.filter ? ' aria-current="page"' : '') + ' data-app-link="1">' + label + '</a>').join('') + '</nav>';
+        const heading = '<section class="app-card app-grid"><h1>Meine Termine</h1>' + controls + '</section>';
+        if (!state.online) {
+            return shell(heading + '<p class="app-empty" role="status">Termine sind offline nicht verfügbar. Bitte stellen Sie eine Internetverbindung her.</p>');
+        }
+
+        const notice = view.notice ? '<p class="app-empty" role="status">' + escapeHtml(view.notice) + '</p>' : '';
+        if (selection.invalid || view.error) {
+            const error = selection.invalid ? 'Dieser Termin ist nicht verfügbar.' : view.error;
+            return shell(heading + notice + '<p class="app-empty" role="alert">' + escapeHtml(error) + '</p>');
+        }
+        if (!view.loaded) {
+            return shell(heading + notice + '<p class="app-empty" role="status">Termine werden geladen …</p>');
+        }
+        if (detail) {
+            return shell(heading + notice + appointmentCard(view.detail, selection, true));
+        }
+
+        const cards = view.items.length === 0
+            ? '<p class="app-empty">Für diesen Zeitraum sind keine Termine vorhanden.</p>'
+            : view.items.map(item => appointmentCard(item, selection, false)).join('');
+        const pageLink = (page, label) => '<a class="app-button app-button-secondary app-appointment-link" href="'
+            + escapeHtml(appointmentUrl({ ...selection, page })) + '" data-app-link="1">' + label + '</a>';
+        const pager = selection.page > 1 || view.hasMore
+            ? '<nav class="app-inline-actions app-appointment-filters" aria-label="Terminlistenseiten">'
+                + (selection.page > 1 ? pageLink(selection.page - 1, 'Vorherige Seite') : '')
+                + (view.hasMore ? pageLink(selection.page + 1, 'Nächste Seite') : '') + '</nav>'
+            : '';
+
+        return shell(heading + notice + cards + pager);
+    }
+
     function projectDisplayName(projectId) {
         if (projectId === null) return 'Nicht zugeordnet';
         const project = projectById(projectId);
@@ -4428,6 +4566,8 @@
             html = projectView();
         } else if (routeName() === '/urlaub') {
             html = vacationView();
+        } else if (state.route === APPOINTMENTS_PATH) {
+            html = appointmentsView();
         } else if (routeName() === '/personal') {
             html = personalView();
         } else if (routeName() === '/profil') {
@@ -4652,6 +4792,9 @@
                     return;
                 }
 
+                const selection = appointmentSelection();
+                const destination = appointmentLoginTarget || (selection ? appointmentUrl(selection) : '/app/heute');
+                appointmentLoginTarget = null;
                 clearSessionScopedState();
                 state.session = payload.session || { authenticated: true, user: payload.user || null };
                 restoreUserProjectPreferences();
@@ -4670,7 +4813,7 @@
                 }
 
                 showFeedback('success', friendlyMessage(payload.message, 'Login erfolgreich.'));
-                navigate('/app/heute');
+                if (destination !== window.location.pathname + window.location.search) navigate(destination);
             });
         }
 
@@ -4980,6 +5123,7 @@
             bindInteraction(logoutButton, 'click', async function () {
                 const previousTodayCacheKey = todayCacheKey();
                 const previousUserPart = currentSessionUserCachePart();
+                appointmentLoginTarget = null;
                 clearSessionScopedState();
                 state.session = { authenticated: false, user: null };
                 state.sessionExpiredHandled = false;
@@ -5045,6 +5189,9 @@
                 await archiveTimesheetAttachment(Number(button.getAttribute('data-delete-attachment') || '0'));
             });
         });
+
+        const acknowledgeAppointmentButton = document.querySelector('[data-appointment-acknowledge]');
+        if (acknowledgeAppointmentButton) bindInteraction(acknowledgeAppointmentButton, 'click', acknowledgeAppointment);
 
         document.querySelectorAll('[data-app-link]').forEach((link) => {
             bindInteraction(link, 'click', function (event) {
@@ -5187,8 +5334,9 @@
 
     function navigate(path) {
         state.menuOpen = false;
-        state.route = path;
         window.history.pushState({}, '', path);
+        state.route = window.location.pathname || '/app';
+        reconcileAppointmentView();
         reconcileProjectContexts(false);
         render();
 
@@ -5261,11 +5409,14 @@
         // rather than returning early because another refresh superseded theirs.
         const route = routeName();
         const projectId = route === '/projektwahl' ? viewedProjectId() : null;
+        reconcileAppointmentView();
+        const appointmentView = state.route === APPOINTMENTS_PATH ? state.appointmentView : null;
         if (activeOnlineDataLoad && isCurrentSessionContext(activeOnlineDataLoad.context)
-            && activeOnlineDataLoad.route === route && activeOnlineDataLoad.projectId === projectId) {
+            && activeOnlineDataLoad.route === route && activeOnlineDataLoad.projectId === projectId
+            && activeOnlineDataLoad.appointmentView === appointmentView) {
             return activeOnlineDataLoad.promise;
         }
-        const entry = { context: sessionContext(), route, projectId, promise: null };
+        const entry = { context: sessionContext(), route, projectId, appointmentView, promise: null };
         entry.promise = performOnlineDataLoad(force).then(function (result) {
             if (isCurrentSessionContext(entry.context) && activeOnlineDataLoad && activeOnlineDataLoad !== entry) {
                 return activeOnlineDataLoad.promise;
@@ -5295,6 +5446,8 @@
             render();
             return;
         }
+        // Appointment reads are independent of the session and day refresh awaited by time sync.
+        if (state.route === APPOINTMENTS_PATH) void loadAppointments();
 
         try {
             const [dayResult, companyResult, pushResult] = await Promise.allSettled([
@@ -5662,6 +5815,105 @@
         } finally {
             state.vacationLoading = false;
             render();
+        }
+    }
+
+    function isCurrentAppointmentView(view, context) {
+        return state.appointmentView === view && state.session.authenticated && isCurrentSessionContext(context)
+            && state.route === APPOINTMENTS_PATH && view.key === appointmentSelection().key
+            && state.online && navigator.onLine && document.visibilityState === 'visible';
+    }
+
+    function appointmentUnavailable(view, message) {
+        view.items = [];
+        view.detail = null;
+        view.csrfToken = '';
+        view.loaded = false;
+        view.error = message;
+    }
+
+    async function loadAppointments() {
+        const view = state.appointmentView;
+        const context = sessionContext();
+        if (!isCurrentAppointmentView(view, context) || view.loading || view.confirming) return;
+
+        const selection = appointmentSelection();
+        if (selection.invalid) return;
+        const path = selection.id === null
+            ? APPOINTMENTS_API + '?' + new URLSearchParams({ filter: selection.filter, page: String(selection.page) })
+            : APPOINTMENTS_API + '/' + selection.id;
+
+        view.loading = true;
+        view.error = '';
+        if (!view.loaded) render();
+        try {
+            const payload = await apiJson(path, { cache: 'no-store' });
+            if (!isCurrentAppointmentView(view, context)) return;
+            if (selection.id === null && Array.isArray(payload.data)) {
+                view.items = payload.data.filter(item => item && Number.isSafeInteger(item.id) && item.id > 0);
+                view.hasMore = payload.has_more === true;
+            } else if (selection.id !== null && payload.data?.id === selection.id) {
+                view.detail = payload.data;
+                view.csrfToken = typeof payload.csrf_token === 'string' ? payload.csrf_token : '';
+            } else {
+                throw new Error('Unerwartete Terminantwort.');
+            }
+            view.loaded = true;
+        } catch (error) {
+            if (isCurrentAppointmentView(view, context) && !isSessionExpiredError(error)) {
+                appointmentUnavailable(view, [403, 404].includes(error.httpStatus)
+                    ? 'Dieser Terminbereich ist nicht verfügbar.'
+                    : 'Termine konnten nicht geladen werden. Bitte versuchen Sie es erneut.');
+            }
+        } finally {
+            if (isCurrentAppointmentView(view, context)) {
+                view.loading = false;
+                render();
+            }
+        }
+    }
+
+    async function acknowledgeAppointment() {
+        const view = state.appointmentView;
+        const context = sessionContext();
+        const item = view.detail;
+        if (!isCurrentAppointmentView(view, context) || !item || item.acknowledged || !view.csrfToken
+            || view.loading || view.confirming || !Number.isSafeInteger(item.version) || item.version < 1) return;
+
+        view.confirming = true;
+        view.notice = '';
+        render();
+        try {
+            const response = await apiJson(APPOINTMENTS_API + '/' + item.id + '/acknowledge', {
+                method: 'POST',
+                cache: 'no-store',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ version: item.version, csrf_token: view.csrfToken })
+            });
+            if (!isCurrentAppointmentView(view, context)) return;
+            if (response.data?.id !== item.id || response.data.acknowledged !== true) {
+                throw new Error('Unerwartete Terminantwort.');
+            }
+            view.detail = response.data;
+        } catch (error) {
+            if (!isCurrentAppointmentView(view, context) || isSessionExpiredError(error)) return;
+            if (error.httpStatus === 409 || error.code === 'csrf_invalid') {
+                appointmentUnavailable(view, '');
+                view.notice = error.httpStatus === 409
+                    ? 'Der Termin wurde geändert. Bitte prüfen Sie den aktuellen Stand und bestätigen Sie erneut.'
+                    : 'Die Bestätigung muss erneut ausgelöst werden. Bitte prüfen Sie den aktuellen Stand.';
+                view.confirming = false;
+                await loadAppointments();
+            } else if ([403, 404].includes(error.httpStatus)) {
+                appointmentUnavailable(view, 'Dieser Terminbereich ist nicht verfügbar.');
+            } else {
+                view.notice = 'Die Bestätigung konnte nicht gespeichert werden. Bitte versuchen Sie es erneut.';
+            }
+        } finally {
+            if (isCurrentAppointmentView(view, context)) {
+                view.confirming = false;
+                render();
+            }
         }
     }
 
@@ -8106,11 +8358,13 @@
 
     window.addEventListener('offline', function () {
         state.online = false;
-        render();
+        if (state.route === APPOINTMENTS_PATH) forgetAppointmentData();
+        else render();
     });
 
     window.addEventListener('popstate', function () {
         state.route = window.location.pathname || '/app';
+        reconcileAppointmentView();
         reconcileProjectContexts(false);
         render();
 
@@ -8152,17 +8406,22 @@
         }
     });
 
+    window.addEventListener('pagehide', forgetAppointmentData);
+
     window.addEventListener('pageshow', function (event) {
         if (event.persisted) scheduleRevalidate();
     });
 
     window.addEventListener('focus', function () {
+        forgetAppointmentData();
         scheduleRevalidate();
     });
 
     document.addEventListener('visibilitychange', function () {
         if (document.visibilityState === 'visible') {
             scheduleRevalidate();
+        } else {
+            forgetAppointmentData();
         }
     });
 

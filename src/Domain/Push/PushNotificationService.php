@@ -30,6 +30,8 @@ final class PushNotificationService implements PushSender
         $title = (string) ($message['title'] ?? 'Zeiterfassung');
         $body = (string) ($message['body'] ?? '');
         $notificationType = (string) ($message['type'] ?? 'push');
+        $appointmentDispatch = $notificationType === 'appointment_dispatch';
+        $redactProviderError = ($message['redact_provider_error'] ?? false) === true;
         $payload = [
             'title' => $title,
             'body' => $body,
@@ -44,6 +46,16 @@ final class PushNotificationService implements PushSender
             return ['ok' => false, 'not_configured' => true, 'definitive_not_accepted' => true, 'retryable' => false, 'message' => 'VAPID ist nicht vollstaendig konfiguriert.'];
         }
 
+        $endpoint = (string) ($subscriptionRow['endpoint'] ?? '');
+        $transport = $appointmentDispatch ? PublicPushEndpoint::transport($endpoint) : [];
+        if ($transport === null) {
+            $reason = 'Der Push-Endpunkt ist nicht als öffentlicher HTTPS-Dienst erreichbar.';
+            $this->subscriptionService->markFailure($subscriptionId, $reason);
+            $this->log($userId, $subscriptionId, $notificationType, $workDate, $dedupeKey, $title, $body, $payload, 'error', $reason);
+
+            return ['ok' => false, 'message' => $reason, 'definitive_not_accepted' => true, 'retryable' => false];
+        }
+
         try {
             $webPush = new WebPush([
                 'VAPID' => [
@@ -51,9 +63,9 @@ final class PushNotificationService implements PushSender
                     'publicKey' => $this->settingsService->vapidPublicKey(),
                     'privateKey' => $this->settingsService->vapidPrivateKey(),
                 ],
-            ]);
+            ], clientOptions: $transport);
             $subscription = Subscription::create([
-                'endpoint' => (string) ($subscriptionRow['endpoint'] ?? ''),
+                'endpoint' => $endpoint,
                 'publicKey' => (string) ($subscriptionRow['public_key'] ?? ''),
                 'authToken' => (string) ($subscriptionRow['auth_token'] ?? ''),
                 'contentEncoding' => (string) ($subscriptionRow['content_encoding'] ?? 'aes128gcm'),
@@ -63,22 +75,25 @@ final class PushNotificationService implements PushSender
                 json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)
             );
 
-            if ($report->isSuccess()) {
+            $httpStatus = $report->getResponse()?->getStatusCode();
+            if ($report->isSuccess() && (!$appointmentDispatch || ($httpStatus >= 200 && $httpStatus < 300))) {
                 $this->subscriptionService->markSuccess($subscriptionId);
                 $this->log($userId, $subscriptionId, $notificationType, $workDate, $dedupeKey, $title, $body, $payload, 'sent');
 
                 return ['ok' => true, 'message' => 'Push-Benachrichtigung wurde gesendet.'];
             }
 
-            $reason = $report->getReason() ?: 'Push-Versand fehlgeschlagen.';
+            $rejected = ($appointmentDispatch && $httpStatus >= 300 && $httpStatus < 500)
+                || in_array($httpStatus, [400, 401, 403, 404, 405, 406, 409, 410, 413, 415, 422, 429], true);
+            $reason = $redactProviderError
+                ? ($rejected ? 'Der Push-Dienst hat die Nachricht abgelehnt.' : 'Die Annahme durch den Push-Dienst ist unklar.')
+                : ($report->getReason() ?: 'Push-Versand fehlgeschlagen.');
             $this->subscriptionService->markFailure($subscriptionId, $reason, $report->isSubscriptionExpired());
             $this->log($userId, $subscriptionId, $notificationType, $workDate, $dedupeKey, $title, $body, $payload, 'error', $reason);
 
-            $httpStatus = $report->getResponse()?->getStatusCode();
-            $rejected = in_array($httpStatus, [400, 401, 403, 404, 405, 406, 409, 410, 413, 415, 422, 429], true);
             return ['ok' => false, 'message' => $reason, 'definitive_not_accepted' => $rejected, 'retryable' => $httpStatus === 429];
         } catch (Throwable $throwable) {
-            $messageText = $throwable->getMessage();
+            $messageText = $redactProviderError ? 'Die Annahme durch den Push-Dienst ist unklar.' : $throwable->getMessage();
             $this->subscriptionService->markFailure($subscriptionId, $messageText);
             $this->log($userId, $subscriptionId, $notificationType, $workDate, $dedupeKey, $title, $body, $payload, 'error', $messageText);
 

@@ -14,10 +14,16 @@ use RuntimeException;
 final class AppointmentService
 {
     private const PER_PAGE = 25;
+    private const OWN_PER_PAGE = 50;
     private const STATUSES = ['planned', 'completed', 'cancelled'];
     private const COLUMNS = 'a.id, a.title, a.description, a.starts_at_utc, a.ends_at_utc, a.timezone, a.project_id,
         a.location, a.status, a.version, a.archived_at, p.name AS project_name, p.project_number';
     private const FROM = ' FROM appointments a LEFT JOIN projects p ON p.id = a.project_id';
+    private const OWN_SELECT = 'SELECT a.id, a.title, a.description, a.starts_at_utc, a.ends_at_utc, a.location,
+        a.status, a.version, p.name AS project_name, p.project_number, ap.acknowledged_at_utc, ap.acknowledged_version
+        FROM appointment_participants ap JOIN appointments a ON a.id = ap.appointment_id
+        LEFT JOIN projects p ON p.id = a.project_id
+        WHERE ap.user_id = :own_user AND a.archived_at IS NULL';
 
     private readonly AppointmentTime $time;
 
@@ -36,7 +42,7 @@ final class AppointmentService
         $params = [];
         $conditions = ['a.archived_at IS NULL', $this->projectScope($actor, 'a.project_id', $params)];
         if (($filters['period'] ?? 'upcoming') === 'upcoming') {
-            $conditions[] = 'a.starts_at_utc >= :upcoming';
+            $conditions[] = 'a.ends_at_utc > :upcoming';
             $params['upcoming'] = $this->time->formatUtc(new DateTimeImmutable('now', $this->time->timezone));
         } else {
             [$from, $until] = $this->filterDates($filters);
@@ -95,6 +101,101 @@ final class AppointmentService
         );
 
         return $row === null ? null : $this->hydrate([$row])[0];
+    }
+
+    /** @return array{items: list<array>, page: int, has_more: bool} */
+    public function listOwn(array $actor, string $filter, int $page = 1): array
+    {
+        $params = ['own_user' => $this->activeActorId($actor)];
+        $now = new DateTimeImmutable('now', $this->time->timezone);
+        $condition = match ($filter) {
+            'today' => $this->overlap($now->setTime(0, 0), $now->setTime(0, 0)->modify('+1 day'), $params),
+            'upcoming' => 'a.ends_at_utc > :now AND a.status = "planned"',
+            'past' => '(a.ends_at_utc <= :now OR a.status IN ("completed", "cancelled"))',
+            default => throw new InvalidArgumentException('Bitte wählen Sie einen gültigen Terminfilter.'),
+        };
+        if ($filter !== 'today') {
+            $params['now'] = $this->time->formatUtc($now);
+        }
+        $page = $this->positiveId($page, 'Seite');
+        $limit = self::OWN_PER_PAGE + 1;
+        $offset = ($page - 1) * self::OWN_PER_PAGE;
+        $direction = $filter === 'past' ? 'DESC' : 'ASC';
+        $rows = $this->connection->fetchAll(
+            self::OWN_SELECT . " AND {$condition} ORDER BY a.starts_at_utc {$direction}, a.id {$direction} LIMIT {$limit} OFFSET {$offset}",
+            $params
+        );
+
+        return [
+            'items' => array_map($this->hydrateOwn(...), array_slice($rows, 0, self::OWN_PER_PAGE)),
+            'page' => $page,
+            'has_more' => count($rows) > self::OWN_PER_PAGE,
+        ];
+    }
+
+    public function findOwn(array $actor, int $id): ?array
+    {
+        $row = $this->connection->fetchOne(self::OWN_SELECT . ' AND a.id = :id', [
+            'own_user' => $this->activeActorId($actor), 'id' => $id,
+        ]);
+
+        return $row === null ? null : $this->hydrateOwn($row);
+    }
+
+    public function acknowledge(array $actor, int $id, int $version): array
+    {
+        $userId = $this->activeActorId($actor);
+        $this->positiveId($version, 'Terminversion');
+
+        return $this->connection->transaction(function () use ($actor, $userId, $id, $version): array {
+            // Lock the appointment first, as in admin update and archive.
+            $currentVersion = $this->connection->fetchColumn(
+                'SELECT a.version FROM appointments a WHERE a.id = :id AND a.archived_at IS NULL
+                 AND EXISTS (SELECT 1 FROM appointment_participants ap WHERE ap.appointment_id = a.id AND ap.user_id = :user)
+                 FOR UPDATE',
+                ['id' => $id, 'user' => $userId]
+            );
+            if (!$currentVersion) {
+                throw $this->notFound();
+            }
+            $participant = $this->connection->fetchOne(
+                'SELECT id, acknowledged_version FROM appointment_participants WHERE appointment_id = :id AND user_id = :user FOR UPDATE',
+                ['id' => $id, 'user' => $userId]
+            );
+            if ($participant === null) {
+                throw $this->notFound();
+            }
+            if ((int) $currentVersion !== $version) {
+                throw new AppointmentConflictException('Der Termin wurde geändert. Bitte prüfen Sie den aktuellen Stand.');
+            }
+            if ((int) $participant['acknowledged_version'] !== $version) {
+                $this->write(
+                    'UPDATE appointment_participants SET acknowledged_at_utc = UTC_TIMESTAMP(), acknowledged_version = :version WHERE id = :id',
+                    ['version' => $version, 'id' => (int) $participant['id']]
+                );
+            }
+
+            return $this->findOwn($actor, $id) ?? throw $this->notFound();
+        });
+    }
+
+    public function acknowledgements(array $actor, int $id): array
+    {
+        $this->requireRight($actor);
+        $params = ['id' => $id];
+        $scope = $this->projectScope($actor, 'a.project_id', $params);
+        $rows = $this->connection->fetchAll(
+            "SELECT u.id, CONCAT_WS(' ', u.first_name, u.last_name) AS name, a.version,
+                ap.acknowledged_at_utc, ap.acknowledged_version
+             FROM appointments a JOIN appointment_participants ap ON ap.appointment_id = a.id
+             JOIN users u ON u.id = ap.user_id WHERE a.id = :id AND " . $scope . ' ORDER BY u.last_name, u.first_name, u.id',
+            $params
+        );
+
+        return array_map(function (array $row): array {
+            $state = $this->acknowledgementState($row);
+            return ['id' => (int) $row['id'], 'name' => $row['name'], ...$state];
+        }, $rows);
     }
 
     /** @return array{projects: list<array>, participants: list<array>} */
@@ -174,15 +275,23 @@ final class AppointmentService
             $current = $this->lockedAppointment($actor, $id, $version);
             $existing = $this->participants([$id])[$id] ?? [];
             $current['participant_ids'] = array_column($existing, 'id');
+            sort($current['participant_ids'], SORT_NUMERIC);
+            $current['project_id'] = $current['project_id'] === null ? null : (int) $current['project_id'];
             $values = $this->values($data, $current);
             if ($current['status'] !== 'planned' && $values['status'] !== $current['status']) {
                 throw new InvalidArgumentException('Ein erledigter oder abgesagter Termin kann seinen Status nicht mehr wechseln.');
             }
-            if ($values['project_id'] !== ($current['project_id'] === null ? null : (int) $current['project_id'])) {
+            if ($values['project_id'] !== $current['project_id']) {
                 $this->assertNewProject($actor, $values['project_id']);
             }
             $participants = $values['participant_ids'];
             unset($values['participant_ids']);
+            $originalFields = array_intersect_key($current, $values);
+            ksort($originalFields);
+            ksort($values);
+            if ($originalFields === $values && $participants === $current['participant_ids']) {
+                return;
+            }
             $this->assertNewParticipants(array_values(array_diff($participants, $current['participant_ids'])));
 
             $this->write(
@@ -446,12 +555,21 @@ final class AppointmentService
 
     private function requireRight(array $actor, bool $manage = false): int
     {
-        $id = (int) ($actor['id'] ?? 0);
+        $id = $this->activeActorId($actor);
         $permissions = is_array($actor['permissions'] ?? null) ? $actor['permissions'] : [];
         $global = in_array('*', $permissions, true);
-        if ($id < 1 || (int) ($actor['is_deleted'] ?? 0) !== 0 || ($actor['employment_status'] ?? 'active') !== 'active'
-            || (!$global && (!in_array('appointments.view', $permissions, true)
-                || ($manage && !in_array('appointments.manage', $permissions, true))))) {
+        if (!$global && (!in_array('appointments.view', $permissions, true)
+            || ($manage && !in_array('appointments.manage', $permissions, true)))) {
+            throw new AppointmentAccessDeniedException('Für diese Aktion fehlt die Terminberechtigung.');
+        }
+
+        return $id;
+    }
+
+    private function activeActorId(array $actor): int
+    {
+        $id = (int) ($actor['id'] ?? 0);
+        if ($id < 1 || (int) ($actor['is_deleted'] ?? 0) !== 0 || ($actor['employment_status'] ?? 'active') !== 'active') {
             throw new AppointmentAccessDeniedException('Für diese Aktion fehlt die Terminberechtigung.');
         }
 
@@ -495,6 +613,28 @@ final class AppointmentService
         unset($row);
 
         return $rows;
+    }
+
+    private function hydrateOwn(array $row): array
+    {
+        $row['id'] = (int) $row['id'];
+        $row['version'] = (int) $row['version'];
+        $row['starts_at'] = $this->time->fromUtc($row['starts_at_utc']);
+        $row['ends_at'] = $this->time->fromUtc($row['ends_at_utc']);
+        $row['timezone'] = $this->time->timezone->getName();
+
+        return [...$row, ...$this->acknowledgementState($row)];
+    }
+
+    private function acknowledgementState(array $row): array
+    {
+        $version = $row['acknowledged_version'] === null ? null : (int) $row['acknowledged_version'];
+
+        return [
+            'acknowledged' => $version === (int) $row['version'] && $row['acknowledged_at_utc'] !== null,
+            'acknowledged_at_utc' => $row['acknowledged_at_utc'],
+            'acknowledged_version' => $version,
+        ];
     }
 
     private function hydrateOption(array $row): array
