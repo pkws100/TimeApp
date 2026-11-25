@@ -20,7 +20,8 @@ final class AppointmentService
         a.location, a.status, a.version, a.archived_at, p.name AS project_name, p.project_number';
     private const FROM = ' FROM appointments a LEFT JOIN projects p ON p.id = a.project_id';
     private const OWN_SELECT = 'SELECT a.id, a.title, a.description, a.starts_at_utc, a.ends_at_utc, a.location,
-        a.status, a.version, p.name AS project_name, p.project_number, ap.acknowledged_at_utc, ap.acknowledged_version
+        a.status, a.version, a.updated_at AS updated_at_utc, p.name AS project_name, p.project_number,
+        ap.acknowledged_at_utc, ap.acknowledged_version
         FROM appointment_participants ap JOIN appointments a ON a.id = ap.appointment_id
         LEFT JOIN projects p ON p.id = a.project_id
         WHERE ap.user_id = :own_user AND a.archived_at IS NULL';

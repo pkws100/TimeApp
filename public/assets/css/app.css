@@ -1761,6 +1761,34 @@ html[data-theme="dark"] .app-attachment-icon {
     flex: 1 1 auto;
 }
 
+.app-appointment-calendar {
+    border-top: 1px solid var(--app-line);
+    padding-top: 0.9rem;
+}
+
+.app-appointment-calendar h3 {
+    margin: 0;
+}
+
+.app-appointment-calendar .app-appointment-link {
+    flex: 1 1 12rem;
+}
+
+.app-appointment-reminders {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-height: 44px;
+    cursor: pointer;
+}
+
+.app-appointment-reminders input {
+    flex: 0 0 auto;
+    width: 1.2rem;
+    height: 1.2rem;
+    margin: 0;
+}
+
 @media (min-width: 768px) {
     .app-topbar-main {
         gap: 1rem;

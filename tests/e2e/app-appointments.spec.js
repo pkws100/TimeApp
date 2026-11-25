@@ -10,6 +10,9 @@ const shell = execFileSync('php', ['-r',
 ], { cwd: root, encoding: 'utf8' });
 const appointmentPath = '/app/termine';
 const api = '/api/v1/app/appointments';
+const calendarRegion = 'In meinen Kalender übernehmen';
+const googleTarget = 'https://calendar.google.com/calendar/r/eventedit?text=Testtermin&ctz=Europe%2FBerlin';
+const calendarFile = 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n';
 
 test.use({ serviceWorkers: 'block' });
 
@@ -24,20 +27,24 @@ function item(id, title, status = 'planned') {
     id, title, status, description: 'Fiktive Einsatzbeschreibung',
     starts_at: '2026-11-27T10:00', ends_at: '2026-11-27T11:30', timezone: 'Europe/Berlin',
     project_number: 'TEST-01', project_name: 'Testprojekt', location: 'Werkhalle', version: 1,
-    acknowledged: false, acknowledged_at_utc: null,
+    acknowledged: false, acknowledged_at_utc: null, google_calendar_url: status === 'cancelled' ? null : googleTarget,
   };
 }
 
 async function appointmentApp(page, initiallySignedIn = true) {
   const privateTitle = '<b data-appointment-xss>Eigener Termin</b>';
   const records = [item(21, privateTitle), item(22, 'Abgesagter Einsatz', 'cancelled')];
-  const state = { records, privateTitle, signedIn: initiallySignedIn, userId: 7, reads: [], writes: [], holdDetail: null, beforeWrite: null, storageFetches: [], timeActions: [] };
+  const state = {
+    records, privateTitle, signedIn: initiallySignedIn, userId: 7, reads: [], writes: [], holdDetail: null,
+    beforeWrite: null, storageFetches: [], timeActions: [], calendars: [], holdCalendar: null,
+  };
   const user = () => ({ id: state.userId, display_name: 'Testmitarbeiter ' + state.userId, permissions: ['timesheets.create'] });
   const session = () => ({ authenticated: state.signedIn, user: state.signedIn ? user() : null, bootstrap_required: false });
 
   await page.route('**/*', async route => {
     const request = route.request();
     const url = new URL(request.url());
+    if (!['http:', 'https:'].includes(url.protocol)) return route.continue();
     const pathname = url.pathname;
     const json = (value, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) });
     if (pathname === '/assets/js/app.js' || pathname === '/assets/css/app.css') {
@@ -70,13 +77,29 @@ async function appointmentApp(page, initiallySignedIn = true) {
       const scoped = state.userId === 7 ? records : [item(31, 'Termin des neuen Kontos')];
       return json({ data: scoped.filter(record => filter === 'past' ? record.status === 'cancelled' : record.status === 'planned'), page, has_more: filter === 'upcoming' && page === 1 });
     }
-    const match = /^\/api\/v1\/app\/appointments\/(\d+)(\/acknowledge)?$/.exec(pathname);
+    const match = /^\/api\/v1\/app\/appointments\/(\d+)(\/acknowledge|\/calendar\.ics)?$/.exec(pathname);
     if (match) {
       const candidate = state.userId === 7
         ? records.find(record => record.id === Number(match[1]))
         : (Number(match[1]) === 31 ? item(31, 'Termin des neuen Kontos') : null);
       if (!candidate) return json({ error: 'Nicht verfügbar' }, 404);
-      if (match[2]) {
+      if (match[2] === '/calendar.ics') {
+        state.calendars.push({ id: candidate.id, expectedId, reminders: url.searchParams.get('reminders') });
+        const hold = state.holdCalendar;
+        state.holdCalendar = null;
+        if (hold) {
+          hold.started.resolve();
+          await hold.continue.promise;
+        }
+        return route.fulfill({
+          contentType: 'text/calendar; charset=utf-8',
+          headers: { 'Content-Disposition': 'attachment; filename="timeapp-termin.ics"' },
+          body: calendarFile,
+        }).catch(error => {
+          if (!hold) throw error;
+        });
+      }
+      if (match[2] === '/acknowledge') {
         const payload = request.postDataJSON();
         state.writes.push({ id: candidate.id, expectedId, payload });
         if (state.beforeWrite) {
@@ -245,6 +268,137 @@ test('time sync on reconnect does not wait for a pending appointment read', asyn
   await expect(page.locator('[data-app-appointment-detail]')).toBeVisible();
 });
 
+test('an assigned appointment offers an explicitly prepared ICS download with optional reminders', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'canShare', { value: () => false });
+    const original = window.fetch;
+    window.calendarFetches = [];
+    window.fetch = (input, options) => {
+      if (String(input).includes('/calendar.ics')) window.calendarFetches.push(options.cache);
+      return original.call(window, input, options);
+    };
+  });
+  const mock = await appointmentApp(page);
+  await page.goto(appointmentPath + '?id=21');
+  const calendar = page.getByRole('region', { name: calendarRegion });
+  const reminders = calendar.getByRole('checkbox', { name: 'Erinnerungen 24 und 2 Stunden vorher' });
+  const downloadLink = calendar.getByRole('link', { name: 'Kalenderdatei öffnen oder herunterladen' });
+  await expect(calendar).toContainText('Dieser Kalendertermin ist eine Kopie. Änderungen oder Absagen in der TimeApp werden möglicherweise nicht automatisch in Ihren Smartphone-Kalender übernommen.');
+  await expect(reminders).not.toBeChecked();
+  expect(mock.calendars).toEqual([]);
+  await reminders.check();
+  await calendar.getByRole('button', { name: 'Smartphone-Kalender / ICS' }).click();
+  await expect(downloadLink).toHaveAttribute('href', /^blob:/);
+  await expect(calendar.getByRole('button', { name: 'Kalenderdatei teilen' })).toHaveCount(0);
+  expect(await page.evaluate(() => window.calendarFetches)).toEqual(['no-store']);
+  const downloadEvent = page.waitForEvent('download');
+  await downloadLink.click();
+  const download = await downloadEvent;
+  expect(download.suggestedFilename()).toBe('timeapp-termin.ics');
+  expect(fs.readFileSync(await download.path(), 'utf8')).toBe(calendarFile);
+  expect(await page.locator('.app-layout').evaluate(node => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
+
+  await page.goto(appointmentPath + '?id=22');
+  await expect(calendar).toBeVisible();
+  await expect(reminders).toHaveCount(0);
+  await expect(calendar.getByRole('button', { name: 'In Google Kalender übernehmen' })).toHaveCount(0);
+  await calendar.getByRole('button', { name: 'Smartphone-Kalender / ICS' }).click();
+  await expect(downloadLink).toBeVisible();
+  expect(mock.calendars).toEqual([
+    { id: 21, expectedId: '7', reminders: '1' },
+    { id: 22, expectedId: '7', reminders: null },
+  ]);
+  expect(mock.writes).toEqual([]);
+});
+
+test('file share and Google handoff require separate explicit actions', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.calendarShares = [];
+    window.calendarHandoffs = [];
+    Object.defineProperty(navigator, 'canShare', {
+      value: ({ files }) => files.length === 1 && files[0].type === 'text/calendar',
+    });
+    Object.defineProperty(navigator, 'share', {
+      value: async ({ files }) => {
+        const activation = navigator.userActivation?.isActive;
+        window.calendarShares.push({ name: files[0].name, content: await files[0].text(), activation });
+      },
+    });
+    const original = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function () {
+      if (this.href.startsWith('https://calendar.google.com/')) {
+        window.calendarHandoffs.push({ href: this.href, rel: this.rel, target: this.target });
+      } else {
+        original.call(this);
+      }
+    };
+  });
+  const mock = await appointmentApp(page);
+  await page.goto(appointmentPath + '?id=21');
+  const calendar = page.getByRole('region', { name: calendarRegion });
+  const google = calendar.getByRole('button', { name: 'In Google Kalender übernehmen' });
+  await expect(google).toHaveAccessibleDescription(/Google erhält Titel, Zeiten mit Zeitzone, den Einsatzort und eine allgemeine Beschreibung/);
+  await expect(calendar.locator('[href*="calendar.google.com"]')).toHaveCount(0);
+  await calendar.getByRole('button', { name: 'Smartphone-Kalender / ICS' }).click();
+  const share = calendar.getByRole('button', { name: 'Kalenderdatei teilen' });
+  await expect(share).toBeVisible();
+  expect(await page.evaluate(() => [window.calendarShares, window.calendarHandoffs])).toEqual([[], []]);
+  await share.click();
+  await expect.poll(() => page.evaluate(() => window.calendarShares)).toEqual([
+    { name: 'timeapp-termin.ics', content: calendarFile, activation: true },
+  ]);
+  expect(await page.evaluate(() => window.calendarHandoffs)).toEqual([]);
+  await google.click();
+  expect(await page.evaluate(() => window.calendarHandoffs)).toEqual([
+    { href: googleTarget, rel: 'noopener noreferrer', target: '_blank' },
+  ]);
+  expect(mock.calendars).toEqual([{ id: 21, expectedId: '7', reminders: null }]);
+  expect(mock.writes).toEqual([]);
+});
+
+test('leaving an appointment cancels a pending calendar file and revokes a prepared link', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.revokedCalendarUrls = [];
+    const original = URL.revokeObjectURL.bind(URL);
+    URL.revokeObjectURL = url => {
+      window.revokedCalendarUrls.push(url);
+      original(url);
+    };
+  });
+  const mock = await appointmentApp(page);
+  await page.goto(appointmentPath + '?id=21');
+  const calendar = page.getByRole('region', { name: calendarRegion });
+  const prepare = calendar.getByRole('button', { name: 'Smartphone-Kalender / ICS' });
+  const download = calendar.getByRole('link', { name: 'Kalenderdatei öffnen oder herunterladen' });
+  const hold = { started: deferred(), continue: deferred() };
+  mock.holdCalendar = hold;
+  try {
+    await prepare.click();
+    await hold.started.promise;
+    await page.getByRole('link', { name: 'Zur Terminliste' }).click();
+  } finally {
+    hold.continue.resolve();
+  }
+  await expect(calendar).toHaveCount(0);
+  await page.getByRole('link', { name: 'Termin öffnen: ' + mock.privateTitle }).click();
+  await expect(prepare).toBeVisible();
+  await expect(download).toHaveCount(0);
+  await prepare.click();
+  await expect(download).toBeVisible();
+  const url = await download.getAttribute('href');
+  await page.getByRole('link', { name: 'Zur Terminliste' }).click();
+  await expect(calendar).toHaveCount(0);
+  expect(await page.evaluate(() => window.revokedCalendarUrls)).toContain(url);
+  expect(await page.evaluate(async blobUrl => {
+    try {
+      return (await fetch(blobUrl)).ok;
+    } catch (error) {
+      return false;
+    }
+  }, url)).toBe(false);
+});
+
 test('service worker opens internal appointment notification links without caching private responses', async () => {
   const code = execFileSync('php', ['-r',
     'require "bootstrap/autoload.php"; $a=new App\\Domain\\Auth\\AuthService(new App\\Infrastructure\\Database\\DatabaseConnection([]),new App\\Domain\\Users\\PermissionMatrix([],[]));'
@@ -284,6 +438,7 @@ test('service worker opens internal appointment notification links without cachi
   expect(calls).toEqual([['notify', target], ['navigate', target], ['focus'], ['navigate', target], ['focus'], ['navigate', '/app'], ['focus']]);
   calls.length = 0;
   handlers.get('fetch')({ request: new Request(origin + api + '/21'), respondWith: () => { throw new Error('private response intercepted'); } });
+  handlers.get('fetch')({ request: new Request(origin + api + '/21/calendar.ics?reminders=1'), respondWith: () => { throw new Error('private calendar file intercepted'); } });
   let offlineResponse;
   handlers.get('fetch')({ request: new Request(origin + target), respondWith: value => { offlineResponse = value; } });
   expect(await offlineResponse).toBe('generic offline shell');

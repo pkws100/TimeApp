@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Domain\Appointments\AppointmentAccessDeniedException;
+use App\Domain\Appointments\AppointmentCalendarExport;
 use App\Domain\Appointments\AppointmentConflictException;
 use App\Domain\Appointments\AppointmentNotFoundException;
 use App\Domain\Appointments\AppointmentService;
@@ -21,6 +22,8 @@ final class AppAppointmentsController
         private readonly AppointmentService $appointments,
         private readonly AuthService $auth,
         private readonly CsrfService $csrf,
+        private readonly string $installationUrl = 'http://localhost',
+        private readonly bool $shareCalendarProject = false,
     ) {
     }
 
@@ -40,13 +43,32 @@ final class AppAppointmentsController
 
     public function show(Request $request, array $params): Response
     {
-        return $this->authorized(function (array $actor) use ($params): Response {
-            $appointment = $this->appointments->findOwn($actor, $this->appointmentId($params));
-            if ($appointment === null) {
-                throw new AppointmentNotFoundException();
+        return $this->authorized(fn (array $actor): Response => $this->json([
+            'ok' => true,
+            'data' => $this->withGoogleCalendarUrl($this->ownAppointment($actor, $params)),
+            'csrf_token' => $this->csrf->token($this->context($actor)),
+        ]));
+    }
+
+    public function calendar(Request $request, array $params): Response
+    {
+        return $this->authorized(function (array $actor) use ($request, $params): Response {
+            $appointment = $this->ownAppointment($actor, $params);
+            $reminders = $request->query('reminders', '0');
+            if (!in_array($reminders, ['0', '1'], true)) {
+                throw new InvalidArgumentException('Die Auswahl für Kalendererinnerungen ist ungültig.');
             }
 
-            return $this->json(['ok' => true, 'data' => $appointment, 'csrf_token' => $this->csrf->token($this->context($actor))]);
+            $calendar = AppointmentCalendarExport::render(
+                $appointment, $this->installationUrl, $this->shareCalendarProject, $reminders === '1',
+            );
+
+            return new Response($calendar, 200, [
+                'Content-Type' => 'text/calendar; charset=utf-8',
+                'Content-Disposition' => 'attachment; filename="timeapp-termin.ics"',
+                'Cache-Control' => 'private, no-store',
+                'X-Content-Type-Options' => 'nosniff',
+            ]);
         });
     }
 
@@ -61,7 +83,9 @@ final class AppAppointmentsController
                 throw new InvalidArgumentException('Die Terminversion ist ungültig.');
             }
 
-            return $this->json(['ok' => true, 'data' => $this->appointments->acknowledge($actor, $this->appointmentId($params), $version)]);
+            $appointment = $this->appointments->acknowledge($actor, $this->appointmentId($params), $version);
+
+            return $this->json(['ok' => true, 'data' => $this->withGoogleCalendarUrl($appointment)]);
         });
     }
 
@@ -89,6 +113,18 @@ final class AppAppointmentsController
     private function appointmentId(array $params): int
     {
         return $this->id($params['id'] ?? null) ?? throw new AppointmentNotFoundException();
+    }
+
+    private function ownAppointment(array $actor, array $params): array
+    {
+        return $this->appointments->findOwn($actor, $this->appointmentId($params)) ?? throw new AppointmentNotFoundException();
+    }
+
+    private function withGoogleCalendarUrl(array $appointment): array
+    {
+        $appointment['google_calendar_url'] = AppointmentCalendarExport::googleUrl($appointment);
+
+        return $appointment;
     }
 
     private function id(mixed $value): ?int

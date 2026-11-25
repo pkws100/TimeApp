@@ -527,7 +527,7 @@
         state.vacationDetailsOpen = false;
         state.vacationPreview = null;
         state.vacationForm = { date_from: '', date_to: '', employee_note: '' };
-        state.appointmentView = emptyAppointmentView();
+        resetAppointmentView();
     }
 
     function currentTimesheetFilterLabel() {
@@ -787,13 +787,13 @@
         }
     }
 
-    async function apiJson(url, options = {}) {
-        const context = sessionContext();
+    function fetchForSession(url, options, context) {
         const headers = new Headers(options.headers);
         if (context.userPart !== 'anonymous') headers.set('X-TimeApp-User-Id', context.userPart);
-        const response = await fetch(url, { ...options, headers });
-        const payload = await parseJsonResponse(response);
+        return fetch(url, { ...options, headers });
+    }
 
+    async function checkApiResponse(response, payload, context) {
         if (!isCurrentSessionContext(context)) {
             throw new SessionExpiredError('Diese Anfrage gehoert zu einer vorherigen Sitzung.');
         }
@@ -812,7 +812,13 @@
             error.code = payload.code;
             throw error;
         }
+    }
 
+    async function apiJson(url, options = {}) {
+        const context = sessionContext();
+        const response = await fetchForSession(url, options, context);
+        const payload = await parseJsonResponse(response);
+        await checkApiResponse(response, payload, context);
         return payload;
     }
 
@@ -3462,7 +3468,23 @@
     }
 
     function emptyAppointmentView(key = null) {
-        return { key, loading: false, loaded: false, confirming: false, items: [], detail: null, csrfToken: '', hasMore: false, error: '', notice: '' };
+        return {
+            key, loading: false, loaded: false, confirming: false, items: [], detail: null,
+            csrfToken: '', hasMore: false, error: '', notice: '', calendarReminders: false,
+            calendarExport: null, calendarError: ''
+        };
+    }
+
+    function clearAppointmentCalendarExport(view) {
+        view.calendarExport?.request?.abort();
+        if (view.calendarExport?.url) URL.revokeObjectURL(view.calendarExport.url);
+        view.calendarExport = null;
+        view.calendarError = '';
+    }
+
+    function resetAppointmentView(key = null) {
+        clearAppointmentCalendarExport(state.appointmentView);
+        state.appointmentView = emptyAppointmentView(key);
     }
 
     function positiveAppointmentNumber(value) {
@@ -3495,14 +3517,14 @@
 
     function reconcileAppointmentView() {
         const key = appointmentSelection()?.key ?? null;
-        if (key !== state.appointmentView.key) state.appointmentView = emptyAppointmentView(key);
+        if (key !== state.appointmentView.key) resetAppointmentView(key);
     }
 
     function forgetAppointmentData() {
         const selection = appointmentSelection();
         if (!selection) return;
 
-        state.appointmentView = emptyAppointmentView(selection.key);
+        resetAppointmentView(selection.key);
         render();
     }
 
@@ -3539,7 +3561,45 @@
         return '<article class="app-card app-grid app-appointment-card"' + (detail ? ' data-app-appointment-detail' : '') + '>'
             + '<header><h2>' + escapeHtml(item.title) + '</h2><span class="app-badge ' + tone + '">' + status + '</span></header>'
             + '<p>' + appointmentDateTime(item.starts_at) + ' – ' + appointmentDateTime(item.ends_at, !sameDay) + '</p>'
-            + facts + description + confirmation + action + '</article>';
+            + facts + description + confirmation + action
+            + (detail ? appointmentCalendarOptions(item, data) : '') + '</article>';
+    }
+
+    function googleCalendarTarget(item) {
+        if (item.status === 'cancelled' || typeof item.google_calendar_url !== 'string') return null;
+        try {
+            const target = new URL(item.google_calendar_url);
+            return target.origin === 'https://calendar.google.com' && target.pathname === '/calendar/r/eventedit'
+                && !target.username && !target.password && !target.hash ? target.href : null;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function appointmentCalendarOptions(item, view) {
+        const file = view.calendarExport;
+        const reminders = item.status === 'planned'
+            ? '<label class="app-appointment-reminders"><input type="checkbox" id="appointmentCalendarReminders"'
+                + (view.calendarReminders ? ' checked' : '') + '> Erinnerungen 24 und 2 Stunden vorher</label>'
+            : '';
+        const fileActions = file?.url
+            ? '<a class="app-button app-button-secondary app-appointment-link" data-appointment-calendar-download href="'
+                + escapeHtml(file.url) + '" download="timeapp-termin.ics" target="_blank" rel="noopener noreferrer">Kalenderdatei öffnen oder herunterladen</a>'
+                + (file.shareData ? '<button class="app-button-secondary" type="button" data-appointment-calendar-share>Kalenderdatei teilen</button>' : '')
+            : '<button class="app-button-secondary" type="button" data-appointment-calendar-prepare'
+                + (file?.request ? ' disabled' : '') + '>'
+                + (file?.request ? 'Kalenderdatei wird vorbereitet …' : 'Smartphone-Kalender / ICS') + '</button>';
+        const google = googleCalendarTarget(item)
+            ? '<p id="appointmentGoogleCalendarNotice" class="muted">Google erhält Titel, Zeiten mit Zeitzone, den Einsatzort und eine allgemeine Beschreibung. Speichern Sie den Termin anschließend in Google Kalender.</p>'
+                + '<button class="app-button-secondary" type="button" data-appointment-google-calendar aria-describedby="appointmentGoogleCalendarNotice">In Google Kalender übernehmen</button>'
+            : '';
+
+        return '<section class="app-grid app-appointment-calendar" aria-labelledby="appointmentCalendarHeading">'
+            + '<h3 id="appointmentCalendarHeading">In meinen Kalender übernehmen</h3>'
+            + '<p class="muted">Dieser Kalendertermin ist eine Kopie. Änderungen oder Absagen in der TimeApp werden möglicherweise nicht automatisch in Ihren Smartphone-Kalender übernommen.</p>'
+            + reminders + '<div class="app-inline-actions">' + fileActions + '</div>'
+            + (view.calendarError ? '<p class="app-empty" role="alert">' + escapeHtml(view.calendarError) + '</p>' : '')
+            + google + '</section>';
     }
 
     function appointmentsView() {
@@ -5192,6 +5252,7 @@
 
         const acknowledgeAppointmentButton = document.querySelector('[data-appointment-acknowledge]');
         if (acknowledgeAppointmentButton) bindInteraction(acknowledgeAppointmentButton, 'click', acknowledgeAppointment);
+        if (state.route === APPOINTMENTS_PATH) bindAppointmentCalendarInteractions();
 
         document.querySelectorAll('[data-app-link]').forEach((link) => {
             bindInteraction(link, 'click', function (event) {
@@ -5824,7 +5885,120 @@
             && state.online && navigator.onLine && document.visibilityState === 'visible';
     }
 
+    function bindAppointmentCalendarInteractions() {
+        const bindings = [
+            ['#appointmentCalendarReminders', 'change', function (event) {
+                const view = state.appointmentView;
+                if (!isCurrentAppointmentView(view, sessionContext()) || view.detail?.status !== 'planned') return;
+                view.calendarReminders = event.currentTarget.checked;
+                clearAppointmentCalendarExport(view);
+                render();
+                root.querySelector('#appointmentCalendarReminders')?.focus({ preventScroll: true });
+            }],
+            ['[data-appointment-calendar-prepare]', 'click', prepareAppointmentCalendarFile],
+            ['[data-appointment-calendar-download]', 'click', function (event) {
+                const view = state.appointmentView;
+                if (!isCurrentAppointmentView(view, sessionContext()) || view.calendarExport?.url !== event.currentTarget.href) {
+                    event.preventDefault();
+                }
+            }],
+            ['[data-appointment-calendar-share]', 'click', shareAppointmentCalendarFile],
+            ['[data-appointment-google-calendar]', 'click', openGoogleCalendar]
+        ];
+        for (const [selector, event, handler] of bindings) {
+            const control = root.querySelector(selector);
+            if (control) bindInteraction(control, event, handler);
+        }
+    }
+
+    function calendarFileShareData(blob) {
+        if (typeof navigator.share !== 'function' || typeof navigator.canShare !== 'function' || typeof File !== 'function') {
+            return null;
+        }
+        try {
+            const data = { files: [new File([blob], 'timeapp-termin.ics', { type: 'text/calendar' })] };
+            return navigator.canShare(data) ? data : null;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    async function prepareAppointmentCalendarFile() {
+        const view = state.appointmentView;
+        const context = sessionContext();
+        const item = view.detail;
+        if (!isCurrentAppointmentView(view, context) || !item || view.calendarExport) return;
+
+        const request = new AbortController();
+        const exportState = { request, url: '', shareData: null };
+        view.calendarExport = exportState;
+        view.calendarError = '';
+        render();
+        const current = () => isCurrentAppointmentView(view, context) && view.calendarExport === exportState;
+        const path = APPOINTMENTS_API + '/' + item.id + '/calendar.ics'
+            + (view.calendarReminders && item.status === 'planned' ? '?reminders=1' : '');
+
+        try {
+            const response = await fetchForSession(path, { cache: 'no-store', redirect: 'error', signal: request.signal }, context);
+            if (!current()) return;
+            if (!response.ok) await checkApiResponse(response, await parseJsonResponse(response), context);
+            if (!/^text\/calendar(?:\s*;|$)/i.test(response.headers.get('Content-Type') || '')) {
+                throw new Error('Unerwartetes Kalenderformat.');
+            }
+
+            const blob = await response.blob();
+            if (!current()) return;
+            if (!blob.size) throw new Error('Leere Kalenderdatei.');
+            exportState.shareData = calendarFileShareData(blob);
+            exportState.url = URL.createObjectURL(blob);
+            exportState.request = null;
+        } catch (error) {
+            if (!current() || isSessionExpiredError(error)) return;
+            if ([403, 404].includes(error.httpStatus)) {
+                appointmentUnavailable(view, 'Dieser Terminbereich ist nicht verfügbar.');
+            } else {
+                clearAppointmentCalendarExport(view);
+                view.calendarError = 'Die Kalenderdatei konnte nicht geladen werden. Bitte versuchen Sie es erneut.';
+            }
+        } finally {
+            if (isCurrentAppointmentView(view, context)) render();
+        }
+    }
+
+    async function shareAppointmentCalendarFile() {
+        const view = state.appointmentView;
+        const context = sessionContext();
+        const file = view.calendarExport;
+        if (!isCurrentAppointmentView(view, context) || !file?.shareData) return;
+
+        // The file is already in memory, so calling share still has the button's user activation.
+        try {
+            await navigator.share(file.shareData);
+        } catch (error) {
+            if (error.name !== 'AbortError' && isCurrentAppointmentView(view, context) && view.calendarExport === file) {
+                view.calendarError = 'Teilen ist hier nicht möglich. Sie können die Kalenderdatei öffnen oder herunterladen.';
+                render();
+            }
+        }
+    }
+
+    function openGoogleCalendar() {
+        const view = state.appointmentView;
+        if (!view.detail || !isCurrentAppointmentView(view, sessionContext())) return;
+        const target = googleCalendarTarget(view.detail);
+        if (!target) return;
+
+        const link = document.createElement('a');
+        link.href = target;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+    }
+
     function appointmentUnavailable(view, message) {
+        clearAppointmentCalendarExport(view);
         view.items = [];
         view.detail = null;
         view.csrfToken = '';
@@ -5853,6 +6027,12 @@
                 view.items = payload.data.filter(item => item && Number.isSafeInteger(item.id) && item.id > 0);
                 view.hasMore = payload.has_more === true;
             } else if (selection.id !== null && payload.data?.id === selection.id) {
+                if (view.detail?.version !== payload.data.version || view.detail?.status !== payload.data.status
+                    || view.detail?.project_name !== payload.data.project_name
+                    || view.detail?.project_number !== payload.data.project_number) {
+                    clearAppointmentCalendarExport(view);
+                    if (payload.data.status !== 'planned') view.calendarReminders = false;
+                }
                 view.detail = payload.data;
                 view.csrfToken = typeof payload.csrf_token === 'string' ? payload.csrf_token : '';
             } else {

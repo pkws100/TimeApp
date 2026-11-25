@@ -387,7 +387,13 @@ $adminPausePolicyController = new AdminPausePolicyController($pausePolicies, $au
 $adminWorkTimeController = new AdminWorkTimeController($adminView, $authService, $csrfService, $userService, $workTimePolicies, $workTimePreview, $workTimeDeviations, new WorkTimeAccessService($workTimePolicies), $workTimeEvents, $workTimePauseCorrections, pausePolicies: $adminPausePolicyController);
 $adminWorkTimeNotificationController = new AdminWorkTimeNotificationController($adminView, $authService, $csrfService, $userService, $workTimePolicies, $workTimeEvents->notifications(), new WorkTimeAccessService($workTimePolicies));
 $appPushController = new AppPushController($pushSettingsService, $pushSubscriptionService, $pushNotificationService, $authService);
-$appAppointmentsController = new AppAppointmentsController($appointmentService, $authService, $csrfService);
+$appAppointmentsController = new AppAppointmentsController(
+    $appointmentService,
+    $authService,
+    $csrfService,
+    (string) $config->get('app.url'),
+    $config->get('app.appointments_calendar_share_project') === true,
+);
 $appTimeAccountController = new AppTimeAccountController($timeAccountService, $authService);
 $appVacationRequestController = new AppVacationRequestController($vacationRequestService, $authService);
 $appTimesheetController = new AppTimesheetController($appTimesheetSyncService, $authService);
@@ -723,6 +729,7 @@ $router->post('/api/v1/app/vacation-requests/{id}/cancel', $api([$appVacationReq
 $router->get('/api/v1/app/push/status', $api([$appPushController, 'status']));
 $router->get('/api/v1/app/appointments', $api([$appAppointmentsController, 'index']));
 $router->get('/api/v1/app/appointments/{id}', $api([$appAppointmentsController, 'show']));
+$router->get('/api/v1/app/appointments/{id}/calendar\.ics', $api([$appAppointmentsController, 'calendar']));
 $router->post('/api/v1/app/appointments/{id}/acknowledge', $api([$appAppointmentsController, 'acknowledge']));
 $router->post('/api/v1/app/push/subscriptions', $api([$appPushController, 'store'], 'push.receive'));
 $router->delete('/api/v1/app/push/subscriptions/{id}', $api([$appPushController, 'disable'], 'push.receive'));

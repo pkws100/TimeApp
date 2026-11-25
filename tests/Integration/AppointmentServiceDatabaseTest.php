@@ -319,6 +319,59 @@ final class AppointmentServiceDatabaseTest extends MariaDbTestCase
         self::assertSame(0, (int) $this->connection()->fetchColumn('SELECT COUNT(*) FROM project_memberships'));
     }
 
+    public function testCalendarExportHonorsInstallationProjectPolicyAndCurrentAssignment(): void
+    {
+        $employee = $this->createUser();
+        $colleague = $this->createUser();
+        $project = $this->createProject();
+        $own = $this->appointments->create($this->admin, $this->data([
+            'project_id' => $project,
+            'participant_ids' => [$employee],
+            'title' => 'Baustellentermin',
+            'description' => 'Terminnotiz für die Datei',
+        ]));
+        $appointment = $this->appointments->find($this->admin, $own);
+        $auth = new AuthService($this->connection(), new PermissionMatrix([], []));
+        $csrf = new CsrfService();
+        $controller = new AppAppointmentsController($this->appointments, $auth, $csrf, 'https://time.example.test');
+        $withProject = new AppAppointmentsController($this->appointments, $auth, $csrf, 'https://time.example.test', true);
+        $params = ['id' => $own];
+        $request = $this->employeeRequest(query: ['reminders' => '1', 'project' => '1']);
+
+        self::assertSame(401, $controller->calendar($request, $params)->status());
+        $_SESSION['auth'] = ['user_id' => $colleague, 'database_realm' => $this->connection()->authenticationRealm()];
+        self::assertSame(404, $controller->calendar($request, $params)->status());
+        $_SESSION['auth']['user_id'] = $employee;
+        $export = $controller->calendar($request, $params);
+        self::assertSame(200, $export->status());
+        self::assertSame('text/calendar; charset=utf-8', $export->headers()['Content-Type']);
+        self::assertSame('attachment; filename="timeapp-termin.ics"', $export->headers()['Content-Disposition']);
+        self::assertSame('private, no-store', $export->headers()['Cache-Control']);
+        $content = $this->responseBody($export);
+        self::assertStringContainsString("DTSTART:20990716T071500Z\r\n", $content);
+        self::assertStringContainsString("SEQUENCE:1\r\n", $content);
+        self::assertSame(2, substr_count($content, 'BEGIN:VALARM'));
+        self::assertStringNotContainsString($appointment['project_number'], $content);
+        $released = $this->responseBody($withProject->calendar($this->employeeRequest(), $params));
+        self::assertStringContainsString($appointment['project_number'], $released);
+        self::assertStringNotContainsString('BEGIN:VALARM', $released);
+        self::assertSame(422, $controller->calendar($this->employeeRequest(query: ['reminders' => ['1']]), $params)->status());
+
+        $detail = $this->payload($withProject->show($this->employeeRequest(), $params))['data'];
+        parse_str((string) parse_url($detail['google_calendar_url'], PHP_URL_QUERY), $google);
+        self::assertSame('Termin aus der TimeApp', $google['details']);
+        self::assertStringNotContainsString($appointment['project_number'], $detail['google_calendar_url']);
+
+        $this->appointments->update($this->admin, $own, ['version' => 1, 'status' => 'cancelled']);
+        $cancelled = $this->responseBody($controller->calendar($request, $params));
+        self::assertStringContainsString("STATUS:CANCELLED\r\n", $cancelled);
+        self::assertStringContainsString("SEQUENCE:2\r\n", $cancelled);
+        self::assertStringNotContainsString('BEGIN:VALARM', $cancelled);
+        self::assertNull($this->payload($controller->show($this->employeeRequest(), $params))['data']['google_calendar_url']);
+        $this->appointments->archive($this->admin, $own, 2);
+        self::assertSame(404, $controller->calendar($request, $params)->status());
+    }
+
     private function employeeRequest(array $body = [], array $query = []): Request
     {
         return new Request($body === [] ? 'GET' : 'POST', '/api/v1/app/appointments', $query, $body, [], [], []);
@@ -326,9 +379,15 @@ final class AppointmentServiceDatabaseTest extends MariaDbTestCase
 
     private function payload(Response $response): array
     {
+        return json_decode($this->responseBody($response), true, flags: JSON_THROW_ON_ERROR);
+    }
+
+    private function responseBody(Response $response): string
+    {
         ob_start();
         $response->send();
-        return json_decode((string) ob_get_clean(), true, flags: JSON_THROW_ON_ERROR);
+
+        return (string) ob_get_clean();
     }
 
     private function data(array $overrides = []): array

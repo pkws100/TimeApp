@@ -40,4 +40,16 @@ Im Entwicklungscheckout zuerst die wirksame Datenbankverbindung einschließlich 
 
 Für lokale Integrationstests `TIMEAPP_TEST_DB_*` auf eine isolierte MariaDB setzen. Der Playwright-Workflow benutzt synthetische Nutzer, die isolierte Testdatenbank und einen `PushSender`-Fake. CI prüft die Versandlogik ohne externe Übermittlung. Auf dem Entwicklungsserver gehören persönliche Ansicht, negative Fremd-ID-Prüfung, Bestätigung, Vorschau und Historie zur Funktionsprüfung. End-to-End-Zustellung an reale Push-Geräte ist ein eigener Test mit ausdrücklich dafür freigegebenen Empfängern.
 
-Zeitgesteuerte Erinnerungen, wiederkehrende Termine, SMS und externe Kalenderanbindungen sind spätere Phasen.
+Zeitgesteuerte TimeApp-Erinnerungen, wiederkehrende Termine, SMS und laufende externe Kalendersynchronisierung sind spätere Phasen.
+
+## Phase 2b – einzelne Termine in den Kalender übernehmen
+
+Die Mitarbeiter-App bietet in den Termindetails eine Kalenderdatei und einen Link zu Google Kalender. Beides erstellt eine Kopie. Änderungen und Absagen in der TimeApp werden von externen Kalendern möglicherweise erst nach erneutem Import oder manueller Bearbeitung berücksichtigt. Das gilt auch bei identischer Kalender-UID, weil die Importfunktion des Kalenderprogramms entscheidet, ob sie eine ältere Kopie aktualisiert.
+
+`GET /api/v1/app/appointments/{id}/calendar.ics` prüft Sitzung und aktuelle Teilnehmerzuordnung. Der Download enthält Titel, UTC-Intervall, Einsatzort, Terminbeschreibung und die Terminversion. `?reminders=1` ergänzt bei geplanten Terminen zwei lokale Kalenderalarme für 24 und 2 Stunden vor Beginn. Absagen sind als `STATUS:CANCELLED` exportierbar. Archivierte Termine sind über die Mitarbeiter-API gesperrt. Die UID hängt von der konfigurierten Installationsadresse `APP_URL` und dem Termin ab. `APP_URL` sollte für dieselbe Installation konstant bleiben. [RFC 5545](https://www.rfc-editor.org/rfc/rfc5545.html)
+
+Die Projektbezeichnung wird als separates Feld ausschließlich bei explizit gesetztem `APPOINTMENTS_CALENDAR_SHARE_PROJECT=true` in der ICS-Beschreibung ergänzt. Die Einstellung gilt für die gesamte Installation. Titel, Beschreibung und Einsatzort können bereits von der Disposition eingetragene Projekthinweise enthalten. Vor einer Weitergabe an Dritte diese Angaben prüfen.
+
+Die Google-Aktion öffnet erst nach der bewussten Auswahl ein vorausgefülltes Formular. An Google gehen Titel, UTC-Intervall, Zeitzone, Einsatzort und ein allgemeiner Beschreibungstext. Der Mitarbeiter speichert das Ereignis dort selbst. Absagen sind in dieser Aktion ausgeblendet. [Google-Kalender-Linkvorlage](https://developers.google.com/workspace/calendar/api/concepts/inviting-attendees-to-events#provide_a_link_for_users_to_add_the_event)
+
+Auf Geräten mit Datei-Teilen kann die App die Kalenderdatei an das System übergeben. Als Alternative lässt sich die Datei öffnen oder herunterladen. Die Übernahme und der Umgang mit Erinnerungen hängen vom Kalenderprogramm ab. Chromium und Mobile WebKit prüfen die Weboberfläche. Der Import in die nativen iOS- und Android-Kalender-Apps ist separat zu prüfen.
