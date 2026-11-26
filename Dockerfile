@@ -38,6 +38,7 @@ RUN composer install \
         --no-interaction \
         --no-progress \
         --no-autoloader \
+    && sed -i 's/\r$//' /usr/local/bin/app-entrypoint \
     && chmod +x /usr/local/bin/app-entrypoint
 
 COPY . /var/www/html
