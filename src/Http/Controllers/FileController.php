@@ -29,7 +29,7 @@ final class FileController
         return Response::json([
             'data' => $this->fileAttachmentService->listForProject(
                 (int) $params['id'],
-                (string) $request->query('scope', 'active')
+                $this->authService->hasPermission('files.manage') ? (string) $request->query('scope', 'active') : 'active'
             ),
         ]);
     }
@@ -88,7 +88,7 @@ final class FileController
     {
         $file = $this->fileAttachmentService->findProjectFile((int) $params['id']);
 
-        if ($file === null || !$this->canAccessProject((int) ($file['project_id'] ?? 0))) {
+        if ($file === null || !$this->canAccessProject((int) ($file['project_id'] ?? 0), true)) {
             return Response::json(['error' => 'Projektdatei nicht gefunden.'], 404);
         }
 
@@ -104,10 +104,10 @@ final class FileController
         return Response::json(['message' => 'Geraetedatei archiviert.']);
     }
 
-    private function canAccessProject(int $projectId): bool
+    private function canAccessProject(int $projectId, bool $allowArchived = false): bool
     {
         $user = $this->authService->currentUser();
 
-        return $user !== null && $this->projectAccessService->canAccessFiles($user, $projectId);
+        return $user !== null && $this->projectAccessService->canAccessFiles($user, $projectId, $allowArchived);
     }
 }

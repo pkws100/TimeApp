@@ -322,7 +322,6 @@ final class EmployeeAccountCutoverService
                     'opening_remaining_leave_days' => number_format((float) $record['opening_remaining_leave_days'], 2, '.', ''),
                     'source_reference' => $record['source_reference'] ?: null,
                     'note' => $record['note'] ?: null,
-                    'created_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
                 ];
 
                 if ($existing !== null) {
@@ -356,7 +355,7 @@ final class EmployeeAccountCutoverService
                         :source_reference, :note, "draft", :created_by_user_id, NULL, NULL,
                         NULL, NULL, NULL, NOW(), NOW()
                      )',
-                    $bindings
+                    $bindings + ['created_by_user_id' => $adminUserId > 0 ? $adminUserId : null]
                 );
 
                 return $this->find($this->connection->lastInsertId()) ?? [];
@@ -769,7 +768,6 @@ final class EmployeeAccountCutoverService
             'opening_remaining_leave_days' => number_format((float) $preview['opening_remaining_leave_days'], 2, '.', ''),
             'source_reference' => $preview['source_reference'] ?: null,
             'note' => $preview['note'] ?: null,
-            'created_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
             'finalized_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
         ];
 
@@ -808,7 +806,7 @@ final class EmployeeAccountCutoverService
                 :source_reference, :note, "final", :created_by_user_id, :finalized_by_user_id, NOW(),
                 NULL, NULL, NULL, NOW(), NOW()
              )',
-            $bindings
+            $bindings + ['created_by_user_id' => $adminUserId > 0 ? $adminUserId : null]
         );
 
         return $this->connection->lastInsertId();

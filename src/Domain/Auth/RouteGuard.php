@@ -13,12 +13,12 @@ final class RouteGuard
     {
     }
 
-    public function forApi(callable $handler, ?string $permission = null): callable
+    public function forApi(callable $handler, ?string $permission = null, bool $nativeDownload = false): callable
     {
-        return function (Request $request, array $params = []) use ($handler, $permission): Response {
-            $response = $this->apiAuthorizationResponse($request, $permission);
+        return function (Request $request, array $params = []) use ($handler, $permission, $nativeDownload): Response {
+            $response = $this->apiAuthorizationResponse($request, $permission, $nativeDownload) ?? $handler($request, $params);
 
-            return $response ?? $handler($request, $params);
+            return $nativeDownload ? $response->withHeaders(['Cache-Control' => 'private, no-store']) : $response;
         };
     }
 
@@ -31,7 +31,25 @@ final class RouteGuard
         };
     }
 
-    private function apiAuthorizationResponse(Request $request, ?string $permission): ?Response
+    public static function matchesExpectedAccount(Request $request, int $userId, bool $nativeDownload = false): bool
+    {
+        $header = $request->server('HTTP_X_TIMEAPP_USER_ID');
+        $query = $nativeDownload ? $request->query('timeapp_user_id') : null;
+        $expected = (string) $userId;
+
+        return ($header === null || $header === $expected) && ($query === null || $query === $expected);
+    }
+
+    public static function sessionChangedResponse(): Response
+    {
+        return Response::json([
+            'ok' => false,
+            'code' => 'session_changed',
+            'message' => 'Das angemeldete Konto hat gewechselt. Bitte erneut anmelden.',
+        ], 401, ['Cache-Control' => 'private, no-store']);
+    }
+
+    private function apiAuthorizationResponse(Request $request, ?string $permission, bool $nativeDownload): ?Response
     {
         $user = $this->authService->currentUser();
         if ($user === null) {
@@ -43,13 +61,8 @@ final class RouteGuard
             ], 401);
         }
 
-        $expectedUser = $request->server('HTTP_X_TIMEAPP_USER_ID');
-        if ($expectedUser !== null && $expectedUser !== (string) $user['id']) {
-            return Response::json([
-                'ok' => false,
-                'code' => 'session_changed',
-                'message' => 'Das angemeldete Konto hat gewechselt. Bitte erneut anmelden.',
-            ], 401);
+        if (!self::matchesExpectedAccount($request, (int) $user['id'], $nativeDownload)) {
+            return self::sessionChangedResponse();
         }
 
         if (!$this->authService->hasPermission($permission)) {

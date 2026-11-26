@@ -282,14 +282,18 @@ final class ProjectNumberSuggestionDatabaseTest extends MariaDbTestCase
 
         chmod($override, 0600);
         file_put_contents($override, "<?php\nreturn " . var_export($this->connectionConfig(), true) . ";\n");
-        $previous = getenv('DB_OVERRIDE_FILE');
-        putenv('DB_OVERRIDE_FILE=' . $override);
+        $previous = $_ENV['DB_OVERRIDE_FILE'] ?? null;
+        $_ENV['DB_OVERRIDE_FILE'] = $override;
 
         try {
             [, $router] = require base_path('bootstrap/app.php');
             $callback($router);
         } finally {
-            $previous === false ? putenv('DB_OVERRIDE_FILE') : putenv('DB_OVERRIDE_FILE=' . $previous);
+            if ($previous === null) {
+                unset($_ENV['DB_OVERRIDE_FILE']);
+            } else {
+                $_ENV['DB_OVERRIDE_FILE'] = $previous;
+            }
             unlink($override);
         }
     }

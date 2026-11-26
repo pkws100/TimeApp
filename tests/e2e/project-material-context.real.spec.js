@@ -43,6 +43,32 @@ test.describe('real mobile project view and material capture', () => {
     expect(new Set(before.time.timesheets.map((entry) => entry.id)).size).toBe(1);
     const runningEntry = before.time.timesheets.at(-1);
     expect(runningEntry).toMatchObject({ project_id: Number(workProject), end_time: null, entry_type: 'work' });
+    const originalStamp = checkIn.request().postDataJSON();
+    const stampHeaders = { 'X-TimeApp-User-Id': process.env.UI_TEST_MATERIAL_USER_ID };
+    const replay = await page.request.post(syncPath, { headers: stampHeaders, data: originalStamp });
+    expect(replay.status()).toBe(200);
+    expect((await replay.json()).data.timesheet.id).toBe(runningEntry.id);
+    for (const requestedProject of [workProject, materialProject]) {
+      const response = await page.request.post(syncPath, {
+        headers: stampHeaders,
+        data: {
+          ...originalStamp,
+          client_request_id: 'ui-check-in-conflict-' + requestedProject,
+          project_id: Number(requestedProject),
+        },
+      });
+      expect(response.status()).toBe(409);
+      const conflict = await response.json();
+      expect(conflict).toMatchObject({
+        code: 'active_work_session',
+        data: { active_work_session: { project_id: Number(workProject) } },
+      });
+      if (requestedProject === workProject) {
+        expect(conflict.message).toBe('Sie sind bereits in diesem Projekt eingecheckt.');
+      } else {
+        expect(conflict.message).toContain('Projekt ' + conflict.data.active_work_session.project_number + ' eingecheckt');
+      }
+    }
     const balanceBefore = await accountData();
     expect(balanceBefore).toBeTruthy();
 
@@ -148,13 +174,14 @@ test.describe('real mobile project view and material capture', () => {
       const before = await (await other.request.get(materialPath)).json();
       expect(before.ok).toBeTruthy();
 
-      const [response] = await Promise.all([
-        page.waitForResponse((result) => new URL(result.url()).pathname === materialPath && result.request().method() === 'POST'),
-        page.locator('#projectMaterialForm').evaluate((form) => form.requestSubmit()),
-      ]);
+      await expect(page.getByRole('heading', { name: 'Anmelden' })).toBeVisible();
+      await expect(page.locator('#projectMaterialForm')).toHaveCount(0);
+      const response = await page.request.post(materialPath, {
+        headers: { 'X-TimeApp-User-Id': process.env.UI_TEST_MATERIAL_USER_ID },
+        data: { description },
+      });
       expect(response.status()).toBe(401);
       expect((await response.json()).code).toBe('session_changed');
-      await expect(page.getByRole('heading', { name: 'Anmelden' })).toBeVisible();
       const after = await (await other.request.get(materialPath)).json();
       expect(after).toEqual(before);
       expect(await cacheValue(other, draftKey)).toMatchObject({ description, dirty: true });

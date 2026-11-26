@@ -7,9 +7,12 @@ namespace App\Domain\Terminals;
 use App\Domain\Calendar\CalendarPolicyService;
 use App\Domain\TimeAccounts\TimeAccountService;
 use App\Domain\Timesheets\AppTimesheetSyncService;
+use App\Domain\Timesheets\LiveWorkSession;
 use App\Domain\Timesheets\TimesheetWriteGuard;
+use App\Domain\Timesheets\TimesheetWriteLockUnavailable;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
+use DateTimeZone;
 use InvalidArgumentException;
 use RuntimeException;
 
@@ -58,10 +61,11 @@ final class TerminalPunchService
 
     public function scan(array $terminal, array $payload): array
     {
-        if ($this->syncService->workTimeWindowsEnabled()) {
+        try {
             return (new TimesheetWriteGuard($this->connection))->withAccountingWriteLock(fn (): array => $this->performScan($terminal, $payload));
+        } catch (TimesheetWriteLockUnavailable $exception) {
+            return $this->failure('accounting_busy', $exception->getMessage(), 503, $terminal, null, null, null, null, $payload);
         }
-        return $this->performScan($terminal, $payload);
     }
 
     private function performScan(array $terminal, array $payload): array
@@ -122,32 +126,37 @@ final class TerminalPunchService
         }
 
         $projectId = $this->projectId($terminal, $tag);
-
-        if ($projectId !== null && !$this->projectIsBookable($projectId)) {
-            return $this->failure('project_unavailable', 'Projekt ist nicht aktiv.', 422, $terminal, $tag, $user, $projectId, null, $payload);
+        $userId = (int) $user['id'];
+        $now = new DateTimeImmutable('now', new DateTimeZone('Europe/Berlin'));
+        $today = LiveWorkSession::referenceDate(now: $now);
+        $syncRequestId = $this->syncRequestId($terminal, $requestId);
+        $committed = $this->committedSync($userId, $syncRequestId);
+        if ($committed !== null) {
+            // The stamp may have committed before the terminal response was recorded.
+            return $this->completeScan($terminal, $tag, $user, $projectId, $committed['action'], $committed['response'], $today, $requestId, $payload);
         }
 
-        $workDate = (new DateTimeImmutable('today'))->format('Y-m-d');
-        $windowEnabled = $this->syncService->workTimeWindowsEnabled();
-        $pauseModeActive = $this->syncService->hasOpenPauseModelBooking((int) $user['id']);
-        if ($windowEnabled || $pauseModeActive) {
-            $presence = $this->syncService->openPresenceForUser((int) $user['id']);
-            if ($presence !== null) {
-                $workDate = (string) $presence['work_date'];
-            } else {
-                $activeEntries = $this->connection->fetchAll('SELECT id, work_date FROM timesheets WHERE user_id = :user_id AND entry_type = "work" AND start_time IS NOT NULL AND end_time IS NULL AND COALESCE(is_deleted, 0) = 0 ORDER BY work_date, id LIMIT 2', ['user_id' => (int) $user['id']]);
-                if ($activeEntries !== [] && ($pauseModeActive || $this->syncService->workTimeAppliesToUser((int) $user['id'], $workDate) || $this->syncService->workTimeAppliesToUser((int) $user['id'], (string) $activeEntries[0]['work_date']))) {
-                    if (count($activeEntries) > 1) {
-                        return $this->failure('ambiguous_work_session', 'Mehrere Arbeitseinsaetze sind offen. Bitte im Admin pruefen.', 409, $terminal, $tag, $user, $projectId, null, $payload);
-                    }
-                    $workDate = (string) $activeEntries[0]['work_date'];
-                }
+        $workDate = $today;
+        $action = 'check_in';
+        $expectedTimesheetId = null;
+        $presence = $this->syncService->openPresenceForUser($userId, $today);
+        if ($presence !== null) {
+            $action = 'presence_end';
+            $workDate = (string) $presence['work_date'];
+        } else {
+            $activeEntries = $this->connection->fetchAll('SELECT t.id, t.work_date FROM timesheets t WHERE t.user_id = :user_id
+                AND ' . LiveWorkSession::isOpenSql('t') . ' ORDER BY t.work_date, t.id LIMIT 2', ['user_id' => $userId, 'live_reference_date' => $today]);
+            if (count($activeEntries) > 1) {
+                return $this->failure('ambiguous_work_session', 'Mehrere Arbeitseinsaetze sind offen. Bitte im Admin pruefen.', 409, $terminal, $tag, $user, $projectId, null, $payload);
+            }
+            if ($activeEntries !== []) {
+                $action = 'check_out';
+                $workDate = (string) $activeEntries[0]['work_date'];
+                $expectedTimesheetId = (int) $activeEntries[0]['id'];
             }
         }
-        $action = $this->nextAction((int) $user['id'], $workDate);
-        $expectedTimesheetId = null;
-        if ($action === 'check_out' && ($windowEnabled || $pauseModeActive)) {
-            $expectedTimesheetId = $this->connection->fetchColumn('SELECT id FROM timesheets WHERE user_id = :user_id AND work_date = :work_date AND entry_type = "work" AND start_time IS NOT NULL AND end_time IS NULL AND COALESCE(is_deleted, 0) = 0 ORDER BY id DESC LIMIT 1', ['user_id' => (int) $user['id'], 'work_date' => $workDate]);
+        if ($action === 'check_in' && $projectId !== null && !$this->projectIsBookable($projectId)) {
+            return $this->failure('project_unavailable', 'Projekt ist nicht aktiv.', 422, $terminal, $tag, $user, $projectId, null, $payload);
         }
 
         try {
@@ -157,21 +166,51 @@ final class TerminalPunchService
                     'permissions' => ['timesheets.manage'],
                 ],
                 [
-                    'client_request_id' => $this->syncRequestId($terminal, $requestId),
+                    'client_request_id' => $syncRequestId,
                     'action' => $action,
                     'work_date' => $workDate,
                     'project_id' => $action === 'check_in' ? $projectId : null,
                     'source' => 'terminal',
                     'note' => 'Terminal: ' . (string) ($terminal['name'] ?? ''),
-                    ...($expectedTimesheetId !== null ? ['expected_timesheet_id' => (int) $expectedTimesheetId] : []),
-                    ...($expectedTimesheetId !== null && $workDate < (new DateTimeImmutable('today'))->format('Y-m-d') ? ['actual_end_at' => (new DateTimeImmutable())->format('Y-m-d H:i:00')] : []),
+                    ...($expectedTimesheetId !== null ? ['expected_timesheet_id' => $expectedTimesheetId, 'end_time' => $now->format('H:i')] : []),
+                    ...($expectedTimesheetId !== null && $workDate < $today ? ['actual_end_at' => $now->format('Y-m-d H:i:00')] : []),
                 ]
             );
         } catch (RuntimeException|InvalidArgumentException $exception) {
             return $this->failure('booking_failed', $exception->getMessage(), 422, $terminal, $tag, $user, $projectId, $action, $payload);
         }
 
-        $monthly = $this->monthlySummary((int) $user['id'], $workDate);
+        return $this->completeScan($terminal, $tag, $user, $projectId, $action, $sync, $workDate, $requestId, $payload);
+    }
+
+    /** @return array{action:string,response:array}|null */
+    private function committedSync(int $userId, string $requestId): ?array
+    {
+        if (!$this->connection->tableExists('app_sync_operations')) {
+            return null;
+        }
+
+        $operation = $this->connection->fetchOne(
+            'SELECT operation_type, response_json FROM app_sync_operations
+             WHERE user_id = :user_id AND client_request_id = :request_id
+               AND operation_type IN ("check_in", "check_out", "presence_end")',
+            ['user_id' => $userId, 'request_id' => $requestId]
+        );
+        $response = json_decode((string) ($operation['response_json'] ?? ''), true);
+        if (!is_array($response) || empty($response['ok'])) {
+            return null;
+        }
+
+        return ['action' => $operation['operation_type'], 'response' => $response];
+    }
+
+    private function completeScan(array $terminal, array $tag, array $user, ?int $projectId, string $action, array $sync, string $workDate, string $requestId, array $payload): array
+    {
+        $monthly = [];
+        if (isset($sync['timesheet'])) {
+            $projectId = isset($sync['timesheet']['project_id']) ? (int) $sync['timesheet']['project_id'] : null;
+            $monthly = $this->monthlySummary((int) $user['id'], (string) ($sync['timesheet']['work_date'] ?? $workDate));
+        }
         $response = $this->successResponse($terminal, $user, $action, $sync, $monthly);
         $this->recordEvent($terminal, $tag, $user, $projectId, $action, 'synced', $response['message'], $requestId, $payload, $response);
 
@@ -296,7 +335,9 @@ final class TerminalPunchService
             'http_status' => $status,
         ];
 
-        $this->recordEvent($terminal, $tag, $user, $projectId, $action, $code, $message, (string) ($payload['request_id'] ?? ''), $payload, $response);
+        if ($status < 500) {
+            $this->recordEvent($terminal, $tag, $user, $projectId, $action, $code, $message, (string) ($payload['request_id'] ?? ''), $payload, $response);
+        }
 
         return $response;
     }
@@ -353,40 +394,6 @@ final class TerminalPunchService
              LIMIT 1',
             ['id' => $projectId]
         ) ?? 0) > 0;
-    }
-
-    private function nextAction(int $userId, string $workDate): string
-    {
-        if ($this->syncService->openPresenceForUser($userId) !== null) {
-            return 'presence_end';
-        }
-        if (!$this->connection->tableExists('timesheets')) {
-            return 'check_in';
-        }
-
-        $entry = $this->connection->fetchOne(
-            'SELECT start_time, end_time
-             FROM timesheets
-             WHERE user_id = :user_id
-               AND work_date = :work_date
-               AND entry_type = "work"
-               AND COALESCE(is_deleted, 0) = 0
-             ORDER BY
-               CASE WHEN start_time IS NOT NULL AND end_time IS NULL THEN 0 ELSE 1 END ASC,
-               COALESCE(end_time, start_time, "00:00:00") DESC,
-               id DESC
-             LIMIT 1',
-            [
-                'user_id' => $userId,
-                'work_date' => $workDate,
-            ]
-        );
-
-        if ($entry !== null && ($entry['start_time'] ?? null) !== null && ($entry['end_time'] ?? null) === null) {
-            return 'check_out';
-        }
-
-        return 'check_in';
     }
 
     private function monthlySummary(int $userId, string $workDate): array

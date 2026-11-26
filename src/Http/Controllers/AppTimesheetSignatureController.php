@@ -113,7 +113,7 @@ final class AppTimesheetSignatureController
             'Content-Type' => (string) ($file['mime_type'] ?? 'image/png'),
             'Content-Length' => (string) strlen($content),
             'Content-Disposition' => 'inline; filename="' . (string) ($file['filename'] ?? 'kundenbestaetigung.png') . '"',
-            'Cache-Control' => 'private, max-age=300',
+            'Cache-Control' => 'private, no-store',
             'X-Content-Type-Options' => 'nosniff',
         ]);
     }

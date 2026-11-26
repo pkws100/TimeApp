@@ -396,7 +396,7 @@ $appAppointmentsController = new AppAppointmentsController(
 );
 $appTimeAccountController = new AppTimeAccountController($timeAccountService, $authService);
 $appVacationRequestController = new AppVacationRequestController($vacationRequestService, $authService);
-$appTimesheetController = new AppTimesheetController($appTimesheetSyncService, $authService);
+$appTimesheetController = new AppTimesheetController($appTimesheetSyncService, $authService, $projectAccessService);
 $appTimesheetAttachmentController = new AppTimesheetAttachmentController($fileService, $authService);
 $appTimesheetSignatureController = new AppTimesheetSignatureController($timesheetSignatureService, $authService);
 $appProjectAttachmentController = new AppProjectAttachmentController($fileService, $authService, $projectAccessService);
@@ -483,7 +483,7 @@ $projectController = new ProjectController($projectService, $authService, $proje
 $fileController = new FileController($fileService, $authService, $projectAccessService);
 
 $admin = static fn (callable $handler, ?string $permission = 'dashboard.view'): callable => $routeGuard->forAdmin($handler, $permission);
-$api = static fn (callable $handler, ?string $permission = null): callable => $routeGuard->forApi($handler, $permission);
+$api = static fn (callable $handler, ?string $permission = null, bool $nativeDownload = false): callable => $routeGuard->forApi($handler, $permission, $nativeDownload);
 
 $router = new Router();
 if ($personnelBoundary !== null) {
@@ -729,7 +729,7 @@ $router->post('/api/v1/app/vacation-requests/{id}/cancel', $api([$appVacationReq
 $router->get('/api/v1/app/push/status', $api([$appPushController, 'status']));
 $router->get('/api/v1/app/appointments', $api([$appAppointmentsController, 'index']));
 $router->get('/api/v1/app/appointments/{id}', $api([$appAppointmentsController, 'show']));
-$router->get('/api/v1/app/appointments/{id}/calendar\.ics', $api([$appAppointmentsController, 'calendar']));
+$router->get('/api/v1/app/appointments/{id}/calendar\.ics', $api([$appAppointmentsController, 'calendar'], nativeDownload: true));
 $router->post('/api/v1/app/appointments/{id}/acknowledge', $api([$appAppointmentsController, 'acknowledge']));
 $router->post('/api/v1/app/push/subscriptions', $api([$appPushController, 'store'], 'push.receive'));
 $router->delete('/api/v1/app/push/subscriptions/{id}', $api([$appPushController, 'disable'], 'push.receive'));
@@ -737,7 +737,7 @@ $router->post('/api/v1/app/push/test', $api([$appPushController, 'test'], 'push.
 $router->post('/api/v1/app/timesheets/sync', $api([$appTimesheetController, 'sync'], 'timesheets.create'));
 $router->get('/api/v1/app/projects/{id}/files', $api([$appProjectAttachmentController, 'index'], 'files.view'));
 $router->post('/api/v1/app/projects/{id}/files', $api([$appProjectAttachmentController, 'upload'], 'files.upload'));
-$router->get('/api/v1/app/project-files/{id}/download', $api([$appProjectAttachmentController, 'download'], 'files.view'));
+$router->get('/api/v1/app/project-files/{id}/download', $api([$appProjectAttachmentController, 'download'], 'files.view', nativeDownload: true));
 $router->get('/api/v1/app/projects/{id}/materials', $api([$appProjectMaterialController, 'index']));
 $router->post('/api/v1/app/projects/{id}/materials', $api([$appProjectMaterialController, 'store']));
 $router->delete('/api/v1/app/project-materials/{id}', $api([$appProjectMaterialController, 'archive']));
@@ -746,11 +746,11 @@ $router->post('/api/v1/app/projects/{id}/work-reports', $api([$appProjectWorkRep
 $router->delete('/api/v1/app/project-work-reports/{id}', $api([$appProjectWorkReportController, 'archive']));
 $router->get('/api/v1/app/timesheets/{id}/files', $api([$appTimesheetAttachmentController, 'index'], 'timesheets.view_own'));
 $router->post('/api/v1/app/timesheets/{id}/files', $api([$appTimesheetAttachmentController, 'upload'], 'timesheets.create'));
-$router->get('/api/v1/app/timesheet-files/{id}/download', $api([$appTimesheetAttachmentController, 'download'], 'timesheets.view_own'));
+$router->get('/api/v1/app/timesheet-files/{id}/download', $api([$appTimesheetAttachmentController, 'download'], 'timesheets.view_own', nativeDownload: true));
 $router->delete('/api/v1/app/timesheet-files/{id}', $api([$appTimesheetAttachmentController, 'archive'], 'timesheets.create'));
 $router->get('/api/v1/app/timesheets/{id}/signature', $api([$appTimesheetSignatureController, 'status'], 'timesheets.view_own'));
 $router->post('/api/v1/app/timesheets/{id}/signature', $api([$appTimesheetSignatureController, 'store'], 'timesheets.create'));
-$router->get('/api/v1/app/timesheet-signatures/{id}/image', $api([$appTimesheetSignatureController, 'image'], 'timesheets.view_own'));
+$router->get('/api/v1/app/timesheet-signatures/{id}/image', $api([$appTimesheetSignatureController, 'image'], 'timesheets.view_own', nativeDownload: true));
 
 $router->get('/api/v1/attendance/today', $api([$attendanceController, 'today'], 'attendance.view'));
 $router->get('/api/v1/dashboard/overview', $api([new DashboardController($dashboardService), 'overview'], 'dashboard.view'));

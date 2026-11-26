@@ -142,6 +142,32 @@ final class AppointmentDispatchServiceDatabaseTest extends MariaDbTestCase
         self::assertSame([$disabled], $dispatches->history($this->admin, $id, 10, $unconfigured['id']));
     }
 
+    public function testArchivedParentKeepsAdminDispatchHistoryWithoutAllowingANewDispatch(): void
+    {
+        $project = $this->createProject();
+        $id = $this->createAppointment([$this->createUser()], ['project_id' => $project]);
+        $sender = $this->createMock(PushSender::class);
+        $sender->expects(self::never())->method('send');
+        $service = $this->service($sender);
+        $requestKey = str_repeat('3', 32);
+        $sent = $service->dispatch($this->admin, $id, 1, $requestKey);
+        $this->connection()->execute('UPDATE projects SET status = "archived" WHERE id = :id', ['id' => $project]);
+
+        self::assertSame([$sent], $service->history($this->admin, $id));
+        self::assertSame($sent, $service->dispatch($this->admin, $id, 1, $requestKey));
+        foreach ([
+            fn () => $service->recipientPreview($this->admin, $id),
+            fn () => $service->dispatch($this->admin, $id, 1, str_repeat('4', 32)),
+        ] as $action) {
+            try {
+                $action();
+                self::fail('A project archive must prevent new appointment dispatches.');
+            } catch (AppointmentNotFoundException) {
+                self::assertSame([$sent], $service->history($this->admin, $id));
+            }
+        }
+    }
+
     public function testViewPermissionAndProjectMembershipAloneDoNotAllowPreviewSendOrHistory(): void
     {
         $project = $this->createProject();

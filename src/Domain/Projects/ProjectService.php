@@ -594,9 +594,9 @@ final class ProjectService
     private function scopeWhereClause(string $scope): string
     {
         return match ($scope) {
-            'archived' => 'projects.is_deleted = 1',
+            'archived' => '(projects.is_deleted = 1 OR projects.status = "archived")',
             'all' => '1 = 1',
-            default => 'projects.is_deleted = 0',
+            default => 'projects.is_deleted = 0 AND projects.status <> "archived"',
         };
     }
 }

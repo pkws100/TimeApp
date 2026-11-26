@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace App\Domain\Timesheets;
 
+use App\Domain\Projects\ProjectAccessService;
 use App\Domain\Settings\CompanySettingsService;
 use App\Domain\WorkTime\WorkTimePresenceService;
 use App\Domain\WorkTime\WorkTimeLocalTime;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
+use DateTimeZone;
 use InvalidArgumentException;
 use RuntimeException;
 
@@ -42,9 +44,9 @@ final class AppTimesheetSyncService
         $this->pauses = $service;
     }
 
-    public function openPresenceForUser(int $userId): ?array
+    public function openPresenceForUser(int $userId, ?string $referenceDate = null): ?array
     {
-        return $this->workTimePresenceService?->openForUser($userId);
+        return $this->workTimePresenceService?->openForUser($userId, $referenceDate);
     }
 
     public function workTimeWindowsEnabled(): bool
@@ -111,13 +113,26 @@ final class AppTimesheetSyncService
 
     private function performSync(int $userId, array $permissions, string $clientRequestId, array $payload, string $action): array
     {
-        $workDate = trim((string) ($payload['work_date'] ?? (new \DateTimeImmutable('today'))->format('Y-m-d')));
+        $now = new DateTimeImmutable('now', new DateTimeZone('Europe/Berlin'));
+        $rawWorkDate = $payload['work_date'] ?? $now->format('Y-m-d');
+        $workDate = is_string($rawWorkDate) ? trim($rawWorkDate) : '';
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/D', $workDate)) {
+            throw new InvalidArgumentException('Das Arbeitsdatum ist ungültig.');
+        }
+        $date = DateTimeImmutable::createFromFormat('!Y-m-d', $workDate, $now->getTimezone());
+        if ($date === false || $date->format('Y-m-d') !== $workDate) {
+            throw new InvalidArgumentException('Das Arbeitsdatum ist ungültig.');
+        }
+        $payload['work_date'] = $workDate;
         $originalAction = $action;
+        $startingWork = in_array($action, ['check_in', 'work_start'], true);
+        $endingWork = in_array($action, ['check_out', 'day_close'], true);
+        $requestedProjectId = $this->normalizeProjectId($payload['project_id'] ?? null);
+        if ($startingWork) {
+            $this->assertNoOpenWorkSession($userId, $permissions, $requestedProjectId, LiveWorkSession::referenceDate($workDate, $now));
+        }
         $appliesToUser = $this->workTimePresenceService?->appliesToUser($userId, $workDate) ?? false;
         if ($appliesToUser) {
-            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/D', $workDate) || (new DateTimeImmutable($workDate))->format('Y-m-d') !== $workDate) {
-                throw new RuntimeException('Das Arbeitsdatum ist ungueltig.');
-            }
             $active = $this->connection->fetchOne('SELECT id FROM users WHERE id = :id AND employment_status = "active" AND COALESCE(is_deleted, 0) = 0', ['id' => $userId]);
             if ($active === null) {
                 throw new RuntimeException('Arbeitszeit kann nur fuer aktive Mitarbeiter erfasst werden.');
@@ -150,15 +165,24 @@ final class AppTimesheetSyncService
             $this->assertExpectedProjectAssignment($entry, $payload, $userId);
             unset($payload['source']);
         }
-        if (($appliesToUser || $pausePolicy !== null || $boundPauseAction)
-            && !in_array($action, ['check_in', 'work_start', 'presence_end'], true)) {
-            if (isset($payload['expected_start_time']) && !isset($payload['expected_timesheet_id'])) {
+        $checkSessionBinding = $appliesToUser || $pausePolicy !== null || $boundPauseAction || $endingWork;
+        if ($checkSessionBinding && !$startingWork && $action !== 'presence_end') {
+            if (isset($payload['expected_start_time'])) {
                 $expectedStart = is_string($payload['expected_start_time']) ? $this->normalizeTime($payload['expected_start_time']) : null;
-                $sameStartSessions = $expectedStart === null ? 0 : (int) $this->connection->fetchColumn('SELECT COUNT(*) FROM timesheets WHERE user_id = :user_id AND work_date = :work_date AND entry_type = "work" AND COALESCE(is_deleted, 0) = 0 AND start_time = :start_time', ['user_id' => $userId, 'work_date' => $workDate, 'start_time' => $expectedStart]);
-                if ($entry === null || $expectedStart === null || substr((string) $entry['start_time'], 0, 5) !== $expectedStart || $sameStartSessions !== 1) {
+                if ($entry === null || $expectedStart === null || substr((string) $entry['start_time'], 0, 5) !== $expectedStart) {
                     throw new RuntimeException('Die Offline-Buchung gehoert zu einem anderen oder nicht eindeutig bestimmbaren Arbeitseinsatz. Bitte neu laden und pruefen.');
                 }
-            } elseif (($appliesToUser || $pausePolicy !== null) && !isset($payload['expected_timesheet_id'])) {
+                if (!isset($payload['expected_timesheet_id'])) {
+                    $sameStartSessions = (int) $this->connection->fetchColumn(
+                        'SELECT COUNT(*) FROM timesheets WHERE user_id = :user_id AND work_date = :work_date
+                         AND entry_type = "work" AND COALESCE(is_deleted, 0) = 0 AND start_time = :start_time',
+                        ['user_id' => $userId, 'work_date' => $workDate, 'start_time' => $expectedStart]
+                    );
+                    if ($sameStartSessions !== 1) {
+                        throw new RuntimeException('Die Offline-Buchung ist keinem eindeutigen Arbeitseinsatz zugeordnet. Bitte neu laden und prüfen.');
+                    }
+                }
+            } elseif (($appliesToUser || $pausePolicy !== null || $endingWork) && !isset($payload['expected_timesheet_id'])) {
                 $dailySessionCount = (int) $this->connection->fetchColumn('SELECT COUNT(*) FROM timesheets WHERE user_id = :user_id AND work_date = :work_date AND entry_type = "work" AND COALESCE(is_deleted, 0) = 0 AND start_time IS NOT NULL', ['user_id' => $userId, 'work_date' => $workDate]);
                 if ($dailySessionCount > 1) {
                     throw new RuntimeException('Bei mehreren Arbeitseinsaetzen ist eine eindeutige Buchungszuordnung erforderlich. Bitte App-Daten neu laden.');
@@ -171,7 +195,7 @@ final class AppTimesheetSyncService
             throw new RuntimeException('Ihre Tagesbuchung wurde im Backend geaendert oder archiviert. Bitte App-Daten neu laden.');
         }
 
-        $startNewEntry = in_array($action, ['check_in', 'work_start'], true) && $entry !== null && ($entry['start_time'] ?? null) !== null && ($entry['end_time'] ?? null) !== null;
+        $startNewEntry = $startingWork && $entry !== null && ($entry['start_time'] ?? null) !== null && ($entry['end_time'] ?? null) !== null;
 
         if ($startNewEntry) {
             $entry = null;
@@ -182,15 +206,20 @@ final class AppTimesheetSyncService
 
         $existingBreaks = $entry !== null ? $this->findBreaksForTimesheet((int) $entry['id']) : [];
         $currentBreak = $this->workdayStateCalculator->currentBreak($existingBreaks);
-        $projectId = $this->normalizeProjectId(($pauseWrite ? null : ($payload['project_id'] ?? null)) ?? ($entry['project_id'] ?? null));
-        $this->assertProjectVisibleToUser($projectId, $userId, $permissions, $workDate);
+        $entryProjectId = $this->normalizeProjectId($entry['project_id'] ?? null);
+        if ($endingWork && $entry !== null && $requestedProjectId !== null && $requestedProjectId !== $entryProjectId) {
+            throw new InvalidArgumentException('Die Projektzuordnung muss separat geändert werden. Laden Sie den Arbeitseinsatz vor dem Check-out neu.');
+        }
+        $projectId = ($pauseWrite ? null : $requestedProjectId) ?? $entryProjectId;
+        if ((!$endingWork && !$pauseWrite) || $projectId !== $entryProjectId) {
+            $this->assertProjectVisibleToUser($projectId, $userId, $permissions, $workDate);
+        }
         $this->assertAccountingWriteAllowed($entry, $userId, $projectId, $workDate);
         $this->dayConflictService?->assertNoConflictForWork($userId, $workDate, $entry !== null ? (int) $entry['id'] : null);
-        if ($action === 'check_in' && (($this->pauses?->hasOpenModelBooking($userId) ?? false)
-            || (($appliesToUser || $pausePolicy !== null) && (int) $this->connection->fetchColumn('SELECT COUNT(*) FROM timesheets WHERE user_id = :user_id AND entry_type = "work" AND start_time IS NOT NULL AND end_time IS NULL AND COALESCE(is_deleted, 0) = 0', ['user_id' => $userId]) > 0))) {
-            throw new RuntimeException('Es besteht bereits ein laufender Arbeitseinsatz. Ein erneuter Check-in darf dessen Arbeitsbeginn nicht veraendern.');
+        if ($startingWork) {
+            $this->assertNoLaterCompletedWork($userId, $date, $this->normalizeTime($payload['start_time'] ?? null) ?? $now->format('H:i'));
         }
-        $presenceResponse = $this->workTimePresenceService?->handle($userId, $payload + ['work_date' => $workDate], $action, $entry);
+        $presenceResponse = $this->workTimePresenceService?->handle($userId, $payload, $action, $entry);
         if ($presenceResponse !== null) {
             $this->updateSyncOperationResponse($clientRequestId, $userId, $action, $presenceResponse);
             return $presenceResponse;
@@ -216,7 +245,7 @@ final class AppTimesheetSyncService
         $endTime = $entry['end_time'] ?? null;
 
         if ($action === 'check_in') {
-            $startTime = $this->normalizeTime($payload['start_time'] ?? null) ?? $this->nowTime();
+            $startTime = $this->normalizeTime($payload['start_time'] ?? null) ?? $now->format('H:i');
         }
 
         if (in_array($action, ['check_out', 'day_close'], true)) {
@@ -228,12 +257,8 @@ final class AppTimesheetSyncService
                 throw new RuntimeException('Check-out ist erst moeglich, wenn die laufende Pause beendet wurde.');
             }
 
-            if (($appliesToUser || $pausePolicy !== null) && !empty($endTime)) {
-                throw new RuntimeException('Dieser Arbeitseinsatz ist bereits beendet. Bitte App-Daten neu laden.');
-            }
-
-            $endTime = $this->normalizeTime($payload['end_time'] ?? null) ?? $this->nowTime();
-            if (($appliesToUser || $pausePolicy !== null) && isset($payload['actual_end_at'])) {
+            $endTime = $this->normalizeTime($payload['end_time'] ?? null) ?? $now->format('H:i');
+            if (isset($payload['actual_end_at'])) {
                 $actualValue = $payload['actual_end_at'];
                 if (!is_string($actualValue) || !preg_match('/^\d{4}-\d{2}-\d{2}[T ](?:[01]\d|2[0-3]):[0-5]\d(?::00)?$/D', $actualValue)) {
                     throw new RuntimeException('Bitte Datum und Uhrzeit des tatsaechlichen Endes minutengenau eingeben.');
@@ -242,8 +267,8 @@ final class AppTimesheetSyncService
                 $actualLocal = strlen($actualLocal) === 16 ? $actualLocal . ':00' : $actualLocal;
                 $actualEnd = WorkTimeLocalTime::parse($actualLocal);
                 $actualStart = WorkTimeLocalTime::parse($workDate . ' ' . (strlen((string) $startTime) === 5 ? $startTime . ':00' : $startTime));
-                $inferredEndDate = $endTime < substr((string) $startTime, 0, 5) ? (new DateTimeImmutable($workDate))->modify('+1 day')->format('Y-m-d') : $workDate;
-                if ($actualEnd->format('Y-m-d H:i') !== $inferredEndDate . ' ' . $endTime || $actualEnd <= $actualStart || $actualEnd > new DateTimeImmutable('now', new \DateTimeZone('Europe/Berlin')) || $actualEnd->getTimestamp() - $actualStart->getTimestamp() > 86400) {
+                $inferredEndDate = $endTime < substr((string) $startTime, 0, 5) ? $date->modify('+1 day')->format('Y-m-d') : $workDate;
+                if ($actualEnd->format('Y-m-d H:i') !== $inferredEndDate . ' ' . $endTime || $actualEnd <= $actualStart || $actualEnd > $now || $actualEnd->getTimestamp() - $actualStart->getTimestamp() > 86400) {
                     throw new RuntimeException('Dieser Einsatz kann mit dem vorhandenen Tageswechselmodell nicht eindeutig abgeschlossen werden. Bitte den Arbeitszeitnachweis im Admin pruefen.');
                 }
             }
@@ -339,6 +364,9 @@ final class AppTimesheetSyncService
                 'net_minutes' => $calculated['net_minutes'], 'entry_type' => 'work', 'source' => $source,
             ], $boundPauseAction || ($action === 'pause' && array_key_exists('manual_break_minutes', $payload)));
         }
+        if ($endingWork && !empty($entry['end_time'])) {
+            throw new RuntimeException('Dieser Arbeitseinsatz ist bereits beendet. Bitte App-Daten neu laden.');
+        }
         if ($action === 'pause' && array_key_exists('manual_break_minutes', $payload) && ($pausePolicy !== null || $existingBreaks !== [])) {
             throw new InvalidArgumentException('Vorhandene Pausennachweise bleiben erhalten. Bitte einen einzelnen Pausennachtrag erfassen.');
         }
@@ -398,9 +426,62 @@ final class AppTimesheetSyncService
             'server_time' => (new DateTimeImmutable())->format(DATE_ATOM),
         ];
 
-        $this->updateSyncOperationResponse($clientRequestId, $userId, $action, $response);
+        $this->updateSyncOperationResponse($clientRequestId, $userId, $originalAction, $response);
 
         return $response;
+    }
+
+    private function assertNoOpenWorkSession(int $userId, array $permissions, ?int $requestedProjectId, string $referenceDate): void
+    {
+        $entry = $this->connection->fetchOne(
+            'SELECT t.project_id
+             FROM timesheets t
+             WHERE t.user_id = :user_id AND ' . LiveWorkSession::isOpenSql('t') . '
+             ORDER BY t.work_date DESC, t.start_time DESC, t.id DESC LIMIT 1',
+            ['user_id' => $userId, 'live_reference_date' => $referenceDate]
+        );
+        if ($entry === null) {
+            return;
+        }
+
+        $project = null;
+        $projectId = $this->normalizeProjectId($entry['project_id']);
+        if ($projectId !== null && (new ProjectAccessService($this->connection))->canAccess(['id' => $userId, 'permissions' => $permissions], $projectId)) {
+            $project = $this->connection->fetchOne(
+                'SELECT id AS project_id, project_number, name AS project_name FROM projects
+                 WHERE id = :id AND COALESCE(is_deleted, 0) = 0 AND status <> "archived"',
+                ['id' => $projectId]
+            );
+        }
+
+        $message = WorkSessionConflict::ACTIVE_MESSAGE;
+        $label = trim((string) ($project['project_number'] ?? '')) ?: trim((string) ($project['project_name'] ?? ''));
+        if ($project !== null && $projectId === $requestedProjectId) {
+            $message = 'Sie sind bereits in diesem Projekt eingecheckt.';
+        } elseif ($project !== null && $label !== '') {
+            $message = 'Sie sind bereits in Projekt ' . $label . ' eingecheckt. Beenden Sie dort zuerst den Einsatz, um in einem anderen Projekt zu starten.';
+        }
+
+        throw new WorkSessionConflict('active_work_session', $message, $project);
+    }
+
+    private function assertNoLaterCompletedWork(int $userId, DateTimeImmutable $date, string $startTime): void
+    {
+        $overlap = $this->connection->fetchOne(
+            'SELECT id FROM timesheets
+             WHERE user_id = :user_id AND entry_type = "work" AND COALESCE(is_deleted, 0) = 0
+               AND work_date >= :earliest_date AND start_time IS NOT NULL AND end_time IS NOT NULL
+               AND TIMESTAMP(IF(end_time < start_time, DATE_ADD(work_date, INTERVAL 1 DAY), work_date), end_time) > :start_at
+             LIMIT 1',
+            [
+                'user_id' => $userId,
+                'earliest_date' => $date->modify('-1 day')->format('Y-m-d'),
+                'start_at' => $date->format('Y-m-d') . ' ' . $startTime . ':00',
+            ]
+        );
+        if ($overlap !== null) {
+            throw new WorkSessionConflict('overlapping_work_session', 'Für diesen Check-in liegt bereits eine spätere Arbeitsbuchung vor. Prüfen Sie die erfassten Zeiten, bevor Sie erneut buchen.');
+        }
     }
 
     private function assertExpectedProjectAssignment(?array $entry, array $payload, int $userId): void
@@ -628,12 +709,11 @@ final class AppTimesheetSyncService
             }
 
             $existingOperation = $this->findSyncOperation($clientRequestId, $userId);
-            if ($existingOperation !== null) {
-                $this->assertReplayAction($existingOperation, $action);
+            if ($existingOperation === null) {
+                throw new InvalidArgumentException('Diese Anfrage-ID ist bereits vergeben. Bitte prüfen Sie die ausstehende Aktion.');
             }
-            $response = is_array($existingOperation)
-                ? json_decode((string) ($existingOperation['response_json'] ?? ''), true)
-                : null;
+            $this->assertReplayAction($existingOperation, $action);
+            $response = json_decode((string) ($existingOperation['response_json'] ?? ''), true);
 
             return is_array($response) ? $response : ['status' => 'synced'];
         }
@@ -642,9 +722,12 @@ final class AppTimesheetSyncService
     private function assertReplayAction(array $operation, string $action): void
     {
         $previous = (string) ($operation['operation_type'] ?? '');
-        if ($previous !== $action && (in_array($action, self::ACTUAL_PAUSE_ACTIONS, true)
-            || in_array($previous, self::ACTUAL_PAUSE_ACTIONS, true))) {
-            throw new InvalidArgumentException('Diese Anfrage-ID gehört bereits zu einer anderen Pausenaktion.');
+        if ($previous === 'check_in'
+            && (json_decode((string) ($operation['response_json'] ?? ''), true)['action'] ?? null) === 'work_start') {
+            $previous = 'work_start';
+        }
+        if ($previous !== $action) {
+            throw new InvalidArgumentException('Diese Anfrage-ID gehört bereits zu einer anderen Aktion.');
         }
     }
 
@@ -1141,7 +1224,8 @@ final class AppTimesheetSyncService
         }
 
         try {
-            return (new \DateTimeImmutable($value))->format('Y-m-d H:i:s');
+            $zone = new DateTimeZone('Europe/Berlin');
+            return (new DateTimeImmutable($value, $zone))->setTimezone($zone)->format('Y-m-d H:i:s');
         } catch (\Exception) {
             return null;
         }
@@ -1152,11 +1236,6 @@ final class AppTimesheetSyncService
         $value = trim((string) ($value ?? ''));
 
         return $value === '' ? null : $value;
-    }
-
-    private function nowTime(): string
-    {
-        return (new \DateTimeImmutable())->format('H:i');
     }
 
     private function successMessage(string $action, ?int $projectId): string

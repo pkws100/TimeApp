@@ -39,7 +39,7 @@ final class AppWorkTimeController
         $today = (new DateTimeImmutable('today', new DateTimeZone('Europe/Berlin')))->format('Y-m-d');
 
         return Response::json(['ok' => true, 'data' => [
-            ...$this->events->statusForUser((int) $user['id']),
+            ...$this->events->statusForUser((int) $user['id'], $today, $user),
             'policy' => $this->policies->policyFor((int) $user['id'], $today),
             'preview' => $this->preview->forUserPeriod((int) $user['id'], $today, $today),
             'csrf_token' => $this->csrf->token(),
@@ -68,7 +68,7 @@ final class AppWorkTimeController
             }
             $data = $this->events->respond(
                 (int) $user['id'], (int) ($params['id'] ?? 0),
-                $action, $actualEnd ?: null, $requestId ?: null
+                $action, $actualEnd ?: null, $requestId ?: null, $this->auth->currentUser(...)
             );
             return Response::json(['ok' => true, 'data' => $data]);
         } catch (InvalidArgumentException|RuntimeException $exception) {

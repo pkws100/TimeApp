@@ -23,7 +23,7 @@ final class AppointmentService
         a.status, a.version, a.updated_at AS updated_at_utc, p.name AS project_name, p.project_number,
         ap.acknowledged_at_utc, ap.acknowledged_version
         FROM appointment_participants ap JOIN appointments a ON a.id = ap.appointment_id
-        LEFT JOIN projects p ON p.id = a.project_id
+        LEFT JOIN projects p ON p.id = a.project_id AND COALESCE(p.is_deleted, 0) = 0 AND p.status <> "archived"
         WHERE ap.user_id = :own_user AND a.archived_at IS NULL';
 
     private readonly AppointmentTime $time;
@@ -483,7 +483,7 @@ final class AppointmentService
              FROM appointments WHERE id = :id FOR UPDATE',
             ['id' => $id]
         );
-        if ($row === null || ($row['project_id'] !== null && !$this->projectAccess->canAccess($actor, (int) $row['project_id']))) {
+        if ($row === null || ($row['project_id'] !== null && !$this->projectAccess->canAccess($actor, (int) $row['project_id'], true))) {
             throw $this->notFound();
         }
         if ($row['archived_at'] !== null) {

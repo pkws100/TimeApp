@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace App\Domain\WorkTime;
 
+use App\Domain\Projects\ProjectAccessService;
 use App\Domain\Timesheets\AppTimesheetSyncService;
+use App\Domain\Timesheets\LiveWorkSession;
 use App\Domain\Timesheets\TimesheetPauseIntervals;
 use App\Domain\Timesheets\TimesheetWriteGuard;
 use App\Infrastructure\Database\DatabaseConnection;
@@ -19,6 +21,7 @@ final class WorkTimeEventService
     private ?Closure $pushSender;
     private SmsProvider $smsProvider;
     private WorkTimeNotificationService $notifications;
+    private ProjectAccessService $projectAccess;
     private ?WorkTimeReconciliationQueue $reconciliationQueue = null;
 
     public function __construct(
@@ -32,24 +35,31 @@ final class WorkTimeEventService
         $this->pushSender = $pushSender === null ? null : Closure::fromCallable($pushSender);
         $this->smsProvider = $smsProvider ?? new MockSmsProvider();
         $this->notifications = new WorkTimeNotificationService($connection, $policies, $pushSender, $this->smsProvider);
+        $this->projectAccess = new ProjectAccessService($connection);
     }
 
     public function notifications(): WorkTimeNotificationService { return $this->notifications; }
 
     public function setReconciliationQueue(WorkTimeReconciliationQueue $queue): void { $this->reconciliationQueue = $queue; }
 
-    public function statusForUser(int $userId, ?string $today = null): array
+    public function statusForUser(int $userId, ?string $today = null, ?array $viewer = null): array
     {
         if (!$this->policies->enabled()) {
             return ['enabled' => false, 'checkout_proposals' => [], 'presence_session' => null];
         }
+        $today ??= LiveWorkSession::referenceDate();
+        $liveParams = ['user_id' => $userId, 'live_reference_date' => $today];
         // GET is read-only. Obsolete proposals are filtered and later audited by the worker.
-        $proposals = $this->connection->fetchAll('SELECT p.*, t.work_date, t.start_time FROM work_time_checkout_proposals p JOIN timesheets t ON t.id = p.timesheet_id JOIN users u ON u.id = p.user_id WHERE p.user_id = :user_id AND p.status = "pending" AND t.end_time IS NULL AND t.start_time IS NOT NULL AND COALESCE(t.is_deleted, 0) = 0 AND u.employment_status = "active" AND COALESCE(u.is_deleted, 0) = 0 ORDER BY p.proposed_end_at, p.id', ['user_id' => $userId]);
-        $activeEntries = $this->connection->fetchAll('SELECT t.id, t.user_id, t.work_date, t.start_time, t.project_id FROM timesheets t JOIN users u ON u.id = t.user_id WHERE t.user_id = :user_id AND t.entry_type = "work" AND t.start_time IS NOT NULL AND t.end_time IS NULL AND COALESCE(t.is_deleted, 0) = 0 AND u.employment_status = "active" AND COALESCE(u.is_deleted, 0) = 0 ORDER BY t.work_date, t.id', ['user_id' => $userId]);
+        $proposals = $this->connection->fetchAll('SELECT p.*, t.work_date, t.start_time FROM work_time_checkout_proposals p
+            JOIN timesheets t ON t.id = p.timesheet_id AND t.user_id = p.user_id JOIN users u ON u.id = p.user_id
+            WHERE p.user_id = :user_id AND p.status = "pending" AND u.employment_status = "active" AND COALESCE(u.is_deleted, 0) = 0
+            AND ' . LiveWorkSession::isOpenSql('t') . ' ORDER BY p.proposed_end_at, p.id', $liveParams);
+        $activeEntries = $this->connection->fetchAll('SELECT t.id, t.user_id, t.work_date, t.start_time, t.project_id FROM timesheets t
+            JOIN users u ON u.id = t.user_id WHERE t.user_id = :user_id AND u.employment_status = "active" AND COALESCE(u.is_deleted, 0) = 0
+            AND ' . LiveWorkSession::isOpenSql('t') . ' ORDER BY t.work_date, t.id', $liveParams);
         $assignedEntries = array_filter($activeEntries, fn (array $row): bool => $this->policies->policyFor($userId, $row['work_date']) !== null);
         $conflict = $assignedEntries !== [] && count($activeEntries) > 1;
         $activeEntry = null;
-        $today ??= (new DateTimeImmutable('today', new DateTimeZone('Europe/Berlin')))->format('Y-m-d');
         if (count($activeEntries) === 1 && $assignedEntries !== [] && $activeEntries[0]['work_date'] < $today) {
             $activeEntry = $activeEntries[0];
             foreach (['id', 'user_id'] as $field) { $activeEntry[$field] = (int) $activeEntry[$field]; }
@@ -57,7 +67,25 @@ final class WorkTimeEventService
             $activeEntry['current_break'] = (new TimesheetPauseIntervals($this->connection))->currentForTimesheet($activeEntry['id']);
         }
 
-        return ['enabled' => true, 'checkout_proposals' => $proposals, 'presence_session' => $this->sync->openPresenceForUser($userId), 'active_work_entry' => $activeEntry, 'active_work_entry_conflict' => $conflict];
+        $presence = $this->sync->openPresenceForUser($userId, $today);
+        if ($viewer !== null) {
+            $activeEntry = $this->withVisibleProject($viewer, $activeEntry);
+            $presence = $this->withVisibleProject($viewer, $presence);
+        }
+
+        return ['enabled' => true, 'checkout_proposals' => $proposals, 'presence_session' => $presence, 'active_work_entry' => $activeEntry, 'active_work_entry_conflict' => $conflict];
+    }
+
+    private function withVisibleProject(array $viewer, ?array $entry): ?array
+    {
+        if (isset($entry['project_id']) && !$this->projectAccess->canAccess($viewer, (int) $entry['project_id'])) {
+            $entry['project_id'] = null;
+            $entry['project_unavailable'] = true;
+            unset($entry['project_number'], $entry['project_name'], $entry['project_customer_name'],
+                $entry['customer_signature_name'], $entry['customer_signature_required']);
+        }
+
+        return $entry;
     }
 
     public function notificationEventsForEmployee(int $userId): array
@@ -75,7 +103,7 @@ final class WorkTimeEventService
         return 'work-time-events-worker:' . substr(hash('sha256', (string) $this->connection->fetchColumn('SELECT DATABASE()')), 0, 16);
     }
 
-    public function respond(int $userId, int $proposalId, string $action, ?string $actualEndAt = null, ?string $requestId = null): array
+    public function respond(int $userId, int $proposalId, string $action, ?string $actualEndAt = null, ?string $requestId = null, ?callable $currentViewer = null): array
     {
         if (!$this->policies->enabled()) {
             throw new InvalidArgumentException('Arbeitszeitfenster sind deaktiviert.');
@@ -85,7 +113,7 @@ final class WorkTimeEventService
         }
         $guard = new TimesheetWriteGuard($this->connection);
 
-        return $guard->withAccountingWriteLock(function () use ($userId, $proposalId, $action, $actualEndAt, $requestId): array {
+        return $guard->withAccountingWriteLock(function () use ($userId, $proposalId, $action, $actualEndAt, $requestId, $currentViewer): array {
             $previous = $this->connection->fetchOne('SELECT * FROM work_time_checkout_proposal_actions WHERE user_id = :user_id AND request_id = :request_id', ['user_id' => $userId, 'request_id' => $requestId]);
             if ($previous !== null) {
                 if ((int) $previous['proposal_id'] !== $proposalId || $previous['action'] !== $action) {
@@ -104,11 +132,13 @@ final class WorkTimeEventService
             if ($proposal === null) {
                 throw new InvalidArgumentException('Der Vorschlag wurde nicht gefunden.');
             }
-            $entry = $this->connection->fetchOne('SELECT t.*, u.employment_status, u.is_deleted AS user_deleted FROM timesheets t JOIN users u ON u.id = t.user_id WHERE t.id = :id AND t.user_id = :user_id', ['id' => $proposal['timesheet_id'], 'user_id' => $userId]);
             if ($proposal['status'] !== 'pending') {
                 return ['ok' => true, 'status' => 'already_resolved', 'proposal' => $proposal];
             }
-            if ($entry === null || !empty($entry['end_time']) || (int) $entry['is_deleted'] === 1 || $entry['employment_status'] !== 'active' || (int) $entry['user_deleted'] === 1) {
+            $entry = $this->connection->fetchOne('SELECT t.* FROM timesheets t JOIN users u ON u.id = t.user_id
+                WHERE t.id = :id AND t.user_id = :user_id AND u.employment_status = "active" AND COALESCE(u.is_deleted, 0) = 0
+                AND ' . LiveWorkSession::isOpenSql('t'), ['id' => $proposal['timesheet_id'], 'user_id' => $userId, 'live_reference_date' => LiveWorkSession::referenceDate()]);
+            if ($entry === null) {
                 $this->connection->transaction(function () use ($proposalId, $userId, $requestId, $action): void {
                     $this->finishProposal($proposalId, $userId, 'stale', $requestId, null, null, $action);
                 });
@@ -144,7 +174,17 @@ final class WorkTimeEventService
                 throw new InvalidArgumentException('Die Buchungs-Request-ID wurde bereits verwendet. Bitte den aktuellen Vorschlag neu laden.');
             }
 
-            return ['ok' => true, 'status' => $resultStatus, 'proposal' => $completed, 'timesheet' => $sync['timesheet'] ?? null];
+            $timesheet = $sync['timesheet'] ?? null;
+            if (isset($timesheet['project_id']) && $currentViewer !== null) {
+                $timesheet = $this->withVisibleProject($currentViewer() ?? [], $timesheet);
+            }
+
+            return [
+                'ok' => true,
+                'status' => $resultStatus,
+                'proposal' => $completed,
+                'timesheet' => $timesheet,
+            ];
         });
     }
 
@@ -164,7 +204,11 @@ final class WorkTimeEventService
         try {
             $guard = new TimesheetWriteGuard($this->connection);
             $guard->withAccountingWriteLock(function () use (&$summary, $dryRun, $now, $guard): void {
-                $stale = $this->connection->fetchAll('SELECT p.* FROM work_time_checkout_proposals p JOIN timesheets t ON t.id = p.timesheet_id JOIN users u ON u.id = p.user_id WHERE p.status = "pending" AND (t.end_time IS NOT NULL OR COALESCE(t.is_deleted, 0) = 1 OR u.employment_status <> "active" OR COALESCE(u.is_deleted, 0) = 1)');
+                $liveParams = ['live_reference_date' => LiveWorkSession::referenceDate(now: $now)];
+                $stale = $this->connection->fetchAll('SELECT p.* FROM work_time_checkout_proposals p
+                    JOIN timesheets t ON t.id = p.timesheet_id JOIN users u ON u.id = p.user_id WHERE p.status = "pending"
+                    AND NOT (t.user_id = p.user_id AND u.employment_status = "active" AND COALESCE(u.is_deleted, 0) = 0
+                    AND ' . LiveWorkSession::isOpenSql('t') . ')', $liveParams);
                 foreach ($stale as $proposal) {
                     $summary['stale']++;
                     if (!$dryRun) {
@@ -173,7 +217,9 @@ final class WorkTimeEventService
                         });
                     }
                 }
-                $entries = $this->connection->fetchAll('SELECT t.* FROM timesheets t JOIN users u ON u.id = t.user_id WHERE t.entry_type = "work" AND t.start_time IS NOT NULL AND t.end_time IS NULL AND t.is_deleted = 0 AND u.employment_status = "active" AND COALESCE(u.is_deleted, 0) = 0 AND t.work_date <= :today ORDER BY t.id', ['today' => $now->format('Y-m-d')]);
+                $entries = $this->connection->fetchAll('SELECT t.* FROM timesheets t JOIN users u ON u.id = t.user_id
+                    WHERE u.employment_status = "active" AND COALESCE(u.is_deleted, 0) = 0 AND t.work_date <= :today
+                    AND ' . LiveWorkSession::isOpenSql('t') . ' ORDER BY t.id', ['today' => $liveParams['live_reference_date']] + $liveParams);
                 foreach ($entries as $entry) {
                     try {
                         try {

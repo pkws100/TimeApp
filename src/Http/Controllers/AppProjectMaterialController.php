@@ -35,7 +35,7 @@ final class AppProjectMaterialController
                 'data' => $this->projectMaterialService->list($user, (int) ($params['id'] ?? 0)),
             ]);
         } catch (ProjectAccessDeniedException $exception) {
-            return $this->error($exception->getMessage(), 403);
+            return $this->error($exception->getMessage(), 403, $exception->reason);
         } catch (RuntimeException) {
             return $this->error('Materialeintraege konnten nicht geladen werden.', 500);
         }
@@ -50,7 +50,12 @@ final class AppProjectMaterialController
         }
 
         try {
-            $result = $this->projectMaterialService->createWithResult($user, (int) ($params['id'] ?? 0), $request->input());
+            $result = $this->projectMaterialService->createWithResult(
+                $user,
+                (int) ($params['id'] ?? 0),
+                $request->input(),
+                $this->authService->currentUser(...)
+            );
 
             return Response::json([
                 'ok' => true,
@@ -63,7 +68,7 @@ final class AppProjectMaterialController
         } catch (InvalidArgumentException $exception) {
             return $this->error($exception->getMessage(), 422);
         } catch (ProjectAccessDeniedException $exception) {
-            return $this->error($exception->getMessage(), 403);
+            return $this->error($exception->getMessage(), 403, $exception->reason);
         } catch (RuntimeException) {
             return $this->error('Der Materialeintrag konnte nicht gespeichert werden.', 500);
         }
@@ -86,18 +91,19 @@ final class AppProjectMaterialController
         } catch (InvalidArgumentException $exception) {
             return $this->error($exception->getMessage(), 404);
         } catch (ProjectAccessDeniedException $exception) {
-            return $this->error($exception->getMessage(), 403);
+            return $this->error($exception->getMessage(), 403, $exception->reason);
         } catch (RuntimeException) {
             return $this->error('Der Materialeintrag konnte nicht archiviert werden.', 500);
         }
     }
 
-    private function error(string $message, int $status): Response
+    private function error(string $message, int $status, ?string $code = null): Response
     {
         return Response::json([
             'ok' => false,
             'error' => $message,
             'message' => $message,
+            ...($code === null ? [] : ['code' => $code]),
         ], $status);
     }
 }

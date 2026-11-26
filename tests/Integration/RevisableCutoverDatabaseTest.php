@@ -13,6 +13,29 @@ use Tests\Support\MariaDbTestCase;
 
 final class RevisableCutoverDatabaseTest extends MariaDbTestCase
 {
+    public function testDraftUpdateAndFinalizationPreserveTheOriginalCreator(): void
+    {
+        $creatorId = $this->createUser();
+        $finalizerId = $this->createUser();
+        $employeeId = $this->createUser();
+        $service = $this->service();
+
+        $original = $service->saveDraft($this->payload($employeeId, '+01:00'), $creatorId);
+        $updated = $service->saveDraft($this->payload($employeeId, '+02:00'), $finalizerId);
+        $final = $service->finalize($this->payload($employeeId, '+03:00'), $finalizerId);
+
+        self::assertEquals($original['id'], $updated['id']);
+        self::assertEquals($original['id'], $final['id']);
+        self::assertSame('draft', $updated['status']);
+        self::assertSame(120, (int) $updated['opening_time_balance_minutes']);
+        self::assertSame($creatorId, (int) $updated['created_by_user_id']);
+        self::assertNull($updated['finalized_by_user_id']);
+        self::assertSame('final', $final['status']);
+        self::assertSame(180, (int) $final['opening_time_balance_minutes']);
+        self::assertSame($creatorId, (int) $final['created_by_user_id']);
+        self::assertSame($finalizerId, (int) $final['finalized_by_user_id']);
+    }
+
     public function testZeroOpeningValuesCanBeFinalizedAndReversed(): void
     {
         $adminId = $this->createUser(['employee_number' => 'ADMIN-1', 'email' => 'admin1@example.test']);

@@ -441,7 +441,7 @@ final class ProjectDispatchService
 
     private function assertManageAccess(array $actor, int $projectId): void
     {
-        if (!$this->projectAccessService->canManage($actor) || !$this->projectAccessService->canAccess($actor, $projectId)) {
+        if (!$this->projectAccessService->canManage($actor) || !$this->projectAccessService->canAccess($actor, $projectId, true)) {
             throw new RuntimeException('Keine Berechtigung fuer den Projektversand.');
         }
     }

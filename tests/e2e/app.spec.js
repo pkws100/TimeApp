@@ -315,7 +315,7 @@ test('mobile project deep link shows order details, materials and isolates proje
   await expect(page.locator('main script')).toHaveCount(0);
   await expect(page.locator('.app-work-instructions br')).toHaveCount(1);
   await expect(page.locator('.app-attachment-info').filter({ hasText: 'auftrag.pdf' }).getByRole('link', { name: 'Oeffnen' }))
-    .toHaveAttribute('href', '/api/v1/app/project-files/51/download');
+    .toHaveAttribute('href', '/api/v1/app/project-files/51/download?timeapp_user_id=7');
   await expect(page.getByText('Sicherung', { exact: true }).first()).toBeVisible();
   await expect(page).toHaveURL('/app/projektwahl');
 
@@ -2059,7 +2059,7 @@ test('mobile app does not send geo when geo section is hidden', async ({ page })
   const syncPayloads = [];
 
   await page.addInitScript(() => {
-    window.localStorage.setItem('app.geoAck', '1');
+    window.localStorage.setItem('app.geoAck.user.7', '1');
 
     Object.defineProperty(navigator, 'geolocation', {
       configurable: true,
@@ -2207,7 +2207,7 @@ test('mobile app does not send geo when geo section is hidden', async ({ page })
   expect(syncPayloads[0]).not.toHaveProperty('geo_acknowledged');
 });
 
-test('mobile app strips queued geo after geo section is disabled before reconnect sync', async ({ page }) => {
+test('mobile reconnect strips disabled geo and keeps unassigned legacy queue rows local', async ({ page }) => {
   const syncPayloads = [];
 
   await page.addInitScript(async () => {
@@ -2248,6 +2248,7 @@ test('mobile app strips queued geo after geo section is disabled before reconnec
         tx.objectStore('queue').put({
           id: 'queued-geo-entry',
           client_request_id: 'queued-geo-entry',
+          userPart: '7',
           endpoint: '/api/v1/app/timesheets/sync',
           payload: {
             action: 'check_in',
@@ -2263,6 +2264,14 @@ test('mobile app strips queued geo after geo section is disabled before reconnec
             },
             geo_acknowledged: true
           },
+          status: 'pending',
+          createdAt: Date.now()
+        });
+        tx.objectStore('queue').put({
+          id: 'legacy-without-owner',
+          client_request_id: 'legacy-without-owner',
+          endpoint: '/api/v1/app/timesheets/sync',
+          payload: { action: 'check_in', work_date: '2026-05-15', start_time: '08:00' },
           status: 'pending',
           createdAt: Date.now()
         });
@@ -2389,8 +2398,10 @@ test('mobile app strips queued geo after geo section is disabled before reconnec
   await page.evaluate(() => window.dispatchEvent(new Event('online')));
 
   await expect.poll(() => syncPayloads.length).toBe(1);
+  expect(syncPayloads[0].client_request_id).toBe('queued-geo-entry');
   expect(syncPayloads[0]).not.toHaveProperty('geo');
   expect(syncPayloads[0]).not.toHaveProperty('geo_acknowledged');
+  await expect(page.getByText('Ältere lokale Buchungen ohne bestätigte Kontozuordnung warten auf Klärung.')).toBeVisible();
 });
 
 test('mobile topbar updates after check-in without a page reload', async ({ page }) => {

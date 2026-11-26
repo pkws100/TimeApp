@@ -21,13 +21,13 @@ final class ProjectWorkReportService
 
     public function list(array $user, int $projectId, string $scope = 'active'): array
     {
-        $this->assertProjectAccess($user, $projectId);
+        $includeArchived = $scope === 'all' && $this->projectAccessService->canManage($user);
+        $this->assertProjectAccess($user, $projectId, $includeArchived);
 
         if (!$this->connection->tableExists('project_work_reports')) {
             return [];
         }
 
-        $includeArchived = $scope === 'all' && $this->projectAccessService->canManage($user);
         $rows = $this->connection->fetchAll(
             $this->entrySelect() . '
              WHERE project_work_reports.project_id = :project_id
@@ -46,7 +46,7 @@ final class ProjectWorkReportService
     public function create(array $user, int $projectId, array $input): array
     {
         // Permission must be checked on every retry, before returning any stored report.
-        $this->assertProjectAccess($user, $projectId);
+        $this->projectAccessService->requireProjectEntryWriteAccess($user, $projectId);
 
         if (!$this->connection->tableExists('project_work_reports')) {
             throw new RuntimeException('Die Arbeitsberichte sind noch nicht migriert.');
@@ -81,6 +81,7 @@ final class ProjectWorkReportService
 
         // The unique author/request key also serializes simultaneous submissions.
         // Archived reports retain their key and can never be recreated by a retry.
+        $this->projectAccessService->requireProjectEntryWriteAccess($user, $projectId);
         $existing = $this->connection->fetchOne(
             $this->entrySelect() . '
              WHERE project_work_reports.created_by_user_id = :created_by_user_id
@@ -105,7 +106,7 @@ final class ProjectWorkReportService
         return ['entry' => $this->publicEntry($existing), 'replayed' => true];
     }
 
-    public function archive(array $user, int $entryId): array
+    public function archive(array $user, int $entryId, bool $allowArchivedProject = false): array
     {
         $entry = $this->find($entryId);
 
@@ -114,11 +115,11 @@ final class ProjectWorkReportService
         }
 
         $projectId = (int) $entry['project_id'];
-        $this->assertProjectAccess($user, $projectId);
+        $this->projectAccessService->requireProjectEntryWriteAccess($user, $projectId, $allowArchivedProject);
         $userId = (int) ($user['id'] ?? 0);
 
         if (!$this->projectAccessService->canManage($user) && (int) ($entry['created_by_user_id'] ?? 0) !== $userId) {
-            throw new ProjectAccessDeniedException('Fremde Arbeitsberichte duerfen nicht archiviert werden.');
+            throw new ProjectAccessDeniedException('Fremde Arbeitsberichte duerfen nicht archiviert werden.', ProjectAccessDeniedException::WRITE_DENIED);
         }
 
         $this->connection->execute(
@@ -221,9 +222,9 @@ final class ProjectWorkReportService
         ];
     }
 
-    private function assertProjectAccess(array $user, int $projectId): void
+    private function assertProjectAccess(array $user, int $projectId, bool $allowArchivedProject = false): void
     {
-        if (!$this->projectAccessService->canAccess($user, $projectId)) {
+        if (!$this->projectAccessService->canAccess($user, $projectId, $allowArchivedProject)) {
             throw new ProjectAccessDeniedException('Keine Berechtigung fuer dieses Projekt.');
         }
     }

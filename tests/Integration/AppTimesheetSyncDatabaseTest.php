@@ -8,6 +8,7 @@ use App\Domain\Settings\CompanySettingsService;
 use App\Domain\Timesheets\AppTimesheetSyncService;
 use App\Domain\Timesheets\TimesheetCalculator;
 use App\Domain\Timesheets\WorkdayStateCalculator;
+use App\Domain\Timesheets\WorkSessionConflict;
 use App\Infrastructure\Database\DatabaseConnection;
 use PDO;
 use PDOException;
@@ -17,6 +18,164 @@ use Tests\Support\MariaDbScratchConfig;
 
 final class AppTimesheetSyncDatabaseTest extends TestCase
 {
+    public function testFinalCutoverLetsTheEmployeeStartWithoutChangingTheLockedOpenBooking(): void
+    {
+        $this->withScratchDatabase(function (DatabaseConnection $connection): void {
+            [$userId, $projectId] = $this->seedAssignedUserAndProject($connection, 'live-cutover');
+            $connection->execute('ALTER TABLE timesheets ADD SYSTEM VERSIONING');
+            $connection->execute('INSERT INTO timesheets (user_id, work_date, start_time, note)
+                VALUES (:user, "2026-06-01", "08:00", "Altbuchung")', ['user' => $userId]);
+            $oldId = $connection->lastInsertId();
+            $connection->execute('UPDATE timesheets SET note = "Historischer Nachweis" WHERE id = :id', ['id' => $oldId]);
+            $connection->execute('INSERT INTO employee_account_cutovers (user_id, active_final_user_id, status, effective_from)
+                VALUES (:user, :active_user, "final", "2026-06-02")', ['user' => $userId, 'active_user' => $userId]);
+            $connection->execute('INSERT INTO accounting_closures (closure_number, closure_type, status, period_start, period_end, user_id)
+                VALUES ("TEST-CUTOVER", "month", "final", "2026-01-01", "2026-06-01", :user)', ['user' => $userId]);
+            $history = static fn (): array => $connection->fetchAll(
+                'SELECT *, ROW_START, ROW_END FROM timesheets FOR SYSTEM_TIME ALL WHERE id = :id ORDER BY ROW_START',
+                ['id' => $oldId]
+            );
+            $before = $history();
+            $cutovers = $connection->fetchAll('SELECT * FROM employee_account_cutovers');
+            self::assertCount(2, $before);
+
+            $service = $this->createSyncService($connection);
+            $checkIn = [
+                'client_request_id' => 'valid-after-cutover',
+                'action' => 'check_in',
+                'work_date' => '2026-06-02',
+                'project_id' => $projectId,
+                'start_time' => '07:00',
+            ];
+            $result = $service->sync($userId, $checkIn);
+            self::assertSame($projectId, $result['timesheet']['project_id']);
+            self::assertSame($result, $service->sync($userId, $checkIn));
+            self::assertSame($before, $history());
+            self::assertSame($cutovers, $connection->fetchAll('SELECT * FROM employee_account_cutovers'));
+            self::assertSame(2, (int) $connection->fetchColumn('SELECT COUNT(*) FROM timesheets'));
+
+            $this->expectException(WorkSessionConflict::class);
+            $service->sync($userId, array_replace($checkIn, ['client_request_id' => 'another-in', 'work_date' => '2026-06-03']));
+        });
+    }
+
+    public function testDraftRevisedFutureAndForeignCutoversDoNotHideLiveWork(): void
+    {
+        $this->withScratchDatabase(function (DatabaseConnection $connection): void {
+            $service = $this->createSyncService($connection);
+            $futureDate = (new \DateTimeImmutable('tomorrow', new \DateTimeZone('Europe/Berlin')))->format('Y-m-d');
+            [$otherUserId] = $this->seedAssignedUserAndProject($connection, 'other-cutover');
+            foreach (['draft', 'revised', 'future', 'foreign', 'inactive', 'inconsistent', 'notyet'] as $case) {
+                [$userId] = $this->seedAssignedUserAndProject($connection, $case);
+                $connection->execute('INSERT INTO timesheets (user_id, work_date, start_time)
+                    VALUES (:user, "2026-06-01", "08:00")', ['user' => $userId]);
+                $connection->execute('INSERT INTO employee_account_cutovers (user_id, active_final_user_id, status, effective_from)
+                    VALUES (:user, :active_user, :status, :effective_from)', [
+                    'user' => $case === 'foreign' ? $otherUserId : $userId,
+                    'active_user' => match ($case) {
+                        'inactive' => null,
+                        'foreign' => $otherUserId,
+                        'inconsistent' => $otherUserId,
+                        default => $userId,
+                    },
+                    'status' => in_array($case, ['draft', 'revised'], true) ? $case : 'final',
+                    'effective_from' => match ($case) {
+                        'future' => $futureDate,
+                        'notyet' => '2026-06-03',
+                        default => '2026-06-02',
+                    },
+                ]);
+
+                try {
+                    $service->sync($userId, [
+                        'client_request_id' => 'blocked-' . $case,
+                        'action' => 'check_in',
+                        'work_date' => $case === 'future' ? $futureDate : '2026-06-02',
+                        'start_time' => '07:00',
+                    ]);
+                    self::fail('Expected an open-session conflict for ' . $case);
+                } catch (WorkSessionConflict $exception) {
+                    self::assertSame('active_work_session', $exception->reason, $case);
+                    self::assertNull($exception->visibleProject);
+                }
+            }
+        });
+    }
+
+    public function testDuplicateMessagesRespectCurrentProjectAccessAndStaleOfflineStartCannotOverlap(): void
+    {
+        $this->withScratchDatabase(function (DatabaseConnection $connection): void {
+            [$userId, $projectId] = $this->seedAssignedUserAndProject($connection, 'visible');
+            [$otherUserId, $otherProjectId] = $this->seedAssignedUserAndProject($connection, 'other-project');
+            $projectNumber = $connection->fetchColumn('SELECT project_number FROM projects WHERE id = :id', ['id' => $projectId]);
+            $user = ['id' => $userId, 'permissions' => ['timesheets.create']];
+            $service = $this->createSyncService($connection);
+            $checkIn = [
+                'client_request_id' => 'night-work',
+                'action' => 'check_in',
+                'work_date' => '2026-06-01',
+                'project_id' => $projectId,
+                'start_time' => '23:00',
+            ];
+            $result = $service->sync($user, $checkIn);
+
+            foreach ([$projectId, $otherProjectId, null] as $index => $requestedProject) {
+                if ($requestedProject === null) {
+                    $connection->execute('UPDATE projects SET status = "archived" WHERE id = :id', ['id' => $projectId]);
+                }
+                try {
+                    $service->sync($user, array_replace($checkIn, [
+                        'client_request_id' => 'duplicate-' . $index,
+                        'work_date' => '2026-06-02',
+                        'start_time' => '00:30',
+                        'project_id' => $requestedProject ?? $otherProjectId,
+                    ]));
+                    self::fail('Duplicate live check-in was accepted.');
+                } catch (WorkSessionConflict $exception) {
+                    self::assertSame('active_work_session', $exception->reason);
+                    if ($requestedProject === $projectId) {
+                        self::assertSame('Sie sind bereits in diesem Projekt eingecheckt.', $exception->getMessage());
+                    } elseif ($requestedProject !== null) {
+                        self::assertStringContainsString('Projekt ' . $projectNumber, $exception->getMessage());
+                    } else {
+                        self::assertNull($exception->visibleProject);
+                        self::assertStringNotContainsString($projectNumber, $exception->getMessage());
+                    }
+                }
+            }
+            self::assertSame(1, (int) $connection->fetchColumn('SELECT COUNT(*) FROM timesheets'));
+            $checkout = $service->sync($user, [
+                'client_request_id' => 'end-night',
+                'action' => 'check_out',
+                'work_date' => '2026-06-01',
+                'expected_timesheet_id' => $result['timesheet']['id'],
+                'end_time' => '01:00',
+                'actual_end_at' => '2026-06-02T01:00',
+            ]);
+            self::assertSame(120, $checkout['timesheet']['net_minutes']);
+            self::assertSame($projectId, $checkout['timesheet']['project_id']);
+
+            try {
+                $service->sync($user, [
+                    'client_request_id' => 'late-start',
+                    'action' => 'check_in',
+                    'work_date' => '2026-06-02',
+                    'start_time' => '00:30',
+                ]);
+                self::fail('An offline start would overlap the completed night shift.');
+            } catch (WorkSessionConflict $exception) {
+                self::assertSame('overlapping_work_session', $exception->reason);
+            }
+            try {
+                $service->sync($otherUserId, $checkIn);
+                self::fail('An operation ID owned by another account must not appear synced.');
+            } catch (\InvalidArgumentException $exception) {
+                self::assertStringContainsString('Anfrage-ID', $exception->getMessage());
+            }
+            self::assertSame(1, (int) $connection->fetchColumn('SELECT COUNT(*) FROM timesheets'));
+        });
+    }
+
     public function testManualFortyFiveMinuteBreakSurvivesCheckout(): void
     {
         $this->withScratchDatabase(function (DatabaseConnection $connection): void {
@@ -595,7 +754,7 @@ final class AppTimesheetSyncDatabaseTest extends TestCase
                 'project_id' => $projectId,
                 'user_id' => $userId,
                 'assigned_from' => '2026-01-01',
-                'assigned_until' => '2026-12-31',
+                'assigned_until' => null,
             ]
         );
 
@@ -677,6 +836,16 @@ final class AppTimesheetSyncDatabaseTest extends TestCase
                 is_deleted TINYINT(1) DEFAULT 0,
                 deleted_at DATETIME NULL,
                 deleted_by_user_id INT UNSIGNED NULL
+            )'
+        );
+
+        $connection->execute(
+            'CREATE TABLE employee_account_cutovers (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                user_id INT UNSIGNED NOT NULL,
+                active_final_user_id INT UNSIGNED NULL,
+                status ENUM("draft","final","revised") NOT NULL,
+                effective_from DATE NOT NULL
             )'
         );
 

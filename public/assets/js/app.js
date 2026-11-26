@@ -30,6 +30,8 @@
         system: 'System'
     };
     const GEO_ACK_KEY = 'app.geoAck';
+    const SESSION_CHANGE_KEY = 'app.sessionChange';
+    const PENDING_LOGOUT_KEY = 'pending_logout';
     const DB_NAME = 'zeiterfassung-app';
     const DB_VERSION = 1;
     const VACATION_CACHE_SCHEMA_VERSION = 2;
@@ -107,6 +109,9 @@
         workTimeDrafts: {},
         pauseSyncUncertain: false,
         pauseConflicts: [],
+        workConflicts: [],
+        unassignedQueueCount: 0,
+        timeSyncRequiresRefresh: false,
         vacationRequests: [],
         vacationLoading: false,
         vacationOffline: false,
@@ -130,6 +135,7 @@
     let workTimeRequestCounter = 0;
     let activeOnlineDataLoad = null;
     let queueSyncTail = Promise.resolve(null);
+    let authMutationTail = Promise.resolve();
     let sessionGeneration = 0;
     let viewedProjectGeneration = 0;
     let workReportStorageQueue = Promise.resolve();
@@ -471,6 +477,16 @@
         projectWorkReportRequestCounter += 1;
         workTimeRequestCounter += 1;
         state.pendingAction = null;
+        state.pendingCount = 0;
+        state.feedback = null;
+        state.dialog = null;
+        state.push = null;
+        state.pushLoading = false;
+        state.pushBusy = false;
+        state.signatureDrawing = null;
+        state.fileSelectionGuardUntil = 0;
+        window.clearTimeout(feedbackTimer);
+        timesheetListRequestCounter += 1;
         state.uploadingTimesheetId = null;
         state.uploadingProjectId = null;
         state.today = null;
@@ -519,6 +535,9 @@
         state.workTimeDrafts = {};
         state.pauseSyncUncertain = false;
         state.pauseConflicts = [];
+        state.workConflicts = [];
+        state.unassignedQueueCount = 0;
+        state.timeSyncRequiresRefresh = false;
         state.vacationRequests = [];
         state.vacationLoading = false;
         state.vacationOffline = false;
@@ -708,7 +727,7 @@
         return error instanceof SessionExpiredError;
     }
 
-    async function handleExpiredSession(message) {
+    async function handleExpiredSession(message, sessionChangedElsewhere = false, discardDrafts = false) {
         if (state.sessionExpiredHandled && !state.session.authenticated) {
             return;
         }
@@ -717,13 +736,14 @@
         appointmentLoginTarget = selection ? appointmentUrl(selection) : null;
         const previousTodayCacheKey = todayCacheKey();
         const previousUserPart = currentSessionUserCachePart();
-        captureProjectMaterialDraft();
+        const previousSessionId = state.session.localSessionId;
+        if (!discardDrafts) captureProjectMaterialDraft();
         const unsentMaterials = Object.entries(state.projectMaterialDrafts)
-            .filter(([projectId, draft]) => draft.ready && draft.dirty && isCurrentAuthorizedProject(projectId))
+            .filter(([projectId, draft]) => !discardDrafts && draft.ready && draft.dirty && isCurrentAuthorizedProject(projectId))
             .map(([projectId, draft]) => [projectId, JSON.parse(JSON.stringify(draft))]);
-        captureProjectWorkReportDraft();
+        if (!discardDrafts) captureProjectWorkReportDraft();
         const unsentDrafts = Object.entries(state.projectWorkReportDrafts)
-            .filter(([projectId, draft]) => draft.ready && isCurrentAuthorizedProject(projectId))
+            .filter(([projectId, draft]) => !discardDrafts && draft.ready && isCurrentAuthorizedProject(projectId))
             .map(([projectId, draft]) => [projectId, JSON.parse(JSON.stringify(draft))]);
         state.sessionExpiredHandled = true;
         state.session = { authenticated: false, user: null };
@@ -756,13 +776,15 @@
         }
         if (!isCurrentSessionContext(expiredContext)) return;
         // Session expiry requires reauthentication, not destruction of unsent work.
-        await clearProjectWorkReportStorage(previousUserPart, undefined, true);
-        if (!isCurrentSessionContext(expiredContext)) return;
-        try {
-            await clearCachedSession(previousUserPart, expiredContext);
-            await cacheDelete(previousTodayCacheKey);
-        } catch (error) {
-            console.warn('Lokaler Sitzungsstatus konnte nicht bereinigt werden.', error);
+        if (!sessionChangedElsewhere) {
+            await clearProjectWorkReportStorage(previousUserPart, undefined, true);
+            if (!isCurrentSessionContext(expiredContext)) return;
+            try {
+                await clearCachedSession(previousUserPart, previousSessionId, expiredContext);
+                await cacheDelete(previousTodayCacheKey, () => isCurrentSessionContext(expiredContext));
+            } catch (error) {
+                console.warn('Lokaler Sitzungsstatus konnte nicht bereinigt werden.', error);
+            }
         }
         if (!isCurrentSessionContext(expiredContext)) return;
 
@@ -790,7 +812,7 @@
     function fetchForSession(url, options, context) {
         const headers = new Headers(options.headers);
         if (context.userPart !== 'anonymous') headers.set('X-TimeApp-User-Id', context.userPart);
-        return fetch(url, { ...options, headers });
+        return fetch(url, { cache: 'no-store', ...options, headers });
     }
 
     async function checkApiResponse(response, payload, context) {
@@ -800,9 +822,10 @@
 
         if (response.status === 401) {
             const message = payload.message || payload.error || 'Bitte erneut anmelden.';
-            await handleExpiredSession(payload.code === 'session_changed'
+            const sessionChanged = payload.code === 'session_changed';
+            await handleExpiredSession(sessionChanged
                 ? 'Das angemeldete Konto hat gewechselt. Bitte melden Sie sich erneut an.'
-                : 'Ihre Sitzung ist abgelaufen. Bitte erneut anmelden. Wartende Buchungen bleiben erhalten.');
+                : 'Ihre Sitzung ist abgelaufen. Bitte erneut anmelden. Wartende Buchungen bleiben erhalten.', sessionChanged);
             throw new SessionExpiredError(message);
         }
 
@@ -810,6 +833,7 @@
             const error = new Error(payload.message || payload.error || 'Bitte erneut versuchen.');
             error.httpStatus = response.status;
             error.code = payload.code;
+            error.activeWorkSession = payload.data?.active_work_session;
             throw error;
         }
     }
@@ -831,6 +855,45 @@
         }
 
         return payload;
+    }
+
+    function withAuthMutation(operation) {
+        const result = authMutationTail.then(() => navigator.locks?.request
+            ? navigator.locks.request('timeapp-auth', operation)
+            : operation());
+        authMutationTail = result.catch(() => {});
+        return result;
+    }
+
+    function publishSessionChange(action, userPart) {
+        try {
+            localStorage.setItem(SESSION_CHANGE_KEY, JSON.stringify({ action, userPart, id: createClientId() }));
+        } catch (error) {
+            console.warn('Die Sitzungsänderung konnte nicht an andere Tabs gemeldet werden.', error);
+        }
+    }
+
+    async function confirmPendingLogout() {
+        const pending = await cacheGet(PENDING_LOGOUT_KEY);
+        if (!pending) return true;
+
+        try {
+            await clearCachedSession(pending.userPart, pending.localSessionId, sessionContext());
+            await Promise.all([
+                clearProjectWorkReportStorage(pending.userPart),
+                clearProjectMaterialDraftStorage(pending.userPart),
+                cacheDelete('today_v2_user_' + pending.userPart),
+                cacheDelete('today')
+            ]);
+            if (!navigator.onLine) return false;
+            const response = await fetchForSession('/api/v1/auth/logout', { method: 'POST', cache: 'no-store' }, pending);
+            if (!response.ok && response.status !== 401) return false;
+            await cacheDelete(PENDING_LOGOUT_KEY);
+            return true;
+        } catch (error) {
+            console.warn('Server-Abmeldung konnte nicht bestätigt werden.', error);
+            return false;
+        }
     }
 
     function db() {
@@ -873,7 +936,7 @@
         });
     }
 
-    async function clearCachedSession(userPart, context) {
+    async function clearCachedSession(userPart, localSessionId, context) {
         const database = await db();
         if (!isCurrentSessionContext(context)) return;
 
@@ -883,7 +946,8 @@
             const request = store.get('session');
             request.onsuccess = function () {
                 const cachedOwner = request.result?.value?.user?.id;
-                if (isCurrentSessionContext(context) && String(cachedOwner) === userPart) {
+                if (isCurrentSessionContext(context) && String(cachedOwner) === userPart
+                    && request.result?.value?.localSessionId === localSessionId) {
                     store.put({ key: 'session', value: { authenticated: false, user: null }, updatedAt: Date.now() });
                 }
             };
@@ -904,8 +968,9 @@
         });
     }
 
-    async function cacheDelete(key) {
+    async function cacheDelete(key, guard) {
         const database = await db();
+        if (guard && !guard()) return;
 
         await new Promise((resolve, reject) => {
             const tx = database.transaction('cache', 'readwrite');
@@ -994,15 +1059,21 @@
         return new Promise((resolve, reject) => {
             const tx = database.transaction('queue', 'readonly');
             const request = tx.objectStore('queue').getAll();
-            request.onsuccess = () => resolve((request.result || [])
-                .filter((item) => !item.userPart || item.userPart === userPart)
-                .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)));
+            request.onsuccess = () => {
+                const records = request.result || [];
+                const owned = records.filter((item) => userPart !== 'anonymous' && String(item.userPart) === userPart)
+                    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+                // Older rows carry no trustworthy owner. Keep them in IndexedDB without sending or displaying their contents.
+                owned.unassignedCount = records.filter((item) => !/^\d+$/.test(String(item.userPart)) || Number(item.userPart) <= 0).length;
+                resolve(owned);
+            };
             request.onerror = () => reject(request.error);
         });
     }
 
-    async function queueUpdate(item) {
+    async function queueUpdate(item, guard) {
         const database = await db();
+        if (guard && !guard()) return;
 
         await new Promise((resolve, reject) => {
             const tx = database.transaction('queue', 'readwrite');
@@ -1012,8 +1083,9 @@
         });
     }
 
-    async function queueRemove(id) {
+    async function queueRemove(id, guard) {
         const database = await db();
+        if (guard && !guard()) return;
 
         await new Promise((resolve, reject) => {
             const tx = database.transaction('queue', 'readwrite');
@@ -1516,12 +1588,21 @@
     }
 
     function currentProjectDayView() {
+        const entry = globalWorkEntry();
+        if (entry?.project_unavailable && entry.start_time && !entry.end_time) {
+            return {
+                ...emptyProjectDayView(), project_name: 'Projekt nicht verfügbar',
+                status: state.today.today_state.status, start_time: entry.start_time, work_entry: entry,
+                current_break: state.today.current_break, breaks_today: state.today.breaks_today,
+                attachments: entry.attachments, tracked_minutes_live_basis: state.today.tracked_minutes_live_basis
+            };
+        }
         const projectId = timeContextProjectId();
         const summaries = projectDaySummaries();
         const summary = summaries.find((item) => {
             const itemProjectId = Object.prototype.hasOwnProperty.call(item, 'project_id') ? item.project_id : null;
 
-            return itemProjectId === projectId;
+            return !item.project_unavailable && itemProjectId === projectId;
         });
 
         if (summary) {
@@ -1587,7 +1668,7 @@
 
     function previousWorkTimeEntry() {
         const data = state.workTime;
-        const entry = data && data.enabled && data.active_work_entry;
+        const entry = state.today?.active_work_entry || (data?.enabled && data.active_work_entry);
         const today = state.today && state.today.today;
         return entry && Number(entry.id) > 0 && entry.start_time && !entry.end_time && today && entry.work_date < today ? entry : null;
     }
@@ -1597,7 +1678,8 @@
     }
 
     function hasOpenWorkTimeCarryover() {
-        return !!previousWorkTimeEntry() || !!(state.workTime && state.workTime.enabled && state.workTime.active_work_entry_conflict);
+        return !!previousWorkTimeEntry() || !!state.today?.active_work_entry_conflict
+            || !!(state.workTime?.enabled && state.workTime.active_work_entry_conflict);
     }
 
     function canEndPreviousWorkTimeEntry(entry) {
@@ -2234,7 +2316,9 @@
         try {
             await syncQueue();
             if (!isCurrentSessionContext(context)) return false;
-            updatePendingQueue(await queueAll());
+            const pending = await queueAll();
+            if (!isCurrentSessionContext(context)) return false;
+            updatePendingQueue(pending);
             if (state.pendingCount > 0) throw new Error('Bitte zuerst die wartenden Buchungen klären und synchronisieren.');
             const result = await apiJson(url, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2243,11 +2327,14 @@
             if (!isCurrentSessionContext(context)) return false;
             if (payload.action === 'work_start' || payload.action === 'presence_end') state.workTimeDrafts.start = '';
             await loadOnlineData(true);
+            if (!isCurrentSessionContext(context)) return false;
             showFeedback('success', result.data && result.data.message || 'Ihre Angabe wurde gespeichert.');
             return true;
         } catch (error) {
             if (!isCurrentSessionContext(context) || isSessionExpiredError(error)) return false;
-            showFeedback('error', error.message || 'Bitte erneut versuchen.');
+            showFeedback('error', error.code === 'active_work_session'
+                ? activeCheckInMessage(payload.project_id, error.activeWorkSession?.project_id)
+                : error.message || 'Bitte erneut versuchen.');
             try { await loadWorkTime(context); } catch (_) { /* Keep the last confirmed state. */ }
             return false;
         } finally {
@@ -2327,6 +2414,18 @@
         return Math.max(1, Math.round(value / 1024)) + ' KB';
     }
 
+    function nativeProtectedUrl(value) {
+        if (!value || !state.session.authenticated) return '';
+        try {
+            const url = new URL(value, window.location.origin);
+            if (url.origin !== window.location.origin || !url.pathname.startsWith('/api/v1/app/')) return '';
+            url.searchParams.set('timeapp_user_id', currentSessionUserCachePart());
+            return url.pathname + url.search;
+        } catch (error) {
+            return '';
+        }
+    }
+
     function attachmentListMarkup(files, options) {
         const items = Array.isArray(files) ? files : [];
         const settings = options || {};
@@ -2336,12 +2435,13 @@
         }
 
         return items.map((attachment) => {
-            const downloadUrl = attachment.download_url || attachment.preview_url || '#';
-            const canOpen = state.online && downloadUrl && downloadUrl !== '#';
+            const downloadUrl = nativeProtectedUrl(attachment.download_url || attachment.preview_url);
+            const previewUrl = attachment.is_image && nativeProtectedUrl(attachment.preview_url);
+            const canOpen = state.online && downloadUrl;
             const meta = compactBlock([attachment.mime_type || '', fileSizeLabel(attachment.size_bytes)], ' · ');
-            const preview = attachment.is_image && attachment.preview_url
+            const preview = previewUrl
                 ? (canOpen
-                    ? '<a class="app-attachment-preview" href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener" aria-label="' + escapeHtml((attachment.original_name || 'Datei') + ' oeffnen') + '"><img src="' + escapeHtml(attachment.preview_url) + '" alt=""></a>'
+                    ? '<a class="app-attachment-preview" href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener" aria-label="' + escapeHtml((attachment.original_name || 'Datei') + ' oeffnen') + '"><img src="' + escapeHtml(previewUrl) + '" alt=""></a>'
                     : '<span class="app-attachment-icon" aria-label="Datei nur online abrufbar">Datei</span>')
                 : (canOpen
                     ? '<a class="app-attachment-icon" href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener" aria-label="' + escapeHtml((attachment.original_name || 'Datei') + ' oeffnen') + '">Datei</a>'
@@ -2529,6 +2629,7 @@
             ? 'Materialnachtrag für ' + destination + '. Ihre Zeitbuchung in ' + projectDisplayName(activeId) + ' wird nicht verändert.'
             : 'Material wird in ' + destination + ' gespeichert.';
         const canManage = hasPermission('projects.manage');
+        const canWrite = canManage || hasPermission('timesheets.create');
         const loading = state.projectMaterialsLoading ? '<div class="app-empty">Materialeintraege werden geladen ...</div>' : '';
         const offline = state.projectMaterialsOffline || !state.online
             ? '<div class="app-empty">Offline – zuletzt synchronisierter Stand'
@@ -2540,7 +2641,7 @@
         const rows = items.length === 0
             ? '<div class="app-empty">Noch keine Materialeintraege vorhanden.</div>'
             : '<div class="app-info-list">' + items.map(function (item) {
-                const canArchive = canManage || Number(item.created_by_user_id || 0) === currentUserId;
+                const canArchive = canManage || (canWrite && Number(item.created_by_user_id || 0) === currentUserId);
                 const quantity = formatMaterialQuantity(item.quantity) + (item.unit ? ' ' + item.unit : '');
                 const civilTime = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}):\d{2}$/.exec(item.created_at || '');
                 const recorded = civilTime ? formatDate(civilTime[1]) + ' ' + civilTime[2] : formatDateTimeStamp(item.created_at);
@@ -2564,7 +2665,7 @@
             + (uncertain && !busy ? '<div class="app-empty" role="status">Die Speicherantwort ist noch nicht bestätigt. Prüfen Sie denselben Eintrag erneut, bevor Sie die Angaben ändern.</div>' : '')
             + '</div>'
             + rows
-            + '<form id="projectMaterialForm" class="app-grid" data-project-id="' + projectId + '" aria-describedby="projectMaterialTarget">'
+            + (canWrite ? '<form id="projectMaterialForm" class="app-grid" data-project-id="' + projectId + '" aria-describedby="projectMaterialTarget">'
             + '<p id="projectMaterialTarget" class="app-material-target">' + escapeHtml(targetLabel) + '</p>'
             + '<label class="app-field"><span>Material / Artikel</span><input id="projectMaterialDescription" name="description" maxlength="255" required' + locked + ' value="' + escapeHtml(draft.description) + '"></label>'
             + '<label class="app-field"><span>Menge</span><input id="projectMaterialQuantity" name="quantity" inputmode="decimal" required' + locked + ' value="' + escapeHtml(draft.quantity) + '"></label>'
@@ -2573,7 +2674,7 @@
             + '<label class="app-field"><span>Bemerkung</span><textarea id="projectMaterialNote" name="note" maxlength="2000" rows="3"' + locked + '>' + escapeHtml(draft.note) + '</textarea></label>'
             + '<label class="app-field"><span>Materialdatum</span><input id="projectMaterialDate" name="work_date" type="date" max="' + escapeHtml(state.today && state.today.today ? state.today.today : '') + '" required' + locked + ' value="' + escapeHtml(draft.work_date) + '"></label>'
             + '<button type="submit" ' + (!draft.ready || busy ? 'disabled' : '') + '>' + escapeHtml(busy ? buttonLabel('project_material', 'Material speichern') : (uncertain ? 'Speichern erneut prüfen' : 'Material speichern')) + '</button>'
-            + '</form>'
+            + '</form>' : '')
             + '</section>';
     }
 
@@ -2599,26 +2700,29 @@
         const items = state.projectWorkReports[String(projectId)] || [];
         const error = state.projectWorkReportStorageErrors[String(projectId)];
         const userId = Number(currentSessionUserCachePart());
+        const canManage = hasPermission('projects.manage');
+        const canWrite = canManage || hasPermission('timesheets.create');
         const rows = items.map(function (item) {
             return '<article class="app-info-row app-material-row" data-render-key="work-report-' + Number(item.id) + '">'
                 + '<div><strong>' + escapeHtml(formatDate(item.work_date)) + '</strong>'
                 + '<small class="muted">' + escapeHtml(item.created_by_name || 'Unbekannt') + ' · Erfasst: ' + escapeHtml(formatDateTimeStamp(item.created_at)) + '</small>'
                 + '<p class="app-work-report-text">' + escapeHtml(item.description) + '</p></div>'
-                + (hasPermission('projects.manage') || Number(item.created_by_user_id) === userId
+                + (canManage || (canWrite && Number(item.created_by_user_id) === userId)
                     ? '<button type="button" class="app-button-secondary" data-archive-project-work-report="' + Number(item.id) + '" ' + (busy ? 'disabled' : '') + '>Archivieren</button>' : '')
                 + '</article>';
         }).join('');
         return '<section class="app-card app-grid" id="projectWorkReportSection" data-project-id="' + projectId + '">'
-            + '<div><p class="muted">Arbeitsberichte</p><h2>Ausgeführte Arbeiten</h2><p>Dokumentieren Sie die Arbeiten per Texteingabe oder über die Diktierfunktion Ihrer Handy-Tastatur.</p></div>'
+            + '<div><p class="muted">Arbeitsberichte</p><h2>Ausgeführte Arbeiten</h2>'
+            + (canWrite ? '<p>Dokumentieren Sie die Arbeiten per Texteingabe oder über die Diktierfunktion Ihrer Handy-Tastatur.</p>' : '') + '</div>'
             + '<div id="projectWorkReportStatus">'
             + (state.projectWorkReportsOffline || !state.online ? '<div class="app-empty">Offline – zuletzt geladene Berichte. Ihr Entwurf bleibt auf diesem Gerät erhalten. Bitte mit Verbindung erneut speichern.</div>' : '')
             + (error ? '<div class="app-empty" role="alert">' + escapeHtml(error) + '</div>' : '')
             + '</div>'
-            + '<form id="projectWorkReportForm" class="app-grid" data-project-id="' + projectId + '">'
+            + (canWrite ? '<form id="projectWorkReportForm" class="app-grid" data-project-id="' + projectId + '">'
             + '<label class="app-field"><span>Datum</span><input id="projectWorkReportDate" name="work_date" type="date" required max="' + escapeHtml(berlinToday()) + '" value="' + escapeHtml(draft.work_date) + '" ' + (!draft.ready || busy ? 'disabled' : '') + '></label>'
             + '<label class="app-field"><span>Ausgeführte Arbeiten</span><textarea id="projectWorkReportDescription" name="description" maxlength="10000" rows="6" required ' + (!draft.ready || busy ? 'readonly' : '') + '>' + escapeHtml(draft.description) + '</textarea></label>'
             + '<button type="submit" ' + (!draft.ready || state.pendingAction ? 'disabled' : '') + '>' + escapeHtml(busy ? 'Wird gespeichert …' : 'Arbeitsbericht speichern') + '</button>'
-            + '</form>'
+            + '</form>' : '')
             + '<div id="projectWorkReportList">'
             + (state.projectWorkReportsLoading ? '<p class="muted">Arbeitsberichte werden geladen …</p>' : '')
             + (rows || '<div class="app-empty">Noch keine Arbeitsberichte für dieses Projekt.</div>')
@@ -2846,8 +2950,9 @@
 
         if (signature) {
             const signedAt = signature.signed_at ? formatDateTimeStamp(signature.signed_at) : '-';
-            const imageLink = signature.image_url
-                ? '<a href="' + escapeHtml(signature.image_url) + '" target="_blank" rel="noopener">Unterschrift anzeigen</a>'
+            const imageUrl = nativeProtectedUrl(signature.image_url);
+            const imageLink = state.online && imageUrl
+                ? '<a href="' + escapeHtml(imageUrl) + '" target="_blank" rel="noopener">Unterschrift anzeigen</a>'
                 : '';
 
             return '<div class="app-history-locations"><div><strong>Kundenbestätigung vorhanden</strong><span>'
@@ -3130,6 +3235,42 @@
         return '<span data-live-pending-count>' + escapeHtml(String(state.pendingCount)) + '</span>';
     }
 
+    function activeCheckInMessage(targetProjectId, activeProjectId) {
+        const project = projectById(Number(activeProjectId));
+        if (!project) return 'Sie sind bereits eingecheckt. Beenden Sie zuerst den laufenden Einsatz.';
+        if (Number(targetProjectId) === Number(activeProjectId)) return 'Sie sind bereits in diesem Projekt eingecheckt.';
+        const projectLabel = project.project_number || project.name;
+        return 'Sie sind bereits in Projekt ' + projectLabel + ' eingecheckt. Beenden Sie dort zuerst den Einsatz, um in einem anderen Projekt zu starten.';
+    }
+
+    function activeCheckInMarkup(targetProjectId) {
+        const running = runningWorkEntry();
+        if (!running) return '';
+        const activeProjectId = Number(running.project_id);
+        const offerSwitch = activeProjectId !== Number(targetProjectId) && isCurrentAuthorizedProject(activeProjectId);
+        return '<div class="app-grid app-check-in-notice"><p role="status">'
+            + escapeHtml(activeCheckInMessage(targetProjectId, activeProjectId)) + '</p>'
+            + (offerSwitch ? '<button type="button" id="viewRunningProject" class="app-button-secondary">Zum eingecheckten Projekt wechseln</button>' : '')
+            + '</div>';
+    }
+
+    function workQueueMarkup() {
+        const unassigned = state.unassignedQueueCount > 0
+            ? '<p class="app-empty" role="status">Ältere lokale Buchungen ohne bestätigte Kontozuordnung warten auf Klärung.</p>' : '';
+        const refresh = state.timeSyncRequiresRefresh
+            ? '<p class="app-empty" role="status">Der aktuelle Buchungsstand muss online geprüft werden.</p>' : '';
+        if (!state.workConflicts.length) return unassigned + refresh;
+
+        const labels = { check_in: 'Check-in', check_out: 'Check-out', day_close: 'Tagesabschluss', upsert: 'Zeitbuchung',
+            select_project: 'Projektzuordnung', pause: 'Pause', pause_start: 'Pausenbeginn', pause_end: 'Pausenende', pause_record: 'Pausennachtrag' };
+        const conflicts = state.workConflicts.map((item) => '<article class="app-empty app-grid">'
+            + '<h4>' + escapeHtml((labels[item.payload.action] || 'Zeitbuchung') + ' vom ' + formatDate(item.payload.work_date)) + '</h4>'
+            + '<p>' + escapeHtml(item.error) + '</p>'
+            + '<button type="button" class="app-button-secondary" data-discard-work-conflict="' + escapeHtml(item.id) + '">Lokale Aktion verwerfen</button></article>').join('');
+        return unassigned + refresh + '<section class="app-grid app-check-in-conflicts" aria-label="Zeitbuchungen zur Prüfung">'
+            + '<h3>Zeitbuchungen zur Prüfung</h3>' + conflicts + '</section>';
+    }
+
     function pauseRecordButton(id, target, secondary = true) {
         return '<button type="button" id="' + id + '" data-record-pause="' + target + '"'
             + (secondary ? ' class="app-button-secondary"' : '') + (state.pendingAction || state.pauseSyncUncertain ? ' disabled' : '')
@@ -3188,15 +3329,20 @@
     }
 
     function previousPauseEntryMarkup() {
-        const entry = previousPauseEntry();
+        const pauseEntry = previousPauseEntry();
+        if (!pauseEntry && state.workTime?.enabled && state.workTime.active_work_entry) return '';
+        const entry = pauseEntry || previousWorkTimeEntry();
+        if (!entry && state.today?.active_work_entry_conflict && !state.workTime?.active_work_entry_conflict) {
+            return '<p class="app-empty" role="alert">Mehrere offene Einsätze wurden gefunden. Bitte klären Sie die Buchungen im Büro, bevor Sie neu einchecken.</p>';
+        }
         if (!entry) return '';
         const disabled = state.pendingAction || state.pauseSyncUncertain || !hasPermission('timesheets.create') ? ' disabled' : '';
         const canEnd = canEndPreviousWorkTimeEntry(entry);
         const actions = entry.current_break
             ? '<p role="status">Pause läuft · <strong data-live-prior-break-duration>' + escapeHtml(formatDurationMinutes(liveCurrentBreakMinutes(entry.current_break))) + '</strong></p>'
                 + '<button type="button" data-prior-pause-action="pause_end"' + disabled + '>Pause des laufenden Einsatzes beenden</button>'
-            : '<button type="button" data-prior-pause-action="pause_start"' + disabled + '>Pause starten</button>'
-                + pauseRecordButton('pauseRecordPrior', 'prior');
+            : (pauseEntry ? '<button type="button" data-prior-pause-action="pause_start"' + disabled + '>Pause starten</button>'
+                + pauseRecordButton('pauseRecordPrior', 'prior') : '');
         return '<section class="app-card app-grid app-pause-details" aria-label="Laufender Einsatz aus früherem Tag"><h2>Laufender Einsatz vom '
             + escapeHtml(formatDate(entry.work_date)) + '</h2>' + actions + breakAssessmentMarkup(entry.break_assessment)
             + (entry.breaks?.length ? '<details class="app-history-detail" id="pausePriorDetails"><summary>Pausen dieses Einsatzes anzeigen</summary>' + timesheetBreaksMarkup(entry) + '</details>' : '')
@@ -3209,7 +3355,7 @@
         const today = state.today || {};
         const entry = workEntry();
         const status = currentStatus();
-        const canCheckIn = !['working', 'paused', 'presence_only', 'previous_work_open'].includes(status);
+        const canCheckIn = !state.timeSyncRequiresRefresh && !runningWorkEntry() && !['working', 'paused', 'presence_only', 'previous_work_open'].includes(status);
         const canCheckOut = (status === 'working' || status === 'paused');
         const totalBreakMinutes = todayTotalBreakMinutes();
         const breakTotalLabel = (today.break_assessment?.linked_work_dates || []).length > 1 ? 'Dokumentierte Pausen über Mitternacht'
@@ -3252,8 +3398,9 @@
             + '</div>'
             + '<div class="app-grid">'
             + projectSelectMarkup(runningWorkEntry() ? 'Projekt für den nächsten Check-in' : 'Projekt für die Zeiterfassung')
+            + activeCheckInMarkup(checkInProjectId()) + workQueueMarkup()
             + '<label class="app-field"><span>Notiz</span><textarea id="timesheetNote" rows="4">' + escapeHtml(entry && entry.note ? entry.note : '') + '</textarea></label>'
-            + '<button type="button" id="saveUpsert" ' + (isBusy('upsert') || !canEditTimeContext() || status === 'presence_only' || status === 'previous_work_open' ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Stand speichern')) + '</button>'
+            + '<button type="button" id="saveUpsert" ' + (state.timeSyncRequiresRefresh || isBusy('upsert') || !canEditTimeContext() || status === 'presence_only' || status === 'previous_work_open' ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Stand speichern')) + '</button>'
             + '</div>'
             + '</section>'
             + pauseDetailsMarkup() + geoSection
@@ -3263,7 +3410,7 @@
     function timesView() {
         const entry = workEntry();
         const status = currentStatus();
-        const canCheckIn = !['working', 'paused', 'presence_only', 'previous_work_open'].includes(status);
+        const canCheckIn = !state.timeSyncRequiresRefresh && !runningWorkEntry() && !['working', 'paused', 'presence_only', 'previous_work_open'].includes(status);
         const canCheckOut = (status === 'working' || status === 'paused');
         const optionalMetrics = [
             showAppWidget('show_current_shift_minutes')
@@ -3294,13 +3441,14 @@
             + '</div>'
             + '<div class="app-grid">'
             + projectSelectMarkup(runningWorkEntry() ? 'Projekt für den nächsten Check-in' : 'Projekt für die Zeiterfassung')
+            + activeCheckInMarkup(checkInProjectId()) + workQueueMarkup()
             + '</div>'
             + manualTimeMarkup(entry)
             + '<div class="app-inline-actions">'
             + (canCheckIn ? '<button type="button" data-action="check_in" ' + (isBusy('check_in') ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('check_in', 'Start jetzt')) + '</button>' : '')
             + pauseActionsMarkup(status, entry)
             + (canCheckOut ? '<button type="button" data-action="check_out" ' + (isBusy('check_out') || status === 'paused' ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('check_out', 'Ende jetzt')) + '</button>' : '')
-            + '<button type="button" id="saveUpsert" ' + (isBusy('upsert') || !canEditTimeContext() || status === 'presence_only' || status === 'previous_work_open' ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Zeiten speichern')) + '</button>'
+            + '<button type="button" id="saveUpsert" ' + (state.timeSyncRequiresRefresh || isBusy('upsert') || !canEditTimeContext() || status === 'presence_only' || status === 'previous_work_open' ? 'disabled' : '') + '>' + escapeHtml(buttonLabel('upsert', 'Zeiten speichern')) + '</button>'
             + '</div>'
             + '</section>'
             + pauseDetailsMarkup() + attachmentSectionMarkup()
@@ -3320,6 +3468,7 @@
             '<section class="app-card app-grid">'
             + '<div><p class="muted">Historie</p><h1>Meine Zeiten</h1><p>Ihre erfassten Zeiten bleiben mit dem letzten bekannten Stand auch offline sichtbar.</p></div>'
             + pauseSyncMarkup()
+            + workQueueMarkup()
             + '</section>'
             + timesheetHistoryMarkup()
         );
@@ -3658,16 +3807,15 @@
         const paused = running?.current_break || state.today?.today_state?.status === 'paused';
         return '<section class="app-project-contexts" id="projectContexts" aria-label="Zeitbuchung und Projektansicht">'
             + '<dl>'
-            + '<div><dt>Aktuelle Zeitbuchung</dt><dd><strong>' + escapeHtml(running ? projectDisplayName(activeId) : 'Kein laufender Einsatz') + '</strong>'
+            + '<div><dt>Aktuelle Zeitbuchung</dt><dd><strong>' + escapeHtml(running?.project_unavailable ? 'Projekt nicht verfügbar'
+                : (running ? projectDisplayName(activeId) : 'Kein laufender Einsatz')) + '</strong>'
             + (running ? '<span>' + (paused ? 'Eingecheckt – Pause läuft' : 'Eingecheckt – Arbeitszeit läuft') + '</span>' : '') + '</dd></div>'
             + '<div><dt>Aktuell geöffnetes Projekt</dt><dd><strong>' + escapeHtml(projectId === null ? 'Kein Projekt geöffnet' : projectDisplayName(projectId)) + '</strong></dd></div>'
             + '</dl>'
             + (separateProject
                 ? '<p>Materialeinträge und Arbeitsberichte werden dem geöffneten Projekt zugeordnet. Ihre laufende Zeitbuchung bleibt unverändert.</p>'
                 : '')
-            + (running && projectId !== activeId && isCurrentAuthorizedProject(activeId)
-                ? '<button type="button" id="viewRunningProject" class="app-button-secondary">Zum eingecheckten Projekt wechseln</button>'
-                : '')
+            + activeCheckInMarkup(projectId)
             + '</section>';
     }
 
@@ -3677,8 +3825,8 @@
         const latestEntry = globalWorkEntry();
         const hasProjects = activeProjects().length > 0;
         const hasExistingBooking = latestEntry && latestEntry.start_time;
-        const canStart = !running && !hasOpenWorkTimePresence() && !hasOpenWorkTimeCarryover();
-        const canAssign = hasExistingBooking && Number(latestEntry.id) > 0 && !hasOpenWorkTimeCarryover()
+        const canStart = !state.timeSyncRequiresRefresh && !running && !hasOpenWorkTimePresence() && !hasOpenWorkTimeCarryover();
+        const canAssign = hasExistingBooking && Number(latestEntry.id) > 0 && !latestEntry.project_unavailable && !hasOpenWorkTimeCarryover()
             && projectId !== null && projectId !== (latestEntry.project_id ?? null);
         const assignmentLabel = !canAssign ? '' : latestEntry.end_time ? 'Letzte Zeitbuchung diesem Projekt zuordnen'
             : (latestEntry.project_id === null ? 'Laufenden Einsatz zuordnen' : 'Laufende Zeitbuchung diesem Projekt zuordnen');
@@ -3689,6 +3837,7 @@
             + (state.projectAccessNotice ? '<p class="app-empty" role="alert">' + escapeHtml(state.projectAccessNotice) + '</p>' : '')
             + (hasProjects ? projectSelectMarkup('Projektansicht öffnen') : '')
             + projectContextsMarkup(projectId, running)
+            + workQueueMarkup()
             + (canStart && projectId !== null
                 ? '<button type="button" class="app-button-secondary" id="saveProjectSelection">Für nächsten Check-in vormerken</button>'
                 : '')
@@ -3891,7 +4040,7 @@
             + '<form id="vacationRequestForm" class="app-grid">'
             + '<label class="app-field"><span>Von</span><input id="vacationDateFrom" name="date_from" type="date" value="' + escapeHtml(form.date_from || '') + '" required></label>'
             + '<label class="app-field"><span>Bis</span><input id="vacationDateTo" name="date_to" type="date" value="' + escapeHtml(form.date_to || '') + '" required></label>'
-            + '<label class="app-field"><span>Notiz</span><textarea id="vacationEmployeeNote" name="employee_note" rows="3">' + escapeHtml(form.employee_note || '') + '</textarea></label>'
+            + '<label class="app-field"><span>Notiz</span><textarea id="vacationEmployeeNote" name="employee_note" maxlength="1000" rows="3">' + escapeHtml(form.employee_note || '') + '</textarea></label>'
             + previewMarkup
             + '<div class="app-inline-actions">'
             + '<button type="button" id="vacationPreviewButton" ' + (!state.online || isBusy('vacation_submit') ? 'disabled' : '') + '>Tage pruefen</button>'
@@ -4831,44 +4980,57 @@
             bindInteraction(loginForm, 'submit', async function (event) {
                 event.preventDefault();
                 const formData = new FormData(loginForm);
-                const response = await fetch('/api/v1/auth/login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        email: formData.get('email'),
-                        password: formData.get('password')
-                    })
-                });
-                const payload = await response.json();
-                const notice = document.getElementById('loginNotice');
-
-                if (!response.ok) {
-                    if (notice) {
-                        notice.textContent = friendlyMessage(payload.message || payload.error, 'Login fehlgeschlagen.');
-                    }
-
-                    showFeedback('error', friendlyMessage(payload.message || payload.error, 'Login fehlgeschlagen.'));
-
+                const loginContext = sessionContext();
+                let payload;
+                try {
+                    payload = await withAuthMutation(async function () {
+                        if (!isCurrentSessionContext(loginContext)) return null;
+                        if (!await confirmPendingLogout()) {
+                            throw new Error('Die vorige Abmeldung wartet auf Bestätigung. Bitte stellen Sie eine Verbindung her und versuchen Sie es erneut.');
+                        }
+                        const result = await publicJson('/api/v1/auth/login', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                email: formData.get('email'),
+                                password: formData.get('password')
+                            })
+                        });
+                        if (!isCurrentSessionContext(loginContext)) return null;
+                        clearSessionScopedState();
+                        state.session = { ...(result.session || { authenticated: true, user: result.user || null }), localSessionId: createClientId() };
+                        restoreUserProjectPreferences();
+                        state.sessionExpiredHandled = false;
+                        publishSessionChange('login', currentSessionUserCachePart());
+                        await cacheSet('session', state.session);
+                        return result;
+                    });
+                } catch (error) {
+                    if (!isCurrentSessionContext(loginContext)) return;
+                    const message = friendlyMessage(error.message, 'Login fehlgeschlagen.');
+                    const notice = document.getElementById('loginNotice');
+                    if (notice) notice.textContent = message;
+                    showFeedback('error', message);
                     return;
                 }
+                if (!payload) return;
 
+                const context = sessionContext();
                 const selection = appointmentSelection();
                 const destination = appointmentLoginTarget || (selection ? appointmentUrl(selection) : '/app/heute');
                 appointmentLoginTarget = null;
-                clearSessionScopedState();
-                state.session = payload.session || { authenticated: true, user: payload.user || null };
-                restoreUserProjectPreferences();
-                state.sessionExpiredHandled = false;
-                await cacheSet('session', state.session);
+                const pending = await queueAll();
+                if (!isCurrentSessionContext(context)) return;
+                updatePendingQueue(pending);
                 await loadOnlineData(true);
 
-                if (!state.session.authenticated) {
+                if (!isCurrentSessionContext(context)) {
                     return;
                 }
 
                 const syncResult = await syncQueue();
 
-                if (syncResult.sessionExpired || !state.session.authenticated) {
+                if (syncResult.sessionExpired || !isCurrentSessionContext(context)) {
                     return;
                 }
 
@@ -4909,13 +5071,18 @@
         const viewRunningProject = document.getElementById('viewRunningProject');
         if (viewRunningProject) {
             bindInteraction(viewRunningProject, 'click', function () {
-                const projectId = runningWorkEntry()?.project_id;
-                if (!isCurrentAuthorizedProject(projectId) || projectId === viewedProjectId() || state.dialog) return;
+                const projectId = Number(runningWorkEntry()?.project_id);
+                if (!isCurrentAuthorizedProject(projectId) || state.dialog) return;
                 if (hasPendingUploadSelection()) {
                     showFeedback('info', 'Bitte zuerst die gewählte Datei hochladen oder die Dateiauswahl leeren.');
                     return;
                 }
-                applyProjectPickerSelection(projectId, false);
+                if (routeName() === '/projektwahl') {
+                    applyProjectPickerSelection(projectId, false);
+                } else {
+                    setViewedProjectId(projectId);
+                    navigate('/app/projektwahl');
+                }
             });
         }
 
@@ -5096,7 +5263,9 @@
         if (geoAckSelect) {
             bindInteraction(geoAckSelect, 'change', function () {
                 try {
-                    window.localStorage.setItem(GEO_ACK_KEY, geoAckSelect.value === '1' ? '1' : '0');
+                    const key = userPreferenceKey(GEO_ACK_KEY);
+                    if (!key) return;
+                    window.localStorage.setItem(key, geoAckSelect.value === '1' ? '1' : '0');
                     showFeedback('success', geoAckSelect.value === '1' ? 'GEO-Zustimmung wurde lokal gespeichert.' : 'GEO-Zustimmung wurde lokal zurueckgenommen.');
                 } catch (error) {
                     console.warn('GEO-Zustimmung konnte nicht gespeichert werden.', error);
@@ -5181,46 +5350,28 @@
 
         if (logoutButton) {
             bindInteraction(logoutButton, 'click', async function () {
-                const previousTodayCacheKey = todayCacheKey();
                 const previousUserPart = currentSessionUserCachePart();
+                const previousSessionId = state.session.localSessionId;
                 appointmentLoginTarget = null;
                 clearSessionScopedState();
                 state.session = { authenticated: false, user: null };
                 state.sessionExpiredHandled = false;
-                state.menuOpen = false;
-                state.dialog = null;
-                navigate('/app/login');
                 const logoutContext = sessionContext();
-                // Queue old-owner deletion before a new login can start draft
-                // loads/writes, even if session-cache I/O is slow or fails.
-                const cleanup = Promise.all([
-                    clearProjectWorkReportStorage(previousUserPart),
-                    clearProjectMaterialDraftStorage(previousUserPart),
-                    (async function () {
-                        if (!isCurrentSessionContext(logoutContext)) return;
-                        await clearCachedSession(previousUserPart, logoutContext);
-                        if (!isCurrentSessionContext(logoutContext)) return;
-                        await cacheDelete(previousTodayCacheKey);
-                        if (!isCurrentSessionContext(logoutContext)) return;
-                        await cacheDelete('today');
-                    }())
-                ]);
-                let serverConfirmed = false;
+                const logout = withAuthMutation(async function () {
+                    await cacheSet(PENDING_LOGOUT_KEY, { userPart: previousUserPart, localSessionId: previousSessionId });
+                    publishSessionChange('logout', previousUserPart);
+                    return confirmPendingLogout();
+                });
+                navigate('/app/login');
                 try {
-                    serverConfirmed = (await fetch('/api/v1/auth/logout', { method: 'POST' })).ok;
-                } catch (error) {
-                    console.warn('Server-Abmeldung konnte nicht bestaetigt werden.', error);
-                }
-                try {
-                    await cleanup;
+                    const confirmed = await logout;
+                    if (isCurrentSessionContext(logoutContext)) {
+                        showFeedback(confirmed ? 'success' : 'error', confirmed
+                            ? 'Sie wurden erfolgreich abgemeldet.'
+                            : 'Sie sind lokal abgemeldet. Die Abmeldung am Server wartet auf eine Bestätigung.', !confirmed);
+                    }
                 } catch (error) {
                     if (isCurrentSessionContext(logoutContext)) showFeedback('error', 'Sie sind lokal abgemeldet. Lokale Daten konnten nicht vollständig bereinigt werden. Bitte prüfen Sie den Gerätespeicher.', true);
-                    return;
-                }
-                if (isCurrentSessionContext(logoutContext)) {
-                    showFeedback(serverConfirmed ? 'success' : 'error', serverConfirmed
-                        ? 'Sie wurden erfolgreich abgemeldet.'
-                        : 'Sie sind lokal abgemeldet. Die Abmeldung am Server konnte ohne Verbindung nicht bestätigt werden.', !serverConfirmed);
                 }
             });
         }
@@ -5279,7 +5430,7 @@
         });
         document.querySelectorAll('[data-prior-pause-action]').forEach((button) => {
             bindInteraction(button, 'click', function () {
-                const entry = previousPauseEntry();
+                const entry = previousPauseEntry() || previousWorkTimeEntry();
                 const action = button.dataset.priorPauseAction;
                 if (!entry) return;
                 if (action !== 'check_out') return submitPauseStamp(action, entry);
@@ -5297,6 +5448,20 @@
                 const items = await queueAll();
                 const conflict = items.find((item) => item.id === button.dataset.discardPauseConflict
                     && item.status === 'conflict' && item.userPart === context.userPart);
+                if (!conflict || !isCurrentSessionContext(context)) return;
+                await queueRemove(conflict.id, () => isCurrentSessionContext(context));
+                const remaining = await queueAll();
+                if (!isCurrentSessionContext(context)) return;
+                updatePendingQueue(remaining);
+                render();
+            });
+        });
+        document.querySelectorAll('[data-discard-work-conflict]').forEach((button) => {
+            bindInteraction(button, 'click', async function () {
+                if (!window.confirm('Diese lokal vorgemerkte Zeitbuchung verwerfen?')) return;
+                const context = sessionContext();
+                const items = await queueAll();
+                const conflict = items.find((item) => item.id === button.dataset.discardWorkConflict && item.status === 'conflict');
                 if (!conflict || !isCurrentSessionContext(context)) return;
                 await queueRemove(conflict.id);
                 const remaining = await queueAll();
@@ -5406,13 +5571,23 @@
         }
     }
 
+    function canRestoreCachedDay(day, context) {
+        if (!day || (day.user?.id && String(day.user.id) !== context.userPart)) return false;
+        if (hasRejectedLocalCheckIn(day)) {
+            state.timeSyncRequiresRefresh = true;
+            return false;
+        }
+
+        return true;
+    }
+
     async function applyCachedData() {
         const context = sessionContext();
         const current = () => isCurrentSessionContext(context);
         const [cachedToday, cachedCompany] = await Promise.all([cacheGet(todayCacheKey()), cacheGet('company')]);
         if (!current()) return;
 
-        if (cachedToday && (!cachedToday.user?.id || String(cachedToday.user.id) === context.userPart) && !state.today) {
+        if (!state.today && canRestoreCachedDay(cachedToday, context)) {
             state.today = cachedToday;
             syncTodayStateStatus();
             reconcileProjectContexts(false);
@@ -5504,7 +5679,7 @@
             if (routeName() === '/urlaub') {
                 await loadVacationData(force);
             }
-            render();
+            if (current()) render();
             return;
         }
         // Appointment reads are independent of the session and day refresh awaited by time sync.
@@ -5531,6 +5706,7 @@
                     return;
                 }
                 state.today = today;
+                state.timeSyncRequiresRefresh = false;
                 syncTodayStateStatus();
                 reconcileProjectContexts(true);
                 handleProjectDeepLink();
@@ -5546,13 +5722,13 @@
                 } catch (cacheError) {
                     console.warn('Today-Cache konnte nicht geschrieben werden.', cacheError);
                     // Never let an offline restart authorize projects using a superseded snapshot.
-                    await cacheDelete(todayCacheKey());
+                    if (current()) await cacheDelete(todayCacheKey(), current);
                 }
             } else if (failures.length > 0 && !state.today) {
                 const cachedToday = await cacheGet(todayCacheKey());
                 if (!current()) return;
 
-                if (cachedToday && (!cachedToday.user?.id || String(cachedToday.user.id) === context.userPart)) {
+                if (canRestoreCachedDay(cachedToday, context)) {
                     state.today = cachedToday;
                     syncTodayStateStatus();
                     reconcileProjectContexts(false);
@@ -5580,15 +5756,18 @@
 
             if (routeName() === '/historie' && showAppWidget('show_history')) {
                 await loadTimesheetList(force);
+                if (!current()) return;
             }
 
             if (routeName() === '/urlaub') {
                 await loadVacationData(force);
+                if (!current()) return;
             }
 
             if (routeName() === '/projektwahl') {
                 handleProjectDeepLink();
                 await loadProjectContext(viewedProjectId(), force);
+                if (!current()) return;
             }
 
             if (failures.length > 0) {
@@ -5605,6 +5784,7 @@
 
             console.warn('App-Daten konnten nicht geladen werden.', error);
             await applyCachedData();
+            if (!current()) return;
 
             if (!force) {
                 showFeedback('error', 'Die aktuellen App-Daten konnten nicht geladen werden. Bitte erneut versuchen.');
@@ -5612,8 +5792,9 @@
         }
 
         if (!current()) return;
-        updatePendingQueue(await queueAll());
+        const pending = await queueAll();
         if (!current()) return;
+        updatePendingQueue(pending);
         render();
     }
 
@@ -5624,9 +5805,12 @@
 
         const cacheKey = currentTimesheetCacheKey();
         const requestId = ++timesheetListRequestCounter;
+        const context = sessionContext();
+        const current = () => isCurrentSessionContext(context) && requestId === timesheetListRequestCounter && cacheKey === currentTimesheetCacheKey();
 
         if (!navigator.onLine) {
             const cached = await cacheGet(cacheKey);
+            if (!current()) return;
 
             if (cached && Array.isArray(cached.items)) {
                 state.timesheetList = cached.items;
@@ -5671,9 +5855,7 @@
 
             const payload = await apiJson('/api/v1/app/me/timesheets?' + params.toString());
 
-            if (requestId !== timesheetListRequestCounter || cacheKey !== currentTimesheetCacheKey()) {
-                return;
-            }
+            if (!current()) return;
 
             const data = payload.data || {};
             const cachedAt = data.cached_at || data.server_time || null;
@@ -5699,7 +5881,7 @@
                     project_id: Object.prototype.hasOwnProperty.call(data, 'project_id') ? data.project_id : currentTimesheetProjectId(),
                     month: state.timesheetFilterMonth,
                     entry_type: state.timesheetFilterEntryType
-                });
+                }, current);
             } catch (cacheError) {
                 console.warn('Historien-Cache konnte nicht geschrieben werden.', cacheError);
             }
@@ -5708,11 +5890,10 @@
                 return;
             }
 
-            if (requestId !== timesheetListRequestCounter || cacheKey !== currentTimesheetCacheKey()) {
-                return;
-            }
+            if (!current()) return;
 
             const cached = await cacheGet(cacheKey);
+            if (!current()) return;
 
             if (cached && Array.isArray(cached.items)) {
                 state.timesheetList = cached.items;
@@ -5736,29 +5917,27 @@
                 showFeedback('error', friendlyMessage(error.message, 'Die Zeiten konnten nicht geladen werden.'));
             }
         } finally {
-            if (requestId === timesheetListRequestCounter) {
+            if (current()) {
                 state.timesheetListLoading = false;
                 render();
             }
         }
     }
 
-    function vacationCacheKey(cutoverId = null) {
-        const userId = state.session && state.session.user ? Number(state.session.user.id || 0) : 0;
-        const baseKey = 'vacation:' + userId + ':' + currentMonthValue();
-
-        return Number(cutoverId || 0) > 0 ? baseKey + ':cutover:' + Number(cutoverId) : baseKey;
+    function vacationCacheKey() {
+        return 'vacation:' + currentSessionUserCachePart() + ':' + currentMonthValue();
     }
 
     async function readVacationCache() {
-        const index = await cacheGet(vacationCacheKey());
+        const key = vacationCacheKey();
+        const index = await cacheGet(key);
         const cutoverId = Number(index && index.cutover_id ? index.cutover_id : 0);
 
         if (cutoverId <= 0) {
             return index;
         }
 
-        const generation = await cacheGet(vacationCacheKey(cutoverId));
+        const generation = await cacheGet(key + ':cutover:' + cutoverId);
         if (!generation) {
             return index;
         }
@@ -5769,13 +5948,14 @@
         return indexTimestamp > generationTimestamp ? index : generation;
     }
 
-    async function writeVacationCache(payload) {
+    async function writeVacationCache(payload, current) {
         const cutoverId = Number(payload && payload.cutover_id ? payload.cutover_id : 0);
+        const key = vacationCacheKey();
 
-        await cacheSet(vacationCacheKey(), payload);
+        await cacheSet(key, payload, current);
 
         if (cutoverId > 0) {
-            await cacheSet(vacationCacheKey(cutoverId), payload);
+            await cacheSet(key + ':cutover:' + cutoverId, payload, current);
         }
     }
 
@@ -5799,9 +5979,12 @@
         if (!state.session.authenticated) {
             return;
         }
+        const context = sessionContext();
+        const current = () => isCurrentSessionContext(context);
 
         if (!navigator.onLine) {
             const cached = await readVacationCache();
+            if (!current()) return;
 
             if (cached) {
                 applyVacationCachePayload(cached);
@@ -5821,6 +6004,7 @@
                 apiJson('/api/v1/app/time-account/summary'),
                 apiJson('/api/v1/app/vacation-requests')
             ]);
+            if (!current()) return;
             const previousCutoverId = Number(state.timeAccount && state.timeAccount.cutover_id ? state.timeAccount.cutover_id : 0);
             const previousTimeEntries = Array.isArray(state.timeAccount && state.timeAccount.time_entries) ? state.timeAccount.time_entries : [];
             const previousVacationEntries = Array.isArray(state.timeAccount && state.timeAccount.vacation_entries) ? state.timeAccount.vacation_entries : [];
@@ -5831,6 +6015,7 @@
 
                 return null;
             });
+            if (!current()) return;
 
             state.timeAccount = summaryResult.data || null;
             const summaryCutoverId = Number(state.timeAccount && state.timeAccount.cutover_id ? state.timeAccount.cutover_id : 0);
@@ -5857,16 +6042,17 @@
                     time_account: state.timeAccount,
                     requests: state.vacationRequests,
                     cached_at: state.vacationCachedAt
-                });
+                }, current);
             } catch (cacheError) {
                 console.warn('Urlaubscache konnte nicht geschrieben werden.', cacheError);
             }
         } catch (error) {
-            if (isSessionExpiredError(error)) {
+            if (!current() || isSessionExpiredError(error)) {
                 return;
             }
 
             const cached = await readVacationCache();
+            if (!current()) return;
 
             if (cached) {
                 applyVacationCachePayload(cached);
@@ -5874,8 +6060,10 @@
                 showFeedback('error', error.message || 'Urlaubsdaten konnten nicht geladen werden.');
             }
         } finally {
-            state.vacationLoading = false;
-            render();
+            if (current()) {
+                state.vacationLoading = false;
+                render();
+            }
         }
     }
 
@@ -6119,6 +6307,7 @@
             return;
         }
 
+        const context = sessionContext();
         const payload = vacationFormPayload();
         const params = new URLSearchParams();
         params.set('date_from', payload.date_from);
@@ -6126,10 +6315,11 @@
 
         try {
             const response = await apiJson('/api/v1/app/vacation-requests/preview?' + params.toString());
+            if (!isCurrentSessionContext(context)) return;
             state.vacationPreview = response.data || null;
             render();
         } catch (error) {
-            if (!isSessionExpiredError(error)) {
+            if (isCurrentSessionContext(context) && !isSessionExpiredError(error)) {
                 showFeedback('error', error.message || 'Vorschau konnte nicht berechnet werden.');
             }
         }
@@ -6141,6 +6331,7 @@
             return;
         }
 
+        const context = sessionContext();
         state.pendingAction = 'vacation_submit';
         render();
 
@@ -6150,17 +6341,20 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(vacationFormPayload())
             });
+            if (!isCurrentSessionContext(context)) return;
             state.vacationPreview = null;
             state.vacationForm = { date_from: '', date_to: '', employee_note: '' };
             showFeedback('success', 'Urlaubsantrag wurde gesendet.');
             await loadVacationData(true);
         } catch (error) {
-            if (!isSessionExpiredError(error)) {
+            if (isCurrentSessionContext(context) && !isSessionExpiredError(error)) {
                 showFeedback('error', error.message || 'Urlaubsantrag konnte nicht gesendet werden.');
             }
         } finally {
-            state.pendingAction = null;
-            render();
+            if (isCurrentSessionContext(context)) {
+                state.pendingAction = null;
+                render();
+            }
         }
     }
 
@@ -6169,20 +6363,24 @@
             return;
         }
 
+        const context = sessionContext();
         state.pendingAction = 'vacation_cancel';
         render();
 
         try {
             await apiJson('/api/v1/app/vacation-requests/' + requestId + '/cancel', { method: 'POST' });
+            if (!isCurrentSessionContext(context)) return;
             showFeedback('success', 'Urlaubsantrag wurde storniert.');
             await loadVacationData(true);
         } catch (error) {
-            if (!isSessionExpiredError(error)) {
+            if (isCurrentSessionContext(context) && !isSessionExpiredError(error)) {
                 showFeedback('error', error.message || 'Urlaubsantrag konnte nicht storniert werden.');
             }
         } finally {
-            state.pendingAction = null;
-            render();
+            if (isCurrentSessionContext(context)) {
+                state.pendingAction = null;
+                render();
+            }
         }
     }
 
@@ -6218,7 +6416,7 @@
             await cacheSet(cacheKey, {
                 items: files,
                 cached_at: new Date().toISOString()
-            });
+            }, current);
         } catch (error) {
             if (!current() || isSessionExpiredError(error)) {
                 return;
@@ -6226,7 +6424,7 @@
 
             if (error.httpStatus === 403 || error.httpStatus === 404) {
                 state.projectFiles[String(projectId)] = [];
-                await cacheDelete(cacheKey);
+                await cacheDelete(cacheKey, current);
                 return;
             }
 
@@ -6326,7 +6524,7 @@
             await cacheSet(cacheKey, {
                 items: items,
                 cached_at: cachedAt
-            });
+            }, current);
         } catch (error) {
             if (!current() || isSessionExpiredError(error)) {
                 return;
@@ -6414,7 +6612,8 @@
         try {
             await queueWorkReportStorage(async function () {
                 if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return;
-                await cacheSet(projectWorkReportDraftKey(projectId, context.userPart), snapshot);
+                await cacheSet(projectWorkReportDraftKey(projectId, context.userPart), snapshot,
+                    () => isCurrentSessionContext(context) && isCurrentAuthorizedProject(projectId));
             });
             if (!isCurrentSessionContext(context) || !isCurrentAuthorizedProject(projectId)) return false;
             if (state.projectWorkReportStorageErrors[String(projectId)]) {
@@ -6453,7 +6652,7 @@
     }
 
     async function submitProjectWorkReport() {
-        if (state.pendingAction) return;
+        if (state.pendingAction || (!hasPermission('projects.manage') && !hasPermission('timesheets.create'))) return;
         const form = document.getElementById('projectWorkReportForm');
         const projectId = Number(form && form.dataset.projectId);
         const context = sessionContext();
@@ -6498,8 +6697,9 @@
             }
         } catch (error) {
             if (!isSessionExpiredError(error) && isCurrentSessionContext(context) && isCurrentAuthorizedProject(projectId)) {
-                if (error.httpStatus === 403) {
+                if ((error.httpStatus === 403 || error.httpStatus === 404) && error.code !== 'project_write_denied') {
                     await denyProjectAccess(projectId, context);
+                    if (!isCurrentSessionContext(context)) return;
                     showFeedback('error', 'Dieses Projekt ist nicht mehr für Sie freigegeben.', true);
                     return;
                 }
@@ -6516,7 +6716,8 @@
 
     async function archiveProjectWorkReport(reportId) {
         const projectId = viewedProjectId();
-        if (state.pendingAction || !reportId || !isCurrentAuthorizedProject(projectId)) return;
+        if (state.pendingAction || (!hasPermission('projects.manage') && !hasPermission('timesheets.create'))
+            || !reportId || !isCurrentAuthorizedProject(projectId)) return;
         if (!navigator.onLine) {
             showFeedback('error', 'Arbeitsberichte können nur online archiviert werden.');
             return;
@@ -6559,7 +6760,7 @@
             state.projectWorkReportsOffline = false;
             try {
                 await queueWorkReportStorage(async function () {
-                    if (current()) await cacheSet(cacheKey, { items });
+                    if (current()) await cacheSet(cacheKey, { items }, current);
                 });
             } catch (cacheError) {
                 // A local cache failure must not replace fresh server reports with stale data.
@@ -6718,7 +6919,7 @@
             try {
                 await cacheSet(todayCacheKey(), state.today, () => isCurrentSessionContext(context));
             } catch (error) {
-                await cacheDelete(todayCacheKey());
+                if (isCurrentSessionContext(context)) await cacheDelete(todayCacheKey(), () => isCurrentSessionContext(context));
             }
         }
         if (isCurrentSessionContext(context) && routeName() === '/projektwahl' && viewedProjectId() !== null) {
@@ -6834,7 +7035,7 @@
     }
 
     async function submitProjectMaterial() {
-        if (state.pendingAction) return;
+        if (state.pendingAction || (!hasPermission('projects.manage') && !hasPermission('timesheets.create'))) return;
         const form = document.getElementById('projectMaterialForm');
         const projectId = Number(form && form.dataset.projectId);
         const context = sessionContext();
@@ -6847,8 +7048,9 @@
 
         if (!navigator.onLine) {
             await persistProjectMaterialDraft(projectId, draft);
+            if (!isCurrentSessionContext(context)) return;
             state.projectMaterialsOffline = true;
-            if (isCurrentSessionContext(context)) showFeedback('error', 'Material kann nur online gespeichert werden. Ihre Eingaben bleiben erhalten.', true);
+            showFeedback('error', 'Material kann nur online gespeichert werden. Ihre Eingaben bleiben erhalten.', true);
             return;
         }
 
@@ -6905,13 +7107,15 @@
                     showFeedback('error', 'Der Materialeintrag wurde gespeichert. Die Materialliste konnte noch nicht aktualisiert werden.', true);
                     return;
                 }
-                if (error.httpStatus === 403 || error.httpStatus === 404) {
+                if ((error.httpStatus === 403 || error.httpStatus === 404) && error.code !== 'project_write_denied') {
                     await denyProjectAccess(projectId, context);
+                    if (!isCurrentSessionContext(context)) return;
                     showFeedback('error', 'Dieses Projekt ist nicht mehr für Sie freigegeben.', true);
                     return;
                 }
-                draft.submission.status = [400, 422].includes(error.httpStatus) ? 'rejected' : 'uncertain';
+                draft.submission.status = [400, 422].includes(error.httpStatus) || error.code === 'project_write_denied' ? 'rejected' : 'uncertain';
                 await persistProjectMaterialDraft(projectId, draft);
+                if (!isCurrentSessionContext(context)) return;
                 if (accepted) {
                     state.projectMaterialStorageErrors[String(projectId)] = 'Der Materialeintrag wurde gespeichert, der lokale Entwurf konnte aber nicht bereinigt werden. Prüfen Sie denselben Eintrag erneut.';
                 }
@@ -6931,7 +7135,8 @@
     async function archiveProjectMaterial(materialId) {
         const projectId = viewedProjectId();
 
-        if (state.pendingAction || !isCurrentAuthorizedProject(projectId) || materialId <= 0) {
+        if (state.pendingAction || (!hasPermission('projects.manage') && !hasPermission('timesheets.create'))
+            || !isCurrentAuthorizedProject(projectId) || materialId <= 0) {
             return;
         }
 
@@ -6970,15 +7175,16 @@
             return;
         }
 
+        const context = sessionContext();
         state.pushLoading = true;
         render();
 
         try {
             const payload = await apiJson('/api/v1/app/push/status');
-
+            if (!isCurrentSessionContext(context)) return;
             state.push = payload.data || null;
         } catch (error) {
-            if (isSessionExpiredError(error)) {
+            if (!isCurrentSessionContext(context) || isSessionExpiredError(error)) {
                 return;
             }
 
@@ -6988,8 +7194,10 @@
                 showFeedback('error', friendlyMessage(error.message, 'Push-Status konnte nicht geladen werden.'));
             }
         } finally {
-            state.pushLoading = false;
-            render();
+            if (isCurrentSessionContext(context)) {
+                state.pushLoading = false;
+                render();
+            }
         }
     }
 
@@ -7006,11 +7214,14 @@
             return;
         }
 
+        const context = sessionContext();
+        const applicationServerKey = urlBase64ToUint8Array(state.push.vapid_public_key);
         state.pushBusy = true;
         render();
 
         try {
             const permission = await Notification.requestPermission();
+            if (!isCurrentSessionContext(context)) return;
 
             if (permission !== 'granted') {
                 showFeedback('error', 'Push-Berechtigung wurde nicht erteilt.');
@@ -7018,10 +7229,12 @@
             }
 
             const registration = await navigator.serviceWorker.ready;
+            if (!isCurrentSessionContext(context)) return;
             const subscription = await registration.pushManager.subscribe({
                 userVisibleOnly: true,
-                applicationServerKey: urlBase64ToUint8Array(state.push.vapid_public_key)
+                applicationServerKey
             });
+            if (!isCurrentSessionContext(context)) return;
             const body = subscription.toJSON();
 
             body.permission_status = permission;
@@ -7032,6 +7245,7 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body)
             });
+            if (!isCurrentSessionContext(context)) return;
 
             state.push = {
                 ...(state.push || {}),
@@ -7039,14 +7253,16 @@
             };
             showFeedback('success', friendlyMessage(payload.message, 'Push wurde aktiviert.'));
         } catch (error) {
-            if (isSessionExpiredError(error)) {
+            if (!isCurrentSessionContext(context) || isSessionExpiredError(error)) {
                 return;
             }
 
             showFeedback('error', friendlyMessage(error.message, 'Push konnte nicht aktiviert werden.'));
         } finally {
-            state.pushBusy = false;
-            render();
+            if (isCurrentSessionContext(context)) {
+                state.pushBusy = false;
+                render();
+            }
         }
     }
 
@@ -7069,11 +7285,13 @@
             return;
         }
 
+        const context = sessionContext();
         state.pushBusy = true;
         render();
 
         try {
             const subscription = await currentPushSubscriptionPayload();
+            if (!isCurrentSessionContext(context)) return;
 
             if (!subscription || !subscription.endpoint) {
                 showFeedback('error', 'Dieses Geraet ist nicht aktiv fuer Push registriert. Bitte Push erneut aktivieren.');
@@ -7085,6 +7303,7 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ endpoint: subscription.endpoint })
             });
+            if (!isCurrentSessionContext(context)) return;
 
             state.push = {
                 ...(state.push || {}),
@@ -7092,14 +7311,16 @@
             };
             showFeedback('success', friendlyMessage(payload.message, 'Push-Test wurde gesendet.'));
         } catch (error) {
-            if (isSessionExpiredError(error)) {
+            if (!isCurrentSessionContext(context) || isSessionExpiredError(error)) {
                 return;
             }
 
             showFeedback('error', friendlyMessage(error.message, 'Push-Test konnte nicht gesendet werden.'), true);
         } finally {
-            state.pushBusy = false;
-            render();
+            if (isCurrentSessionContext(context)) {
+                state.pushBusy = false;
+                render();
+            }
         }
     }
 
@@ -7109,6 +7330,7 @@
             return;
         }
 
+        const context = sessionContext();
         state.pushBusy = true;
         render();
 
@@ -7120,6 +7342,7 @@
                 },
                 body: '_method=DELETE'
             });
+            if (!isCurrentSessionContext(context)) return;
 
             state.push = {
                 ...(state.push || {}),
@@ -7127,14 +7350,16 @@
             };
             showFeedback('success', friendlyMessage(payload.message, 'Push wurde deaktiviert.'));
         } catch (error) {
-            if (isSessionExpiredError(error)) {
+            if (!isCurrentSessionContext(context) || isSessionExpiredError(error)) {
                 return;
             }
 
             showFeedback('error', friendlyMessage(error.message, 'Push konnte nicht deaktiviert werden.'));
         } finally {
-            state.pushBusy = false;
-            render();
+            if (isCurrentSessionContext(context)) {
+                state.pushBusy = false;
+                render();
+            }
         }
     }
 
@@ -7255,6 +7480,10 @@
             showFeedback('error', 'Bitte zuerst anmelden.');
             return false;
         }
+        if (state.timeSyncRequiresRefresh) {
+            showFeedback('error', 'Der aktuelle Buchungsstand muss online geprüft werden.');
+            return false;
+        }
 
         const context = sessionContext();
         const pauseAction = PAUSE_ACTIONS.includes(action);
@@ -7264,21 +7493,24 @@
             showFeedback('error', 'Ihre Anwesenheit ist erfasst. Bitte bestätigen Sie zuerst den tatsächlichen Arbeitsbeginn oben.');
             return false;
         }
+        if (action === 'check_in' && runningWorkEntry()) {
+            showFeedback('error', activeCheckInMessage(checkInProjectId(), runningWorkEntry().project_id));
+            return false;
+        }
         if (!target && (hasOpenWorkTimeCarryover() || previousPauseEntry())
             && ['check_in', 'upsert', 'pause', 'check_out', 'day_close', ...PAUSE_ACTIONS].includes(action)) {
             showFeedback('error', 'Bitte prüfen und beenden Sie zuerst den noch offenen Einsatz aus einem früheren Tag oben.');
             return false;
         }
 
-        if (action === 'check_in' && runningWorkEntry()) {
-            showFeedback('error', 'Bitte beenden Sie zuerst die laufende Zeitbuchung.');
-            return false;
-        }
         if (action === 'upsert' && !canEditTimeContext()) {
             showFeedback('error', 'Bitte wählen Sie für die Bearbeitung das Projekt der letzten Zeitbuchung.');
             return false;
         }
 
+        const capturedAt = workTimeNowLocal();
+        const capturedDate = capturedAt.slice(0, 10);
+        const capturedTime = capturedAt.slice(11, 16);
         if (state.today && state.today.work_time_windows_enabled && action === 'check_in') {
             if (!state.workTime) {
                 showFeedback('error', 'Bitte zuerst den aktuellen Stand der Kernarbeitszeit laden.');
@@ -7286,16 +7518,18 @@
             }
             if (state.workTime.policy && state.workTime.policy.early_check_in_mode === 'presence_only') {
                 const note = document.getElementById('timesheetNote');
-                return workTimeMutation('/api/v1/app/timesheets/sync', { action: 'check_in', work_date: state.today.today, start_time: manualTimesOverride().start_time || nowTime(), project_id: checkInProjectId(), note: note ? note.value : '', ...(overrides || {}), client_request_id: createClientId() });
+                return workTimeMutation('/api/v1/app/timesheets/sync', { action: 'check_in', work_date: state.today.today, start_time: manualTimesOverride().start_time || capturedTime, project_id: checkInProjectId(), note: note ? note.value : '', ...(overrides || {}), client_request_id: createClientId() });
             }
         }
 
         const noteField = document.getElementById('timesheetNote');
         const entry = target || workEntry();
         const manualTimes = manualTimesOverride();
+        const isCheckOut = action === 'check_out' || action === 'day_close';
         const payload = {
             action: action,
-            work_date: target?.work_date || state.today?.today || berlinToday(),
+            work_date: target?.work_date || (isCheckOut && entry?.work_date)
+                || ((action === 'check_in' && !navigator.onLine) ? capturedDate : state.today?.today) || capturedDate,
         };
         if (action !== 'select_project' && !pauseAction && !target) {
             payload.project_id = action === 'check_in' ? checkInProjectId() : timeContextProjectId();
@@ -7304,11 +7538,12 @@
         }
 
         if (action === 'check_in') {
-            payload.start_time = manualTimes.start_time || nowTime();
+            payload.start_time = manualTimes.start_time || capturedTime;
         }
 
-        if (action === 'check_out' || action === 'day_close') {
-            payload.end_time = manualTimes.end_time || nowTime();
+        if (isCheckOut) {
+            payload.end_time = manualTimes.end_time || capturedTime;
+            if (!navigator.onLine && !manualTimes.end_time) payload.actual_end_at = capturedAt;
         }
 
         if (action === 'upsert') {
@@ -7318,7 +7553,7 @@
 
         Object.assign(payload, overrides || {});
 
-        if ((state.today?.work_time_windows_enabled || pauseAction || target) && entry?.start_time && action !== 'check_in' && action !== 'select_project') {
+        if ((state.today?.work_time_windows_enabled || pauseAction || target || isCheckOut) && entry?.start_time && action !== 'check_in' && action !== 'select_project') {
             // Bind delayed/offline changes to the session the employee actually saw.
             // A later confirmed proposal and new check-in must not redirect this action.
             if (Number(entry.id) > 0) payload.expected_timesheet_id = Number(entry.id);
@@ -7354,6 +7589,7 @@
                 client_request_id: clientRequestId,
                 endpoint: '/api/v1/app/timesheets/sync',
                 userPart: context.userPart,
+                dependsOnCheckIn: entry?.local_check_in_id,
                 payload: queuedPayload
             });
 
@@ -7361,10 +7597,17 @@
             if (!isCurrentSessionContext(context)) return false;
             updatePendingQueue(pending);
             if (action !== 'select_project') {
+                if (action === 'check_in' && state.today && payload.work_date !== state.today.today) {
+                    state.today = {
+                        ...state.today, today: payload.work_date, today_state: {}, project_day_summaries: [],
+                        attachments: [], breaks_today: [], current_break: null, break_assessment: null,
+                        tracked_minutes_live_basis: null
+                    };
+                }
                 if (pauseAction && target && Number(target.id) === Number(previousPauseEntry()?.id)) {
                     applyOptimisticPriorPause(payload);
-                } else if (!target || Number(target.id) === Number(globalWorkEntry()?.id) && payload.work_date === state.today?.today) {
-                    applyOptimisticPayload(payload);
+                } else if ((!target || Number(target.id) === Number(globalWorkEntry()?.id)) && payload.work_date === state.today?.today) {
+                    applyOptimisticPayload(payload, clientRequestId);
                 }
                 await cacheTimeSyncDay(context);
             }
@@ -7378,7 +7621,7 @@
             if (action === 'select_project' && syncResult.deferred) {
                 showFeedback('info', 'Die Projektzuordnung wartet auf eine Verbindung. Bis zur Bestätigung bleibt die bisherige Zeitbuchung sichtbar.', true);
             }
-            const requiresResult = action === 'select_project' || pauseAction || target;
+            const requiresResult = action === 'select_project' || action === 'check_in' || pauseAction || target;
             const pendingRetry = pauseAction && syncResult.pendingRequestIds?.has(clientRequestId);
             succeeded = !requiresResult || syncResult.deferred || syncResult.requestedCompleted || pendingRetry;
         } catch (error) {
@@ -7393,7 +7636,7 @@
         return succeeded;
     }
 
-    function applyOptimisticPayload(payload) {
+    function applyOptimisticPayload(payload, clientRequestId) {
         if (!state.today) {
             return;
         }
@@ -7431,6 +7674,7 @@
         });
         const previousBreaks = startsFreshEntry ? [] : (PAUSE_ACTIONS.includes(payload.action) && Array.isArray(state.today.breaks_today)
             ? state.today.breaks_today : breaksToday());
+        if (payload.action === 'check_in') workEntry.local_check_in_id = clientRequestId;
         const todayBreaks = optimisticBreaks(previousBreaks, payload);
 
         if (payload.project_id !== undefined) {
@@ -7537,12 +7781,17 @@
 
     function updatePendingQueue(items) {
         const pending = items.filter((item) => item.status !== 'conflict');
-        const userPart = currentSessionUserCachePart();
         state.pendingCount = pending.length;
+        state.unassignedQueueCount = items.unassignedCount || 0;
         state.pauseSyncUncertain = pending.some((item) => PAUSE_ACTIONS.includes(item.payload?.action))
             && pending.some((item) => item.status === 'failed');
-        state.pauseConflicts = items.filter((item) => item.status === 'conflict'
-            && item.userPart === userPart && PAUSE_ACTIONS.includes(item.payload?.action));
+        state.pauseConflicts = items.filter((item) => item.status === 'conflict' && PAUSE_ACTIONS.includes(item.payload?.action));
+        state.workConflicts = items.filter((item) => item.status === 'conflict' && !PAUSE_ACTIONS.includes(item.payload?.action));
+    }
+
+    function hasRejectedLocalCheckIn(day) {
+        const checkIn = day?.today_state?.work_entry?.local_check_in_id;
+        return Boolean(checkIn && state.workConflicts.some((item) => item.client_request_id === checkIn));
     }
 
     async function cacheTimeSyncDay(context) {
@@ -7570,7 +7819,9 @@
         const sync = queueSyncTail.then(function (previous) {
             if (!isCurrentSessionContext(context)) return { completed: false, deferred: false, sessionExpired: true };
             if (requestedClientRequestId && previous?.syncedRequestIds?.has(requestedClientRequestId)) return previous;
-            return performQueueSync();
+            return navigator.locks?.request
+                ? navigator.locks.request('timeapp-sync-' + context.userPart, () => performQueueSync(context))
+                : performQueueSync(context);
         });
         queueSyncTail = sync.catch(() => null);
         return sync.then((result) => ({
@@ -7579,7 +7830,9 @@
         }));
     }
 
-    async function performQueueSync() {
+    async function performQueueSync(context) {
+        const current = () => isCurrentSessionContext(context);
+        if (!current()) return { completed: false, deferred: false, sessionExpired: true };
         if (!navigator.onLine || !state.session.authenticated) {
             return {
                 completed: false,
@@ -7588,20 +7841,33 @@
             };
         }
 
-        const context = sessionContext();
         const items = await queueAll();
         let completed = true;
         let sessionExpired = false;
         let completedAny = false;
         const syncedRequestIds = new Set();
+        const blockedCheckIns = new Set();
+        let lastCheckInConflict = null;
 
         for (const item of items) {
-            if (!isCurrentSessionContext(context)) break;
+            if (!current()) break;
+            const action = item.payload.action;
+            if (action === 'check_in') {
+                lastCheckInConflict = item.status === 'conflict' ? item : null;
+                if (lastCheckInConflict) blockedCheckIns.add(item.client_request_id);
+            }
             if (item.status === 'conflict') continue;
+            const legacyDependent = lastCheckInConflict && item.payload.work_date === lastCheckInConflict.payload.work_date
+                && !item.payload.expected_timesheet_id && ['check_out', 'day_close', 'upsert', ...PAUSE_ACTIONS, 'pause'].includes(action);
+            if (blockedCheckIns.has(item.dependsOnCheckIn) || legacyDependent) {
+                await queueUpdate({ ...item, status: 'conflict', error: 'Der zugehörige Check-in konnte nicht gespeichert werden.' }, current);
+                completed = false;
+                continue;
+            }
             try {
                 const sanitizedPayload = syncPayloadForCurrentSettings(item.payload);
-                await queueUpdate({ ...item, payload: sanitizedPayload, status: 'syncing' });
-                if (!isCurrentSessionContext(context)) break;
+                await queueUpdate({ ...item, payload: sanitizedPayload, status: 'syncing' }, current);
+                if (!current()) break;
                 const payload = await apiJson(item.endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -7611,8 +7877,8 @@
                     })
                 });
 
-                await queueRemove(item.id);
-                if (!isCurrentSessionContext(context)) break;
+                await queueRemove(item.id, current);
+                if (!current()) break;
                 completedAny = true;
                 syncedRequestIds.add(item.client_request_id);
                 const pauseMutation = PAUSE_ACTIONS.includes(item.payload.action);
@@ -7626,8 +7892,7 @@
                 maybePromptForSignatureAfterSync(item, payload);
                 showFeedback('success', friendlyMessage(payload.message || (payload.data ? payload.data.message : ''), 'Aenderung erfolgreich gespeichert.'));
             } catch (error) {
-                if (isSessionExpiredError(error)) {
-                    await queueUpdate({ ...item, status: 'pending', error: null });
+                if (!current() || isSessionExpiredError(error)) {
                     completed = false;
                     sessionExpired = true;
                     break;
@@ -7636,17 +7901,23 @@
                 const message = friendlyMessage(error.message, 'Synchronisierung fehlgeschlagen.');
 
                 const rejected = [403, 409, 422].includes(error.httpStatus);
-                const pauseMutation = PAUSE_ACTIONS.includes(item.payload.action);
                 const editable = item.payload.action === 'pause_record' && state.dialog?.type === 'pause-record'
                     && state.dialog.requestId === item.client_request_id;
-                if (rejected && (item.payload.action === 'select_project' || editable)) {
-                    await queueRemove(item.id);
+                const storedMessage = error.code === 'active_work_session'
+                    ? 'Bei der Synchronisierung lief bereits ein Einsatz. Dieser Check-in wurde nicht gebucht.' : message;
+                if (rejected && action === 'check_in') {
+                    lastCheckInConflict = item;
+                    blockedCheckIns.add(item.client_request_id);
+                }
+                if (rejected && editable) {
+                    await queueRemove(item.id, current);
                 } else {
-                    await queueUpdate({ ...item, status: rejected && pauseMutation ? 'conflict' : 'failed', error: message });
+                    await queueUpdate({ ...item, status: rejected ? 'conflict' : 'failed', error: storedMessage }, current);
                 }
                 completed = false;
-                if (!isCurrentSessionContext(context)) break;
-                showFeedback('error', message, true);
+                if (!current()) break;
+                showFeedback('error', error.code === 'active_work_session'
+                    ? activeCheckInMessage(item.payload.project_id, error.activeWorkSession?.project_id) : storedMessage, error.code !== 'active_work_session');
                 // A later stamp may depend on the uncertain check-in or pause start.
                 if (!error.httpStatus || error.httpStatus >= 500 || [408, 429].includes(error.httpStatus)) break;
             }
@@ -7656,7 +7927,14 @@
         const pending = await queueAll();
         if (!isCurrentSessionContext(context)) return { completed: false, deferred: false, sessionExpired: true };
         updatePendingQueue(pending);
-        await cacheTimeSyncDay(context);
+        if (hasRejectedLocalCheckIn(state.today)) {
+            state.today = null;
+            state.timeSyncRequiresRefresh = true;
+            await cacheDelete(todayCacheKey(), current);
+        } else {
+            await cacheTimeSyncDay(context);
+        }
+        if (!current()) return { completed: false, deferred: false, sessionExpired: true };
         if (completedAny) {
             markTimesheetHistoryDirty();
         }
@@ -7679,8 +7957,11 @@
         if (currentDay && Object.prototype.hasOwnProperty.call(data, 'break_assessment')) {
             state.today.break_assessment = data.break_assessment;
         }
-        const currentId = Number(globalWorkEntry()?.id);
+        const currentEntry = globalWorkEntry();
+        const currentId = Number(currentEntry?.id);
         const affectedId = Number(affected?.id);
+        if (command.action === 'check_in' && currentDay && currentId > 0 && affectedId > 0
+            && (currentId > affectedId || (currentId === affectedId && currentEntry.end_time && !affected.end_time))) return;
         const sameWorkEntry = !pauseMutation || !currentId || !affectedId || currentId === affectedId;
         if (!currentDay || !sameWorkEntry) {
             const prior = previousPauseEntry();
@@ -7834,6 +8115,8 @@
 
         const formData = new FormData();
         formData.append('file', selectedFile);
+        const context = sessionContext();
+        const current = () => isCurrentSessionContext(context);
 
         state.pendingAction = 'upload_attachment';
         state.uploadingTimesheetId = entry.id;
@@ -7845,21 +8128,25 @@
                 body: formData
             });
 
+            if (!current()) return;
             updateCurrentAttachments(payload.data && payload.data.files ? payload.data.files : []);
-            await cacheSet(todayCacheKey(), state.today);
+            await cacheSet(todayCacheKey(), state.today, current);
+            if (!current()) return;
             markTimesheetHistoryDirty();
             showFeedback('success', friendlyMessage(payload.message, 'Datei erfolgreich hochgeladen.'));
         } catch (error) {
-            if (isSessionExpiredError(error)) {
+            if (!current() || isSessionExpiredError(error)) {
                 return;
             }
 
             showFeedback('error', friendlyMessage(error.message, 'Die Datei konnte nicht hochgeladen werden.'), true);
         } finally {
-            state.pendingAction = null;
-            state.uploadingTimesheetId = null;
-            state.fileSelectionGuardUntil = 0;
-            render();
+            if (current()) {
+                state.pendingAction = null;
+                state.uploadingTimesheetId = null;
+                state.fileSelectionGuardUntil = 0;
+                render();
+            }
         }
     }
 
@@ -7933,6 +8220,8 @@
             return;
         }
 
+        const context = sessionContext();
+        const current = () => isCurrentSessionContext(context);
         state.pendingAction = 'upload_attachment';
         render();
 
@@ -7945,19 +8234,23 @@
                 body: '_method=DELETE'
             });
 
+            if (!current()) return;
             updateCurrentAttachments(payload.data && payload.data.files ? payload.data.files : []);
-            await cacheSet(todayCacheKey(), state.today);
+            await cacheSet(todayCacheKey(), state.today, current);
+            if (!current()) return;
             markTimesheetHistoryDirty();
             showFeedback('success', friendlyMessage(payload.message, 'Bild erfolgreich entfernt.'));
         } catch (error) {
-            if (isSessionExpiredError(error)) {
+            if (!current() || isSessionExpiredError(error)) {
                 return;
             }
 
             showFeedback('error', friendlyMessage(error.message, 'Das Bild konnte nicht entfernt werden.'), true);
         } finally {
-            state.pendingAction = null;
-            render();
+            if (current()) {
+                state.pendingAction = null;
+                render();
+            }
         }
     }
 
@@ -7990,8 +8283,10 @@
             return;
         }
 
+        const context = sessionContext();
         try {
             const payload = await apiJson('/api/v1/app/timesheets/' + timesheetId + '/signature');
+            if (!isCurrentSessionContext(context)) return;
             const status = payload.data || {};
 
             if (status.signature) {
@@ -8022,7 +8317,7 @@
             render();
             tryOrientationLock();
         } catch (error) {
-            if (isSessionExpiredError(error)) {
+            if (!isCurrentSessionContext(context) || isSessionExpiredError(error)) {
                 return;
             }
 
@@ -8245,6 +8540,7 @@
         }
 
         const signaturePng = canvas.toDataURL('image/png');
+        const context = sessionContext();
         dialog.signaturePng = signaturePng;
         dialog.hasDrawing = true;
         state.pendingAction = 'signature_save';
@@ -8264,6 +8560,7 @@
                 })
             });
 
+            if (!isCurrentSessionContext(context)) return;
             applySignatureResult(Number(dialog.timesheet.id), payload.data && payload.data.signature ? payload.data.signature : null);
             state.signatureDialog = null;
             state.signatureDrawing = null;
@@ -8272,14 +8569,16 @@
             showFeedback('success', friendlyMessage(payload.message, 'Kundenbestätigung gespeichert.'));
             await refreshAfterSignatureChange();
         } catch (error) {
-            if (isSessionExpiredError(error)) {
+            if (!isCurrentSessionContext(context) || isSessionExpiredError(error)) {
                 return;
             }
 
             showFeedback('error', friendlyMessage(error.message, 'Kundenbestätigung konnte nicht gespeichert werden.'), true);
         } finally {
-            state.pendingAction = null;
-            render();
+            if (isCurrentSessionContext(context)) {
+                state.pendingAction = null;
+                render();
+            }
         }
     }
 
@@ -8315,9 +8614,10 @@
     }
 
     async function refreshAfterSignatureChange() {
+        const context = sessionContext();
         await loadOnlineData(true);
 
-        if (state.session.authenticated && routeName() === '/historie' && showAppWidget('show_history')) {
+        if (isCurrentSessionContext(context) && state.session.authenticated && routeName() === '/historie' && showAppWidget('show_history')) {
             await loadTimesheetList(true);
         }
     }
@@ -8351,7 +8651,8 @@
 
     function readGeoAck() {
         try {
-            return window.localStorage.getItem(GEO_ACK_KEY) === '1';
+            const key = userPreferenceKey(GEO_ACK_KEY);
+            return key && window.localStorage.getItem(key) === '1';
         } catch (error) {
             return false;
         }
@@ -8405,40 +8706,44 @@
         resolveTheme();
         state.timesheetFilterMonth = readTimesheetFilterMonth();
         state.timesheetFilterEntryType = readTimesheetFilterEntryType();
-        const cachedSession = await cacheGet('session');
-        const hadCachedAuthenticatedSession = !!(cachedSession && cachedSession.authenticated);
-
-        // The worker may serve an older HTML shell. The stored session owns offline data.
-        state.session = cachedSession || { authenticated: false, user: null };
-
-        if (navigator.onLine) {
+        const expired = await withAuthMutation(async function () {
+            if (await cacheGet(PENDING_LOGOUT_KEY)) {
+                await confirmPendingLogout();
+                return false;
+            }
+            const cachedSession = await cacheGet('session');
+            // The worker may serve an older HTML shell. The stored session owns offline data.
+            state.session = cachedSession || { authenticated: false, user: null };
+            if (!navigator.onLine) return false;
             try {
-                const payload = await publicJson('/api/v1/auth/session');
-
-                if (!payload.authenticated && hadCachedAuthenticatedSession) {
-                    updatePendingQueue(await queueAll());
-                    await handleExpiredSession('Ihre Sitzung ist abgelaufen. Bitte erneut anmelden. Wartende Buchungen bleiben erhalten.');
-                    return;
-                }
-
-                state.session = payload;
+                const context = sessionContext();
+                const payload = await publicJson('/api/v1/auth/session', { cache: 'no-store' });
+                if (!isCurrentSessionContext(context)) return false;
+                if (!payload.authenticated && cachedSession?.authenticated) return true;
+                const localSessionId = cachedSession?.user?.id === payload.user?.id && cachedSession?.localSessionId
+                    ? cachedSession.localSessionId : createClientId();
+                state.session = { ...payload, localSessionId };
                 state.sessionExpiredHandled = false;
                 await cacheSet('session', state.session);
             } catch (error) {
                 console.warn('Sessionstatus konnte nicht geladen werden.', error);
             }
+            return false;
+        });
+        if (expired) {
+            await handleExpiredSession('Ihre Sitzung ist abgelaufen. Bitte erneut anmelden. Wartende Buchungen bleiben erhalten.');
+            return;
         }
 
+        const context = sessionContext();
         restoreUserProjectPreferences();
-        updatePendingQueue(await queueAll());
+        const pending = await queueAll();
+        if (!isCurrentSessionContext(context)) return;
+        updatePendingQueue(pending);
         await loadOnlineData(true);
+        if (!isCurrentSessionContext(context)) return;
         render();
-    }
-
-    function nowTime() {
-        const date = new Date();
-
-        return String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0');
+        if (state.online && state.pendingCount > 0 && state.session.authenticated) await syncQueue();
     }
 
     function refreshLiveDisplays() {
@@ -8532,8 +8837,28 @@
 
     window.addEventListener('online', async function () {
         state.online = true;
+        if (!state.session.authenticated) {
+            await withAuthMutation(confirmPendingLogout);
+            render();
+            return;
+        }
+        const context = sessionContext();
         await loadOnlineData(true);
-        await syncQueue();
+        if (isCurrentSessionContext(context)) await syncQueue();
+    });
+
+    window.addEventListener('storage', function (event) {
+        if (event.key !== SESSION_CHANGE_KEY || !event.newValue || !state.session.authenticated) return;
+        try {
+            const change = JSON.parse(event.newValue);
+            if (change.action === 'logout' && change.userPart === currentSessionUserCachePart()) {
+                void handleExpiredSession('Sie wurden in einem anderen Tab abgemeldet. Wartende Buchungen bleiben erhalten.', true, true);
+            } else if (change.action === 'login') {
+                void handleExpiredSession('Die Anmeldung wurde in einem anderen Tab geändert. Bitte melden Sie sich erneut an.', true);
+            }
+        } catch (error) {
+            console.warn('Die Sitzungsänderung konnte nicht gelesen werden.', error);
+        }
     });
 
     window.addEventListener('offline', function () {

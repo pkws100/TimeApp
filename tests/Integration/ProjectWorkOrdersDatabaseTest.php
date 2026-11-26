@@ -152,7 +152,8 @@ final class ProjectWorkOrdersDatabaseTest extends MariaDbTestCase
             ['project_id' => $projectId]
         );
         self::assertFalse($access->canAccess($this->actor($memberId), $projectId));
-        self::assertTrue($access->canAccess($this->actor($strangerId, ['projects.manage']), $projectId));
+        self::assertFalse($access->canAccess($this->actor($strangerId, ['projects.manage']), $projectId));
+        self::assertTrue($access->canAccess($this->actor($strangerId, ['projects.manage']), $projectId, true));
     }
 
     public function testProjectFileAccessExcludesGlobalTimesheetManagersWithoutMembership(): void
@@ -169,8 +170,13 @@ final class ProjectWorkOrdersDatabaseTest extends MariaDbTestCase
         self::assertTrue($access->canAccessFiles($this->actor($strangerId, ['projects.manage']), $projectId));
 
         $genericFileController = (string) file_get_contents(base_path('src/Http/Controllers/FileController.php'));
-        self::assertStringContainsString('projectAccessService->canAccessFiles($user, $projectId)', $genericFileController);
+        self::assertStringContainsString('projectAccessService->canAccessFiles($user, $projectId, $allowArchived)', $genericFileController);
         self::assertStringNotContainsString('projectAccessService->canAccess($user, $projectId)', $genericFileController);
+
+        $this->connection()->execute('UPDATE projects SET status = "archived" WHERE id = :id', ['id' => $projectId]);
+        self::assertFalse($access->canAccessFiles($this->actor($strangerId, ['files.manage']), $projectId));
+        self::assertTrue($access->canAccessFiles($this->actor($strangerId, ['files.manage']), $projectId, true));
+        self::assertFalse($access->canAccessFiles($this->actor($memberId, ['files.view']), $projectId, true));
     }
 
     public function testMobileDayContextIncludesOnlyAuthorizedProjectOrderDetails(): void
@@ -226,7 +232,7 @@ final class ProjectWorkOrdersDatabaseTest extends MariaDbTestCase
         $this->assign($projectId, $creatorId);
         $this->assign($projectId, $otherId);
         $service = new ProjectMaterialService($this->connection(), new ProjectAccessService($this->connection()));
-        $entry = $service->create($this->actor($creatorId), $projectId, [
+        $entry = $service->create($this->actor($creatorId, ['timesheets.create']), $projectId, [
             'description' => 'Kupferrohr',
             'quantity' => '12,500',
             'unit' => 'm',
@@ -239,15 +245,15 @@ final class ProjectWorkOrdersDatabaseTest extends MariaDbTestCase
         self::assertCount(1, $service->list($this->actor($creatorId), $projectId));
 
         try {
-            $service->archive($this->actor($otherId), (int) $entry['id']);
+            $service->archive($this->actor($otherId, ['timesheets.create']), (int) $entry['id']);
             self::fail('Fremde Materialeintraege muessen fuer Mitarbeiter gesperrt sein.');
         } catch (RuntimeException $exception) {
             self::assertStringContainsString('Fremde Materialeintraege', $exception->getMessage());
         }
 
-        $service->archive($this->actor($creatorId), (int) $entry['id']);
+        $service->archive($this->actor($creatorId, ['timesheets.create']), (int) $entry['id']);
         self::assertSame([], $service->list($this->actor($creatorId), $projectId));
-        $adminArchived = $service->create($this->actor($creatorId), $projectId, [
+        $adminArchived = $service->create($this->actor($creatorId, ['timesheets.create']), $projectId, [
             'description' => 'Admin-Archiv',
             'quantity' => '1',
             'work_date' => date('Y-m-d'),
@@ -266,7 +272,8 @@ final class ProjectWorkOrdersDatabaseTest extends MariaDbTestCase
         $projectId = $this->createProject();
         $this->assign($projectId, $userId);
         $service = new ProjectMaterialService($this->connection(), new ProjectAccessService($this->connection()));
-        $normalized = $service->create($this->actor($userId), $projectId, [
+        $writer = $this->actor($userId, ['timesheets.create']);
+        $normalized = $service->create($writer, $projectId, [
             'description' => 'Mit fuehrenden Nullen',
             'quantity' => '0002,50',
             'work_date' => date('Y-m-d'),
@@ -282,13 +289,14 @@ final class ProjectWorkOrdersDatabaseTest extends MariaDbTestCase
             ['description' => 'A', 'quantity' => '1', 'unit' => [], 'work_date' => date('Y-m-d')],
             ['description' => 'A', 'quantity' => '1', 'note' => [], 'work_date' => date('Y-m-d')],
             ['description' => 'A', 'quantity' => '1', 'work_date' => []],
+            ['description' => 'A', 'quantity' => '1', 'work_date' => "2026-06\0-01"],
         ];
 
         self::assertSame('2.500', $normalized['quantity']);
 
         foreach ($invalidInputs as $input) {
             try {
-                $service->create($this->actor($userId), $projectId, $input);
+                $service->create($writer, $projectId, $input);
                 self::fail('Ungueltiger Materialeintrag wurde akzeptiert: ' . json_encode($input));
             } catch (InvalidArgumentException) {
                 self::assertTrue(true);

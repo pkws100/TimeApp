@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Presentation\Admin;
 
+use App\Domain\Timesheets\AbsencePeriodService;
+
 final class AbsencePeriodModalRenderer
 {
     public function render(array $users, string $csrfToken, array $options = []): string
@@ -33,6 +35,8 @@ final class AbsencePeriodModalRenderer
                 . '<option value="unexcused_absence" data-types="absent">Unentschuldigtes Fehlen</option>'
                 . '</select></label>';
         $title = $vacationOnly ? 'Urlaub fuer Mitarbeiter buchen' : 'Abwesenheit nacherfassen';
+        $noteMaxLength = AbsencePeriodService::NOTE_MAX_LENGTH;
+        $reasonMaxLength = AbsencePeriodService::REASON_MAX_LENGTH;
 
         return <<<HTML
 <div class="admin-modal absence-period-modal"
@@ -63,8 +67,8 @@ final class AbsencePeriodModalRenderer
                 {$typeField}
                 <label><span>Von</span><input type="date" name="date_from" value="{$selectedDate}" min="2000-01-01" max="2100-12-31" required></label>
                 <label><span>Bis</span><input type="date" name="date_to" value="{$selectedDate}" min="2000-01-01" max="2100-12-31" required></label>
-                <label class="full-span"><span>Notiz</span><textarea name="note" rows="3"></textarea></label>
-                <label class="full-span"><span>Fachliche Begruendung</span><textarea name="change_reason" rows="3" required></textarea></label>
+                <label class="full-span"><span>Notiz</span><textarea name="note" rows="3" maxlength="{$noteMaxLength}"></textarea></label>
+                <label class="full-span"><span>Fachliche Begruendung</span><textarea name="change_reason" rows="3" maxlength="{$reasonMaxLength}" required></textarea></label>
             </div>
             <div class="absence-period-preview" data-absence-period-preview aria-live="polite">
                 <p class="muted">Bitte Zeitraum pruefen, bevor Sie verbindlich speichern.</p>

@@ -29,6 +29,105 @@ use Tests\Support\MariaDbTestCase;
 
 final class AbsencePeriodDatabaseTest extends MariaDbTestCase
 {
+    public function testPeriodAndVacationNotesAndReasonsHaveServerSideLimits(): void
+    {
+        $adminId = $this->createUser();
+        $employeeId = $this->createUser();
+        $service = $this->service();
+        $calendar = new CalendarPolicyService($this->connection());
+        $vacations = new VacationRequestService(
+            $this->connection(),
+            $calendar,
+            new TimesheetWriteGuard($this->connection()),
+            new DailyTargetService($calendar),
+            new TimesheetDayConflictService($this->connection()),
+            $service
+        );
+        $note = str_repeat('Ä', AbsencePeriodService::NOTE_MAX_LENGTH);
+        $reason = str_repeat('Ü', AbsencePeriodService::REASON_MAX_LENGTH);
+        $periodInput = [
+            'user_id' => $employeeId,
+            'date_from' => '2026-06-01',
+            'date_to' => '2026-06-01',
+            'entry_type' => 'sick',
+            'absence_reason_code' => 'sick_paid',
+            'note' => $note,
+            'change_reason' => $reason,
+        ];
+        $vacationInput = ['date_from' => '2026-06-02', 'date_to' => '2026-06-02'];
+
+        foreach ([
+            fn () => $service->preview(array_replace($periodInput, ['note' => $note . 'x'])),
+            fn () => $service->create(array_replace($periodInput, ['change_reason' => $reason . 'x']), $adminId),
+            fn () => $vacations->createForUser($employeeId, $vacationInput + ['employee_note' => $note . 'x']),
+        ] as $save) {
+            try {
+                $save();
+                self::fail('Ein Text ueber dem Limit wurde angenommen.');
+            } catch (InvalidArgumentException $exception) {
+                self::assertStringContainsString('maximal', $exception->getMessage());
+            }
+        }
+        self::assertSame(0, (int) $this->connection()->fetchColumn('SELECT COUNT(*) FROM timesheets'));
+
+        $period = $this->createPeriod($service, $periodInput, $adminId);
+        $request = $vacations->createForUser($employeeId, $vacationInput + ['employee_note' => $note]);
+        self::assertSame($note, $period['note']);
+        self::assertSame($note, $request['employee_note']);
+
+        foreach ([
+            fn () => $service->archive((int) $period['id'], $adminId, $reason . 'x', (int) $period['lock_version']),
+            fn () => $vacations->reject($request['id'], $adminId, $reason . 'x'),
+            fn () => $vacations->approve($request['id'], $adminId, $reason . 'x'),
+        ] as $save) {
+            try {
+                $save();
+                self::fail('Eine Begruendung ueber dem Limit wurde angenommen.');
+            } catch (InvalidArgumentException $exception) {
+                self::assertStringContainsString('maximal 500', $exception->getMessage());
+            }
+        }
+
+        $this->createRoleWithPermissions($adminId, ['timesheets.manage', 'timesheets.archive', 'vacation_requests.manage']);
+        $_SESSION['auth']['user_id'] = $adminId;
+        $auth = new AuthService($this->connection(), new PermissionMatrix([], []));
+        $csrf = new CsrfService();
+        $periodController = new AdminAbsencePeriodController($service, $auth, $csrf);
+        $archiveBody = ['csrf_token' => $csrf->token(), 'change_reason' => $reason, 'lock_version' => $period['lock_version']];
+        foreach ([['change_reason' => ['Text']], ['lock_version' => [1]]] as $invalidField) {
+            $response = $periodController->archive(
+                new Request('DELETE', '/admin/absence-periods/' . $period['id'] . '/archive', [], array_replace($archiveBody, $invalidField), [], [], []),
+                ['id' => $period['id']]
+            );
+            self::assertSame(422, $response->status());
+        }
+
+        $vacationController = new AdminVacationRequestController(
+            new AdminView('Test', 'http://localhost'),
+            $vacations,
+            new TimeAccountService($this->connection(), $calendar),
+            new UserService($this->connection()),
+            $auth,
+            $csrf
+        );
+        foreach (['approve', 'reject'] as $action) {
+            $response = $vacationController->$action(
+                new Request('POST', '/admin/vacation-requests/' . $request['id'] . '/' . $action, [], [
+                    'csrf_token' => $csrf->token(), 'decision_note' => ['Text'],
+                ], [], [], []),
+                ['id' => $request['id']]
+            );
+            self::assertSame(302, $response->status());
+            parse_str((string) parse_url($response->headers()['Location'], PHP_URL_QUERY), $query);
+            self::assertSame('Bitte gueltigen Text eingeben.', $query['error']);
+        }
+
+        self::assertSame(1, (int) $this->connection()->fetchColumn('SELECT COUNT(*) FROM timesheets WHERE is_deleted = 0'));
+        $approved = $vacations->approve($request['id'], $adminId, $reason);
+        self::assertSame($reason, $approved['decision_note']);
+        self::assertSame('approved', $approved['status']);
+    }
+
     public function testCreateAndDateDiffKeepStableRowsAndArchiveRemovedDays(): void
     {
         $adminId = $this->createUser(['employee_number' => 'ADMIN-AP', 'email' => 'admin-ap@example.test']);

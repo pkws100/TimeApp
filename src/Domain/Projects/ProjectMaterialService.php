@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Projects;
 
+use App\Domain\Timesheets\LiveWorkSession;
 use App\Domain\Timesheets\TimesheetWriteGuard;
 use App\Domain\WorkTime\WorkTimeEventService;
 use App\Infrastructure\Database\DatabaseConnection;
@@ -30,13 +31,15 @@ final class ProjectMaterialService
 
     public function list(array $user, int $projectId, string $scope = 'active'): array
     {
-        $this->assertProjectAccess($user, $projectId);
+        $includeArchived = $scope === 'all' && $this->projectAccessService->canManage($user);
+        if (!$this->projectAccessService->canAccess($user, $projectId, $includeArchived)) {
+            throw new ProjectAccessDeniedException('Keine Berechtigung fuer dieses Projekt.');
+        }
 
         if (!$this->connection->tableExists('project_material_entries')) {
             return [];
         }
 
-        $includeArchived = $scope === 'all' && $this->projectAccessService->canManage($user);
         $rows = $this->connection->fetchAll(
             'SELECT
                 project_material_entries.*,
@@ -53,7 +56,7 @@ final class ProjectMaterialService
             ['project_id' => $projectId]
         );
 
-        return $this->publicEntries($user, $rows);
+        return $this->publicEntries($user, $rows, $includeArchived);
     }
 
     public function create(array $user, int $projectId, array $input): array
@@ -61,11 +64,13 @@ final class ProjectMaterialService
         return $this->createWithResult($user, $projectId, $input)['entry'];
     }
 
-    /** @return array{entry: array, replayed: bool} */
-    public function createWithResult(array $user, int $projectId, array $input): array
+    /**
+     * @param (callable(): ?array)|null $reloadActor
+     * @return array{entry: array, replayed: bool}
+     */
+    public function createWithResult(array $user, int $projectId, array $input, ?callable $reloadActor = null): array
     {
-        // Replays must still be authorized after a session or membership change.
-        $this->assertProjectAccess($user, $projectId);
+        $this->projectAccessService->requireProjectEntryWriteAccess($user, $projectId);
 
         if (!$this->connection->tableExists('project_material_entries')) {
             throw new RuntimeException('Die Materialerfassung ist noch nicht migriert.');
@@ -94,14 +99,14 @@ final class ProjectMaterialService
         $hasCaptureContext = $captureColumns === 3;
 
         if ($requestId !== null) {
-            $existing = $this->replay($user, $projectId, $requestId, $input);
+            $existing = $this->replay($user, $projectId, $requestId, $input, $reloadActor);
             if ($existing !== null) {
                 return $existing;
             }
         }
 
-        $insert = function () use ($user, $userId, $projectId, $input, $requestId, $hasCaptureContext): int {
-            $this->assertProjectAccess($user, $projectId);
+        $insert = function () use ($user, $userId, $projectId, $input, $requestId, $hasCaptureContext, $reloadActor): array {
+            $actor = $this->currentWriteActor($user, $projectId, $reloadActor);
             $capturedAt = $this->now();
             $record = $this->normalize($input, $capturedAt);
             $capture = $hasCaptureContext ? $this->captureContext($userId, $projectId, $record['work_date'], $capturedAt) : [];
@@ -127,29 +132,29 @@ final class ProjectMaterialService
                 $params
             );
 
-            return $this->connection->lastInsertId();
+            return $this->result($actor, $this->connection->lastInsertId(), false);
         };
 
         try {
             // Zeitbuchung und Material-Snapshot verwenden dieselbe Schreibsperre.
-            $entryId = $hasCaptureContext
-                ? (new TimesheetWriteGuard($this->connection))->withAccountingWriteLock($insert)
-                : $insert();
+            return $hasCaptureContext
+                ? (new TimesheetWriteGuard($this->connection))->withAccountingWriteLock(
+                    fn (): array => $this->connection->transaction($insert)
+                )
+                : $this->connection->transaction($insert);
         } catch (PDOException $exception) {
             if ($requestId === null || (int) ($exception->errorInfo[1] ?? 0) !== 1062) {
                 throw $exception;
             }
 
             // Der Unique-Index bindet auch gleichzeitige Anfragen an den ersten Eintrag.
-            return $this->replay($user, $projectId, $requestId, $input)
+            return $this->replay($user, $projectId, $requestId, $input, $reloadActor)
                 ?? throw new RuntimeException('Der bereits gespeicherte Materialeintrag konnte nicht geladen werden.');
         }
-
-        return $this->result($user, $entryId, false);
     }
 
     /** @return array{entry: array, replayed: bool}|null */
-    private function replay(array $user, int $projectId, string $requestId, array $input): ?array
+    private function replay(array $user, int $projectId, string $requestId, array $input, ?callable $reloadActor): ?array
     {
         $existing = $this->connection->fetchOne(
             'SELECT * FROM project_material_entries
@@ -160,6 +165,7 @@ final class ProjectMaterialService
             return null;
         }
 
+        $actor = $this->currentWriteActor($user, $projectId, $reloadActor);
         $record = $this->normalize($input, $this->now());
         if ((int) $existing['project_id'] !== $projectId
             || !hash_equals((string) $existing['request_payload_hash'], $this->payloadHash($record, $input, !isset($existing['capture_type'])))) {
@@ -168,7 +174,7 @@ final class ProjectMaterialService
                 . 'Bitte pruefen Sie den gespeicherten Materialeintrag, bevor Sie eine neue Buchung anlegen.'
             );
         }
-        return $this->result($user, (int) $existing['id'], true);
+        return $this->result($actor, (int) $existing['id'], true);
     }
 
     /** @return array{entry: array, replayed: bool} */
@@ -186,11 +192,10 @@ final class ProjectMaterialService
     {
         $captureDate = $capturedAt->format('Y-m-d');
         $entry = $this->connection->fetchOne(
-            'SELECT id, project_id FROM timesheets
-             WHERE user_id = :user_id AND entry_type = "work" AND COALESCE(is_deleted, 0) = 0
-               AND work_date = :capture_date AND start_time IS NOT NULL AND end_time IS NULL
+            'SELECT id, project_id FROM timesheets AS t
+             WHERE user_id = :user_id AND work_date = :capture_date AND ' . LiveWorkSession::isOpenSql('t') . '
              ORDER BY start_time DESC, updated_at DESC, id DESC LIMIT 1',
-            ['user_id' => $userId, 'capture_date' => $captureDate]
+            ['user_id' => $userId, 'capture_date' => $captureDate, 'live_reference_date' => $captureDate]
         );
         $entry ??= $this->workTimeEvents?->statusForUser($userId, $captureDate)['active_work_entry'] ?? null;
 
@@ -211,7 +216,7 @@ final class ProjectMaterialService
         ];
     }
 
-    public function archive(array $user, int $entryId): array
+    public function archive(array $user, int $entryId, bool $allowArchivedProject = false): array
     {
         $entry = $this->find($entryId);
 
@@ -220,11 +225,11 @@ final class ProjectMaterialService
         }
 
         $projectId = (int) ($entry['project_id'] ?? 0);
-        $this->assertProjectAccess($user, $projectId);
+        $this->projectAccessService->requireProjectEntryWriteAccess($user, $projectId, $allowArchivedProject);
         $userId = (int) ($user['id'] ?? 0);
 
         if (!$this->projectAccessService->canManage($user) && (int) ($entry['created_by_user_id'] ?? 0) !== $userId) {
-            throw new ProjectAccessDeniedException('Fremde Materialeintraege duerfen nicht archiviert werden.');
+            throw new ProjectAccessDeniedException('Fremde Materialeintraege duerfen nicht archiviert werden.', ProjectAccessDeniedException::WRITE_DENIED);
         }
 
         $archivedAt = $this->now()->format('Y-m-d H:i:s');
@@ -291,6 +296,9 @@ final class ProjectMaterialService
             throw new InvalidArgumentException('Die Bemerkung darf maximal 2.000 Zeichen enthalten.');
         }
 
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/D', $workDate) !== 1) {
+            throw new InvalidArgumentException('Bitte geben Sie ein gueltiges Materialdatum an.');
+        }
         $date = DateTimeImmutable::createFromFormat('!Y-m-d', $workDate, $now->getTimezone());
         $dateErrors = DateTimeImmutable::getLastErrors();
 
@@ -353,14 +361,14 @@ final class ProjectMaterialService
         );
     }
 
-    private function publicEntries(array $user, array $rows): array
+    private function publicEntries(array $user, array $rows, bool $allowArchivedProjects = false): array
     {
         $projectNames = [];
 
-        return array_map(function (array $row) use ($user, &$projectNames): array {
+        return array_map(function (array $row) use ($user, $allowArchivedProjects, &$projectNames): array {
             $projectId = (int) ($row['captured_work_project_id'] ?? 0);
             if ($projectId > 0 && !array_key_exists($projectId, $projectNames)) {
-                $name = $this->projectAccessService->canAccess($user, $projectId)
+                $name = $this->projectAccessService->canAccess($user, $projectId, $allowArchivedProjects)
                     ? $this->connection->fetchColumn('SELECT name FROM projects WHERE id = :id', ['id' => $projectId])
                     : null;
                 $projectNames[$projectId] = is_string($name) ? $name : null;
@@ -394,11 +402,15 @@ final class ProjectMaterialService
         ];
     }
 
-    private function assertProjectAccess(array $user, int $projectId): void
+    private function currentWriteActor(array $user, int $projectId, ?callable $reloadActor): array
     {
-        if (!$this->projectAccessService->canAccess($user, $projectId)) {
-            throw new ProjectAccessDeniedException('Keine Berechtigung fuer dieses Projekt.');
+        $current = $reloadActor === null ? $user : $reloadActor();
+        if ($current === null || (int) $current['id'] !== (int) $user['id']) {
+            throw new ProjectAccessDeniedException('Keine Schreibberechtigung fuer dieses Projekt.');
         }
+        $this->projectAccessService->requireProjectEntryWriteAccess($current, $projectId);
+
+        return $current;
     }
 
     private function nullableTrimmed(mixed $value, string $label): ?string

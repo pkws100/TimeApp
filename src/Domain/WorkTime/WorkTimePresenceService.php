@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\WorkTime;
 
+use App\Domain\Timesheets\LiveWorkSession;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
 use DateTimeZone;
@@ -23,18 +24,20 @@ final class WorkTimePresenceService
 
     public function appliesToUser(int $userId, string $date): bool
     {
-        return $this->enabled() && ($this->policies->policyFor($userId, $date) !== null || $this->openForUser($userId) !== null);
+        return $this->enabled() && ($this->policies->policyFor($userId, $date) !== null || $this->openForUser($userId, LiveWorkSession::referenceDate($date)) !== null);
     }
 
-    public function openForUser(int $userId): ?array
+    public function openForUser(int $userId, ?string $referenceDate = null): ?array
     {
         if (!$this->enabled()) {
             return null;
         }
 
         return $this->connection->fetchOne(
-            'SELECT * FROM work_time_presence_sessions WHERE user_id = :user_id AND ended_at IS NULL AND work_started_at IS NULL ORDER BY id DESC LIMIT 1',
-            ['user_id' => $userId]
+            'SELECT s.* FROM work_time_presence_sessions s
+             WHERE s.user_id = :user_id AND s.ended_at IS NULL AND s.work_started_at IS NULL
+             AND ' . LiveWorkSession::isCurrentSql('s.user_id', 's.work_date') . ' ORDER BY s.id DESC LIMIT 1',
+            ['user_id' => $userId, 'live_reference_date' => $referenceDate ?? LiveWorkSession::referenceDate()]
         );
     }
 
@@ -45,7 +48,10 @@ final class WorkTimePresenceService
             return null;
         }
 
-        $open = $this->openForUser($userId);
+        $now = new DateTimeImmutable('now', new DateTimeZone('Europe/Berlin'));
+        $date = (string) ($payload['work_date'] ?? $now->format('Y-m-d'));
+        $referenceDate = LiveWorkSession::referenceDate($date, $now);
+        $open = $this->openForUser($userId, $referenceDate);
         if ($action === 'presence_end') {
             if ($open === null) {
                 throw new RuntimeException('Es gibt keine offene Anwesenheit. Bitte neu laden.');
@@ -58,7 +64,7 @@ final class WorkTimePresenceService
             if ($open === null) {
                 throw new RuntimeException('Bitte die offene Anwesenheit neu laden, bevor Sie den Arbeitsbeginn bestaetigen.');
             }
-            if (($workEntry !== null && !empty($workEntry['start_time']) && empty($workEntry['end_time'])) || (int) $this->connection->fetchColumn('SELECT COUNT(*) FROM timesheets WHERE user_id = :user_id AND entry_type = "work" AND start_time IS NOT NULL AND end_time IS NULL AND COALESCE(is_deleted, 0) = 0', ['user_id' => $userId]) > 0) {
+            if ((int) $this->connection->fetchColumn('SELECT t.id FROM timesheets t WHERE t.user_id = :user_id AND ' . LiveWorkSession::isOpenSql('t') . ' LIMIT 1', ['user_id' => $userId, 'live_reference_date' => $referenceDate]) > 0) {
                 throw new RuntimeException('Es besteht bereits ein laufender Arbeitseinsatz. Bitte neu laden und den Eintrag pruefen.');
             }
             $start = trim((string) ($payload['start_time'] ?? ''));
@@ -67,7 +73,7 @@ final class WorkTimePresenceService
             }
             $startedAt = WorkTimeLocalTime::parse((string) ($payload['work_date'] ?? '') . ' ' . (strlen($start) === 5 ? $start . ':00' : $start));
             $presenceStarted = new DateTimeImmutable($open['started_at'], new DateTimeZone('Europe/Berlin'));
-            if ($startedAt < $presenceStarted || $startedAt > new DateTimeImmutable('now', new DateTimeZone('Europe/Berlin')) || $startedAt->getTimestamp() - $presenceStarted->getTimestamp() > 86400) {
+            if ($startedAt < $presenceStarted || $startedAt > $now || $startedAt->getTimestamp() - $presenceStarted->getTimestamp() > 86400) {
                 throw new RuntimeException('Der Arbeitsbeginn muss innerhalb von 24 Stunden nach der Anwesenheit liegen und darf nicht in der Zukunft liegen.');
             }
 
@@ -84,12 +90,11 @@ final class WorkTimePresenceService
             return null;
         }
 
-        $date = (string) ($payload['work_date'] ?? date('Y-m-d'));
         $policy = $this->policies->policyFor($userId, $date);
         if ($policy === null || ($policy['early_check_in_mode'] ?? 'work_started') !== 'presence_only') {
             return null;
         }
-        $startTime = (string) ($payload['start_time'] ?? date('H:i'));
+        $startTime = (string) ($payload['start_time'] ?? $now->format('H:i'));
         if (!preg_match('/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/D', $startTime)) {
             throw new RuntimeException('Die Anwesenheitszeit ist ungueltig.');
         }
@@ -114,12 +119,12 @@ final class WorkTimePresenceService
             ['user_id' => $userId, 'version_id' => $policy['policy_version_id'], 'work_date' => $date, 'started_at' => $start->format('Y-m-d H:i:s'), 'request_id' => $payload['client_request_id'], 'source' => ($payload['source'] ?? '') === 'terminal' ? 'terminal' : 'app', 'project_id' => !empty($payload['project_id']) ? (int) $payload['project_id'] : null]
         );
 
-        return $this->response('presence_only', $this->openForUser($userId));
+        return $this->response('presence_only', $this->openForUser($userId, $referenceDate));
     }
 
     public function markWorkStarted(int $userId, int $timesheetId, string $date, string $time): void
     {
-        $open = $this->openForUser($userId);
+        $open = $this->openForUser($userId, LiveWorkSession::referenceDate($date));
         if ($open !== null) {
             $this->connection->execute('UPDATE work_time_presence_sessions SET work_started_at = :started_at, work_timesheet_id = :timesheet_id WHERE id = :id', ['started_at' => $date . ' ' . $time, 'timesheet_id' => $timesheetId, 'id' => $open['id']]);
         }

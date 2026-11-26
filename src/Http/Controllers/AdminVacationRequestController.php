@@ -76,7 +76,7 @@ final class AdminVacationRequestController
             $this->vacationRequestService->approve(
                 (int) ($params['id'] ?? 0),
                 (int) ($user['id'] ?? 0),
-                (string) $request->input('decision_note', '')
+                $this->decisionNote($request)
             );
 
             return Response::redirect($this->withQuery($returnTo, 'notice', 'approved'));
@@ -98,13 +98,23 @@ final class AdminVacationRequestController
             $this->vacationRequestService->reject(
                 (int) ($params['id'] ?? 0),
                 (int) ($user['id'] ?? 0),
-                (string) $request->input('decision_note', '')
+                $this->decisionNote($request)
             );
 
             return Response::redirect($this->withQuery($returnTo, 'notice', 'rejected'));
         } catch (InvalidArgumentException $exception) {
             return Response::redirect($this->withQuery($returnTo, 'error', $exception->getMessage()));
         }
+    }
+
+    private function decisionNote(Request $request): ?string
+    {
+        $note = $request->input('decision_note');
+        if ($note !== null && !is_string($note)) {
+            throw new InvalidArgumentException('Bitte gueltigen Text eingeben.');
+        }
+
+        return $note;
     }
 
     private function renderPage(array $requests, array $overview, array $users, array $filters, Request $request, array $directPeriods = []): string
@@ -210,7 +220,7 @@ HTML;
                 ? '<form method="post" action="/admin/vacation-requests/' . $id . '/approve" class="inline-form vacation-decision-form">'
                     . '<input type="hidden" name="csrf_token" value="' . $csrfToken . '">'
                     . '<input type="hidden" name="return_to" value="' . $this->e($returnTo) . '">'
-                    . '<input name="decision_note" placeholder="Entscheidungsnotiz">'
+                    . '<input name="decision_note" maxlength="' . AbsencePeriodService::REASON_MAX_LENGTH . '" placeholder="Entscheidungsnotiz">'
                     . '<button class="button" type="submit" formaction="/admin/vacation-requests/' . $id . '/approve">Genehmigen</button>'
                     . '<button class="button button-danger" type="submit" formaction="/admin/vacation-requests/' . $id . '/reject">Ablehnen</button>'
                     . '</form>'

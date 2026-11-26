@@ -23,6 +23,7 @@ use App\Domain\WorkTime\WorkTimePolicyService;
 use App\Http\Controllers\AppProjectMaterialController;
 use App\Http\Request;
 use App\Http\Response;
+use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
 use DateTimeZone;
 use InvalidArgumentException;
@@ -80,6 +81,53 @@ final class ProjectMaterialRequestsDatabaseTest extends MariaDbTestCase
         $service->createWithResult($this->actor($user), $project, $this->payload());
     }
 
+    public function testReadOnlyProjectMemberCannotWriteReplayOrArchiveMaterial(): void
+    {
+        [$user, $project, $service] = $this->fixture();
+        $entry = $service->create($this->actor($user), $project, $this->payload());
+        $readOnly = ['id' => $user, 'permissions' => ['projects.view']];
+
+        self::assertCount(1, $service->list($readOnly, $project));
+        foreach ([
+            fn () => $service->create($readOnly, $project, $this->payload(['client_request_id' => 'a1234567-1234-4234-8234-123456789abc'])),
+            fn () => $service->create($readOnly, $project, $this->payload()),
+            fn () => $service->archive($readOnly, $entry['id']),
+        ] as $write) {
+            try {
+                $write();
+                self::fail('Die reine Leseberechtigung darf keinen Schreibzugriff auf Material ermoeglichen.');
+            } catch (ProjectAccessDeniedException) {
+                self::assertSame([$entry], $service->list($readOnly, $project));
+            }
+        }
+    }
+
+    public function testMaterialRechecksSessionPermissionsInsideTheTransaction(): void
+    {
+        [$user, $project, $service] = $this->fixture();
+        $role = $this->grantMaterialWriteAccess($user);
+        $_SESSION['auth']['user_id'] = $user;
+        $auth = new AuthService($this->connection(), new PermissionMatrix([], []));
+        $actor = $auth->currentUser();
+        self::assertContains('timesheets.create', $actor['permissions']);
+        $otherConnection = new DatabaseConnection($this->connectionConfig());
+
+        try {
+            $service->createWithResult($actor, $project, $this->payload(), function () use ($auth, $otherConnection, $role): ?array {
+                if ($this->connection()->pdo()->inTransaction()) {
+                    $otherConnection->execute('DELETE FROM role_permissions WHERE role_id = :role', ['role' => $role]);
+                }
+
+                return $auth->currentUser();
+            });
+            self::fail('Ein zwischenzeitlicher Entzug von Schreibrechten muss das Speichern verhindern.');
+        } catch (ProjectAccessDeniedException $exception) {
+            self::assertSame(ProjectAccessDeniedException::WRITE_DENIED, $exception->reason);
+            self::assertSame(0, (int) $this->connection()->fetchColumn('SELECT COUNT(*) FROM project_material_entries'));
+            self::assertSame([], $auth->currentUser()['permissions']);
+        }
+    }
+
     public function testLegacyRequestsAndInvalidKeysKeepTheirExistingValidation(): void
     {
         [$user, $project, $service] = $this->fixture();
@@ -101,6 +149,7 @@ final class ProjectMaterialRequestsDatabaseTest extends MariaDbTestCase
     public function testHttpResponseDistinguishesNewReplayConflictAndDeniedAccess(): void
     {
         [$user, $project, $service] = $this->fixture();
+        $role = $this->grantMaterialWriteAccess($user);
         $_SESSION['auth']['user_id'] = $user;
         $controller = new AppProjectMaterialController($service, new AuthService($this->connection(), new PermissionMatrix([], [])));
         $request = fn (array $payload): Request => new Request('POST', '/api/v1/app/projects/' . $project . '/materials', [], $payload, [], [], []);
@@ -113,8 +162,14 @@ final class ProjectMaterialRequestsDatabaseTest extends MariaDbTestCase
         $conflict = $controller->store($request($this->payload(['quantity' => '3'])), ['id' => $project]);
         self::assertSame(409, $conflict->status());
         self::assertSame('request_id_conflict', $this->json($conflict)['error']);
+        $this->connection()->execute('DELETE FROM role_permissions WHERE role_id = :role', ['role' => $role]);
+        $readOnly = $controller->store($request($this->payload()), ['id' => $project]);
+        self::assertSame(403, $readOnly->status());
+        self::assertSame('project_write_denied', $this->json($readOnly)['code']);
         $this->connection()->execute('UPDATE project_memberships SET assigned_until = DATE_SUB(CURDATE(), INTERVAL 1 DAY) WHERE project_id = :project AND user_id = :user', ['project' => $project, 'user' => $user]);
-        self::assertSame(403, $controller->store($request($this->payload()), ['id' => $project])->status());
+        $noAccess = $controller->store($request($this->payload()), ['id' => $project]);
+        self::assertSame(403, $noAccess->status());
+        self::assertArrayNotHasKey('code', $this->json($noAccess));
         $_SESSION = [];
         self::assertSame(401, $controller->store($request($this->payload()), ['id' => $project])->status());
     }
@@ -209,6 +264,11 @@ final class ProjectMaterialRequestsDatabaseTest extends MariaDbTestCase
         self::assertSame('cross_project', $replay['entry']['capture_type']);
         self::assertNull($replay['entry']['captured_work_project_id']);
         self::assertNull($replay['entry']['captured_work_project_name']);
+
+        $this->connection()->execute('UPDATE projects SET status = "archived" WHERE id = :id', ['id' => $sourceProject]);
+        $manager = ['id' => $colleague, 'permissions' => ['projects.manage']];
+        self::assertNull($service->list($manager, $targetProject)[0]['captured_work_project_id']);
+        self::assertSame($sourceProject, $service->list($manager, $targetProject, 'all')[0]['captured_work_project_id']);
     }
 
     public function testRetryAfterCheckOutAndNewCheckInKeepsFirstCaptureSnapshot(): void
@@ -218,6 +278,7 @@ final class ProjectMaterialRequestsDatabaseTest extends MariaDbTestCase
         $this->assign($sourceProject, $user);
         $today = $this->berlinToday()->format('Y-m-d');
         $timesheet = $this->workEntry($user, $sourceProject, $today);
+        $this->grantMaterialWriteAccess($user);
         $_SESSION['auth']['user_id'] = $user;
         $controller = new AppProjectMaterialController($service, new AuthService($this->connection(), new PermissionMatrix([], [])));
         $request = new Request('POST', '/api/v1/app/projects/' . $targetProject . '/materials', [], $this->payload(), [], [], []);
@@ -401,7 +462,19 @@ final class ProjectMaterialRequestsDatabaseTest extends MariaDbTestCase
         return [$user, $project, new ProjectMaterialService($this->connection(), new ProjectAccessService($this->connection()))];
     }
 
-    private function actor(int $user): array { return ['id' => $user, 'permissions' => []]; }
+    private function actor(int $user): array { return ['id' => $user, 'permissions' => ['timesheets.create']]; }
+
+    private function grantMaterialWriteAccess(int $userId): int
+    {
+        $this->connection()->execute('INSERT INTO roles (slug, name, is_system_role, created_at, updated_at, is_deleted) VALUES ("material-writer", "Material", 0, NOW(), NOW(), 0)');
+        $roleId = $this->connection()->lastInsertId();
+        $this->connection()->execute('INSERT INTO permissions (code, label, scope, created_at) VALUES ("timesheets.create", "Zeiterfassung", "timesheets", NOW())');
+        $permissionId = $this->connection()->lastInsertId();
+        $this->connection()->execute('INSERT INTO role_permissions (role_id, permission_id) VALUES (:role, :permission)', ['role' => $roleId, 'permission' => $permissionId]);
+        $this->connection()->execute('INSERT INTO user_roles (user_id, role_id) VALUES (:user, :role)', ['user' => $userId, 'role' => $roleId]);
+
+        return $roleId;
+    }
 
     private function assign(int $project, int $user): void
     {

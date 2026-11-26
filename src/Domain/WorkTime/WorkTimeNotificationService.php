@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\WorkTime;
 
+use App\Domain\Timesheets\LiveWorkSession;
 use App\Domain\Timesheets\TimesheetWriteGuard;
 use App\Infrastructure\Database\DatabaseConnection;
 use Closure;
@@ -227,8 +228,10 @@ final class WorkTimeNotificationService
     {
         if (!in_array($event['channel'], ['push', 'sms'], true)) { return false; }
         if ($recipient === null || $recipient['employment_status'] !== 'active' || (int) $recipient['is_deleted'] === 1) { return false; }
-        $entry = $this->connection->fetchOne('SELECT t.*, u.employment_status, u.is_deleted AS employee_deleted FROM timesheets t JOIN users u ON u.id = t.user_id WHERE t.id = :id', ['id' => $event['timesheet_id'] ?? 0]);
-        if ($entry === null || $entry['entry_type'] !== 'work' || !empty($entry['end_time']) || (int) $entry['is_deleted'] === 1 || $entry['employment_status'] !== 'active' || (int) $entry['employee_deleted'] === 1) { return false; }
+        $entry = $this->connection->fetchOne('SELECT t.* FROM timesheets t JOIN users u ON u.id = t.user_id
+            WHERE t.id = :id AND u.employment_status = "active" AND COALESCE(u.is_deleted, 0) = 0
+            AND ' . LiveWorkSession::isOpenSql('t'), ['id' => $event['timesheet_id'] ?? 0, 'live_reference_date' => LiveWorkSession::referenceDate(now: $now)]);
+        if ($entry === null) { return false; }
         if (isset($payload['work_date'], $payload['start_time']) && ($payload['work_date'] !== $entry['work_date'] || $payload['start_time'] !== $entry['start_time'])) { return false; }
         if ((int) ($event['employee_user_id'] ?? 0) !== (int) $entry['user_id']) { return false; }
         // The request-scoped service may have loaded this assignment before an

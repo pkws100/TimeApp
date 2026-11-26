@@ -11,6 +11,7 @@ use App\Domain\Personnel\PersonnelLabelService;
 use App\Domain\Projects\ProjectService;
 use App\Domain\Settings\CompanySettingsService;
 use App\Domain\Terminals\NfcTagService;
+use App\Domain\Timesheets\LiveWorkSession;
 use App\Domain\Timesheets\TimesheetGeoLocationService;
 use App\Domain\Timesheets\TimesheetSignatureService;
 use App\Domain\Timesheets\WorkdayStateCalculator;
@@ -44,7 +45,7 @@ final class MobileAppService
 
     public function dayContext(array $user): array
     {
-        $today = (new \DateTimeImmutable('today'))->format('Y-m-d');
+        $today = LiveWorkSession::referenceDate();
         $todayWorkEntries = $this->findTodayWorkEntries((int) $user['id'], $today);
         $workEntry = $this->findLatestEntry((int) $user['id'], $today, 'work');
         $lastStatusEntry = $this->findLatestStatusEntry((int) $user['id'], $today);
@@ -64,7 +65,6 @@ final class MobileAppService
             : $this->workdayStateCalculator->status($workEntry, $lastStatusEntry, $currentBreak);
         $trackedMinutesLiveBasis = $this->workdayStateCalculator->trackedMinutesLiveBasis($today, $workEntry, $breaksToday);
         $attachments = $workEntry !== null ? $this->fileAttachmentService->listForTimesheet((int) $workEntry['id']) : [];
-        $projectDaySummaries = $this->buildProjectDaySummaries($today, $todayWorkEntries);
         $projects = array_map(
             static fn (array $project): array => [
                 'id' => (int) ($project['id'] ?? 0),
@@ -81,6 +81,28 @@ final class MobileAppService
             ],
             $this->activeProjectsForUser($user)
         );
+        $projectsById = array_column($projects, null, 'id');
+        if ($workEntry !== null && $workEntry['start_time'] !== null && $workEntry['end_time'] === null) {
+            $workEntry = $this->withVisibleProjectLabel($workEntry, $projectsById);
+        }
+        foreach ($todayWorkEntries as &$todayEntry) {
+            if ($todayEntry['start_time'] !== null && $todayEntry['end_time'] === null) {
+                $todayEntry = $this->withVisibleProjectLabel($todayEntry, $projectsById);
+            }
+        }
+        unset($todayEntry);
+        $projectDaySummaries = $this->buildProjectDaySummaries($today, $todayWorkEntries);
+        $openEntries = $this->findOpenWorkEntries((int) $user['id'], $today);
+        $activeEntry = null;
+        if (count($openEntries) === 1 && $openEntries[0]['work_date'] < $today) {
+            $activeEntry = $this->withVisibleProjectLabel($openEntries[0], $projectsById);
+            $activeEntry['id'] = (int) $activeEntry['id'];
+            $activeEntry['project_id'] = isset($activeEntry['project_id']) ? (int) $activeEntry['project_id'] : null;
+            $activeEntry['breaks'] = $this->findBreaksForTimesheet($activeEntry['id']);
+            $activeEntry['current_break'] = $this->workdayStateCalculator->currentBreak($activeEntry['breaks']);
+            $activeEntry['attachments'] = $this->fileAttachmentService->listForTimesheet($activeEntry['id']);
+        }
+        $pauseActiveEntry = $this->pauses?->openCarryover((int) $user['id'], $today);
         $profile = $this->companySettingsService->publicProfile();
         $showPersonnelOverview = ($appUiSettings['show_personnel_overview'] ?? true) !== false;
 
@@ -111,9 +133,11 @@ final class MobileAppService
             ],
             'current_break' => $currentBreak,
             'breaks_today' => $breaksToday,
+            'active_work_entry' => $activeEntry,
+            'active_work_entry_conflict' => count($openEntries) > 1,
             ...(!$this->pauses?->available() ? [] : [
                 'break_assessment' => $this->pauses->assessmentForDay((int) $user['id'], $today),
-                'pause_active_entry' => $this->pauses->openCarryover((int) $user['id'], $today),
+                'pause_active_entry' => $pauseActiveEntry !== null ? $this->withVisibleProjectLabel($pauseActiveEntry, $projectsById) : null,
             ]),
             'tracked_minutes_live_basis' => $trackedMinutesLiveBasis,
             'attachments' => $attachments,
@@ -519,6 +543,34 @@ final class MobileAppService
         return $this->projectService->listForUser($user);
     }
 
+    private function findOpenWorkEntries(int $userId, string $today): array
+    {
+        if (!$this->connection->tableExists('timesheets')) {
+            return [];
+        }
+
+        return $this->connection->fetchAll('SELECT t.id, t.project_id, t.work_date, t.start_time, t.end_time, t.break_minutes, t.net_minutes
+             FROM timesheets t WHERE t.user_id = :user_id AND ' . LiveWorkSession::isOpenSql('t') . ' ORDER BY t.work_date, t.id LIMIT 2',
+            ['user_id' => $userId, 'live_reference_date' => $today]);
+    }
+
+    private function withVisibleProjectLabel(array $entry, array $projectsById): array
+    {
+        $project = $projectsById[$entry['project_id'] ?? 0] ?? null;
+        $unavailable = $entry['project_id'] !== null && $project === null;
+
+        return [
+            ...$entry,
+            'project_id' => $unavailable ? null : $entry['project_id'],
+            ...($unavailable ? ['project_unavailable' => true] : []),
+            'project_number' => $project['project_number'] ?? null,
+            'project_name' => $project['name'] ?? null,
+            'project_customer_name' => $project['customer_name'] ?? null,
+            'customer_signature_required' => $project['customer_signature_required'] ?? false,
+            'customer_signature_name' => $project['customer_signature_name'] ?? null,
+        ];
+    }
+
     private function findLatestEntry(int $userId, string $workDate, string $entryType): ?array
     {
         if (!$this->connection->tableExists('timesheets')) {
@@ -733,7 +785,8 @@ final class MobileAppService
 
         foreach ($entries as $entry) {
             $projectId = $entry['project_id'] ?? null;
-            $key = $this->projectSummaryKey($projectId);
+            $projectUnavailable = !empty($entry['project_unavailable']);
+            $key = $projectUnavailable ? 'unavailable' : $this->projectSummaryKey($projectId);
             $breaks = $this->findBreaksForTimesheet((int) ($entry['id'] ?? 0));
             $currentBreak = $this->workdayStateCalculator->currentBreak($breaks);
             $completedBreakMinutes = $this->workdayStateCalculator->effectiveBreakMinutes($entry, $breaks);
@@ -747,7 +800,8 @@ final class MobileAppService
             if (!isset($summaries[$key])) {
                 $summaries[$key] = [
                     'project_id' => $projectId,
-                    'project_name' => $entry['project_name'] ?? 'Nicht zugeordnet',
+                    ...($projectUnavailable ? ['project_unavailable' => true] : []),
+                    'project_name' => $projectUnavailable ? 'Projekt nicht verfügbar' : ($entry['project_name'] ?? 'Nicht zugeordnet'),
                     'status' => $this->workdayStateCalculator->status($entry, null, $currentBreak),
                     'start_time' => $entry['start_time'] ?? null,
                     'end_time' => $entry['end_time'] ?? null,

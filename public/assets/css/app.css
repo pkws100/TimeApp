@@ -721,6 +721,24 @@ html[data-theme="dark"] .app-topbar-status.is-absence .app-topbar-status__label 
     justify-self: start;
 }
 
+.app-check-in-notice {
+    padding-inline-start: 0.8rem;
+    border-inline-start: 3px solid var(--app-accent);
+}
+
+.app-check-in-notice,
+.app-check-in-conflicts {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.app-check-in-notice p,
+.app-check-in-conflicts h3,
+.app-check-in-conflicts h4,
+.app-check-in-conflicts p {
+    margin: 0;
+}
+
 .app-field {
     display: grid;
     gap: 0.45rem;

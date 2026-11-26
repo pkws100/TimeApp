@@ -17,7 +17,7 @@ async function mockProjectSearchApp(page, routeName, options = {}) {
     dayReads: 0,
     mutations: [],
     unexpected: [],
-    entry: null,
+    entry: options.entry || null,
     projects: [
       { id: 1, project_number: 'P-001', name: 'Lager Süd' },
       { id: 2, project_number: 'BAU-2026-042', name: 'Brückenstraße Nord' },
@@ -42,6 +42,7 @@ async function mockProjectSearchApp(page, routeName, options = {}) {
     if (pathname === '/api/v1/auth/session') return json({ authenticated: true, bootstrap_required: false, user });
     if (pathname === '/api/v1/app/me/day') {
       app.dayReads += 1;
+      if (app.dayStatus) return json({ message: 'Tagesstand nicht erreichbar.' }, app.dayStatus);
       return json({ data: {
         today: '2026-11-06', server_time: '2026-11-06T12:00:00+01:00',
         user: { ...user, roles: [], time_tracking_required: false, app_ui_settings: flags }, app_ui_settings: flags,
@@ -56,6 +57,7 @@ async function mockProjectSearchApp(page, routeName, options = {}) {
     if (request.method() !== 'GET') app.mutations.push({ pathname, method: request.method(), payload: request.postDataJSON() });
     if (pathname === '/api/v1/app/timesheets/sync' && request.method() === 'POST') {
       const payload = request.postDataJSON();
+      if (app.syncConflict) return json(app.syncConflict, 409);
       const project = app.projects.find((item) => item.id === Number(payload.project_id));
       app.entry = { id: 500, project_id: project ? project.id : null, project_name: project ? project.name : null, entry_type: 'work', work_date: '2026-11-06', start_time: '2026-11-06 08:00:00', end_time: null, break_minutes: 0, net_minutes: 0, note: payload.note || '', attachments: [] };
       return json({ ok: true, data: { today_state: todayState(), timesheet: app.entry, breaks_today: [], current_break: null } });
@@ -365,3 +367,74 @@ for (const theme of ['light', 'dark']) {
     expect(app.mutations).toEqual([]);
   });
 }
+
+function openWorkEntry(projectId, projectUnavailable = false) {
+  return {
+    id: 500, project_id: projectId, project_unavailable: projectUnavailable, entry_type: 'work',
+    work_date: '2026-11-06', start_time: '08:00:00', end_time: null,
+    break_minutes: 0, net_minutes: 0, attachments: [],
+  };
+}
+
+test('running project notice distinguishes the same and a different project without reassigning the booking', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const app = await mockProjectSearchApp(page, 'heute', { entry: openWorkEntry(2) });
+  const notice = page.locator('.app-check-in-notice');
+  const switchProject = notice.getByRole('button', { name: 'Zum eingecheckten Projekt wechseln' });
+  await expect(notice).toContainText('Sie sind bereits in Projekt BAU-2026-042 eingecheckt.');
+  await expect(page.locator('[data-action="check_in"]')).toHaveCount(0);
+  await page.locator('#projectSelect').selectOption('2');
+  await expect(notice).toContainText('Sie sind bereits in diesem Projekt eingecheckt.');
+  await expect(switchProject).toHaveCount(0);
+  await page.locator('#projectSelect').selectOption('1');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
+  await switchProject.click();
+  await expect(page).toHaveURL('/app/projektwahl');
+  await expect(page.locator('#projectSelect')).toHaveValue('2');
+  await expect(page.locator('#projectContexts .app-check-in-notice')).toContainText('Sie sind bereits in diesem Projekt eingecheckt.');
+  expect(await page.evaluate(() => localStorage.getItem('app.checkInProjectId.user.7'))).toBe('1');
+  expect(app.mutations).toEqual([]);
+});
+
+for (const unavailable of [false, true]) {
+  test('running notice stays neutral for ' + (unavailable ? 'an unavailable project' : 'an unassigned booking'), async ({ page }) => {
+    const app = await mockProjectSearchApp(page, 'projektwahl', { entry: openWorkEntry(null, unavailable) });
+    const notice = page.locator('#projectContexts .app-check-in-notice');
+    await expect(notice).toHaveText('Sie sind bereits eingecheckt. Beenden Sie zuerst den laufenden Einsatz.');
+    await expect(notice.getByRole('button')).toHaveCount(0);
+    await expect(page.locator('#projectContexts')).toContainText(unavailable ? 'Projekt nicht verfügbar' : 'Nicht zugeordnet');
+    expect(app.mutations).toEqual([]);
+  });
+}
+
+test('rejected offline check-in keeps both actions reviewable and never sends its dependent check-out', async ({ page, context }) => {
+  await page.clock.setFixedTime(new Date('2026-11-06T12:00:00Z'));
+  const app = await mockProjectSearchApp(page, 'heute');
+  await context.setOffline(true);
+  await page.locator('[data-action="check_in"]').click();
+  await expect(page.locator('[data-action="check_out"]')).toBeVisible();
+  await page.clock.setFixedTime(new Date('2026-11-06T12:08:00Z'));
+  await page.locator('[data-action="check_out"]').click();
+  await expect(page.locator('main [data-live-pending-count]')).toHaveText('2');
+  app.dayStatus = 503;
+  app.syncConflict = {
+    ok: false, code: 'active_work_session', message: 'Ein Einsatz läuft bereits.',
+    data: { active_work_session: { project_id: 2, project_number: 'BAU-2026-042', project_name: 'Brückenstraße Nord' } },
+  };
+  await context.setOffline(false);
+  const conflicts = page.getByRole('region', { name: 'Zeitbuchungen zur Prüfung' });
+  await expect(conflicts.getByRole('heading', { name: 'Check-in vom 06.11.2026' })).toBeVisible();
+  await expect(conflicts.getByRole('heading', { name: 'Check-out vom 06.11.2026' })).toBeVisible();
+  await expect(conflicts).toContainText('Der zugehörige Check-in konnte nicht gespeichert werden.');
+  await expect(page.getByText('Der aktuelle Buchungsstand muss online geprüft werden.')).toBeVisible();
+  await expect(page.locator('[data-action="check_in"], [data-action="check_out"]')).toHaveCount(0);
+  expect(app.mutations).toHaveLength(1);
+  expect(app.mutations[0].payload).toMatchObject({ action: 'check_in', work_date: '2026-11-06', start_time: '13:00' });
+
+  app.dayStatus = null;
+  app.entry = openWorkEntry(2);
+  await page.reload();
+  await expect(conflicts.getByRole('button', { name: 'Lokale Aktion verwerfen' })).toHaveCount(2);
+  await expect(page.locator('.app-check-in-notice')).toContainText('BAU-2026-042');
+  expect(app.mutations).toHaveLength(1);
+});

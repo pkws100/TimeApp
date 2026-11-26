@@ -18,7 +18,7 @@ try {
     file_put_contents($argv[4] . '.ready.' . getmypid(), 'ready');
     for ($i = 0; $i < 500 && !is_file($argv[4]); ++$i) { usleep(10000); }
     if (!is_file($argv[4])) { throw new RuntimeException('Worker barrier timed out.'); }
-    $result = $service->createWithResult(['id' => (int) $argv[2], 'permissions' => []], (int) $argv[3], [
+    $result = $service->createWithResult(['id' => (int) $argv[2], 'permissions' => ['timesheets.create']], (int) $argv[3], [
         'client_request_id' => '12345678-1234-4234-8234-123456789abc',
         'work_date' => date('Y-m-d'), 'description' => 'Rohr', 'quantity' => '2', 'unit' => 'm', 'note' => 'Entwurf',
     ]);

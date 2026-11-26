@@ -34,7 +34,7 @@ final class AppProjectAttachmentController
             ], 401);
         }
 
-        if (!$this->canAccessProject($projectId)) {
+        if (!$this->projectAccessService->canAccessFiles($user, $projectId)) {
             return Response::json([
                 'ok' => false,
                 'error' => 'Keine Berechtigung.',
@@ -44,10 +44,7 @@ final class AppProjectAttachmentController
 
         return Response::json([
             'ok' => true,
-            'data' => $this->fileAttachmentService->listForProject(
-                $projectId,
-                (string) $request->query('scope', 'active')
-            ),
+            'data' => $this->fileAttachmentService->listForProject($projectId),
         ]);
     }
 
@@ -85,7 +82,7 @@ final class AppProjectAttachmentController
 
             $projectId = (int) ($params['id'] ?? 0);
 
-            if (!$this->canAccessProject($projectId)) {
+            if (!$this->projectAccessService->canAccessFiles($user, $projectId)) {
                 return Response::json([
                     'ok' => false,
                     'error' => 'Keine Berechtigung.',
@@ -117,7 +114,7 @@ final class AppProjectAttachmentController
         $user = $this->authService->currentUser();
         $fileId = (int) ($params['id'] ?? 0);
 
-        if ($user === null || !$this->canAccessProjectFile($fileId)) {
+        if ($user === null || !$this->canAccessProjectFile($user, $fileId)) {
             return new Response('Datei nicht gefunden.', 404, ['Content-Type' => 'text/plain; charset=utf-8']);
         }
 
@@ -126,20 +123,11 @@ final class AppProjectAttachmentController
         return $this->downloadResponse($file);
     }
 
-    private function canAccessProject(int $projectId): bool
+    private function canAccessProjectFile(array $user, int $fileId): bool
     {
-        $user = $this->authService->currentUser();
-
-        return $user !== null && $this->projectAccessService->canAccessFiles($user, $projectId);
-    }
-
-    private function canAccessProjectFile(int $fileId): bool
-    {
-        $user = $this->authService->currentUser();
         $file = $this->fileAttachmentService->findProjectFile($fileId);
 
-        return $user !== null
-            && $file !== null
+        return $file !== null
             && (int) ($file['is_deleted'] ?? 0) === 0
             && $this->projectAccessService->canAccessFiles($user, (int) ($file['project_id'] ?? 0));
     }
@@ -164,7 +152,7 @@ final class AppProjectAttachmentController
             'Content-Type' => (string) $file['mime_type'],
             'Content-Length' => (string) strlen($content),
             'Content-Disposition' => $disposition,
-            'Cache-Control' => 'private, max-age=300',
+            'Cache-Control' => 'private, no-store',
             'X-Content-Type-Options' => 'nosniff',
         ]);
     }

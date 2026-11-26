@@ -282,20 +282,14 @@ test('continuing a checkout proposal preserves the live session and does not que
 });
 
 for (const enabled of [true, false]) {
-  test('normal checkout ' + (enabled ? 'is bound to its assigned work session' : 'retains the disabled-feature payload'), async ({ page }) => {
+  test('normal checkout is bound to its work session with work-time windows ' + (enabled ? 'enabled' : 'disabled'), async ({ page }) => {
     const app = await mockWorkTimeApp(page, { enabled, entry: workingEntry(), mutate: async ({ app, payload, json }) => {
       app.entry.end_time = payload.end_time;
       return json({ ok: true, data: { timesheet: app.entry } });
     } });
     await page.locator('[data-action="check_out"]').click();
     await expect.poll(() => app.mutations.length).toBe(1);
-    expect(app.mutations[0].payload.action).toBe('check_out');
-    if (enabled) {
-      expect(app.mutations[0].payload).toMatchObject({ expected_timesheet_id: 9, expected_start_time: '08:00:00' });
-    } else {
-      expect(app.mutations[0].payload.expected_timesheet_id).toBeUndefined();
-      expect(app.mutations[0].payload.expected_start_time).toBeUndefined();
-    }
+    expect(app.mutations[0].payload).toMatchObject({ action: 'check_out', expected_timesheet_id: 9, expected_start_time: '08:00:00' });
     expect(app.unexpected).toEqual([]);
   });
 }

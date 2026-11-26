@@ -292,12 +292,12 @@ test('an assigned appointment offers an explicitly prepared ICS download with op
   await expect(downloadLink).toHaveAttribute('href', /^blob:/);
   await expect(calendar.getByRole('button', { name: 'Kalenderdatei teilen' })).toHaveCount(0);
   expect(await page.evaluate(() => window.calendarFetches)).toEqual(['no-store']);
+  expect(await page.locator('.app-layout').evaluate(node => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
   const downloadEvent = page.waitForEvent('download');
   await downloadLink.click();
   const download = await downloadEvent;
   expect(download.suggestedFilename()).toBe('timeapp-termin.ics');
   expect(fs.readFileSync(await download.path(), 'utf8')).toBe(calendarFile);
-  expect(await page.locator('.app-layout').evaluate(node => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
 
   await page.goto(appointmentPath + '?id=22');
   await expect(calendar).toBeVisible();

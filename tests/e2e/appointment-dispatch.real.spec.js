@@ -60,7 +60,7 @@ test.describe('real appointment dispatch, confirmation and calendar export', () 
   test.skip(process.env.REAL_ACCOUNT_UI !== '1' || process.env.UI_ISOLATED_ACCOUNT_RUNNER !== '1'
     || process.env.UI_APPOINTMENT_DISPATCH_FIXTURE !== '1', 'requires the isolated MariaDB UI runner and fake PushSender');
 
-  test('sends only to assigned staff, records explicit versioned acknowledgement and downloads a private calendar', async ({ page, browser, baseURL }) => {
+  test('sends only to assigned staff, records explicit versioned acknowledgement and downloads a private calendar', async ({ page, browser, baseURL, request }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     const date = process.env.UI_TEST_APPOINTMENT_DISPATCH_DAY;
     const title = 'UI Einsatzplanung Push';
@@ -188,6 +188,29 @@ test.describe('real appointment dispatch, confirmation and calendar export', () 
       const changedAccount = await employee.request.get(calendarPath, { headers: { 'X-TimeApp-User-Id': '4294967295' } });
       expect(changedAccount.status()).toBe(401);
       expect((await changedAccount.json()).code).toBe('session_changed');
+      const boundCalendar = await employee.request.get(calendarPath + '?timeapp_user_id=' + process.env.UI_TEST_EMPLOYEE_ID);
+      expect(boundCalendar.status()).toBe(200);
+      const foreignLink = await employee.request.get(calendarPath + '?timeapp_user_id=4294967295', {
+        headers: { 'X-TimeApp-User-Id': process.env.UI_TEST_EMPLOYEE_ID },
+      });
+      expect(foreignLink.status()).toBe(401);
+      expect((await foreignLink.json()).code).toBe('session_changed');
+      const staleLogout = await employee.request.post('/api/v1/auth/logout', {
+        headers: { 'X-TimeApp-User-Id': '4294967295' },
+      });
+      expect(staleLogout.status()).toBe(401);
+      expect((await staleLogout.json()).code).toBe('session_changed');
+      expect(staleLogout.headers()['set-cookie']).toBeUndefined();
+      const sessionCookie = (await employee.context().cookies()).find(cookie => cookie.httpOnly);
+      expect(sessionCookie).toBeDefined();
+      const abandonedLogout = await request.post('/api/v1/auth/logout', {
+        headers: {
+          Cookie: sessionCookie.name + '=' + '0'.repeat(32),
+          'X-TimeApp-User-Id': process.env.UI_TEST_EMPLOYEE_ID,
+        },
+      });
+      expect(abandonedLogout.status()).toBe(200);
+      expect(abandonedLogout.headers()['set-cookie']).toBeUndefined();
       expect(pushCalls()).toEqual(calls);
       expect((await (await employee.request.get(appApi)).json()).data.acknowledged).toBe(false);
       await employeeDetail.getByRole('button', { name: 'Termin zur Kenntnis genommen', exact: true }).click();

@@ -134,11 +134,19 @@ final class AdminAbsencePeriodController
         }
 
         try {
+            $reason = $request->input('change_reason', '');
+            if (!is_string($reason)) {
+                throw new InvalidArgumentException('Bitte gueltigen Text eingeben.');
+            }
+            $lockVersion = filter_var($request->input('lock_version'), FILTER_VALIDATE_INT);
+            if ($lockVersion === false) {
+                throw new InvalidArgumentException('Bitte den Zeitraum neu laden und die Archivierung erneut pruefen.');
+            }
             $this->absencePeriodService->archive(
                 $periodId,
                 (int) ($this->authService->currentUser()['id'] ?? 0),
-                (string) $request->input('change_reason', ''),
-                (int) $request->input('lock_version', 0)
+                $reason,
+                $lockVersion
             );
 
             return Response::json(['ok' => true]);

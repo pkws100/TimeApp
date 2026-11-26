@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Unit;
 
 use App\Domain\Terminals\TerminalPunchService;
+use App\Infrastructure\Database\DatabaseConnection;
 use PHPUnit\Framework\TestCase;
 use ReflectionClass;
 
@@ -41,6 +42,20 @@ final class TerminalPunchDisplayResponseTest extends TestCase
         self::assertSame(['led' => 'yellow', 'beep' => 'ready'], $learning['signal']);
         self::assertSame(7000, $failure['display']['hold_ms']);
         self::assertSame(['led' => 'red', 'beep' => 'error'], $failure['signal']);
+    }
+
+    public function testUnavailableAccountingLockProducesARetryableResponse(): void
+    {
+        $reflection = new ReflectionClass(TerminalPunchService::class);
+        $service = $reflection->newInstanceWithoutConstructor();
+        $reflection->getProperty('connection')->setValue($service, new DatabaseConnection([
+            'socket' => '/nonexistent/timeapp-test.sock',
+        ]));
+
+        $response = $service->scan($this->terminalWithDisplaySettings(), ['request_id' => 'retry-scan']);
+        self::assertFalse($response['ok']);
+        self::assertSame(503, $response['http_status']);
+        self::assertSame('accounting_busy', $response['code']);
     }
 
     /** @return array<string,mixed> */

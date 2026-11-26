@@ -35,7 +35,7 @@ final class AppProjectWorkReportController
                 'data' => $this->projectWorkReportService->list($user, (int) ($params['id'] ?? 0)),
             ]);
         } catch (ProjectAccessDeniedException $exception) {
-            return $this->error($exception->getMessage(), 403);
+            return $this->error($exception->getMessage(), 403, $exception->reason);
         } catch (RuntimeException) {
             return $this->error('Arbeitsberichte konnten nicht geladen werden.', 500);
         }
@@ -63,7 +63,7 @@ final class AppProjectWorkReportController
         } catch (InvalidArgumentException $exception) {
             return $this->error($exception->getMessage(), 422);
         } catch (ProjectAccessDeniedException $exception) {
-            return $this->error($exception->getMessage(), 403);
+            return $this->error($exception->getMessage(), 403, $exception->reason);
         } catch (RuntimeException) {
             return $this->error('Der Arbeitsbericht konnte nicht gespeichert werden.', 500);
         }
@@ -86,7 +86,7 @@ final class AppProjectWorkReportController
         } catch (InvalidArgumentException $exception) {
             return $this->error($exception->getMessage(), 422);
         } catch (ProjectAccessDeniedException $exception) {
-            return $this->error($exception->getMessage(), 403);
+            return $this->error($exception->getMessage(), 403, $exception->reason);
         } catch (RuntimeException) {
             return $this->error('Der Arbeitsbericht konnte nicht archiviert werden.', 500);
         }

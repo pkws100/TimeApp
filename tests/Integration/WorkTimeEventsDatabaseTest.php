@@ -4,13 +4,19 @@ declare(strict_types=1);
 
 namespace Tests\Integration;
 
+use App\Domain\App\MobileAppService;
+use App\Domain\Files\FileAttachmentService;
+use App\Domain\Projects\ProjectService;
 use App\Domain\Settings\CompanySettingsService;
 use App\Domain\Terminals\NfcTagService;
 use App\Domain\Terminals\TerminalPunchService;
 use App\Domain\Terminals\TerminalService;
 use App\Domain\Terminals\TerminalTrustBundleService;
 use App\Domain\Timesheets\AppTimesheetSyncService;
+use App\Domain\Timesheets\LiveWorkSession;
+use App\Domain\Timesheets\PausePolicyService;
 use App\Domain\Timesheets\TimesheetCalculator;
+use App\Domain\Timesheets\TimesheetPauseService;
 use App\Domain\Timesheets\WorkdayStateCalculator;
 use App\Domain\WorkTime\MockSmsProvider;
 use App\Domain\WorkTime\WorkTimeEventService;
@@ -110,6 +116,40 @@ final class WorkTimeEventsDatabaseTest extends MariaDbTestCase
         self::assertSame($presenceDate, $this->connection()->fetchColumn('SELECT work_date FROM work_time_presence_sessions WHERE user_id = :id', ['id' => $user]));
     }
 
+    public function testCutoverHidesOldPresencePauseAndProposalWithoutChangingTheirBooking(): void
+    {
+        [$user, , $sync, $events, $date] = $this->services(true, ['early_check_in_mode' => 'presence_only']);
+        $connection = $this->connection();
+        $presence = $this->checkIn($sync, $user, $date, '07:42')['presence_session'];
+        $connection->execute('INSERT INTO timesheets (user_id, work_date, start_time, entry_type, source)
+            VALUES (:user_id, :work_date, "08:00:00", "work", "admin")', ['user_id' => $user, 'work_date' => $date]);
+        $oldId = $connection->lastInsertId();
+        $proposal = $this->createProposal($events, $user, $date);
+        $pauses = new TimesheetPauseService($connection, new PausePolicyService($connection));
+        $pauses->attachSnapshot($oldId, []);
+        self::assertTrue($pauses->hasOpenModelBooking($user));
+
+        $before = $connection->fetchOne('SELECT *, row_start FROM timesheets WHERE id = :id', ['id' => $oldId]);
+        $today = LiveWorkSession::referenceDate();
+        $this->finalCutover($user, $today);
+        $sync->setPauseService($pauses);
+        $status = $events->statusForUser($user);
+        self::assertSame([], $status['checkout_proposals']);
+        self::assertNull($status['active_work_entry']);
+        self::assertNull($status['presence_session']);
+        self::assertFalse($status['active_work_entry_conflict']);
+        self::assertNull($pauses->openCarryover($user, $today));
+        self::assertFalse($pauses->hasOpenModelBooking($user));
+        self::assertSame('pending', $connection->fetchColumn('SELECT status FROM work_time_checkout_proposals WHERE id = :id', ['id' => $proposal['id']]));
+        self::assertSame(1, $events->process(true)['stale']);
+        self::assertSame('stale', $events->respond($user, (int) $proposal['id'], 'confirm', null, 'old-proposal')['status']);
+
+        $new = $this->checkIn($sync, $user, $today, '08:00', 'next-in');
+        self::assertNotSame($oldId, $new['timesheet']['id']);
+        self::assertSame($before, $connection->fetchOne('SELECT *, row_start FROM timesheets WHERE id = :id', ['id' => $oldId]));
+        self::assertSame($presence, $connection->fetchOne('SELECT * FROM work_time_presence_sessions WHERE id = :id', ['id' => $presence['id']]));
+    }
+
     public function testCheckInAfterMidnightUsesPreviousNightsWindowAndCheckoutProposal(): void
     {
         [$user, , $sync, $events, $date] = $this->services(true, ['early_check_in_mode' => 'presence_only', 'windows' => array_fill(1, 7, [['start' => '22:00', 'end' => '06:00']])]);
@@ -159,6 +199,38 @@ final class WorkTimeEventsDatabaseTest extends MariaDbTestCase
         self::assertSame(1, (int) $this->connection()->fetchColumn('SELECT COUNT(*) FROM work_time_checkout_proposal_actions'));
         $this->checkIn($sync, $user, $date, '17:00', 'second-in');
         self::assertSame(2, (int) $this->connection()->fetchColumn('SELECT COUNT(*) FROM timesheets WHERE user_id = :user_id', ['user_id' => $user]));
+    }
+
+    public static function lostProjectAccess(): array
+    {
+        return ['archived project' => [true], 'revoked global grant' => [false]];
+    }
+
+    #[DataProvider('lostProjectAccess')]
+    public function testProposalCheckoutDoesNotExposeAnUnavailableProject(bool $archived): void
+    {
+        [$user, , $sync, $events, $date] = $this->services();
+        $project = $this->createProject();
+        $viewer = ['id' => $user, 'permissions' => ['timesheets.manage']];
+        $booking = $sync->sync($viewer, [
+            'action' => 'check_in', 'client_request_id' => 'project-in',
+            'work_date' => $date, 'start_time' => '08:00', 'project_id' => $project,
+        ])['timesheet'];
+        $proposal = $this->createProposal($events, $user, $date);
+        if ($archived) {
+            $this->connection()->execute('UPDATE projects SET status = "archived" WHERE id = :id', ['id' => $project]);
+        }
+        $currentViewer = function () use ($archived, $booking, $viewer, $user): array {
+            self::assertSame('16:00:00', $this->connection()->fetchColumn('SELECT end_time FROM timesheets WHERE id = :id', ['id' => $booking['id']]));
+
+            return $archived ? $viewer : ['id' => $user];
+        };
+        $result = $events->respond($user, (int) $proposal['id'], 'confirm', null, 'project-out', $currentViewer);
+        self::assertSame('confirmed', $result['status']);
+        self::assertTrue($result['timesheet']['project_unavailable']);
+        self::assertNull($result['timesheet']['project_id']);
+        self::assertArrayNotHasKey('project_name', $result['timesheet']);
+        self::assertSame($project, (int) $this->connection()->fetchColumn('SELECT project_id FROM timesheets WHERE id = :id', ['id' => $booking['id']]));
     }
 
     public function testActualEndCanBeCorrectedAndProposalCannotCloseNewSession(): void
@@ -487,23 +559,42 @@ final class WorkTimeEventsDatabaseTest extends MariaDbTestCase
         self::assertSame(30, $out['timesheet']['break_minutes']);
     }
 
-    public function testUnassignedPauseTimestampRetainsLegacyNormalization(): void
+    public function testUnassignedPauseTimestampsUseTheBerlinClock(): void
     {
         [, , $sync, , $date] = $this->services();
         $user = $this->createUser();
         $in = $this->checkIn($sync, $user, $date);
-        $legacyExpected = (new DateTimeImmutable('2026-03-29 02:30:00'))->format('Y-m-d H:i:s');
         $sync->sync($user, ['client_request_id' => 'legacy-gap-pause', 'action' => 'pause_start', 'work_date' => $date, 'break_started_at' => '2026-03-29 02:30:00']);
-        self::assertSame($legacyExpected, $this->connection()->fetchColumn('SELECT break_started_at FROM timesheet_breaks WHERE timesheet_id = :id', ['id' => $in['timesheet']['id']]));
+        $sync->sync($user, ['client_request_id' => 'legacy-utc-pause-end', 'action' => 'pause_end', 'work_date' => $date, 'break_ended_at' => '2026-03-29T02:00:00Z']);
+        self::assertSame(
+            ['break_started_at' => '2026-03-29 03:30:00', 'break_ended_at' => '2026-03-29 04:00:00'],
+            $this->connection()->fetchOne('SELECT break_started_at, break_ended_at FROM timesheet_breaks WHERE timesheet_id = :id', ['id' => $in['timesheet']['id']])
+        );
     }
 
-    public function testTerminalCheckoutAfterMidnightClosesOriginalSessionBeforeNextCheckIn(): void
+    /** @return array<string, array{bool}> */
+    public static function terminalWindowModes(): array
     {
-        [$user, , $sync, , $date] = $this->services(true, ['windows' => array_fill(1, 7, [['start' => '22:00', 'end' => '06:00']])]);
-        $in = $this->checkIn($sync, $user, $date, '23:59');
+        return ['with windows' => [true], 'without windows' => [false]];
+    }
+
+    #[DataProvider('terminalWindowModes')]
+    public function testTerminalCheckoutAfterMidnightClosesOriginalSessionBeforeNextCheckIn(bool $windowsEnabled): void
+    {
+        [$user, , $sync, , $date] = $this->services($windowsEnabled, ['windows' => array_fill(1, 7, [['start' => '22:00', 'end' => '06:00']])]);
         $connection = $this->connection();
+        $originalProject = $this->createProject();
+        $terminalProject = $this->createProject();
+        $connection->execute('INSERT INTO project_memberships (project_id, user_id) VALUES (:project_id, :user_id)', ['project_id' => $originalProject, 'user_id' => $user]);
+        $in = $sync->sync($user, ['action' => 'check_in', 'client_request_id' => 'night-in', 'work_date' => $date, 'start_time' => '23:59', 'project_id' => $originalProject]);
+        $connection->execute('INSERT INTO timesheets (user_id, work_date, start_time, entry_type, source)
+            VALUES (:user_id, :work_date, "23:58:00", "work", "admin")', ['user_id' => $user, 'work_date' => (new DateTimeImmutable($date))->modify('-1 day')->format('Y-m-d')]);
+        $oldId = $connection->lastInsertId();
+        $old = $connection->fetchOne('SELECT *, row_start FROM timesheets WHERE id = :id', ['id' => $oldId]);
+        $this->finalCutover($user, $date);
         $connection->execute('INSERT INTO company_settings (id, company_name, terminal_enabled) VALUES (1, "Test", 1) ON DUPLICATE KEY UPDATE terminal_enabled = 1');
-        $connection->execute('INSERT INTO terminals (terminal_identifier, name, token_hash, is_active) VALUES ("test-night", "Nachtterminal", "test-hash", 1)');
+        $connection->execute('INSERT INTO terminals (terminal_identifier, name, token_hash, is_active, default_project_id)
+            VALUES ("test-night", "Nachtterminal", "test-hash", 1, :project_id)', ['project_id' => $terminalProject]);
         $terminalId = $connection->lastInsertId();
         $terminal = $connection->fetchOne('SELECT * FROM terminals WHERE id = :id', ['id' => $terminalId]);
         $tags = new NfcTagService($connection, 'test-only-hash-key');
@@ -515,10 +606,53 @@ final class WorkTimeEventsDatabaseTest extends MariaDbTestCase
         self::assertSame('check_out', $out['action']);
         self::assertSame($in['timesheet']['id'], $out['data']['timesheet']['id']);
         self::assertSame($date, $out['data']['timesheet']['work_date']);
+        self::assertSame($originalProject, $out['data']['timesheet']['project_id']);
+        self::assertSame($originalProject, (int) $connection->fetchColumn('SELECT project_id FROM terminal_events WHERE terminal_id = :terminal AND request_id = "night-out"', ['terminal' => $terminalId]));
+        $connection->execute('DELETE FROM terminal_events WHERE terminal_id = :terminal AND request_id = "night-out"', ['terminal' => $terminalId]);
+        $recovered = $punch->scan($terminal, ['request_id' => 'night-out', 'nfc_uid' => $uid]);
+        self::assertTrue($recovered['ok'], $recovered['message']);
+        self::assertSame('check_out', $recovered['action']);
+        self::assertSame($out['data'], $recovered['data']);
+        self::assertSame($recovered, $punch->scan($terminal, ['request_id' => 'night-out', 'nfc_uid' => $uid]));
+        self::assertSame($originalProject, (int) $connection->fetchColumn('SELECT project_id FROM terminal_events WHERE terminal_id = :terminal AND request_id = "night-out"', ['terminal' => $terminalId]));
+        self::assertSame(2, (int) $connection->fetchColumn('SELECT COUNT(*) FROM timesheets WHERE user_id = :user', ['user' => $user]));
         $next = $punch->scan($terminal, ['request_id' => 'night-next-in', 'nfc_uid' => $uid]);
         self::assertTrue($next['ok'], $next['message']);
         self::assertSame('check_in', $next['action']);
         self::assertSame((new DateTimeImmutable('today'))->format('Y-m-d'), $next['data']['timesheet']['work_date']);
         self::assertNotSame($in['timesheet']['id'], $next['data']['timesheet']['id']);
+        self::assertSame($terminalProject, $next['data']['timesheet']['project_id']);
+        self::assertSame($next, $punch->scan($terminal, ['request_id' => 'night-next-in', 'nfc_uid' => $uid]));
+        self::assertSame($old, $connection->fetchOne('SELECT *, row_start FROM timesheets WHERE id = :id', ['id' => $oldId]));
+    }
+
+    public function testDayContextKeepsNightShiftReachableAndRedactsProjectAfterAccessLoss(): void
+    {
+        [$user, , $sync, , $date] = $this->services(false);
+        $project = $this->createProject();
+        $connection = $this->connection();
+        $connection->execute('INSERT INTO project_memberships (project_id, user_id) VALUES (:project_id, :user_id)', ['project_id' => $project, 'user_id' => $user]);
+        $in = $sync->sync($user, ['action' => 'check_in', 'client_request_id' => 'night-in', 'work_date' => $date, 'start_time' => '23:00', 'project_id' => $project]);
+        $app = new MobileAppService($connection, new ProjectService($connection), new CompanySettingsService($connection, []), new WorkdayStateCalculator(), new FileAttachmentService($connection, []));
+        $view = $app->dayContext(['id' => $user]);
+        self::assertSame($in['timesheet']['id'], $view['active_work_entry']['id']);
+        self::assertSame($project, $view['active_work_entry']['project_id']);
+        self::assertSame($view['projects'][0]['project_number'], $view['active_work_entry']['project_number']);
+
+        $connection->execute('UPDATE projects SET status = "archived" WHERE id = :id', ['id' => $project]);
+        $view = $app->dayContext(['id' => $user]);
+        self::assertSame([], $view['projects']);
+        self::assertSame($in['timesheet']['id'], $view['active_work_entry']['id']);
+        self::assertTrue($view['active_work_entry']['project_unavailable']);
+        self::assertNull($view['active_work_entry']['project_id']);
+        self::assertNull($view['active_work_entry']['project_number']);
+        self::assertNull($view['active_work_entry']['project_name']);
+    }
+
+    private function finalCutover(int $userId, string $date): void
+    {
+        $this->connection()->execute('INSERT INTO employee_account_cutovers (user_id, active_final_user_id, effective_from, leave_year, status, finalized_at)
+            VALUES (:user_id, :active_user_id, :effective_from, :leave_year, "final", NOW())',
+            ['user_id' => $userId, 'active_user_id' => $userId, 'effective_from' => $date, 'leave_year' => (int) substr($date, 0, 4)]);
     }
 }

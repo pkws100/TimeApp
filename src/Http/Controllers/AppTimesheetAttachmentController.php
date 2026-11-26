@@ -181,7 +181,7 @@ final class AppTimesheetAttachmentController
             'Content-Type' => (string) $file['mime_type'],
             'Content-Length' => (string) strlen($content),
             'Content-Disposition' => $disposition,
-            'Cache-Control' => 'private, max-age=300',
+            'Cache-Control' => 'private, no-store',
             'X-Content-Type-Options' => 'nosniff',
         ]);
     }

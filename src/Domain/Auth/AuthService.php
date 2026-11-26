@@ -43,11 +43,11 @@ final class AuthService
         return ['ok' => false, 'message' => 'Ungueltige Zugangsdaten.'];
     }
 
-    public function logout(): void
+    public function logout(bool $regenerateSessionId = true): void
     {
         $_SESSION = [];
 
-        if (session_status() === PHP_SESSION_ACTIVE) {
+        if ($regenerateSessionId && session_status() === PHP_SESSION_ACTIVE) {
             session_regenerate_id(true);
         }
     }

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Domain\Projects;
 
 use App\Infrastructure\Database\DatabaseConnection;
+use DateTimeImmutable;
+use DateTimeZone;
 
 final class ProjectAccessService
 {
@@ -45,51 +47,77 @@ final class ProjectAccessService
         return in_array('*', $permissions, true) || in_array('projects.manage', $permissions, true);
     }
 
-    public function canAccess(array $user, int $projectId): bool
+    public function canAccess(array $user, int $projectId, bool $allowArchived = false): bool
     {
-        if (!$this->isActiveUser($user) || $projectId <= 0 || !$this->projectExists($projectId)) {
+        if (!$this->isActiveUser($user) || $projectId <= 0) {
             return false;
         }
 
         if ($this->hasGlobalAccess($user)) {
-            return true;
+            return $allowArchived ? $this->projectExists($projectId) : $this->activeProjectExists($projectId);
         }
 
-        if (!$this->activeProjectExists($projectId)) {
-            return false;
-        }
-
-        return in_array($projectId, $this->activeProjectIdsForUser($user), true);
+        return $this->activeProjectExists($projectId) && $this->hasActiveMembership($user, $projectId);
     }
 
-    public function canAccessFiles(array $user, int $projectId): bool
+    public function canAccessFiles(array $user, int $projectId, bool $allowArchived = false): bool
     {
-        if (!$this->isActiveUser($user) || $projectId <= 0 || !$this->projectExists($projectId)) {
+        if (!$this->isActiveUser($user) || $projectId <= 0) {
             return false;
         }
 
         if ($this->hasAnyPermission($user, self::GLOBAL_FILE_PERMISSIONS)) {
-            return true;
+            return $allowArchived ? $this->projectExists($projectId) : $this->activeProjectExists($projectId);
         }
 
-        if (!$this->activeProjectExists($projectId)) {
+        return $this->activeProjectExists($projectId) && $this->hasActiveMembership($user, $projectId);
+    }
+
+    public function requireProjectEntryWriteAccess(array $user, int $projectId, bool $allowArchived = false): void
+    {
+        if (!$this->canWriteProjectEntries($user, $projectId, $allowArchived)) {
+            throw new ProjectAccessDeniedException(
+                'Keine Schreibberechtigung fuer dieses Projekt.',
+                $this->canAccess($user, $projectId, $allowArchived) ? ProjectAccessDeniedException::WRITE_DENIED : null
+            );
+        }
+    }
+
+    private function canWriteProjectEntries(array $user, int $projectId, bool $allowArchived): bool
+    {
+        if (!$this->isActiveUser($user) || $projectId <= 0) {
             return false;
         }
 
+        if ($this->canManage($user)) {
+            return $allowArchived ? $this->projectExists($projectId) : $this->activeProjectExists($projectId);
+        }
+
+        return $this->hasAnyPermission($user, ['timesheets.create'])
+            && $this->activeProjectExists($projectId)
+            && $this->hasActiveMembership($user, $projectId);
+    }
+
+    private function hasActiveMembership(array $user, int $projectId): bool
+    {
         if (!$this->connection->tableExists('project_memberships')) {
             return false;
         }
+
+        $today = $this->today();
 
         return (int) ($this->connection->fetchColumn(
             'SELECT COUNT(*)
              FROM project_memberships
              WHERE project_id = :project_id
                AND user_id = :user_id
-               AND (assigned_from IS NULL OR assigned_from <= CURDATE())
-               AND (assigned_until IS NULL OR assigned_until >= CURDATE())',
+               AND (assigned_from IS NULL OR assigned_from <= :assigned_from_date)
+               AND (assigned_until IS NULL OR assigned_until >= :assigned_until_date)',
             [
                 'project_id' => $projectId,
                 'user_id' => (int) ($user['id'] ?? 0),
+                'assigned_from_date' => $today,
+                'assigned_until_date' => $today,
             ]
         ) ?? 0) > 0;
     }
@@ -117,6 +145,7 @@ final class ProjectAccessService
                  ORDER BY id'
             );
         } else {
+            $today = $this->today();
             $rows = $this->connection->fetchAll(
                 'SELECT DISTINCT projects.id
                  FROM projects
@@ -124,10 +153,10 @@ final class ProjectAccessService
                  WHERE project_memberships.user_id = :user_id
                    AND COALESCE(projects.is_deleted, 0) = 0
                    AND projects.status <> "archived"
-                   AND (project_memberships.assigned_from IS NULL OR project_memberships.assigned_from <= CURDATE())
-                   AND (project_memberships.assigned_until IS NULL OR project_memberships.assigned_until >= CURDATE())
+                   AND (project_memberships.assigned_from IS NULL OR project_memberships.assigned_from <= :assigned_from_date)
+                   AND (project_memberships.assigned_until IS NULL OR project_memberships.assigned_until >= :assigned_until_date)
                  ORDER BY projects.id',
-                ['user_id' => $userId]
+                ['user_id' => $userId, 'assigned_from_date' => $today, 'assigned_until_date' => $today]
             );
         }
 
@@ -170,6 +199,11 @@ final class ProjectAccessService
         return (int) ($user['id'] ?? 0) > 0
             && (int) ($user['is_deleted'] ?? 0) === 0
             && (string) ($user['employment_status'] ?? 'active') === 'active';
+    }
+
+    private function today(): string
+    {
+        return (new DateTimeImmutable('now', new DateTimeZone('Europe/Berlin')))->format('Y-m-d');
     }
 
     private function hasAnyPermission(array $user, array $requiredPermissions): bool

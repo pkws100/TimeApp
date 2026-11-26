@@ -96,8 +96,8 @@ final class TimesheetPauseService
         $open = $this->connection->fetchAll('SELECT t.*, p.name AS project_name, s.timesheet_id AS pause_policy_entry
             FROM timesheets t LEFT JOIN timesheet_pause_policy_snapshots s ON s.timesheet_id = t.id
             LEFT JOIN projects p ON p.id = t.project_id
-            WHERE t.user_id = :id AND t.entry_type = "work" AND t.is_deleted = 0 AND t.start_time IS NOT NULL AND t.end_time IS NULL
-            ORDER BY t.id LIMIT 2', ['id' => $userId]);
+            WHERE t.user_id = :id AND ' . LiveWorkSession::isOpenSql('t') . '
+            ORDER BY t.id LIMIT 2', ['id' => $userId, 'live_reference_date' => $today]);
         if (count($open) !== 1 || $open[0]['pause_policy_entry'] === null || $open[0]['work_date'] >= $today) {
             return null;
         }
@@ -109,12 +109,12 @@ final class TimesheetPauseService
         return $entry;
     }
 
-    public function hasOpenModelBooking(int $userId): bool
+    public function hasOpenModelBooking(int $userId, ?string $referenceDate = null): bool
     {
         return $this->connection->tableExists('timesheet_pause_policy_snapshots')
             && (int) $this->connection->fetchColumn('SELECT t.id FROM timesheet_pause_policy_snapshots s
-                JOIN timesheets t ON t.id = s.timesheet_id WHERE t.user_id = :id AND t.entry_type = "work"
-                AND t.start_time IS NOT NULL AND t.end_time IS NULL AND t.is_deleted = 0 LIMIT 1', ['id' => $userId]) > 0;
+                JOIN timesheets t ON t.id = s.timesheet_id WHERE t.user_id = :id AND ' . LiveWorkSession::isOpenSql('t') . ' LIMIT 1',
+                ['id' => $userId, 'live_reference_date' => $referenceDate ?? LiveWorkSession::referenceDate()]) > 0;
     }
 
     public function assessmentForDay(int $userId, string $date): array

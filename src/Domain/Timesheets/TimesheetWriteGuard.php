@@ -25,7 +25,7 @@ final class TimesheetWriteGuard
         $locked = (int) ($this->connection->fetchColumn('SELECT GET_LOCK(:lock_name, 10)', ['lock_name' => self::ACCOUNTING_WRITE_LOCK]) ?? 0);
 
         if ($locked !== 1) {
-            throw new InvalidArgumentException('Die Abrechnung verarbeitet gerade Buchungen. Bitte erneut versuchen.');
+            throw new TimesheetWriteLockUnavailable('Die Abrechnung verarbeitet gerade Buchungen. Bitte erneut versuchen.');
         }
 
         try {

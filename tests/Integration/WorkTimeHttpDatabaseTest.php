@@ -166,14 +166,20 @@ final class WorkTimeHttpDatabaseTest extends MariaDbTestCase
         $file = tempnam(sys_get_temp_dir(), 'timeapp-wt-http-');
         file_put_contents($file, '<?php return ' . var_export($this->connectionConfig(), true) . ';');
         chmod($file, 0600);
-        $previous = ['DB_OVERRIDE_FILE' => getenv('DB_OVERRIDE_FILE'), 'WORK_TIME_WINDOWS_ENABLED' => getenv('WORK_TIME_WINDOWS_ENABLED')];
-        putenv('DB_OVERRIDE_FILE=' . $file);
-        putenv('WORK_TIME_WINDOWS_ENABLED=true');
+        $previous = ['DB_OVERRIDE_FILE' => $_ENV['DB_OVERRIDE_FILE'] ?? null, 'WORK_TIME_WINDOWS_ENABLED' => $_ENV['WORK_TIME_WINDOWS_ENABLED'] ?? null];
+        $_ENV['DB_OVERRIDE_FILE'] = $file;
+        $_ENV['WORK_TIME_WINDOWS_ENABLED'] = 'true';
         try {
             [, $router] = require base_path('bootstrap/app.php');
             $callback($router);
         } finally {
-            foreach ($previous as $key => $value) { putenv($key . ($value === false ? '' : '=' . $value)); }
+            foreach ($previous as $key => $value) {
+                if ($value === null) {
+                    unset($_ENV[$key]);
+                } else {
+                    $_ENV[$key] = $value;
+                }
+            }
             unlink($file);
         }
     }

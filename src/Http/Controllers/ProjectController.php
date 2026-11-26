@@ -29,7 +29,7 @@ final class ProjectController
         }
 
         return Response::json([
-            'data' => !$this->projectAccessService->hasGlobalAccess($user)
+            'data' => !$this->projectAccessService->canManage($user)
                 ? $this->projectService->listForUser($user)
                 : $this->projectService->list((string) $request->query('scope', 'active')),
         ]);
@@ -44,7 +44,7 @@ final class ProjectController
             return Response::json(['error' => 'Bitte erneut anmelden.', 'message' => 'Bitte erneut anmelden.'], 401);
         }
 
-        $project = $this->projectAccessService->canAccess($user, $projectId)
+        $project = $this->projectAccessService->canAccess($user, $projectId, $this->projectAccessService->canManage($user))
             ? $this->projectService->find($projectId)
             : null;
 

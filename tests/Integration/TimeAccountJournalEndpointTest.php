@@ -91,8 +91,8 @@ final class TimeAccountJournalEndpointTest extends MariaDbTestCase
         $overrideFile = sys_get_temp_dir() . '/timeapp-route-db-' . bin2hex(random_bytes(5)) . '.php';
         file_put_contents($overrideFile, "<?php\nreturn " . var_export($this->connectionConfig(), true) . ";\n");
         chmod($overrideFile, 0600);
-        $previousOverride = getenv('DB_OVERRIDE_FILE');
-        putenv('DB_OVERRIDE_FILE=' . $overrideFile);
+        $previousOverride = $_ENV['DB_OVERRIDE_FILE'] ?? null;
+        $_ENV['DB_OVERRIDE_FILE'] = $overrideFile;
         $requests = [
             new Request('GET', '/admin/time-accounts/users/' . $userId . '/entries', [], [], [], [], []),
             new Request('GET', '/admin/time-accounts/users/' . $userId . '/cutovers', [], [], [], [], []),
@@ -117,10 +117,10 @@ final class TimeAccountJournalEndpointTest extends MariaDbTestCase
                 self::assertSame(200, $router->dispatch($request)->status());
             }
         } finally {
-            if ($previousOverride === false) {
-                putenv('DB_OVERRIDE_FILE');
+            if ($previousOverride === null) {
+                unset($_ENV['DB_OVERRIDE_FILE']);
             } else {
-                putenv('DB_OVERRIDE_FILE=' . $previousOverride);
+                $_ENV['DB_OVERRIDE_FILE'] = $previousOverride;
             }
             @unlink($overrideFile);
         }
@@ -142,8 +142,8 @@ final class TimeAccountJournalEndpointTest extends MariaDbTestCase
         $overrideFile = sys_get_temp_dir() . '/timeapp-owner-route-db-' . bin2hex(random_bytes(5)) . '.php';
         file_put_contents($overrideFile, "<?php\nreturn " . var_export($this->connectionConfig(), true) . ";\n");
         chmod($overrideFile, 0600);
-        $previousOverride = getenv('DB_OVERRIDE_FILE');
-        putenv('DB_OVERRIDE_FILE=' . $overrideFile);
+        $previousOverride = $_ENV['DB_OVERRIDE_FILE'] ?? null;
+        $_ENV['DB_OVERRIDE_FILE'] = $overrideFile;
 
         try {
             [, $router] = require base_path('bootstrap/app.php');
@@ -157,10 +157,10 @@ final class TimeAccountJournalEndpointTest extends MariaDbTestCase
 
             self::assertSame(404, $router->dispatch($request)->status());
         } finally {
-            if ($previousOverride === false) {
-                putenv('DB_OVERRIDE_FILE');
+            if ($previousOverride === null) {
+                unset($_ENV['DB_OVERRIDE_FILE']);
             } else {
-                putenv('DB_OVERRIDE_FILE=' . $previousOverride);
+                $_ENV['DB_OVERRIDE_FILE'] = $previousOverride;
             }
             @unlink($overrideFile);
         }

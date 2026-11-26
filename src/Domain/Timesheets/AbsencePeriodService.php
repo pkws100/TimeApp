@@ -15,6 +15,9 @@ use InvalidArgumentException;
 
 final class AbsencePeriodService
 {
+    public const NOTE_MAX_LENGTH = 1000;
+    public const REASON_MAX_LENGTH = 500;
+
     private const MAX_CALENDAR_DAYS = 366;
     private const PAID_REASONS = ['vacation_paid', 'sick_paid', 'paid_leave', 'employer_release_paid'];
     private const SOURCES = ['admin_calendar', 'admin_vacation', 'vacation_request'];
@@ -33,6 +36,7 @@ final class AbsencePeriodService
 
     public function preview(array $payload, ?int $periodId = null, string $source = 'admin_calendar'): array
     {
+        $this->validateReasonLength($this->nullableTrimmed($payload['change_reason'] ?? null));
         $period = $periodId !== null ? $this->find($periodId) : null;
 
         if ($periodId !== null && $period === null) {
@@ -168,11 +172,7 @@ final class AbsencePeriodService
 
     public function archive(int $periodId, int $actorUserId, string $reason, int $expectedVersion): void
     {
-        $reason = trim($reason);
-
-        if ($reason === '') {
-            throw new InvalidArgumentException('Bitte eine fachliche Begruendung angeben.');
-        }
+        $reason = $this->requiredChangeReason(['change_reason' => $reason]);
         if ($expectedVersion <= 0) {
             throw new InvalidArgumentException('Bitte den Zeitraum neu laden und die Archivierung erneut pruefen.');
         }
@@ -239,6 +239,8 @@ final class AbsencePeriodService
 
     public function approveVacationRequest(int $requestId, int $actorUserId, ?string $decisionNote = null): array
     {
+        $decisionNote = $this->nullableTrimmed($decisionNote);
+        $this->validateReasonLength($decisionNote);
         $request = $this->vacationRequest($requestId);
 
         if ($request === null) {
@@ -254,7 +256,7 @@ final class AbsencePeriodService
         }
 
         $userId = (int) $request['user_id'];
-        $reason = trim((string) $decisionNote) ?: 'Urlaubsantrag genehmigt';
+        $reason = $decisionNote ?? 'Urlaubsantrag genehmigt';
 
         return $this->withEmployeeLock($userId, function () use ($requestId, $actorUserId, $decisionNote, $reason): array {
             return $this->writeGuard->withAccountingWriteLock(function () use ($requestId, $actorUserId, $decisionNote, $reason): array {
@@ -290,7 +292,7 @@ final class AbsencePeriodService
                         [
                             'id' => $requestId,
                             'day_count' => $preview['booked_day_count'],
-                            'decision_note' => $this->nullableTrimmed($decisionNote),
+                            'decision_note' => $decisionNote,
                             'decided_by_user_id' => $actorUserId > 0 ? $actorUserId : null,
                         ]
                     );
@@ -434,6 +436,11 @@ final class AbsencePeriodService
             $payload['absence_reason_code'] ?? ($period['absence_reason_code'] ?? null)
         );
         $note = $this->nullableTrimmed($payload['note'] ?? ($period['note'] ?? null));
+        if ($source !== 'vacation_request'
+            && $note !== $this->nullableTrimmed($period['note'] ?? null)
+            && $note !== null && mb_strlen($note, 'UTF-8') > self::NOTE_MAX_LENGTH) {
+            throw new InvalidArgumentException('Die Notiz darf maximal 1.000 Zeichen enthalten.');
+        }
         [$bookDates, $skippedDates, $creditedByDate] = $this->resolveDates($user, $dateFrom, $dateTo, $absenceReason);
 
         if ($bookDates === []) {
@@ -1049,7 +1056,11 @@ final class AbsencePeriodService
 
     private function normalizeDate(mixed $value): ?string
     {
-        $value = trim((string) ($value ?? ''));
+        $value = is_string($value) ? trim($value) : '';
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/D', $value) !== 1) {
+            return null;
+        }
+
         $date = DateTimeImmutable::createFromFormat('!Y-m-d', $value);
         $errors = DateTimeImmutable::getLastErrors();
 
@@ -1066,13 +1077,22 @@ final class AbsencePeriodService
 
     private function requiredChangeReason(array $payload): string
     {
-        $reason = trim((string) ($payload['change_reason'] ?? ''));
+        $reason = $this->nullableTrimmed($payload['change_reason'] ?? null);
 
-        if ($reason === '') {
+        if ($reason === null) {
             throw new InvalidArgumentException('Bitte eine fachliche Begruendung angeben.');
         }
 
+        $this->validateReasonLength($reason);
+
         return $reason;
+    }
+
+    private function validateReasonLength(?string $reason): void
+    {
+        if ($reason !== null && mb_strlen($reason, 'UTF-8') > self::REASON_MAX_LENGTH) {
+            throw new InvalidArgumentException('Die fachliche Begruendung darf maximal 500 Zeichen enthalten.');
+        }
     }
 
     private function user(int $userId): ?array
@@ -1192,7 +1212,11 @@ final class AbsencePeriodService
 
     private function nullableTrimmed(mixed $value): ?string
     {
-        $value = trim((string) ($value ?? ''));
+        if ($value !== null && (!is_string($value) || !mb_check_encoding($value, 'UTF-8'))) {
+            throw new InvalidArgumentException('Bitte gueltigen Text eingeben.');
+        }
+
+        $value = trim($value ?? '');
 
         return $value === '' ? null : $value;
     }

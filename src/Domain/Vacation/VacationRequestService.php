@@ -124,7 +124,11 @@ final class VacationRequestService
             throw new InvalidArgumentException('Im gewaehlten Zeitraum liegt kein anrechenbarer Arbeitstag.');
         }
 
-        $employeeNote = $this->nullableTrimmed($payload['employee_note'] ?? ($payload['note'] ?? null));
+        $employeeNote = $this->validatedNote(
+            $payload['employee_note'] ?? ($payload['note'] ?? null),
+            AbsencePeriodService::NOTE_MAX_LENGTH,
+            'Die Notiz darf maximal 1.000 Zeichen enthalten.'
+        );
 
         return $this->withUserVacationLock($userId, function () use ($userId, $preview, $employeeNote): array {
             return $this->writeGuard->withAccountingWriteLock(function () use ($userId, $preview, $employeeNote): array {
@@ -160,6 +164,7 @@ final class VacationRequestService
             return $this->find($requestId) ?? [];
         }
 
+        $decisionNote = $this->validatedDecisionNote($decisionNote);
         $request = $this->find($requestId);
 
         if ($request === null) {
@@ -227,7 +232,7 @@ final class VacationRequestService
                         [
                             'id' => $requestId,
                             'day_count' => count($workDates),
-                            'decision_note' => $this->nullableTrimmed($decisionNote),
+                            'decision_note' => $decisionNote,
                             'decided_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
                         ]
                     );
@@ -248,6 +253,7 @@ final class VacationRequestService
 
     public function reject(int $requestId, int $adminUserId, ?string $decisionNote = null): array
     {
+        $decisionNote = $this->validatedDecisionNote($decisionNote);
         $request = $this->find($requestId);
 
         if ($request === null) {
@@ -277,7 +283,7 @@ final class VacationRequestService
                      WHERE id = :id AND status = "pending" AND COALESCE(is_deleted, 0) = 0',
                     [
                         'id' => $requestId,
-                        'decision_note' => $this->nullableTrimmed($decisionNote),
+                        'decision_note' => $decisionNote,
                         'decided_by_user_id' => $adminUserId > 0 ? $adminUserId : null,
                     ]
                 );
@@ -577,9 +583,8 @@ final class VacationRequestService
 
     private function normalizeDate(mixed $value): ?string
     {
-        $value = trim((string) ($value ?? ''));
-
-        if ($value === '') {
+        $value = is_string($value) ? trim($value) : '';
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/D', $value) !== 1) {
             return null;
         }
 
@@ -680,6 +685,29 @@ final class VacationRequestService
             'is_deleted' => (int) ($row['is_deleted'] ?? 0),
             'absence_period_id' => $absencePeriodId > 0 ? $absencePeriodId : null,
         ];
+    }
+
+    private function validatedDecisionNote(?string $note): ?string
+    {
+        return $this->validatedNote(
+            $note,
+            AbsencePeriodService::REASON_MAX_LENGTH,
+            'Die Entscheidungsnotiz darf maximal 500 Zeichen enthalten.'
+        );
+    }
+
+    private function validatedNote(mixed $value, int $maxLength, string $lengthError): ?string
+    {
+        if ($value !== null && (!is_string($value) || !mb_check_encoding($value, 'UTF-8'))) {
+            throw new InvalidArgumentException('Bitte gueltigen Text eingeben.');
+        }
+
+        $note = $this->nullableTrimmed($value);
+        if ($note !== null && mb_strlen($note, 'UTF-8') > $maxLength) {
+            throw new InvalidArgumentException($lengthError);
+        }
+
+        return $note;
     }
 
     private function nullableTrimmed(mixed $value): ?string

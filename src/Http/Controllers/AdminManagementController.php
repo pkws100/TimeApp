@@ -307,7 +307,7 @@ final class AdminManagementController
     {
         $projectId = (int) ($params['id'] ?? 0);
 
-        if (!$this->canAccessProject($projectId)) {
+        if (!$this->canAccessProjectFiles($projectId)) {
             return Response::html($this->notFoundMarkup('Projekt'), 403);
         }
 
@@ -339,7 +339,7 @@ final class AdminManagementController
         $file = $this->fileAttachmentService->findProjectFile((int) $params['id']);
 
         if ($file !== null) {
-            if (!$this->canAccessProject((int) $file['project_id'])) {
+            if (!$this->canAccessProjectFiles((int) $file['project_id'], true)) {
                 return Response::html($this->notFoundMarkup('Projektdatei'), 403);
             }
 
@@ -404,7 +404,8 @@ final class AdminManagementController
         try {
             $result = $this->projectMaterialService->archive(
                 $this->authService->currentUser() ?? [],
-                (int) ($params['id'] ?? 0)
+                (int) ($params['id'] ?? 0),
+                true
             );
 
             return Response::redirect('/admin/projects/' . (int) $result['project_id'] . '/edit?notice=material-archived#project-materials');
@@ -428,7 +429,8 @@ final class AdminManagementController
         try {
             $result = $this->projectWorkReportService->archive(
                 $this->authService->currentUser() ?? [],
-                (int) ($params['id'] ?? 0)
+                (int) ($params['id'] ?? 0),
+                true
             );
 
             return Response::redirect('/admin/projects/' . (int) $result['project_id'] . '/edit?notice=work-report-archived#project-work-reports');
@@ -447,7 +449,7 @@ final class AdminManagementController
             return Response::redirect('/admin/projects?error=file-not-found');
         }
 
-        if (!$this->canAccessProject((int) $file['project_id'])) {
+        if (!$this->canAccessProjectFiles((int) $file['project_id'], true)) {
             return Response::html($this->notFoundMarkup('Projektdatei'), 403);
         }
 
@@ -1943,7 +1945,7 @@ HTML;
         if (
             $file === null
             || (int) ($file['is_deleted'] ?? 0) === 1
-            || !$this->canAccessProjectFiles((int) ($file['project_id'] ?? 0))
+            || !$this->canAccessProjectFiles((int) ($file['project_id'] ?? 0), true)
         ) {
             return new Response('Datei nicht gefunden.', 404, ['Content-Type' => 'text/plain; charset=utf-8']);
         }
@@ -2464,28 +2466,19 @@ HTML;
         return is_numeric($userId) ? (int) $userId : null;
     }
 
-    private function canAccessProject(int $projectId): bool
-    {
-        if (!$this->projectAccessService instanceof ProjectAccessService) {
-            return true;
-        }
-
-        return $this->projectAccessService->canAccess($this->authService->currentUser() ?? [], $projectId);
-    }
-
     private function canViewProjectFiles(): bool
     {
         return $this->authService->hasPermission('files.view')
             || $this->authService->hasPermission('files.manage');
     }
 
-    private function canAccessProjectFiles(int $projectId): bool
+    private function canAccessProjectFiles(int $projectId, bool $allowArchived = false): bool
     {
         if (!$this->projectAccessService instanceof ProjectAccessService) {
             return true;
         }
 
-        return $this->projectAccessService->canAccessFiles($this->authService->currentUser() ?? [], $projectId);
+        return $this->projectAccessService->canAccessFiles($this->authService->currentUser() ?? [], $projectId, $allowArchived);
     }
 
     private function scope(Request $request): string

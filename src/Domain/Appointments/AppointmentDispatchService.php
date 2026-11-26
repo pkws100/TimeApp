@@ -85,7 +85,7 @@ final class AppointmentDispatchService
 
         // Commit the dispatch and all recipient rows before contacting any provider.
         [$dispatchId, $message, $devices] = $this->connection->transaction(function () use ($actor, $actorId, $appointmentId, $version, $requestKey): array {
-            $appointment = $this->appointment($actor, $appointmentId, ' FOR UPDATE');
+            $appointment = $this->appointment($actor, $appointmentId, ' FOR UPDATE', allowArchivedProject: true);
             $previous = $this->connection->fetchOne(
                 'SELECT id, appointment_version, project_id, project_scope_known FROM appointment_dispatches
                  WHERE appointment_id = :appointment AND sent_by_user_id = :actor AND request_key = :request_key',
@@ -102,6 +102,9 @@ final class AppointmentDispatchService
                 return [(int) $previous['id'], null, []];
             }
 
+            if (!$this->canAccessProject($actor, $appointment)) {
+                throw $this->notFound();
+            }
             $this->assertSendable($appointment, $version);
             $recipients = $this->recipients($appointmentId, $this->pushIssue());
             if ($recipients === []) {
@@ -141,7 +144,7 @@ final class AppointmentDispatchService
         }
 
         return $this->connection->transaction(function () use ($actor, $appointmentId, $dispatchId): array {
-            $this->appointment($actor, $appointmentId);
+            $this->appointment($actor, $appointmentId, allowArchivedProject: true);
 
             return $this->dispatchRecords($actor, $appointmentId, $dispatchId, 1)[0] ?? throw $this->notFound();
         });
@@ -153,7 +156,7 @@ final class AppointmentDispatchService
         $this->requireRight($actor);
 
         return $this->connection->transaction(function () use ($actor, $appointmentId, $limit, $beforeId): array {
-            $this->appointment($actor, $appointmentId);
+            $this->appointment($actor, $appointmentId, allowArchivedProject: true);
 
             return $this->dispatchRecords($actor, $appointmentId, null, max(1, min(50, $limit)), $beforeId);
         });
@@ -172,23 +175,23 @@ final class AppointmentDispatchService
         return $id;
     }
 
-    private function appointment(array $actor, int $id, string $lock = ''): array
+    private function appointment(array $actor, int $id, string $lock = '', bool $allowArchivedProject = false): array
     {
         $row = $this->connection->fetchOne(
             'SELECT id, title, starts_at_utc, project_id, location, status, archived_at, version
              FROM appointments WHERE id = :id' . $lock,
             ['id' => $id]
         );
-        if ($row === null || !$this->canAccessProject($actor, $row)) {
+        if ($row === null || !$this->canAccessProject($actor, $row, $allowArchivedProject)) {
             throw $this->notFound();
         }
 
         return $row;
     }
 
-    private function canAccessProject(array $actor, array $appointment): bool
+    private function canAccessProject(array $actor, array $appointment, bool $allowArchivedProject = false): bool
     {
-        return $appointment['project_id'] === null || $this->projectAccess->canAccess($actor, (int) $appointment['project_id']);
+        return $appointment['project_id'] === null || $this->projectAccess->canAccess($actor, (int) $appointment['project_id'], $allowArchivedProject);
     }
 
     private function canReadSnapshot(array $actor, array $snapshot): bool

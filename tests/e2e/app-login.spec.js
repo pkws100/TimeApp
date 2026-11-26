@@ -6,7 +6,7 @@ const { test, expect } = require('@playwright/test');
 const projectRoot = path.join(__dirname, '../..');
 const appShell = execFileSync('php', ['-r', 'require "bootstrap/autoload.php"; echo (new \\App\\Presentation\\App\\AppView("Login Test"))->render("/app/login", ["app_name"=>"Login Test"]);'], { cwd: projectRoot, encoding: 'utf8' });
 
-async function mockLogin(page, accepted = false) {
+async function mockLogin(page, accepted = false, logoutStatus = () => 200) {
   const submissions = [];
   const user = { id: 7, display_name: 'UI Login', email: 'login-regression@example.test', permissions: [], roles: [], time_tracking_required: false };
   await page.route('**/*', async (route) => {
@@ -16,6 +16,10 @@ async function mockLogin(page, accepted = false) {
     if (pathname === '/assets/js/app.js' || pathname === '/assets/css/app.css') return route.fulfill({ contentType: pathname.endsWith('.js') ? 'application/javascript' : 'text/css', body: fs.readFileSync(path.join(projectRoot, 'public', pathname)) });
     if (pathname === '/app/login') return route.fulfill({ contentType: 'text/html', body: appShell });
     if (pathname === '/api/v1/auth/session') return json({ authenticated: false, user: null, bootstrap_required: false });
+    if (pathname === '/api/v1/auth/logout' && request.method() === 'POST') {
+      const status = logoutStatus(request.headers()['x-timeapp-user-id']);
+      return json({ ok: status === 200 }, status);
+    }
     if (pathname === '/api/v1/auth/login' && request.method() === 'POST') {
       submissions.push(request.postDataJSON());
       if (accepted) return json({ ok: true, message: 'Login erfolgreich.', session: { authenticated: true, user } });
@@ -72,4 +76,35 @@ test('a successful login replaces the preserved password node at the authenticat
   await expect(form).toHaveCount(0);
   expect(await password.evaluate((element) => element.isConnected)).toBeFalsy();
   expect(submissions).toEqual([{ email: 'login-regression@example.test', password: 'Synthetic-Login-Only-123' }]);
+});
+
+test('a new login waits until the prior account logout is confirmed', async ({ page }) => {
+  const logoutAccounts = [];
+  let confirmLogout = false;
+  const submissions = await mockLogin(page, true, (account) => {
+    logoutAccounts.push(account);
+    return confirmLogout ? 200 : 503;
+  });
+  await page.goto('/app/login');
+  const form = page.locator('#loginForm');
+  const submitLogin = async (email) => {
+    await form.locator('[name="email"]').fill(email);
+    await form.locator('[name="password"]').fill('Synthetic-Login-Only-123');
+    await form.getByRole('button', { name: 'Anmelden', exact: true }).click();
+  };
+  await submitLogin('first-account@example.test');
+  await expect(page).toHaveURL(/\/app\/heute$/);
+  await page.locator('#appMenuToggle').click();
+  await page.locator('#logoutButton').click();
+  await expect(page.locator('.app-feedback-error')).toContainText('Die Abmeldung am Server wartet auf eine Bestätigung.');
+
+  await submitLogin('second-account@example.test');
+  await expect(page.locator('.app-feedback-error')).toContainText('Die vorige Abmeldung wartet auf Bestätigung.');
+  expect(submissions.map(({ email }) => email)).toEqual(['first-account@example.test']);
+
+  confirmLogout = true;
+  await submitLogin('second-account@example.test');
+  await expect(page).toHaveURL(/\/app\/heute$/);
+  expect(logoutAccounts).toEqual(['7', '7', '7']);
+  expect(submissions.map(({ email }) => email)).toEqual(['first-account@example.test', 'second-account@example.test']);
 });

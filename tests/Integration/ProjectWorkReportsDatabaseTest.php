@@ -37,7 +37,7 @@ final class ProjectWorkReportsDatabaseTest extends MariaDbTestCase
         $projectId = $this->createProject();
         $this->assign($projectId, $userId);
         $material = (new ProjectMaterialService($this->connection(), new ProjectAccessService($this->connection())))
-            ->create($this->actor($userId), $projectId, ['description' => 'Bestandsmaterial', 'quantity' => '2']);
+            ->create($this->actor($userId, ['timesheets.create']), $projectId, ['description' => 'Bestandsmaterial', 'quantity' => '2']);
         $projectBefore = $this->connection()->fetchOne('SELECT * FROM projects WHERE id = :id', ['id' => $projectId]);
 
         $this->runPhinx('migrate');
@@ -186,6 +186,30 @@ final class ProjectWorkReportsDatabaseTest extends MariaDbTestCase
         }
     }
 
+    public function testReadOnlyMemberCanListReportsButCannotWriteOrReplayTheirReport(): void
+    {
+        $employee = $this->createUser();
+        $project = $this->createProject();
+        $this->assign($project, $employee);
+        $service = $this->service();
+        $payload = $this->payload();
+        $entry = $service->create($this->actor($employee), $project, $payload)['entry'];
+        $reader = $this->actor($employee, ['projects.view']);
+
+        foreach ([
+            fn () => $service->create($reader, $project, $this->payload()),
+            fn () => $service->create($reader, $project, $payload),
+            fn () => $service->archive($reader, $entry['id']),
+        ] as $write) {
+            try {
+                $write();
+                self::fail('Die reine Leseberechtigung muss Schreibzugriffe auf Arbeitsberichte sperren.');
+            } catch (ProjectAccessDeniedException) {
+                self::assertSame([$entry], $service->list($reader, $project));
+            }
+        }
+    }
+
     public function testValidationUsesBerlinDateAndAcceptsTenThousandUnicodeCharacters(): void
     {
         $userId = $this->createUser();
@@ -229,7 +253,8 @@ final class ProjectWorkReportsDatabaseTest extends MariaDbTestCase
         $teammateId = $this->createUser();
         $outsiderId = $this->createUser();
         $adminId = $this->createUser();
-        $this->grantProjectManagement($adminId);
+        $this->grantPermission($adminId, 'report-office', 'projects.manage');
+        $this->grantPermission($employeeId, 'report-author', 'timesheets.create');
         $projectId = $this->createProject();
         $this->assign($projectId, $employeeId);
         $this->assign($projectId, $teammateId);
@@ -254,6 +279,9 @@ final class ProjectWorkReportsDatabaseTest extends MariaDbTestCase
 
             $_SESSION['auth']['user_id'] = $teammateId;
             self::assertSame($id, $this->json($router->dispatch($this->request('GET', $path)))['data'][0]['id']);
+            $readOnly = $router->dispatch($this->request('POST', $path, $payload));
+            self::assertSame(403, $readOnly->status());
+            self::assertSame('project_write_denied', $this->json($readOnly)['code']);
             self::assertSame(403, $router->dispatch($this->request('DELETE', '/api/v1/app/project-work-reports/' . $id))->status());
             $_SESSION['auth']['user_id'] = $outsiderId;
             self::assertSame(403, $router->dispatch($this->request('GET', $path))->status());
@@ -374,7 +402,7 @@ PHP;
         return new ProjectWorkReportService($this->connection(), new ProjectAccessService($this->connection()));
     }
 
-    private function actor(int $userId, array $permissions = []): array
+    private function actor(int $userId, array $permissions = ['timesheets.create']): array
     {
         return ['id' => $userId, 'employment_status' => 'active', 'is_deleted' => 0, 'permissions' => $permissions];
     }
@@ -414,11 +442,17 @@ PHP;
         return json_decode($this->content($response), true, 512, JSON_THROW_ON_ERROR);
     }
 
-    private function grantProjectManagement(int $userId): void
+    private function grantPermission(int $userId, string $role, string $permission): void
     {
-        $this->connection()->execute('INSERT INTO roles (slug, name, is_system_role, created_at, updated_at, is_deleted) VALUES ("report-office", "Buero", 0, NOW(), NOW(), 0)');
+        $this->connection()->execute(
+            'INSERT INTO roles (slug, name, is_system_role, created_at, updated_at, is_deleted) VALUES (:slug, :name, 0, NOW(), NOW(), 0)',
+            ['slug' => $role, 'name' => $role]
+        );
         $roleId = $this->connection()->lastInsertId();
-        $this->connection()->execute('INSERT INTO permissions (code, label, scope, created_at) VALUES ("projects.manage", "Projekte verwalten", "backend", NOW())');
+        $this->connection()->execute(
+            'INSERT INTO permissions (code, label, scope, created_at) VALUES (:code, :label, "backend", NOW())',
+            ['code' => $permission, 'label' => $permission]
+        );
         $permissionId = $this->connection()->lastInsertId();
         $this->connection()->execute('INSERT INTO role_permissions (role_id, permission_id) VALUES (:role_id, :permission_id)', ['role_id' => $roleId, 'permission_id' => $permissionId]);
         $this->connection()->execute('INSERT INTO user_roles (user_id, role_id) VALUES (:user_id, :role_id)', ['user_id' => $userId, 'role_id' => $roleId]);
@@ -434,14 +468,18 @@ PHP;
 
         chmod($override, 0600);
         file_put_contents($override, "<?php\nreturn " . var_export($this->connectionConfig(), true) . ";\n");
-        $previous = getenv('DB_OVERRIDE_FILE');
-        putenv('DB_OVERRIDE_FILE=' . $override);
+        $previous = $_ENV['DB_OVERRIDE_FILE'] ?? null;
+        $_ENV['DB_OVERRIDE_FILE'] = $override;
 
         try {
             [, $router] = require base_path('bootstrap/app.php');
             $callback($router);
         } finally {
-            $previous === false ? putenv('DB_OVERRIDE_FILE') : putenv('DB_OVERRIDE_FILE=' . $previous);
+            if ($previous === null) {
+                unset($_ENV['DB_OVERRIDE_FILE']);
+            } else {
+                $_ENV['DB_OVERRIDE_FILE'] = $previous;
+            }
             unlink($override);
         }
     }
