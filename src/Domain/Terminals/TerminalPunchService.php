@@ -409,7 +409,8 @@ final class TerminalPunchService
         $tracked = (int) ($monthly['actual_minutes'] ?? 0);
         $creditedMinutes = (int) ($monthly['credited_absence_minutes'] ?? 0);
         $manualAdjustmentMinutes = (int) ($monthly['manual_adjustment_minutes'] ?? 0);
-        $balanceMinutes = (int) ($monthly['period_delta_minutes'] ?? 0);
+        $balanceMinutes = !empty($monthly['booking_overlap']) && $monthly['period_delta_minutes'] === null
+            ? null : (int) ($monthly['period_delta_minutes'] ?? 0);
         $provisional = (bool) ($monthly['balance_is_provisional'] ?? false);
 
         return [
@@ -422,7 +423,9 @@ final class TerminalPunchService
             'tracked_label' => $this->minutesToHours($tracked),
             'credited_label' => $this->minutesToHours($creditedMinutes),
             'manual_adjustment_label' => $this->signedMinutesToHours($manualAdjustmentMinutes),
-            'balance_label' => $this->signedMinutesToHours($balanceMinutes) . ($provisional ? ' (vorlaeufig)' : ''),
+            'balance_label' => $balanceMinutes === null
+                ? 'Klaerungsbedarf'
+                : $this->signedMinutesToHours($balanceMinutes) . ($provisional ? ' (vorlaeufig)' : ''),
             ...(isset($monthly['work_time_window_preview']) ? ['balance_is_provisional' => $provisional, 'window_accounting_message' => $monthly['window_accounting_message'] ?? ''] : []),
         ];
     }

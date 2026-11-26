@@ -16,6 +16,7 @@ use Throwable;
 /** Durable provider attempts: acceptance is not proof of delivery to a device. */
 final class WorkTimeNotificationService
 {
+    public const AUTOMATIC_CHECKOUT = 'work_time_automatic_checkout';
     public const AUTOMATIC_ATTEMPTS = 3;
     public const TOTAL_ATTEMPTS = 5;
     private ?Closure $pushSender;
@@ -31,13 +32,18 @@ final class WorkTimeNotificationService
     {
         if (!$this->policies->enabled()) { return 0; }
         $employeeId = (int) $entry['user_id'];
-        if (!in_array($type, ['work_time_checkout_proposal', 'work_time_outside_window_started'], true)) {
+        if (!in_array($type, ['work_time_checkout_proposal', 'work_time_outside_window_started', self::AUTOMATIC_CHECKOUT], true)) {
             throw new InvalidArgumentException('Unbekanntes Arbeitszeit-Versandereignis.');
         }
         $sourceHash = substr(hash('sha256', $entry['work_date'] . ':' . $entry['start_time'] . ':' . $policy['policy_version_id']), 0, 16);
-        $key = $type === 'work_time_checkout_proposal' ? 'checkout-proposal:' . $proposalId : 'outside-start:' . $entry['id'] . ':' . $sourceHash;
-        $recipients = [$employeeId => ['push' => !empty($policy['notify_employee_push']), 'sms' => !empty($policy['notify_employee_sms'])]];
-        foreach ($policy['supervisor_user_ids'] ?? [] as $id) {
+        $automatic = $type === self::AUTOMATIC_CHECKOUT;
+        $key = match ($type) {
+            'work_time_checkout_proposal' => 'checkout-proposal:' . $proposalId,
+            self::AUTOMATIC_CHECKOUT => 'automatic-checkout:' . $entry['id'],
+            default => 'outside-start:' . $entry['id'] . ':' . $sourceHash,
+        };
+        $recipients = [$employeeId => ['push' => $automatic || !empty($policy['notify_employee_push']), 'sms' => !$automatic && !empty($policy['notify_employee_sms'])]];
+        foreach ($automatic ? [] : ($policy['supervisor_user_ids'] ?? []) as $id) {
             $id = (int) $id;
             $recipients[$id] = ['push' => !empty($recipients[$id]['push']) || !empty($policy['notify_supervisor_push']), 'sms' => !empty($recipients[$id]['sms']) || !empty($policy['notify_supervisor_sms'])];
         }
@@ -53,10 +59,16 @@ final class WorkTimeNotificationService
                 if ($dryRun) { continue; }
                 $prefix = $id === $employeeId ? '' : 'Mitarbeiter #' . $employeeId . ': ';
                 $message = [
-                    'title' => $type === 'work_time_checkout_proposal' ? 'Arbeitszeitfenster beendet' : 'Arbeit ausserhalb des Zeitfensters',
-                    'body' => $prefix . ($type === 'work_time_checkout_proposal'
-                        ? 'Das Arbeitszeitfenster endete um ' . $eventAt->format('H:i') . ' Uhr. Der tatsaechliche Arbeitsabschluss ist noch zu bestaetigen.'
-                        : 'Seit ' . substr((string) $entry['start_time'], 0, 5) . ' Uhr laeuft ein Arbeitseinsatz ausserhalb des Arbeitszeitfensters. Die erfasste Arbeitszeit bleibt erhalten.'),
+                    'title' => match ($type) {
+                        'work_time_checkout_proposal' => 'Arbeitszeitfenster beendet',
+                        self::AUTOMATIC_CHECKOUT => 'Automatisch ausgecheckt',
+                        default => 'Arbeit ausserhalb des Zeitfensters',
+                    },
+                    'body' => $prefix . match ($type) {
+                        'work_time_checkout_proposal' => 'Das Arbeitszeitfenster endete um ' . $eventAt->format('H:i') . ' Uhr. Der tatsaechliche Arbeitsabschluss ist noch zu bestaetigen.',
+                        self::AUTOMATIC_CHECKOUT => 'Ihre Kernarbeitszeit endete um ' . $eventAt->format('H:i') . ' Uhr. Für Überstunden bitte erneut einchecken.',
+                        default => 'Seit ' . substr((string) $entry['start_time'], 0, 5) . ' Uhr laeuft ein Arbeitseinsatz ausserhalb des Arbeitszeitfensters. Die erfasste Arbeitszeit bleibt erhalten.',
+                    },
                     'url' => $id === $employeeId ? '/app/zeiten' : '/admin/work-time?user_id=' . $employeeId,
                     'type' => $type, 'proposal_id' => $proposalId, 'employee_user_id' => $employeeId,
                     'timesheet_id' => (int) $entry['id'], 'work_date' => $entry['work_date'], 'start_time' => $entry['start_time'],
@@ -228,6 +240,16 @@ final class WorkTimeNotificationService
     {
         if (!in_array($event['channel'], ['push', 'sms'], true)) { return false; }
         if ($recipient === null || $recipient['employment_status'] !== 'active' || (int) $recipient['is_deleted'] === 1) { return false; }
+        if (($event['event_type'] ?? '') === self::AUTOMATIC_CHECKOUT) {
+            return $event['channel'] === 'push' && (int) $event['recipient_user_id'] === (int) $event['employee_user_id']
+                && $this->connection->fetchOne(
+                    'SELECT a.timesheet_id FROM work_time_automatic_checkouts a
+                     JOIN timesheets t ON t.id = a.timesheet_id AND t.user_id = a.user_id
+                     WHERE a.user_id = :user AND a.timesheet_id = :entry AND a.policy_version_id = :policy
+                       AND ' . WorkTimeAutomaticCheckoutNotice::currentSql('a', 't'),
+                    ['user' => $event['employee_user_id'], 'entry' => $event['timesheet_id'], 'policy' => $event['policy_version_id']]
+                ) !== null;
+        }
         $entry = $this->connection->fetchOne('SELECT t.* FROM timesheets t JOIN users u ON u.id = t.user_id
             WHERE t.id = :id AND u.employment_status = "active" AND COALESCE(u.is_deleted, 0) = 0
             AND ' . LiveWorkSession::isOpenSql('t'), ['id' => $event['timesheet_id'] ?? 0, 'live_reference_date' => LiveWorkSession::referenceDate(now: $now)]);
@@ -245,7 +267,7 @@ final class WorkTimeNotificationService
             || empty($policy['notify_supervisor_' . $event['channel']])) { return false; }
         $startedAt = WorkTimeLocalTime::parse($entry['work_date'] . ' ' . $entry['start_time']);
         if (($event['event_type'] ?? '') === 'work_time_checkout_proposal') {
-            if (empty($policy['checkout_proposals_enabled'])) { return false; }
+            if ($policy['checkout_mode'] === 'manual') { return false; }
             $proposal = $this->connection->fetchOne('SELECT status, proposed_end_at FROM work_time_checkout_proposals WHERE id = :id AND timesheet_id = :timesheet', ['id' => $event['proposal_id'] ?? 0, 'timesheet' => $entry['id']]);
             $end = WorkTimeEventWindows::windowEnd($policy, $entry['work_date'], $startedAt);
             return ($proposal['status'] ?? '') === 'pending' && $end !== null && $end > $startedAt

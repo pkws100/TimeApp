@@ -25,6 +25,9 @@ final class BackupService
     private const APPOINTMENT_TABLES = ['appointments', 'appointment_participants'];
     private const APPOINTMENT_DISPATCH_SCHEMA = '20261124120000_appointment_acknowledgement_and_dispatch';
     private const APPOINTMENT_DISPATCH_TABLES = ['appointment_dispatches', 'appointment_dispatch_recipients'];
+    private const APPOINTMENT_PROJECT_SCOPE_SCHEMA = '20261124123000_appointment_dispatch_project_scope';
+    private const AUTOMATIC_CHECKOUT_SCHEMA = '20261126120000_work_time_automatic_checkouts';
+    private const AUTOMATIC_CHECKOUT_TABLE = 'work_time_automatic_checkouts';
     private const PHASE_TWO_PRIVATE_TABLES = ['employee_personnel_scope_events', 'personnel_command_receipts'];
     private const PERSONNEL_EVIDENCE_REVIEWS_TABLE = 'employee_document_evidence_reviews';
     private const REDACTED_SECRET = '[redacted:backup-secret]';
@@ -498,12 +501,14 @@ final class BackupService
         $currentSchema = $this->schemaVersion();
         $hasAppointmentSchema = self::schemaAtLeast($currentSchema, self::APPOINTMENTS_SCHEMA);
         $hasDispatchSchema = self::schemaAtLeast($currentSchema, self::APPOINTMENT_DISPATCH_SCHEMA);
+        $hasAutomaticCheckoutSchema = self::schemaAtLeast($currentSchema, self::AUTOMATIC_CHECKOUT_SCHEMA);
         // The presence view grants access to coverage only and adds no files to the archive.
         $previousArchiveLayout = $hasAppointmentSchema || $currentSchema === self::PERSONNEL_BACKUP_PRESENCE_SCHEMA
             ? self::PERSONNEL_EVIDENCE_REVIEWS_SCHEMA : $currentSchema;
         $previousPresenceSchema = $hasAppointmentSchema && $schemaVersion === self::PERSONNEL_BACKUP_PRESENCE_SCHEMA;
         $previousAppointmentSchema = $hasDispatchSchema && $schemaVersion === self::APPOINTMENTS_SCHEMA;
         $previousDispatchSchema = $hasDispatchSchema && $schemaVersion === self::APPOINTMENT_DISPATCH_SCHEMA;
+        $previousProjectScopeSchema = $hasAutomaticCheckoutSchema && $schemaVersion === self::APPOINTMENT_PROJECT_SCOPE_SCHEMA;
         // These releases only changed the excluded personnel rows after their original table layouts were published.
         $personnelSchemaOrder = [self::PREVIOUS_PERSONNEL_SCHEMA, self::PERSONNEL_TRIGGER_MIGRATION,
             self::PERSONNEL_PHASE_TWO_SCHEMA, self::PERSONNEL_EMPLOYEE_ACCESS_SCHEMA, self::PERSONNEL_PRIVATE_STORAGE_SCHEMA,
@@ -513,7 +518,8 @@ final class BackupService
         $previousPersonnelSchema = $archivePosition !== false && $currentPosition !== false && $archivePosition < $currentPosition
             && ($legacy ? $archivePosition === 0 : $archivePosition > 0);
         if ($schemaVersion !== $currentSchema && $schemaVersion !== $previousArchiveLayout
-            && !$previousPresenceSchema && !$previousPersonnelSchema && !$previousAppointmentSchema && !$previousDispatchSchema) {
+            && !$previousPresenceSchema && !$previousPersonnelSchema && !$previousAppointmentSchema && !$previousDispatchSchema
+            && !$previousProjectScopeSchema) {
             throw new RuntimeException('Die Backup-Schema-Version passt nicht zum aktuellen System.');
         }
         $this->assertCurrentSchemaApplied($currentSchema);
@@ -536,6 +542,9 @@ final class BackupService
         if ($hasDispatchSchema && !self::schemaAtLeast($schemaVersion, self::APPOINTMENT_DISPATCH_SCHEMA)) {
             $tablesAddedSinceArchive = [...$tablesAddedSinceArchive, ...self::APPOINTMENT_DISPATCH_TABLES];
         }
+        if ($hasAutomaticCheckoutSchema && !self::schemaAtLeast($schemaVersion, self::AUTOMATIC_CHECKOUT_SCHEMA)) {
+            $tablesAddedSinceArchive[] = self::AUTOMATIC_CHECKOUT_TABLE;
+        }
         if ($previousPersonnelSchema) {
             if ($archivePosition < 2 && $currentPosition >= 2) {
                 $tablesAddedSinceArchive = [...$tablesAddedSinceArchive, ...self::PHASE_TWO_PRIVATE_TABLES];
@@ -546,7 +555,7 @@ final class BackupService
         }
         $this->assertExpectedTables(
             $databaseTables,
-            !$legacy || $previousPersonnelSchema || $previousPresenceSchema || $previousAppointmentSchema || $previousDispatchSchema,
+            !$legacy || $previousPersonnelSchema || $previousPresenceSchema || $previousAppointmentSchema || $previousDispatchSchema || $previousProjectScopeSchema,
             $tablesAddedSinceArchive
         );
         $this->assertPersonnelArchiveEntries($archiveEntries, $databaseFiles);

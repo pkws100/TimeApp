@@ -10,6 +10,7 @@ use App\Domain\Auth\CsrfService;
 use App\Domain\Settings\CompanySettingsService;
 use App\Domain\TimeAccounts\EmployeeAccountCutoverService;
 use App\Domain\TimeAccounts\TimeAccountService;
+use App\Domain\Timesheets\TimesheetOverlap;
 use App\Domain\Users\UserService;
 use App\Http\Request;
 use App\Http\Response;
@@ -515,8 +516,11 @@ HTML;
             $notActiveInPeriod = (string) ($row['cutover_status'] ?? '') === 'not_active_in_period';
             $cutoverCell = $this->e((string) (($row['cutover_date'] ?? null) ?: 'Nicht eingerichtet'));
             $windowNotice = !empty($row['balance_is_provisional'])
-                ? '<br><span class="badge warn">Vorläufig</span><br><span class="muted">' . $this->e((string) ($row['window_accounting_message'] ?? 'Ungeklärte Arbeitszeitanteile.')) . '</span>'
+                ? '<br><span class="badge warn">Vorläufig</span><br><span class="muted">' . $this->e(
+                    !empty($row['booking_overlap']) ? TimesheetOverlap::MESSAGE : (string) ($row['window_accounting_message'] ?? 'Ungeklärte Arbeitszeitanteile.')
+                ) . '</span>'
                 : '';
+            $missingBalance = !empty($row['booking_overlap']) ? 'Klärung erforderlich' : 'Nicht eingerichtet';
 
             if ($notActiveInPeriod && (string) ($row['account_message'] ?? '') !== '') {
                 $cutoverCell .= '<br><span class="muted">' . $this->e((string) $row['account_message']) . '</span>';
@@ -530,7 +534,7 @@ HTML;
                 . '<td>' . $this->e((string) ($row['actual_label'] ?? '00:00')) . '</td>'
                 . '<td>' . $this->e((string) ($row['credited_absence_label'] ?? '00:00')) . '</td>'
                 . '<td><span' . $saldoClass . '>' . $this->e((string) ($row['saldo_label'] ?? '+00:00')) . '</span></td>'
-                . '<td>' . ($notActiveInPeriod ? '<span class="badge warn">Noch nicht aktiv</span>' : ($closing === null ? '<span class="badge warn">Nicht eingerichtet</span>' : '<span' . $closingClass . '>' . $this->e((string) $closing) . '</span>')) . $windowNotice . '</td>'
+                . '<td>' . ($notActiveInPeriod ? '<span class="badge warn">Noch nicht aktiv</span>' : ($closing === null ? '<span class="badge warn">' . $missingBalance . '</span>' : '<span' . $closingClass . '>' . $this->e((string) $closing) . '</span>')) . $windowNotice . '</td>'
                 . '<td>' . $this->number($vacation['approved_taken_days'] ?? 0) . '</td>'
                 . '<td>' . $this->number($vacation['pending_days'] ?? 0) . '</td>'
                 . '<td>' . $this->number($vacation['remaining_days'] ?? 0) . '</td>'

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\TimeAccounts;
 
 use App\Domain\Calendar\CalendarPolicyService;
+use App\Domain\Timesheets\TimesheetOverlap;
 use App\Domain\Timesheets\TimesheetPauseService;
 use App\Domain\WorkTime\WorkTimePreviewService;
 use App\Infrastructure\Database\DatabaseConnection;
@@ -81,16 +82,21 @@ final class TimeAccountService
         $creditedMinutes = (int) ($stats['credited_minutes'] ?? 0);
         $cutoverId = $cutover !== null ? (int) $cutover['id'] : null;
         $manualAdjustmentMinutes = $targetEnd === null ? 0 : $this->journalMinutes($userId, $calculationStart->format('Y-m-d'), $targetEnd->format('Y-m-d'), false, $cutoverId);
-        $periodDelta = $actualMinutes + $creditedMinutes - $targetMinutes + $manualAdjustmentMinutes;
+        $periodOverlap = $stats['booking_overlap'];
+        $periodDelta = $periodOverlap ? null : $actualMinutes + $creditedMinutes - $targetMinutes + $manualAdjustmentMinutes;
         $openingBalance = null;
         $closingBalance = null;
+        $openingOverlap = false;
         $cutoverStatus = $cutover === null ? 'missing' : 'final';
 
         if ($cutover !== null) {
             $periodStartForBalance = $calculationStart->format('Y-m-d');
             $beforePeriod = (new DateTimeImmutable($periodStartForBalance))->modify('-1 day')->format('Y-m-d');
             $openingBalance = $this->balanceUntil($user, $cutover, $beforePeriod);
-            $closingBalance = $targetEnd === null ? $openingBalance : $openingBalance + $periodDelta;
+            $openingOverlap = $openingBalance === null;
+            if ($openingBalance !== null && $periodDelta !== null) {
+                $closingBalance = $openingBalance + $periodDelta;
+            }
         }
 
         $saldoMinutes = $periodDelta;
@@ -107,6 +113,8 @@ final class TimeAccountService
             'cutover_date' => $cutoverDate,
             'as_of_date' => $standDate,
             'account_message' => $cutover === null ? 'Zeitkonto noch nicht eingerichtet' : null,
+            'booking_overlap' => $periodOverlap || $openingOverlap,
+            'balance_is_provisional' => $periodOverlap || $openingOverlap,
             'opening_balance_at_period_start_minutes' => $openingBalance,
             'target_minutes' => $targetMinutes,
             'contract_target_minutes' => (int) $targetStats['contract_target_minutes'],
@@ -127,10 +135,10 @@ final class TimeAccountService
             'actual_label' => $this->durationLabel($actualMinutes),
             'credited_absence_label' => $this->durationLabel($creditedMinutes),
             'manual_adjustment_label' => $this->signedDurationLabel($manualAdjustmentMinutes),
-            'period_delta_label' => $this->signedDurationLabel($periodDelta),
+            'period_delta_label' => $periodDelta === null ? 'Klärung erforderlich' : $this->signedDurationLabel($periodDelta),
             'opening_balance_at_period_start_label' => $openingBalance === null ? null : $this->signedDurationLabel($openingBalance),
             'closing_balance_label' => $closingBalance === null ? null : $this->signedDurationLabel($closingBalance),
-            'saldo_label' => $this->signedDurationLabel($saldoMinutes),
+            'saldo_label' => $saldoMinutes === null ? 'Klärung erforderlich' : $this->signedDurationLabel($saldoMinutes),
             'vacation_days' => (float) ($stats['vacation_days'] ?? 0),
             'sick_days' => (float) ($stats['sick_days'] ?? 0),
             'absent_days' => (float) ($stats['absent_days'] ?? 0),
@@ -185,6 +193,9 @@ final class TimeAccountService
             || ($cutoverDate !== '' && $cutoverDate > $calculationDate->format('Y-m-d'))) {
             $status = 'not_active';
             $balance = null;
+        } elseif (!empty($account['booking_overlap'])) {
+            $status = 'needs_clarification';
+            $balance = null;
         } elseif ($cutoverStatus !== 'missing' && $balance !== null) {
             $status = $balance < 0 ? 'negative' : ($balance > 0 ? 'positive' : 'balanced');
         }
@@ -200,6 +211,10 @@ final class TimeAccountService
             'current_day_included' => false,
         ];
 
+        if (!empty($account['booking_overlap'])) {
+            $account['employee_balance']['is_provisional'] = true;
+            $account['employee_balance']['booking_overlap_message'] = TimesheetOverlap::MESSAGE;
+        }
         if (isset($account['work_time_window_preview'])) {
             $account['employee_balance']['is_provisional'] = (bool) ($account['balance_is_provisional'] ?? false);
             $account['employee_balance']['work_time_window_message'] = $account['window_accounting_message'];
@@ -500,9 +515,10 @@ final class TimeAccountService
         $filters = $this->normalizeAdminFilters($filters);
         $rows = $this->adminRows($year, $month, $filters);
         $includeWindow = (bool) array_filter($rows, static fn (array $row): bool => isset($row['work_time_window_preview']));
-        $includeStatus = $includeWindow || (bool) array_filter($rows, static fn (array $row): bool => isset($row['pause_assessment_days']));
+        $includeOverlap = (bool) array_filter($rows, static fn (array $row): bool => !empty($row['booking_overlap']));
+        $includeStatus = $includeWindow || $includeOverlap || (bool) array_filter($rows, static fn (array $row): bool => isset($row['pause_assessment_days']));
 
-        return array_map(function (array $row) use ($includeWindow, $includeStatus): array {
+        return array_map(function (array $row) use ($includeWindow, $includeStatus, $includeOverlap): array {
             $vacation = $row['vacation'] ?? [];
 
             $export = [
@@ -557,8 +573,11 @@ final class TimeAccountService
             }
 
             if ($includeStatus) {
-                $export['Saldo vorlaeufig'] = isset($row['work_time_window_preview']) || isset($row['pause_assessment_days'])
+                $export['Saldo vorlaeufig'] = !empty($row['booking_overlap']) || isset($row['work_time_window_preview']) || isset($row['pause_assessment_days'])
                     ? (!empty($row['balance_is_provisional']) ? 'Ja' : 'Nein') : '';
+            }
+            if ($includeOverlap) {
+                $export['Buchungskonflikt'] = !empty($row['booking_overlap']) ? TimesheetOverlap::MESSAGE : '';
             }
 
             return $export;
@@ -595,7 +614,7 @@ final class TimeAccountService
         $preview['closing_balance_minutes'] = null;
         $preview['closing_balance_label'] = null;
 
-        if (isset($preview['accountable_work_minutes'], $preview['recorded_net_minutes'])) {
+        if (isset($account['period_delta_minutes'], $preview['accountable_work_minutes'], $preview['recorded_net_minutes'])) {
             $delta = (int) $account['period_delta_minutes'] + (int) $preview['accountable_work_minutes'] - (int) $preview['recorded_net_minutes'];
             $preview['period_delta_minutes'] = $delta;
             $preview['period_delta_label'] = $this->signedDurationLabel($delta);
@@ -608,7 +627,7 @@ final class TimeAccountService
         }
 
         $account['work_time_window_preview'] = $preview;
-        $account['balance_is_provisional'] = $unresolved;
+        $account['balance_is_provisional'] = $unresolved || !empty($account['balance_is_provisional']);
         $account['window_accounting_message'] = $unresolved
             ? 'Vorlaeufig: Aussenzeiten oder Pausenzuordnung sind noch zu klaeren. Die Fensteranrechnung ist eine Vorschau; der bestehende Saldo verwendet weiterhin die erfasste Arbeitszeit.'
             : 'Fensteranrechnung nur als Vorschau; die fachliche Freigabe fuer eine verbindliche Anrechnung steht aus. Der bestehende Saldo verwendet weiterhin die erfasste Arbeitszeit.';
@@ -725,6 +744,8 @@ final class TimeAccountService
             'cutover_date' => (string) $cutover['effective_from'],
             'as_of_date' => $end->format('Y-m-d'),
             'account_message' => 'Zeitkonto war in diesem Zeitraum noch nicht aktiv.',
+            'booking_overlap' => $stats['booking_overlap'],
+            'balance_is_provisional' => $stats['booking_overlap'],
             'opening_balance_at_period_start_minutes' => null,
             'target_minutes' => 0,
             'contract_target_minutes' => 0,
@@ -761,7 +782,7 @@ final class TimeAccountService
         ];
     }
 
-    private function balanceUntil(array $user, array $cutover, string $dateTo): int
+    private function balanceUntil(array $user, array $cutover, string $dateTo): ?int
     {
         $cutoverDate = (string) $cutover['effective_from'];
         $opening = (int) ($cutover['opening_time_balance_minutes'] ?? 0);
@@ -771,6 +792,9 @@ final class TimeAccountService
         }
 
         $stats = $this->timesheetStats((int) $cutover['user_id'], $cutoverDate, $dateTo);
+        if ($stats['booking_overlap']) {
+            return null;
+        }
         $targetStats = $this->dailyTargetService?->stats($user, $cutoverDate, $dateTo) ?? $this->emptyTargetStats();
         $journal = $this->journalMinutes((int) $cutover['user_id'], $cutoverDate, $dateTo, false, (int) $cutover['id']);
 
@@ -866,6 +890,7 @@ final class TimeAccountService
     {
         return [
             'work_minutes' => 0,
+            'booking_overlap' => false,
             'credited_minutes' => 0,
             'vacation_days' => 0.0,
             'sick_days' => 0.0,
@@ -1093,13 +1118,7 @@ final class TimeAccountService
 
     private function timesheetStats(int $userId, string $dateFrom, string $dateTo): array
     {
-        $stats = [
-            'work_minutes' => 0,
-            'credited_minutes' => 0,
-            'vacation_days' => 0.0,
-            'sick_days' => 0.0,
-            'absent_days' => 0.0,
-        ];
+        $stats = $this->emptyTimesheetStats();
 
         if (!$this->connection->tableExists('timesheets')) {
             return $stats;
@@ -1112,8 +1131,11 @@ final class TimeAccountService
             ? 'COUNT(DISTINCT CASE WHEN absence_reason_code = "vacation_paid" OR absence_reason_code IS NULL THEN work_date END) AS paid_vacation_days,
                COUNT(DISTINCT CASE WHEN absence_reason_code = "unpaid_leave" THEN work_date END) AS unpaid_leave_days'
             : 'COUNT(DISTINCT work_date) AS paid_vacation_days, 0 AS unpaid_leave_days';
+        $overlap = TimesheetOverlap::disputedSql('timesheets');
         $rows = $this->connection->fetchAll(
-            'SELECT entry_type, COUNT(DISTINCT work_date) AS day_count, ' . $vacationDaySelect . ', SUM(COALESCE(net_minutes, 0)) AS minutes, ' . $creditedSelect . '
+            'SELECT entry_type, COUNT(DISTINCT work_date) AS day_count, ' . $vacationDaySelect . ',
+                    SUM(CASE WHEN ' . $overlap . ' THEN 0 ELSE COALESCE(net_minutes, 0) END) AS minutes,
+                    MAX(' . $overlap . ') AS booking_overlap, ' . $creditedSelect . '
              FROM timesheets
              WHERE user_id = :user_id
                AND work_date >= :date_from
@@ -1133,6 +1155,7 @@ final class TimeAccountService
 
             if ($type === 'work') {
                 $stats['work_minutes'] += (int) ($row['minutes'] ?? 0);
+                $stats['booking_overlap'] = !empty($row['booking_overlap']);
             } elseif ($type === 'vacation') {
                 $stats['vacation_days'] += (float) ($row['paid_vacation_days'] ?? 0);
                 $stats['absent_days'] += (float) ($row['unpaid_leave_days'] ?? 0);

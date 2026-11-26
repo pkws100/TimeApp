@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Domain\Attendance;
 
+use App\Domain\Timesheets\TimesheetOverlap;
+
 use App\Domain\Calendar\CalendarPolicyProvider;
 use App\Domain\Users\UserWorkdayPolicy;
 use App\Infrastructure\Database\DatabaseConnection;
@@ -41,6 +43,7 @@ final class AttendanceService
                     timesheets.start_time,
                     timesheets.end_time,
                     timesheets.net_minutes,
+                    ' . TimesheetOverlap::disputedSql('timesheets') . ' AS booking_overlap,
                     timesheets.note,
                     timesheets.updated_at,
                     users.employee_number,
@@ -408,7 +411,8 @@ final class AttendanceService
             'project_name' => $projectDeleted || $projectName === '' ? null : $projectName,
             'start_time' => $this->nullableTrimmed($row['start_time'] ?? null),
             'end_time' => $this->nullableTrimmed($row['end_time'] ?? null),
-            'net_minutes' => (int) ($row['net_minutes'] ?? 0),
+            'net_minutes' => empty($row['booking_overlap']) ? (int) ($row['net_minutes'] ?? 0) : 0,
+            'booking_overlap' => !empty($row['booking_overlap']),
             'note' => $this->nullableTrimmed($row['note'] ?? null),
             'updated_at' => (string) ($row['updated_at'] ?? ''),
         ];
@@ -420,6 +424,7 @@ final class AttendanceService
         $firstStart = null;
         $lastEnd = null;
         $netMinutes = 0;
+        $bookingOverlap = false;
 
         foreach ($workRows as $workRow) {
             $startTime = $this->nullableTrimmed($workRow['start_time'] ?? null);
@@ -434,7 +439,11 @@ final class AttendanceService
                 $latestRow = $workRow;
             }
 
-            $netMinutes += max(0, (int) ($workRow['net_minutes'] ?? 0));
+            if (!empty($workRow['booking_overlap'])) {
+                $bookingOverlap = true;
+            } else {
+                $netMinutes += max(0, (int) ($workRow['net_minutes'] ?? 0));
+            }
         }
 
         return [
@@ -442,6 +451,7 @@ final class AttendanceService
             'start_time' => $firstStart,
             'end_time' => $lastEnd,
             'net_minutes' => $netMinutes,
+            'booking_overlap' => $bookingOverlap,
             'work_entry_count' => count($workRows),
         ];
     }

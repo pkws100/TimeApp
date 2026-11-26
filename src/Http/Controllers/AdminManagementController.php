@@ -72,13 +72,14 @@ final class AdminManagementController
             $projectId = (int) ($project['id'] ?? 0);
             $editUrl = '/admin/projects/' . $projectId . '/edit';
             $trackedNetMinutes = max(0, (int) ($project['tracked_net_minutes'] ?? 0));
+            $overlapNotice = empty($project['booking_overlap']) ? '' : '<br><span class="muted">Ohne überlappende Buchungen</span>';
             $rows .= '<tr data-row-selectable="true" data-edit-url="' . $this->e($editUrl) . '">'
                 . '<td>' . $this->e((string) $project['project_number']) . '</td>'
                 . '<td>' . $this->e((string) $project['name']) . '</td>'
                 . '<td>' . $this->e((string) ($project['customer_name'] ?? '')) . '</td>'
                 . '<td>' . $this->e((string) ($project['status'] ?? '')) . '</td>'
                 . '<td>' . $this->e((string) ($project['city'] ?? '')) . '</td>'
-                . '<td data-sort-value="' . $trackedNetMinutes . '">' . $this->e($this->formatProjectHours($trackedNetMinutes)) . '</td>'
+                . '<td data-sort-value="' . $trackedNetMinutes . '">' . $this->e($this->formatProjectHours($trackedNetMinutes)) . $overlapNotice . '</td>'
                 . '<td class="table-actions" data-search="false">'
                 . '<a class="button" href="' . $this->e($editUrl) . '">Bearbeiten</a>'
                 . $this->projectLifecycleForm(

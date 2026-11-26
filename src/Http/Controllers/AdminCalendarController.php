@@ -348,6 +348,9 @@ HTML;
             if ((int) ($day['issue_count'] ?? 0) > 0) {
                 $meta[] = (int) $day['issue_count'] . ' offen';
             }
+            if (!empty($day['booking_overlap'])) {
+                $meta[] = 'Überlappende Buchungen';
+            }
 
             if ((int) ($day['absence_count'] ?? 0) > 0) {
                 $meta[] = (int) $day['absence_count'] . ' abw.';

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\TimeAccounts;
 
 use App\Domain\Timesheets\TimesheetWriteGuard;
+use App\Domain\Timesheets\TimesheetOverlap;
 use App\Domain\Timesheets\TimesheetPauseService;
 use App\Domain\WorkTime\WorkTimePreviewService;
 use App\Infrastructure\Database\DatabaseConnection;
@@ -89,6 +90,13 @@ final class EmployeeAccountCutoverService
         if ($closureCount > 0) {
             $warnings[] = 'Im betroffenen Zeitraum existieren bereits finale Abrechnungsabschluesse.';
         }
+        $legacyOverlap = $this->legacyOverlap((int) $record['user_id'], $effectiveFrom);
+        if ($legacyOverlap['editable'] > 0) {
+            $warnings[] = TimesheetOverlap::MESSAGE . ' Vor der Stichtagsfinalisierung ist eine Korrektur erforderlich.';
+        }
+        if ($legacyOverlap['total'] > $legacyOverlap['editable']) {
+            $warnings[] = 'Im bereits festgeschriebenen Altzeitraum liegen überlappende Buchungen. Der übernommene Eröffnungssaldo ist gesondert zu prüfen.';
+        }
 
         return [
             ...$record,
@@ -98,6 +106,7 @@ final class EmployeeAccountCutoverService
             'locked_until' => (new DateTimeImmutable($effectiveFrom))->modify('-1 day')->format('Y-m-d'),
             'timesheets_after_cutover' => $timesheetsAfter,
             'final_closures_in_legacy_period' => $closureCount,
+            'editable_legacy_overlap_count' => $legacyOverlap['editable'],
             'warnings' => $warnings,
         ];
     }
@@ -109,6 +118,9 @@ final class EmployeeAccountCutoverService
 
         return $this->withUserAndAccountingLocks($userId, function () use ($payload, $adminUserId): array {
             $preview = $this->preview($payload);
+            if ($preview['editable_legacy_overlap_count'] > 0) {
+                throw new InvalidArgumentException(TimesheetOverlap::MESSAGE . ' Vor der Stichtagsfinalisierung ist eine Korrektur erforderlich.');
+            }
             $this->assertWorkTimeWindowsResolved((int) $preview['user_id'], (string) $preview['effective_from']);
 
             return $this->connection->transaction(function () use ($preview, $adminUserId): array {
@@ -174,8 +186,19 @@ final class EmployeeAccountCutoverService
             return;
         }
         $windowPreview = $this->workTimePreviewService->forUserPeriod($userId, $firstAssignment, $until);
-        if (!empty($windowPreview['unresolved'])) {
-            throw new InvalidArgumentException('Vor der Stichtagsfinalisierung muessen ungeklärte Aussenzeiten und Pausenzuordnungen im Altzeitraum dokumentiert geklaert werden.');
+        foreach ($windowPreview['rows'] as $row) {
+            if (!empty($row['booking_overlap'])) {
+                // These rows are already sealed. Check the original single-booking
+                // window evidence independently of the newly detected overlap.
+                $entry = $this->connection->fetchOne(
+                    'SELECT *, row_start AS work_time_source_revision FROM timesheets WHERE id = :entry',
+                    ['entry' => $row['timesheet_id']]
+                );
+                $row = $entry === null ? [] : $this->workTimePreviewService->forTimesheet($entry);
+            }
+            if (!empty($row['calculation']['unresolved'])) {
+                throw new InvalidArgumentException('Vor der Stichtagsfinalisierung muessen ungeklärte Aussenzeiten und Pausenzuordnungen im Altzeitraum dokumentiert geklaert werden.');
+            }
         }
     }
 
@@ -691,6 +714,33 @@ final class EmployeeAccountCutoverService
                AND ' . ($this->connection->columnExists('accounting_closures', 'source_type') ? '(source_type IS NULL OR source_type <> "employee_account_cutover")' : 'closure_number NOT LIKE "ZK-%"'),
             ['legacy_end' => $legacyEnd, 'user_id' => $userId]
         ) ?? 0);
+    }
+
+    /** @return array{total: int, editable: int} */
+    private function legacyOverlap(int $userId, string $effectiveFrom): array
+    {
+        if (!$this->connection->tableExists('timesheets')) {
+            return ['total' => 0, 'editable' => 0];
+        }
+
+        $locked = ['FALSE'];
+        if ($this->connection->tableExists('accounting_closures')) {
+            $locked[] = 'EXISTS (SELECT 1 FROM accounting_closures c WHERE c.status IN ("final", "correction")
+                AND t.work_date BETWEEN c.period_start AND c.period_end
+                AND (c.user_id IS NULL OR c.user_id = t.user_id) AND (c.project_id IS NULL OR c.project_id = t.project_id))';
+            if ($this->connection->tableExists('accounting_closure_items')) {
+                $locked[] = 'EXISTS (SELECT 1 FROM accounting_closure_items i JOIN accounting_closures c ON c.id = i.closure_id
+                    WHERE i.timesheet_id = t.id AND c.status IN ("final", "correction"))';
+            }
+        }
+        $row = $this->connection->fetchOne(
+            'SELECT COUNT(*) AS total, COALESCE(SUM(NOT (' . implode(' OR ', $locked) . ')), 0) AS editable
+             FROM timesheets t WHERE t.user_id = :user_id AND t.work_date < :date
+             AND ' . TimesheetOverlap::disputedSql('t'),
+            ['user_id' => $userId, 'date' => $effectiveFrom]
+        );
+
+        return ['total' => (int) ($row['total'] ?? 0), 'editable' => (int) ($row['editable'] ?? 0)];
     }
 
     private function assertEffectiveDateAfterCutover(int $userId, string $effectiveDate): void

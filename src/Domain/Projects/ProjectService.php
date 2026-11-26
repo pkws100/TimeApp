@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Projects;
 
+use App\Domain\Timesheets\TimesheetOverlap;
 use App\Infrastructure\Database\DatabaseConnection;
 use InvalidArgumentException;
 
@@ -18,7 +19,7 @@ final class ProjectService
         $this->projectAccessService = $projectAccessService ?? new ProjectAccessService($connection);
     }
 
-    public function list(string $scope = 'active'): array
+    public function list(string $scope = 'active', bool $includeTrackedTotals = true): array
     {
         if ($this->connection->tableExists('projects')) {
             $trackedSelect = '0 AS tracked_net_minutes';
@@ -26,10 +27,13 @@ final class ProjectService
             $signatureColumns = $this->signatureColumnsSelect();
             $workInstructionColumns = $this->workInstructionColumnsSelect();
 
-            if ($this->connection->tableExists('timesheets')) {
-                $trackedSelect = 'COALESCE(tracked.tracked_net_minutes, 0) AS tracked_net_minutes';
+            if ($includeTrackedTotals && $this->connection->tableExists('timesheets')) {
+                $overlap = TimesheetOverlap::disputedSql('timesheets');
+                $trackedSelect = 'COALESCE(tracked.tracked_net_minutes, 0) AS tracked_net_minutes,
+                                  COALESCE(tracked.booking_overlap, 0) AS booking_overlap';
                 $trackedJoin = 'LEFT JOIN (
-                    SELECT project_id, COALESCE(SUM(net_minutes), 0) AS tracked_net_minutes
+                    SELECT project_id, COALESCE(SUM(CASE WHEN ' . $overlap . ' THEN 0 ELSE net_minutes END), 0) AS tracked_net_minutes,
+                           MAX(' . $overlap . ') AS booking_overlap
                     FROM timesheets
                     WHERE project_id IS NOT NULL
                       AND entry_type = "work"
@@ -81,7 +85,7 @@ final class ProjectService
         ];
     }
 
-    public function listForUser(array $user): array
+    public function listForUser(array $user, bool $includeTrackedTotals = true): array
     {
         $allowedIds = $this->projectAccessService->activeProjectIdsForUser($user);
 
@@ -90,7 +94,7 @@ final class ProjectService
         }
 
         return array_values(array_filter(
-            $this->list('active'),
+            $this->list('active', $includeTrackedTotals),
             static fn (array $project): bool => in_array((int) ($project['id'] ?? 0), $allowedIds, true)
         ));
     }
@@ -110,7 +114,7 @@ final class ProjectService
                 continue;
             }
 
-            if ((int) ($timesheet['is_deleted'] ?? 0) === 1) {
+            if ((int) ($timesheet['is_deleted'] ?? 0) === 1 || !empty($timesheet['booking_overlap'])) {
                 continue;
             }
 

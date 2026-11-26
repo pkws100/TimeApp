@@ -122,7 +122,7 @@ final class WorkTimeNotificationDatabaseTest extends MariaDbTestCase
     {
         $calls = 0;
         foreach (['disabled', 'window_changed'] as $change) {
-            [$user, $policies, $events, $date, $entry] = $this->fixture(['checkout_proposals_enabled' => true], function () use (&$calls): array { ++$calls; return ['ok' => true]; }, '08:00');
+            [$user, $policies, $events, $date, $entry] = $this->fixture(['checkout_mode' => 'proposal'], function () use (&$calls): array { ++$calls; return ['ok' => true]; }, '08:00');
             $policy = $policies->policyFor($user, $date);
             $this->connection()->execute('INSERT INTO work_time_checkout_proposals (user_id, timesheet_id, policy_version_id, proposed_end_at, status) VALUES (:user, :timesheet, :version, :end_at, "pending")', ['user' => $user, 'timesheet' => $entry['id'], 'version' => $policy['policy_version_id'], 'end_at' => $date . ' 16:00:00']);
             $proposal = $this->connection()->lastInsertId();
@@ -170,7 +170,7 @@ final class WorkTimeNotificationDatabaseTest extends MariaDbTestCase
     public function testNormalStartContinuedWorkAndSecondSessionDoNotShareAnOutsideStartEvent(): void
     {
         $calls = 0; $sender = function () use (&$calls): array { ++$calls; return ['ok' => true]; };
-        [$user, , $events, $date, $entry] = $this->fixture(['checkout_proposals_enabled' => true], $sender, '08:00');
+        [$user, , $events, $date, $entry] = $this->fixture(['checkout_mode' => 'proposal'], $sender, '08:00');
         $events->process(false, $this->at($date . ' 16:05'));
         $proposal = $events->statusForUser($user)['checkout_proposals'][0];
         self::assertSame(1, $calls);

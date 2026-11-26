@@ -255,7 +255,7 @@ final class WorkTimePolicyService
             throw new InvalidArgumentException('Die aktive Regelversion wurde nicht gefunden.');
         }
         $base = json_decode((string) $version['policy_json'], true, 32, JSON_THROW_ON_ERROR);
-        $policy = $this->normalizePolicy(array_replace($base, $overrides));
+        $policy = $this->normalizePolicy($this->mergePolicy($base, $overrides));
         $overlap = $this->connection->fetchAll(
             'SELECT * FROM employee_work_time_assignments WHERE user_id = :user_id AND effective_from <= :end_date AND (effective_to IS NULL OR effective_to >= :start_date)'
             . ($this->hasAssignmentHistory() ? ' AND interval_revision = 0' : '') . ' ORDER BY effective_from, id' . ($write ? ' FOR UPDATE' : ''),
@@ -440,7 +440,11 @@ final class WorkTimePolicyService
             if ($assignment['effective_from'] <= $date && ($assignment['effective_to'] === null || $assignment['effective_to'] >= $date)) { $row = $assignment; break; }
         }
         if ($row === null) { return $this->policyCache[$cacheKey] = null; }
-        $policy = array_replace(json_decode((string) $row['policy_json'], true, 32, JSON_THROW_ON_ERROR), json_decode((string) $row['overrides_json'], true, 32, JSON_THROW_ON_ERROR));
+        $policy = $this->mergePolicy(
+            json_decode((string) $row['policy_json'], true, 32, JSON_THROW_ON_ERROR),
+            json_decode((string) $row['overrides_json'], true, 32, JSON_THROW_ON_ERROR)
+        );
+        $policy['checkout_mode'] = $this->checkoutMode($policy);
         return $this->policyCache[$cacheKey] = [...$policy, 'id' => (int) $row['policy_version_id'], 'policy_version_id' => (int) $row['policy_version_id'], 'assignment_id' => (int) $row['id'], 'effective_from' => $row['effective_from'], 'effective_to' => $row['effective_to'], 'template_name' => $row['template_name'], 'revision' => (int) $row['revision'], 'supervisor_user_ids' => $row['supervisor_user_ids'], 'carried_from_assignment_id' => isset($row['carried_from_assignment_id']) ? (int) $row['carried_from_assignment_id'] : null, 'live_from_unix' => isset($row['live_from_unix']) ? (int) $row['live_from_unix'] : null];
     }
 
@@ -509,7 +513,29 @@ final class WorkTimePolicyService
             $result[$key] = filter_var($input[$key] ?? false, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
             if ($result[$key] === null) { throw new InvalidArgumentException('Ungueltiger Schalter: ' . $key); }
         }
+        $result['checkout_mode'] = $this->checkoutMode($input);
         return $result;
+    }
+
+    private function mergePolicy(array $base, array $overrides): array
+    {
+        if (array_key_exists('checkout_proposals_enabled', $overrides) && !array_key_exists('checkout_mode', $overrides)) {
+            unset($base['checkout_mode']);
+        }
+
+        return array_replace($base, $overrides);
+    }
+
+    private function checkoutMode(array $policy): string
+    {
+        $mode = $policy['checkout_mode'] ?? (
+            filter_var($policy['checkout_proposals_enabled'] ?? false, FILTER_VALIDATE_BOOLEAN) ? 'automatic' : 'manual'
+        );
+        if (!in_array($mode, ['manual', 'proposal', 'automatic'], true)) {
+            throw new InvalidArgumentException('Der Modus für das Arbeitszeitende ist ungültig.');
+        }
+
+        return $mode;
     }
 
     private function insertVersion(int $template, int $revision, array $policy, int $actor): array
@@ -517,7 +543,13 @@ final class WorkTimePolicyService
         $this->connection->execute('INSERT INTO work_time_policy_versions (template_id, revision, policy_json, created_by_user_id) VALUES (:template, :revision, :policy, :actor)', ['template' => $template, 'revision' => $revision, 'policy' => $this->json($policy), 'actor' => $actor]);
         return ['id' => $this->connection->lastInsertId(), 'template_id' => $template, 'revision' => $revision, 'policy' => $policy];
     }
-    private function versionRecord(array $row): array { $row['id'] = (int) $row['id']; $row['policy'] = json_decode((string) $row['policy_json'], true, 32, JSON_THROW_ON_ERROR); return $row; }
+    private function versionRecord(array $row): array
+    {
+        $row['id'] = (int) $row['id'];
+        $row['policy'] = json_decode((string) $row['policy_json'], true, 32, JSON_THROW_ON_ERROR);
+        $row['policy']['checkout_mode'] = $this->checkoutMode($row['policy']);
+        return $row;
+    }
     private function assignmentRecord(array $row): array { foreach (['id','user_id','policy_version_id'] as $key) { $row[$key] = (int) $row[$key]; } $row['overrides'] = json_decode((string) $row['overrides_json'], true, 32, JSON_THROW_ON_ERROR); $row['supervisor_user_ids'] = $this->supervisors($row['id']); return $row; }
     private function supervisors(int $assignment): array { return array_map('intval', array_column($this->connection->fetchAll('SELECT user_id FROM employee_work_time_supervisors WHERE assignment_id = :id ORDER BY user_id', ['id' => $assignment]), 'user_id')); }
     private function audit(string $action, int $id, int $actor, ?array $before, array $after): void { $this->connection->execute('INSERT INTO work_time_policy_audit (actor_user_id, action, entity_id, before_json, after_json) VALUES (:actor, :action, :id, :before, :after)', ['actor' => $actor, 'action' => $action, 'id' => $id, 'before' => $before === null ? null : $this->json($before), 'after' => $this->json($after)]); }

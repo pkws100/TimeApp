@@ -51,7 +51,8 @@
                 ['early_check_in_mode', 'checkout_delay_minutes', 'outside_window_delay_minutes'].forEach((key) => {
                     if (policy[key] !== undefined) form.elements[key].value = policy[key];
                 });
-                ['checkout_proposals_enabled', 'outside_window_notifications_enabled', 'notify_employee_push', 'notify_employee_sms', 'notify_supervisor_push', 'notify_supervisor_sms'].forEach((key) => {
+                form.elements.checkout_mode.value = policy.checkout_mode ?? (policy.checkout_proposals_enabled ? 'automatic' : 'manual');
+                ['outside_window_notifications_enabled', 'notify_employee_push', 'notify_employee_sms', 'notify_supervisor_push', 'notify_supervisor_sms'].forEach((key) => {
                     form.elements[key].checked = !!policy[key];
                 });
             });

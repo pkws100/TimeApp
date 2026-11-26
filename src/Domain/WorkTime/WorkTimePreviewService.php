@@ -8,6 +8,7 @@ use App\Domain\Timesheets\TimesheetWriteGuard;
 use App\Domain\Timesheets\TimesheetPauseService;
 use App\Domain\Timesheets\PauseAssessmentCalculator;
 use App\Domain\Timesheets\TimesheetPauseIntervals;
+use App\Domain\Timesheets\TimesheetOverlap;
 use App\Domain\Timesheets\WorkdayStateCalculator;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateTimeImmutable;
@@ -17,6 +18,12 @@ use InvalidArgumentException;
 /** One read-only calculation source for PWA, admin, accounts and exports. */
 final class WorkTimePreviewService
 {
+    private const SUMMARY_MINUTE_FIELDS = [
+        'actual_work_minutes', 'inside_window_minutes', 'outside_before_minutes', 'outside_after_minutes',
+        'outside_gap_minutes', 'outside_pending_minutes', 'outside_approved_minutes', 'outside_rejected_minutes',
+        'outside_disputed_minutes', 'accountable_work_minutes',
+    ];
+
     private WorkTimeWindowCalculator $calculator;
     private TimesheetPauseIntervals $breakIntervals;
     private ?TimesheetPauseService $pauses = null;
@@ -40,16 +47,44 @@ final class WorkTimePreviewService
         if (!$this->enabled()) { return $summary; }
         $this->assertDate($dateFrom); $this->assertDate($dateTo);
         if ($dateFrom > $dateTo) { throw new InvalidArgumentException('Der Auswertungsbeginn liegt nach dem Ende.'); }
-        $entries = $this->connection->fetchAll('SELECT *, row_start AS work_time_source_revision FROM timesheets WHERE user_id = :user_id AND work_date BETWEEN :date_from AND :date_to AND entry_type = "work" AND COALESCE(is_deleted,0) = 0 ORDER BY work_date, start_time, id', ['user_id' => $userId, 'date_from' => $dateFrom, 'date_to' => $dateTo]);
+        $entries = $this->connection->fetchAll(
+            'SELECT timesheets.*, row_start AS work_time_source_revision, ' . TimesheetOverlap::disputedSql('timesheets') . ' AS booking_overlap
+             FROM timesheets WHERE user_id = :user_id AND work_date BETWEEN :date_from AND :date_to AND entry_type = "work"
+             AND COALESCE(is_deleted,0) = 0 ORDER BY work_date, start_time, id',
+            ['user_id' => $userId, 'date_from' => $dateFrom, 'date_to' => $dateTo]
+        );
         $hasPolicy = false;
         foreach ($entries as $entry) {
             $policy = $this->policies->policyFor($userId, (string) $entry['work_date']);
-            $row = $this->forTimesheet($entry, $policy);
             $hasPolicy = $hasPolicy || $policy !== null;
+            if (!empty($entry['booking_overlap'])) {
+                $summary['rows'][] = [
+                    'timesheet_id' => (int) $entry['id'],
+                    'user_id' => $userId,
+                    'work_date' => $entry['work_date'],
+                    'policy' => $policy,
+                    'recorded_net_minutes' => null,
+                    'calculation_hash' => null,
+                    'booking_overlap' => true,
+                    'calculation' => [
+                        ...array_fill_keys(self::SUMMARY_MINUTE_FIELDS, null),
+                        'unresolved' => true,
+                        'calculation_status' => 'needs_clarification',
+                        'clarification_reason' => TimesheetOverlap::MESSAGE,
+                        'preview_only' => true,
+                        'outside_segments' => [],
+                    ],
+                ];
+                $summary['booking_overlap'] = true;
+                $summary['unresolved'] = true;
+                $summary['calculation_status'] = 'needs_clarification';
+                continue;
+            }
+            $row = $this->forTimesheet($entry, $policy);
             $summary['rows'][] = $row;
             $summary['recorded_net_minutes'] += (int) ($entry['net_minutes'] ?? 0);
             $calculation = $row['calculation'];
-            foreach (['actual_work_minutes', 'inside_window_minutes', 'outside_before_minutes', 'outside_after_minutes', 'outside_gap_minutes', 'outside_pending_minutes', 'outside_approved_minutes', 'outside_rejected_minutes', 'outside_disputed_minutes', 'accountable_work_minutes'] as $key) {
+            foreach (self::SUMMARY_MINUTE_FIELDS as $key) {
                 if ($summary[$key] === null || ($calculation[$key] ?? null) === null) { $summary[$key] = null; }
                 else { $summary[$key] += (int) $calculation[$key]; }
             }

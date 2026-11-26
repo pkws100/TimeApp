@@ -101,7 +101,8 @@ final class PauseAssessmentCalculator
         if ($end === null || $end === '') {
             return [$from->getTimestamp(), max($from->getTimestamp(), $asOf->getTimestamp())];
         }
-        $endDate = strcmp(substr($end, 0, 5), substr($start, 0, 5)) < 0
+        $endClock = strlen($end) === 5 ? $end . ':00' : $end;
+        $endDate = strcmp($endClock, $from->format('H:i:s')) < 0
             ? $from->modify('+1 day')->format('Y-m-d') : $date;
         $to = WorkTimeLocalTime::fromInput($endDate . ' ' . $end);
         return [$from->getTimestamp(), $to->getTimestamp()];

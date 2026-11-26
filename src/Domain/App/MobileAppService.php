@@ -12,6 +12,7 @@ use App\Domain\Projects\ProjectService;
 use App\Domain\Settings\CompanySettingsService;
 use App\Domain\Terminals\NfcTagService;
 use App\Domain\Timesheets\LiveWorkSession;
+use App\Domain\Timesheets\TimesheetOverlap;
 use App\Domain\Timesheets\TimesheetGeoLocationService;
 use App\Domain\Timesheets\TimesheetSignatureService;
 use App\Domain\Timesheets\WorkdayStateCalculator;
@@ -19,6 +20,8 @@ use App\Domain\Timesheets\TimesheetPauseIntervals;
 use App\Domain\Timesheets\TimesheetPauseService;
 use App\Domain\Users\UserWorkdayPolicy;
 use App\Infrastructure\Database\DatabaseConnection;
+use DateTimeImmutable;
+use DateTimeZone;
 use InvalidArgumentException;
 
 final class MobileAppService
@@ -45,8 +48,10 @@ final class MobileAppService
 
     public function dayContext(array $user): array
     {
-        $today = LiveWorkSession::referenceDate();
-        $todayWorkEntries = $this->findTodayWorkEntries((int) $user['id'], $today);
+        $now = new DateTimeImmutable('now', new DateTimeZone('Europe/Berlin'));
+        $today = LiveWorkSession::referenceDate(now: $now);
+        $asOf = $now->format('Y-m-d H:i:s');
+        $todayWorkEntries = $this->findTodayWorkEntries((int) $user['id'], $today, $asOf);
         $workEntry = $this->findLatestEntry((int) $user['id'], $today, 'work');
         $lastStatusEntry = $this->findLatestStatusEntry((int) $user['id'], $today);
         $timeTrackingRequired = (int) ($user['time_tracking_required'] ?? 1) === 1;
@@ -91,13 +96,18 @@ final class MobileAppService
             }
         }
         unset($todayEntry);
+        $overlappingEntries = array_filter($todayWorkEntries, static fn (array $entry): bool => !empty($entry['booking_overlap']));
+        if ($workEntry !== null && in_array($workEntry['id'], array_column($overlappingEntries, 'id'), true)) {
+            $workEntry['booking_overlap'] = true;
+        }
         $projectDaySummaries = $this->buildProjectDaySummaries($today, $todayWorkEntries);
-        $openEntries = $this->findOpenWorkEntries((int) $user['id'], $today);
+        $openEntries = $this->findOpenWorkEntries((int) $user['id'], $today, $asOf);
         $activeEntry = null;
         if (count($openEntries) === 1 && $openEntries[0]['work_date'] < $today) {
             $activeEntry = $this->withVisibleProjectLabel($openEntries[0], $projectsById);
             $activeEntry['id'] = (int) $activeEntry['id'];
             $activeEntry['project_id'] = isset($activeEntry['project_id']) ? (int) $activeEntry['project_id'] : null;
+            $activeEntry['booking_overlap'] = !empty($activeEntry['booking_overlap']);
             $activeEntry['breaks'] = $this->findBreaksForTimesheet($activeEntry['id']);
             $activeEntry['current_break'] = $this->workdayStateCalculator->currentBreak($activeEntry['breaks']);
             $activeEntry['attachments'] = $this->fileAttachmentService->listForTimesheet($activeEntry['id']);
@@ -133,6 +143,7 @@ final class MobileAppService
             ],
             'current_break' => $currentBreak,
             'breaks_today' => $breaksToday,
+            'booking_overlap' => $overlappingEntries !== [] || !empty($activeEntry['booking_overlap']),
             'active_work_entry' => $activeEntry,
             'active_work_entry_conflict' => count($openEntries) > 1,
             ...(!$this->pauses?->available() ? [] : [
@@ -236,6 +247,7 @@ final class MobileAppService
                     timesheets.end_time,
                     timesheets.break_minutes,
                     timesheets.net_minutes,
+                    ' . TimesheetOverlap::disputedSql('timesheets') . ' AS booking_overlap,
                     timesheets.entry_type,
                     ' . $absenceReasonSelect . ',
                     timesheets.note,
@@ -347,6 +359,7 @@ final class MobileAppService
             'end_time' => $row['end_time'] ?? null,
             'break_minutes' => (int) ($row['break_minutes'] ?? 0),
             'net_minutes' => (int) ($row['net_minutes'] ?? 0),
+            'booking_overlap' => !empty($row['booking_overlap']),
             'entry_type' => $entryType,
             'entry_type_label' => self::entryTypeLabel($entryType),
             'absence_reason_code' => $absenceReason,
@@ -426,13 +439,15 @@ final class MobileAppService
         foreach ($items as $item) {
             $entryType = (string) ($item['entry_type'] ?? 'work');
             $date = (string) ($item['work_date'] ?? '');
-            $breakMinutes = (int) ($item['break_minutes'] ?? 0);
-            $netMinutes = (int) ($item['net_minutes'] ?? 0);
+            $bookingOverlap = !empty($item['booking_overlap']);
+            $breakMinutes = $bookingOverlap ? 0 : (int) ($item['break_minutes'] ?? 0);
+            $netMinutes = $bookingOverlap ? 0 : (int) ($item['net_minutes'] ?? 0);
             $attachmentCount = (int) ($item['attachment_count'] ?? (is_array($item['attachments'] ?? null) ? count($item['attachments']) : 0));
 
             $summary['entry_count']++;
             $summary['total_net_minutes'] += $netMinutes;
             $summary['total_break_minutes'] += $breakMinutes;
+            $summary['booking_overlap'] = $summary['booking_overlap'] || $bookingOverlap;
             $summary['attachment_count'] += $attachmentCount;
 
             if ($entryType === 'work') {
@@ -460,6 +475,7 @@ final class MobileAppService
                     'weekday' => self::weekdayLabel($date),
                     'total_net_minutes' => 0,
                     'total_break_minutes' => 0,
+                    'booking_overlap' => false,
                     'entry_count' => 0,
                     'status_counts' => [
                         'work' => 0,
@@ -475,6 +491,7 @@ final class MobileAppService
 
             $days[$date]['total_net_minutes'] += $netMinutes;
             $days[$date]['total_break_minutes'] += $breakMinutes;
+            $days[$date]['booking_overlap'] = $days[$date]['booking_overlap'] || $bookingOverlap;
             $days[$date]['entry_count']++;
             $days[$date]['attachment_count'] += $attachmentCount;
 
@@ -500,6 +517,7 @@ final class MobileAppService
         return [
             'total_net_minutes' => 0,
             'total_break_minutes' => 0,
+            'booking_overlap' => false,
             'entry_count' => 0,
             'work_entry_count' => 0,
             'absence_entry_count' => 0,
@@ -540,18 +558,19 @@ final class MobileAppService
 
     private function activeProjectsForUser(array $user): array
     {
-        return $this->projectService->listForUser($user);
+        return $this->projectService->listForUser($user, includeTrackedTotals: false);
     }
 
-    private function findOpenWorkEntries(int $userId, string $today): array
+    private function findOpenWorkEntries(int $userId, string $today, string $asOf): array
     {
         if (!$this->connection->tableExists('timesheets')) {
             return [];
         }
 
-        return $this->connection->fetchAll('SELECT t.id, t.project_id, t.work_date, t.start_time, t.end_time, t.break_minutes, t.net_minutes
+        return $this->connection->fetchAll('SELECT t.id, t.project_id, t.work_date, t.start_time, t.end_time, t.break_minutes, t.net_minutes,
+                ' . TimesheetOverlap::disputedSql('t', includeLive: true) . ' AS booking_overlap
              FROM timesheets t WHERE t.user_id = :user_id AND ' . LiveWorkSession::isOpenSql('t') . ' ORDER BY t.work_date, t.id LIMIT 2',
-            ['user_id' => $userId, 'live_reference_date' => $today]);
+            ['user_id' => $userId, 'live_reference_date' => $today, 'overlap_live_start' => $asOf, 'overlap_live_end' => $asOf]);
     }
 
     private function withVisibleProjectLabel(array $entry, array $projectsById): array
@@ -718,7 +737,7 @@ final class MobileAppService
         return $this->calendarPolicyService->dayPolicy($date);
     }
 
-    private function findTodayWorkEntries(int $userId, string $workDate): array
+    private function findTodayWorkEntries(int $userId, string $workDate, string $asOf): array
     {
         if (!$this->connection->tableExists('timesheets')) {
             return [];
@@ -735,6 +754,7 @@ final class MobileAppService
                 timesheets.gross_minutes,
                 timesheets.break_minutes,
                 timesheets.net_minutes,
+                ' . TimesheetOverlap::disputedSql('timesheets', includeLive: true) . ' AS booking_overlap,
                 timesheets.note,
                 timesheets.updated_at,
                 projects.name AS project_name,
@@ -755,6 +775,8 @@ final class MobileAppService
             [
                 'user_id' => $userId,
                 'work_date' => $workDate,
+                'overlap_live_start' => $asOf,
+                'overlap_live_end' => $asOf,
             ]
         );
 
@@ -772,6 +794,7 @@ final class MobileAppService
                 'gross_minutes' => (int) ($row['gross_minutes'] ?? 0),
                 'break_minutes' => (int) ($row['break_minutes'] ?? 0),
                 'net_minutes' => (int) ($row['net_minutes'] ?? 0),
+                'booking_overlap' => !empty($row['booking_overlap']),
                 'note' => self::nullableTrimmed($row['note'] ?? null),
                 'updated_at' => self::dateTimeOrNull($row['updated_at'] ?? null),
             ],
@@ -807,6 +830,7 @@ final class MobileAppService
                     'end_time' => $entry['end_time'] ?? null,
                     'total_break_minutes' => 0,
                     'total_net_minutes' => 0,
+                    'booking_overlap' => false,
                     'current_break' => $currentBreak,
                     'tracked_minutes_live_basis' => $trackedMinutesLiveBasis,
                     'work_entry' => $normalizedEntry,
@@ -815,8 +839,12 @@ final class MobileAppService
                 ];
             }
 
-            $summaries[$key]['total_break_minutes'] += $completedBreakMinutes;
-            $summaries[$key]['total_net_minutes'] += (int) ($entry['net_minutes'] ?? 0);
+            if (!empty($entry['booking_overlap'])) {
+                $summaries[$key]['booking_overlap'] = true;
+            } else {
+                $summaries[$key]['total_break_minutes'] += $completedBreakMinutes;
+                $summaries[$key]['total_net_minutes'] += (int) ($entry['net_minutes'] ?? 0);
+            }
         }
 
         return array_values($summaries);

@@ -88,7 +88,7 @@ final class WorkTimeHistoricalAssignmentDatabaseTest extends MariaDbTestCase
         ]], $actor);
         $this->save($service, $this->input($employee, $before['id'], $from), $actor);
         $night = $this->nightWork($employee, $from, '23:00', '07:15', 495);
-        $early = $this->nightWork($employee, $next, '02:00', '03:00', 60);
+        $early = $this->nightWork($employee, $next, '07:15', '08:15', 60);
         $nextVersion = $service->addVersion($template['id'], ['windows' => [
             1 => [['start' => '22:00', 'end' => '06:00']],
             2 => [['start' => '06:15', 'end' => '06:45'], ['start' => '09:00', 'end' => '17:00']],

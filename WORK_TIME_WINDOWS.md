@@ -33,7 +33,7 @@ abschliessend ueber arbeitsrechtliche oder Verguetungsansprueche.
 | --- | --- |
 | `AppTimesheetSyncService` | Gemeinsamer Schreibweg fuer PWA, Offline, NFC und Bestaetigungen; bestehender Accounting-Lock und Transaktion. |
 | `TimesheetCalculator` | Unveraenderte Dauerabzuege; rechnerische Mindestpause belegt kein Pausenintervall. |
-| `WorkdayStateCalculator` / `MobileAppService` | Bestehender Tagesstatus und Live-Timer; Anwesenheit und Vorschlaege erscheinen daneben. |
+| `WorkdayStateCalculator` / `MobileAppService` | Tagesstatus und Live-Timer zeigen Anwesenheit, Endvorschläge und automatische Check-outs. |
 | `WorkTimeWindowCalculator` | Reine Intervallschnittmengen aus Arbeit, dokumentierten Pausen, Wochenfenstern und Entscheidungen. |
 | `WorkTimePreviewService` | Zentrale Quelle fuer PWA, Admin, Zeitkonten, Exporte und Abschlusspruefungen; Lesen erzeugt keine Ereignisse. |
 | `TimeAccountService` | Bestehende Salden plus Vorschau; Mitarbeiterstand weiterhin nur bis Ende des Vortages. |
@@ -49,8 +49,12 @@ Arbeitstage, Regelkonflikte sowie Abschlussstatus. Das Prueftoken bindet Akteur,
 Eingaben und Quellstand. Rueckwirkung braucht Begruendung und Bestaetigung.
 Ueberlappungen brauchen eine ausdrueckliche Ersetzungsentscheidung. Nicht
 betroffene Abschnitte bleiben mit ihrer bisherigen Regelversion erhalten. Alte
-Zuordnungsstaende bleiben in der Historie lesbar. Endvorschlaege sowie Mitarbeiter-
-und Vorgesetztenkanaele sind getrennt konfigurierbar.
+Zuordnungsstände bleiben in der Historie lesbar. Die Einstellung „Am Ende des
+Zeitfensters“ wählt zwischen automatischem Check-out, einem Endvorschlag und
+manuellem Check-out. Bei Altregeln mit aktiviertem Endvorschlag greift der
+automatische Modus für neue berechtigte Einsätze. Bereits erzeugte Vorschläge
+bleiben beim bisherigen Bestätigungsablauf. Mitarbeiter- und Vorgesetztenkanäle
+für Vorschläge und Außenzeitmeldungen sind getrennt einstellbar.
 
 Rechte: `work_time_policies.view`, `work_time_policies.manage`,
 `work_time_deviations.view`, `work_time_deviations.manage`,
@@ -85,8 +89,8 @@ Historische FKs verwenden `RESTRICT`; `timesheets` wird nicht strukturell veraen
 Rueckwirkende Zuordnungen revidieren nur die betroffenen Quellen in der vorhandenen
 Warteschlange. Die Vorschau auf abgeschlossene Perioden ist lesend. Vorhandene
 Journale, Stichtagsprotokolle und Abschluss-Snapshots behalten ihre Werte.
-Rueckwirkende Regeln erzeugen fuer bereits begonnene Einsaetze keine neuen
-Endvorschlaege, Push- oder SMS-Ereignisse.
+Rückwirkende Regeln beschränken die Änderung für bereits begonnene Einsätze auf
+die Vorschau. Der Live-Betrieb gilt ab dem Beginn der wirksamen Zuordnung.
 Basismigration: `20261111120000_work_time_windows.php`. Die drei additiven
 Hardening-Migrationen enden auf `reconciliation_queue`, `notification_delivery`
 und `pause_corrections`; Einzelheiten und Pruefnachweise stehen in
@@ -147,15 +151,31 @@ an einer Schicht mit mehreren Pausen prüfen. Phinx blockiert den Down-Pfad ab d
 ersten gespeicherten Regel oder dem ersten Nachweis. Eine Rueckkehr nach Nutzung
 braucht den Sicherungspunkt und eine Abstimmung ueber zwischenzeitlich erfasste Daten.
 
-## Anwesenheit, Endvorschlaege und Offline
+## Anwesenheit, Arbeitsende und Offline
 
 `work_time_presence_sessions` dokumentiert Anwesenheit ohne Arbeitsminuten.
-Ein ausdruecklicher Arbeitsbeginn kann auch nach Mitternacht erfolgen. Ein
-Endvorschlag erzeugt nur `work_time_checkout_proposals`, keine echte Endzeit.
-Erst Bestaetigung/Korrektur schliesst genau den betroffenen Einsatz atomar mit
-der Aktionshistorie ueber den zentralen Sync-Service ab. „Ich arbeite weiter“
-laesst die Buchung offen. Nach einem bestaetigten Abschluss ist ein neuer
-Check-in am selben Tag moeglich.
+Ein ausdrücklicher Arbeitsbeginn kann auch nach Mitternacht erfolgen. Der
+Endvorschlag in `work_time_checkout_proposals` wartet auf eine Bestätigung oder
+Korrektur. Der zentrale Sync-Service speichert den tatsächlichen Abschluss
+atomar mit der Aktionshistorie. „Ich arbeite weiter“ lässt die Buchung offen.
+
+Im automatischen Modus schließt der Minutenworker einen laufenden Einsatz am
+letzten Ende der anwendbaren Tagesfenster oder am Ende des zugeordneten
+Nachtfensters. Die konfigurierbare Verzögerung bestimmt den Verarbeitungszeitpunkt.
+Die Buchung hält die Zeit des Fensterendes in `Europe/Berlin` fest. Liegt der
+geplante Ausführungszeitpunkt mehr als einen Tag zurück, bleibt der Einsatz
+zur manuellen Klärung offen. Eine
+bereits vor dem Endzeitpunkt laufende Pause endet gemeinsam mit dem Einsatz.
+Zeitkonto-Stichtage, Buchhaltungsabschlüsse, Pausennachweise und
+Überschneidungsprüfungen gelten auch für den automatischen Abschluss.
+
+`work_time_automatic_checkouts` protokolliert den geprüften Einsatz und die
+Endzeit. Die Migration `20261126120000_work_time_automatic_checkouts.php`
+legt die Tabelle an. Der Worker versendet über die aktive Push-Anmeldung
+den Hinweis „Automatisch ausgecheckt. Für Überstunden bitte erneut einchecken.“ Die App
+zeigt das gespeicherte Arbeitsende und lässt die Anmeldung bestehen. Weitere
+Arbeit beginnt mit einem neuen Check-in auf dem gewählten Projekt.
+Ein noch wartender Push verfällt, wenn der Mitarbeiter bereits neu eingecheckt hat.
 
 Ein vom Vortag laufender Einsatz bleibt fuer individuell zugeordnete Mitarbeiter
 auch ohne Endvorschlag in der PWA sichtbar und kann mit seiner urspruenglichen
@@ -197,7 +217,8 @@ Push-Reminder-Intervall bleibt erhalten. Nativ nach Betriebsfreigabe:
 * * * * * cd /var/www/html && /usr/bin/php bin/process-worktime-events.php >> storage/logs/worktime-events.log 2>&1
 ```
 
-`work_time_outside_window_started` ist vom Endvorschlag unabhaengig. Bei aktivierter
+`work_time_outside_window_started` ist vom automatischen Check-out und
+Endvorschlag unabhängig. Bei aktivierter
 Option entsteht es fuer einen weiterhin offenen Einsatz ab Fensterende bzw. an
 einem Tag ohne Fenster. Die neue Option ist standardmaessig aus; die Verzoegerung
 ab tatsaechlichem Arbeitsbeginn betraegt standardmaessig fuenf Minuten. Eigene

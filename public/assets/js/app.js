@@ -1678,8 +1678,11 @@
     }
 
     function hasOpenWorkTimeCarryover() {
-        return !!previousWorkTimeEntry() || !!state.today?.active_work_entry_conflict
-            || !!(state.workTime?.enabled && state.workTime.active_work_entry_conflict);
+        return !!previousWorkTimeEntry() || hasOpenWorkTimeConflict();
+    }
+
+    function hasOpenWorkTimeConflict() {
+        return Boolean(state.today?.active_work_entry_conflict || (state.workTime?.enabled && state.workTime.active_work_entry_conflict));
     }
 
     function canEndPreviousWorkTimeEntry(entry) {
@@ -1893,6 +1896,9 @@
         const previousBreakMinutes = isFreshOptimisticEntry && previousSummary
             ? Number(previousSummary.total_break_minutes || 0)
             : 0;
+        const entryOverlap = entry.booking_overlap === true || (!isFreshOptimisticEntry
+            && Number(previousSummary?.work_entry?.id) === Number(entry.id)
+            && previousSummary?.work_entry?.booking_overlap === true);
 
         filtered.unshift({
             project_id: projectId,
@@ -1900,13 +1906,15 @@
             status: todayState.status || 'not_started',
             start_time: entry.start_time || null,
             end_time: entry.end_time || null,
-            total_break_minutes: previousBreakMinutes + Number(entry.break_minutes || 0),
-            total_net_minutes: previousNetMinutes + Number(entry.net_minutes || 0),
+            total_break_minutes: previousBreakMinutes + (entryOverlap ? 0 : Number(entry.break_minutes || 0)),
+            total_net_minutes: previousNetMinutes + (entryOverlap ? 0 : Number(entry.net_minutes || 0)),
+            booking_overlap: entryOverlap || previousSummary?.booking_overlap === true,
             current_break: currentBreakValue,
             tracked_minutes_live_basis: tracked,
             work_entry: {
                 ...entry,
-                attachments
+                attachments,
+                booking_overlap: entryOverlap
             },
             breaks_today: breaks,
             attachments
@@ -1920,7 +1928,7 @@
         const basis = view.tracked_minutes_live_basis || null;
         const accumulatedNetMinutes = Number(view.total_net_minutes || 0);
 
-        if (!basis || !basis.work_started_at || (!basis.is_running && !basis.is_paused)) {
+        if (view.work_entry?.booking_overlap || hasOpenWorkTimeConflict() || !basis || !basis.work_started_at || (!basis.is_running && !basis.is_paused)) {
             return accumulatedNetMinutes;
         }
 
@@ -1990,8 +1998,11 @@
         return liveWorkMinutesForView(currentProjectDayView());
     }
 
-    function currentEntryWorkMinutes() {
-        return liveCurrentEntryMinutesForView(currentProjectDayView());
+    function currentEntryWorkDuration() {
+        const view = currentProjectDayView();
+        const entry = view.work_entry;
+        const unresolved = entry?.booking_overlap || (entry?.start_time && !entry.end_time && hasOpenWorkTimeConflict());
+        return unresolved ? 'Zu klären' : formatDurationMinutes(liveCurrentEntryMinutesForView(view));
     }
 
     function todayTotalWorkMinutes() {
@@ -2219,7 +2230,8 @@
 
     function workTimeMarkup() {
         const data = state.workTime;
-        if (!data || !data.enabled || (!data.policy && !data.presence_session && !data.active_work_entry && !data.active_work_entry_conflict && !(data.checkout_proposals || []).length)) return '';
+        if (!data || !data.enabled || (!data.policy && !data.presence_session && !data.active_work_entry && !data.active_work_entry_conflict
+            && !data.automatic_checkout && !(data.checkout_proposals || []).length)) return '';
         const disabled = !state.online || state.workTimeBusy || state.pendingCount > 0 ? ' disabled' : '';
         const policy = data.policy || {};
         const workDate = state.today && state.today.today;
@@ -2229,23 +2241,30 @@
         const rows = Array.isArray(sourcePreview.rows) ? sourcePreview.rows : [];
         const hasOpenWork = rows.some((row) => row.calculation && row.calculation.calculation_status === 'open');
         const completedRows = rows.filter((row) => !row.calculation || row.calculation.calculation_status !== 'open');
+        const includedRows = completedRows.filter((row) => !row.booking_overlap);
         const preview = hasOpenWork ? {
             ...sourcePreview,
             ...Object.fromEntries(['actual_work_minutes', 'accountable_work_minutes', 'outside_pending_minutes'].map((key) => [key,
-                completedRows.reduce((sum, row) => sum === null || !row.calculation || row.calculation[key] === null || row.calculation[key] === undefined ? null : sum + Number(row.calculation[key]), 0)
+                includedRows.reduce((sum, row) => sum === null || !row.calculation || row.calculation[key] === null || row.calculation[key] === undefined ? null : sum + Number(row.calculation[key]), 0)
             ]))
         } : sourcePreview;
         const duration = (value) => value === null || value === undefined ? 'klärungsbedürftig' : formatDurationMinutes(value);
         let html = '<section class="app-card app-grid app-worktime" aria-label="Kernarbeitszeit"><h2>Kernarbeitszeit</h2>'
             + '<p>' + escapeHtml(!data.policy ? 'Heute keine aktive Kernarbeitszeitregel.' : (windows.length ? windows.map((window) => window.start + '–' + window.end + ' Uhr').join(', ') : 'Heute kein Zeitfenster festgelegt')) + '</p>'
             + '<p class="muted">' + (!data.policy
-                ? 'Die noch offene Anwesenheit, der laufende Einsatz oder der Vorschlag gehört zu einer früher gültigen Regel.'
+                ? 'Die angezeigten Einträge gehören zu einer früher gültigen Regel.'
                 : 'Nur für Sie aktivierte Regel. Tatsächliche Arbeit außerhalb des Fensters bleibt erfasst.') + '</p>';
         if (policy.template_name && policy.revision) {
             const validity = policy.effective_from ? ' · ab ' + formatDate(policy.effective_from) : '';
             const until = policy.effective_to ? ' bis ' + formatDate(policy.effective_to) : '';
             html += '<p class="muted">' + escapeHtml(policy.template_name + ' · Version ' + policy.revision + validity + until) + '</p>';
         }
+        if (data.automatic_checkout?.ended_at && !runningWorkEntry() && !hasOpenWorkTimePresence()) {
+            html += '<div class="app-empty" role="status"><strong>Automatisch ausgecheckt</strong><p>Ende am '
+                + escapeHtml(formatBerlinPauseTime(data.automatic_checkout.ended_at))
+                + ' Uhr. Für Überstunden bitte erneut einchecken.</p></div>';
+        }
+        if (sourcePreview.booking_overlap && !state.today?.booking_overlap) html += bookingOverlapNotice();
         if (completedRows.length) {
             html += '<div class="app-stat-list"><div class="app-stat-row"><span>Tatsächliche Arbeit (abgeschlossen)</span><strong>' + escapeHtml(duration(preview.actual_work_minutes)) + '</strong></div>'
                 + '<div class="app-stat-row"><span>Fensteranrechnung (unverbindliche Vorschau)</span><strong>' + escapeHtml(duration(preview.accountable_work_minutes)) + '</strong></div>'
@@ -2255,7 +2274,7 @@
         if (completedRows.some((row) => row.calculation?.unresolved)) {
             html += '<p role="status" class="app-empty">Vorläufig: Offene Abweichungen oder Pausen müssen noch geklärt werden.</p>';
         }
-        if (hasOpenWork) html += '<p role="status">Laufender Einsatz: siehe Timer. Die Fensteraufteilung folgt nach bestätigtem Arbeitsende.</p>';
+        if (hasOpenWork) html += '<p role="status">Laufender Einsatz: siehe Timer. Die Fensteraufteilung folgt nach Arbeitsende.</p>';
         const previousEntry = previousWorkTimeEntry();
         if (previousEntry && !previousPauseEntry()) {
             const canEnd = canEndPreviousWorkTimeEntry(previousEntry);
@@ -2269,7 +2288,7 @@
             html += '<button type="button" data-worktime-previous="check_out"' + (previousEntry.current_break || !canEnd ? ' disabled' : disabled) + '>Jetzt beenden</button></section>';
         }
         if (data.active_work_entry_conflict) {
-            html += '<p role="alert">Mehrere offene Einsätze wurden gefunden. Bitte im Büro klären, welcher Einsatz tatsächlich läuft. Neue Buchungen sind bis zur Klärung gesperrt.</p>';
+            html += openWorkConflictNotice();
         }
         if (data.presence_session) {
             html += '<div class="app-empty" role="status"><strong>Außerhalb der Kernarbeitszeit anwesend</strong><p>Ihr Arbeitsbeginn ist noch nicht bestätigt. Wenn Sie bereits arbeiten, bestätigen Sie die tatsächliche Startzeit.</p>'
@@ -2733,6 +2752,14 @@
         return '<article class="app-history-metric"><span>' + escapeHtml(title) + '</span><strong>' + escapeHtml(value) + '</strong><small>' + escapeHtml(note) + '</small></article>';
     }
 
+    function bookingOverlapNotice() {
+        return '<p class="app-empty" role="status"><strong>Überlappende Buchungen.</strong> Die Summen enthalten die konfliktfreien Zeiten. Bitte lassen Sie die betroffenen Buchungen im Büro prüfen.</p>';
+    }
+
+    function openWorkConflictNotice() {
+        return '<p class="app-empty" role="alert">Mehrere offene Einsätze wurden gefunden. Bitte im Büro klären, welcher Einsatz tatsächlich läuft. Neue Buchungen sind bis zur Klärung gesperrt.</p>';
+    }
+
     function timesheetEntryTypeOptions() {
         return TIMESHEET_ENTRY_TYPES.map((entryType) => {
             const labels = {
@@ -2795,8 +2822,12 @@
                 };
             }
 
-            grouped[date].total_net_minutes += Number(item.net_minutes || 0);
-            grouped[date].total_break_minutes += Number(item.break_minutes || 0);
+            if (item.booking_overlap) {
+                grouped[date].booking_overlap = true;
+            } else {
+                grouped[date].total_net_minutes += Number(item.net_minutes || 0);
+                grouped[date].total_break_minutes += Number(item.break_minutes || 0);
+            }
             grouped[date].entry_count += 1;
             grouped[date].attachment_count += Number(item.attachment_count || (Array.isArray(item.attachments) ? item.attachments.length : 0));
             grouped[date].items.push(item);
@@ -2815,8 +2846,12 @@
         return (Array.isArray(items) ? items : []).reduce((summary, item) => {
             const entryType = item.entry_type || 'work';
 
-            summary.total_net_minutes += Number(item.net_minutes || 0);
-            summary.total_break_minutes += Number(item.break_minutes || 0);
+            if (item.booking_overlap) {
+                summary.booking_overlap = true;
+            } else {
+                summary.total_net_minutes += Number(item.net_minutes || 0);
+                summary.total_break_minutes += Number(item.break_minutes || 0);
+            }
             summary.entry_count += 1;
             summary.attachment_count += Number(item.attachment_count || (Array.isArray(item.attachments) ? item.attachments.length : 0));
             projectKeys[item.project_id === null || typeof item.project_id === 'undefined' ? 'none' : 'project:' + item.project_id] = true;
@@ -3006,7 +3041,7 @@
         return '<article class="app-timesheet-card app-history-entry" data-render-key="timesheet-' + Number(item.id) + '">'
             + '<div class="app-history-entry-head">'
             + '<div><p class="muted">' + escapeHtml(entryTypeLabel(item.entry_type)) + '</p><h3>' + escapeHtml(projectName) + '</h3></div>'
-            + '<div class="app-timesheet-type">' + escapeHtml(formatDurationMinutes(Number(item.net_minutes || 0))) + '</div>'
+            + '<div class="app-timesheet-type">' + escapeHtml(item.booking_overlap ? 'Zu klären' : formatDurationMinutes(Number(item.net_minutes || 0))) + '</div>'
             + '</div>'
             + '<div class="app-timesheet-card-grid">'
             + '<div><span class="muted">Start</span><strong>' + escapeHtml(formatTime(item.start_time)) + '</strong></div>'
@@ -3049,7 +3084,8 @@
                 return '<details class="app-history-day"' + (index === 0 ? ' open' : '') + '>'
                     + '<summary>'
                     + '<span><strong>' + escapeHtml(day.date_label || formatDate(day.date)) + '</strong><small>' + escapeHtml(day.weekday || '') + '</small></span>'
-                    + '<span><strong>' + escapeHtml(formatDurationMinutes(Number(day.total_net_minutes || 0))) + '</strong><small>' + escapeHtml(timesheetDayStatusLabel(day)) + '</small></span>'
+                    + '<span><strong>' + escapeHtml(formatDurationMinutes(Number(day.total_net_minutes || 0))) + '</strong><small>'
+                    + escapeHtml(day.booking_overlap ? 'Klärungsbedarf · ' + timesheetDayStatusLabel(day) : timesheetDayStatusLabel(day)) + '</small></span>'
                     + attachmentSummary
                     + '</summary>'
                     + '<div class="app-timesheet-cards">' + items.map((item) => timesheetDetailMarkup(item)).join('') + '</div>'
@@ -3097,6 +3133,7 @@
             + '<p class="muted">' + escapeHtml(statusNote) + '</p>'
             + '</div>'
             + monthNav
+            + (summary.booking_overlap ? bookingOverlapNotice() : '')
             + summaryMarkup
             + '<div class="app-filter-toggle" role="group" aria-label="Zeiten filtern">'
             + '<button type="button" data-timesheet-scope="project" class="' + (projectScopeActive ? 'is-active' : '') + '" aria-pressed="' + (projectScopeActive ? 'true' : 'false') + '">Projekt</button>'
@@ -3333,7 +3370,7 @@
         if (!pauseEntry && state.workTime?.enabled && state.workTime.active_work_entry) return '';
         const entry = pauseEntry || previousWorkTimeEntry();
         if (!entry && state.today?.active_work_entry_conflict && !state.workTime?.active_work_entry_conflict) {
-            return '<p class="app-empty" role="alert">Mehrere offene Einsätze wurden gefunden. Bitte klären Sie die Buchungen im Büro, bevor Sie neu einchecken.</p>';
+            return openWorkConflictNotice();
         }
         if (!entry) return '';
         const disabled = state.pendingAction || state.pauseSyncUncertain || !hasPermission('timesheets.create') ? ' disabled' : '';
@@ -3381,12 +3418,13 @@
             + '</section>'
             + '<section class="app-card app-grid">'
             + '<div><p class="muted">Heute</p><h1>Tagesstatus</h1><p>Der zuletzt bekannte Stand bleibt auch offline sichtbar.</p></div>'
+            + (today.booking_overlap ? bookingOverlapNotice() : '')
             + '<div class="app-stat-list">'
             + todayTotalRow
             + projectTodayRow
             + '<div class="app-stat-row"><span class="muted">Start aktuelles Projekt</span><strong data-live-start-time>' + escapeHtml(currentStartTimeValue()) + '</strong></div>'
             + '<div class="app-stat-row"><span class="muted">Ende aktuelles Projekt</span><strong data-live-end-time>' + escapeHtml(currentEndTimeValue()) + '</strong></div>'
-            + '<div class="app-stat-row"><span class="muted">Aktueller Einsatz</span><strong data-live-work-duration>' + escapeHtml(formatDurationMinutes(currentEntryWorkMinutes())) + '</strong></div>'
+            + '<div class="app-stat-row"><span class="muted">Aktueller Einsatz</span><strong data-live-work-duration>' + escapeHtml(currentEntryWorkDuration()) + '</strong></div>'
             + '<div class="app-stat-row"><span class="muted">' + breakTotalLabel
             + '</span><strong data-live-today-break-total>' + escapeHtml(formatDurationMinutes(totalBreakMinutes)) + '</strong></div>'
             + '<div class="app-stat-row"><span class="muted">Projekt</span><strong data-live-project-name>' + escapeHtml(currentProjectName()) + '</strong></div>'
@@ -3414,7 +3452,7 @@
         const canCheckOut = (status === 'working' || status === 'paused');
         const optionalMetrics = [
             showAppWidget('show_current_shift_minutes')
-                ? metric('Aktueller Einsatz', '<span data-live-work-duration>' + escapeHtml(formatDurationMinutes(currentEntryWorkMinutes())) + '</span>', 'Nettozeit fuer den laufenden oder letzten Einsatz')
+                ? metric('Aktueller Einsatz', '<span data-live-work-duration>' + escapeHtml(currentEntryWorkDuration()) + '</span>', 'Nettozeit fuer den laufenden oder letzten Einsatz')
                 : '',
             showAppWidget('show_project_today_minutes')
                 ? metric('Heute aktuelles Projekt', '<span data-live-project-today-duration>' + escapeHtml(formatDurationMinutes(currentProjectTodayWorkMinutes())) + '</span>', 'Nettozeit heute auf diesem Projekt')
@@ -3427,6 +3465,7 @@
         return shell(
             previousPauseEntryMarkup() + '<section class="app-card app-grid">'
             + '<div><p class="muted">Zeiterfassung</p><h1>Arbeitszeiten</h1></div>'
+            + (state.today?.booking_overlap ? bookingOverlapNotice() : '')
             + '<div class="app-grid app-metrics">'
             + metric('Status', statusValueMarkup(), 'Aktueller Tagesstatus')
             + optionalMetrics
@@ -3437,7 +3476,7 @@
             + '<div class="app-stat-row"><span class="muted">Projekt</span><strong data-live-project-name>' + escapeHtml(currentProjectName()) + '</strong></div>'
             + '<div class="app-stat-row"><span class="muted">Start aktuelles Projekt</span><strong data-live-start-time>' + escapeHtml(currentStartTimeValue()) + '</strong></div>'
             + '<div class="app-stat-row"><span class="muted">Ende aktuelles Projekt</span><strong data-live-end-time>' + escapeHtml(currentEndTimeValue()) + '</strong></div>'
-            + '<div class="app-stat-row"><span class="muted">Aktueller Einsatz</span><strong data-live-work-duration>' + escapeHtml(formatDurationMinutes(currentEntryWorkMinutes())) + '</strong></div>'
+            + '<div class="app-stat-row"><span class="muted">Aktueller Einsatz</span><strong data-live-work-duration>' + escapeHtml(currentEntryWorkDuration()) + '</strong></div>'
             + '</div>'
             + '<div class="app-grid">'
             + projectSelectMarkup(runningWorkEntry() ? 'Projekt für den nächsten Check-in' : 'Projekt für die Zeiterfassung')
@@ -3907,6 +3946,16 @@
             };
         }
 
+        if (balance.status === 'needs_clarification') {
+            return {
+                tone: 'is-unavailable',
+                title: 'Zeitkontostand zu klären',
+                value: '',
+                meta,
+                hint: 'Bitte lassen Sie die überlappenden Buchungen im Büro prüfen.'
+            };
+        }
+
         if (balance.status === 'not_active') {
             return {
                 tone: 'is-unavailable',
@@ -3933,6 +3982,11 @@
         const preview = state.vacationPreview;
         const form = state.vacationForm || {};
         const balance = employeeBalancePresentation(account);
+        const provisionalMessage = account.employee_balance?.status === 'needs_clarification' || !account.balance_is_provisional
+            ? ''
+            : account.employee_balance?.booking_overlap_message
+                || account.window_accounting_message
+                || 'Ungeklärte Arbeitszeitanteile: Der Zeitkontostand ist vorläufig.';
         const timeBalanceValue = account.employee_balance && account.employee_balance.label
             ? account.employee_balance.label
             : balance.title;
@@ -4002,7 +4056,7 @@
             + balanceValue
             + '<p class="app-account-balance-meta">' + escapeHtml(balance.meta) + '</p>'
             + balanceHint
-            + (account.balance_is_provisional ? '<p role="status">' + escapeHtml(account.window_accounting_message || 'Ungeklärte Arbeitszeitanteile: Der Zeitkontostand ist vorläufig.') + '</p>' : '')
+            + (provisionalMessage ? '<p role="status">' + escapeHtml(provisionalMessage) + '</p>' : '')
             + '<a class="app-button app-button-secondary app-account-today-link" href="/app/heute" data-app-link="1">Heutige Buchungen ansehen</a>'
             + '</section>'
             + loading
@@ -5573,7 +5627,7 @@
 
     function canRestoreCachedDay(day, context) {
         if (!day || (day.user?.id && String(day.user.id) !== context.userPart)) return false;
-        if (hasRejectedLocalCheckIn(day)) {
+        if (hasRejectedLocalTimeChange(day)) {
             state.timeSyncRequiresRefresh = true;
             return false;
         }
@@ -7675,6 +7729,9 @@
         const previousBreaks = startsFreshEntry ? [] : (PAUSE_ACTIONS.includes(payload.action) && Array.isArray(state.today.breaks_today)
             ? state.today.breaks_today : breaksToday());
         if (payload.action === 'check_in') workEntry.local_check_in_id = clientRequestId;
+        if (['upsert', 'check_out', 'day_close'].includes(payload.action)) {
+            state.today.local_time_change_ids = [...(state.today.local_time_change_ids || []), clientRequestId];
+        }
         const todayBreaks = optimisticBreaks(previousBreaks, payload);
 
         if (payload.project_id !== undefined) {
@@ -7789,9 +7846,9 @@
         state.workConflicts = items.filter((item) => item.status === 'conflict' && !PAUSE_ACTIONS.includes(item.payload?.action));
     }
 
-    function hasRejectedLocalCheckIn(day) {
-        const checkIn = day?.today_state?.work_entry?.local_check_in_id;
-        return Boolean(checkIn && state.workConflicts.some((item) => item.client_request_id === checkIn));
+    function hasRejectedLocalTimeChange(day) {
+        const ids = [...(day?.local_time_change_ids || []), day?.today_state?.work_entry?.local_check_in_id].filter(Boolean);
+        return ids.length > 0 && state.workConflicts.some((item) => ids.includes(item.client_request_id));
     }
 
     async function cacheTimeSyncDay(context) {
@@ -7879,6 +7936,9 @@
 
                 await queueRemove(item.id, current);
                 if (!current()) break;
+                if (state.today?.local_time_change_ids) {
+                    state.today.local_time_change_ids = state.today.local_time_change_ids.filter((id) => id !== item.client_request_id);
+                }
                 completedAny = true;
                 syncedRequestIds.add(item.client_request_id);
                 const pauseMutation = PAUSE_ACTIONS.includes(item.payload.action);
@@ -7927,9 +7987,11 @@
         const pending = await queueAll();
         if (!isCurrentSessionContext(context)) return { completed: false, deferred: false, sessionExpired: true };
         updatePendingQueue(pending);
-        if (hasRejectedLocalCheckIn(state.today)) {
+        if (hasRejectedLocalTimeChange(state.today)) {
             state.today = null;
             state.timeSyncRequiresRefresh = true;
+            onlineDataRequestCounter += 1;
+            activeOnlineDataLoad = null;
             await cacheDelete(todayCacheKey(), current);
         } else {
             await cacheTimeSyncDay(context);
@@ -8758,7 +8820,7 @@
         refreshTopbarStatus();
 
         document.querySelectorAll('[data-live-work-duration]').forEach((element) => {
-            element.textContent = formatDurationMinutes(currentEntryWorkMinutes());
+            element.textContent = currentEntryWorkDuration();
         });
 
         document.querySelectorAll('[data-live-today-duration]').forEach((element) => {

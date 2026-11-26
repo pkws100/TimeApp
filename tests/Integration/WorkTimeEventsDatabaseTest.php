@@ -39,7 +39,7 @@ final class WorkTimeEventsDatabaseTest extends MariaDbTestCase
         $user = $this->createUser();
         $policies = new WorkTimePolicyService($this->connection(), $enabled);
         $windows = array_fill(1, 7, [['start' => '08:00', 'end' => '16:00']]);
-        $template = $policies->createTemplate(['name' => 'Testfenster', 'policy' => array_replace(['windows' => $windows, 'checkout_proposals_enabled' => true, 'checkout_delay_minutes' => 0, 'early_check_in_mode' => 'work_started', 'notify_employee_push' => false], $policy)], $user);
+        $template = $policies->createTemplate(['name' => 'Testfenster', 'policy' => array_replace(['windows' => $windows, 'checkout_mode' => 'proposal', 'checkout_delay_minutes' => 0, 'early_check_in_mode' => 'work_started', 'notify_employee_push' => false], $policy)], $user);
         $assignment = $policies->assign(['user_id' => $user, 'policy_version_id' => $template['version']['id'], 'effective_from' => (new DateTimeImmutable('tomorrow'))->format('Y-m-d')], $user);
         // Only synthetic fixtures are backdated; production API forbids past activation.
         $date = (new DateTimeImmutable('yesterday', new DateTimeZone('Europe/Berlin')))->format('Y-m-d');
@@ -59,6 +59,141 @@ final class WorkTimeEventsDatabaseTest extends MariaDbTestCase
     {
         $events->process(false, new DateTimeImmutable($date . ' 16:30', new DateTimeZone('Europe/Berlin')));
         return $events->statusForUser($user)['checkout_proposals'][0];
+    }
+
+    public function testLegacyEnabledWindowChecksOutAtItsLastEndAndQueuesOnePush(): void
+    {
+        $pushes = [];
+        $connection = $this->connection();
+        $sender = static function (int $recipient, array $payload) use (&$pushes, $connection): array {
+            self::assertNull($connection->fetchColumn('SELECT IS_USED_LOCK("accounting-timesheet-write")'));
+            $pushes[] = [$recipient, $payload];
+            return ['ok' => true];
+        };
+        $windows = array_fill(1, 7, [['start' => '08:00', 'end' => '12:00'], ['start' => '13:00', 'end' => '16:00']]);
+        [$user, , $sync, $events, $date] = $this->services(true, ['windows' => $windows, 'checkout_proposals_enabled' => true], $sender);
+        $connection->execute('UPDATE work_time_policy_versions SET policy_json = JSON_REMOVE(policy_json, "$.checkout_mode")');
+        $entry = $this->checkIn($sync, $user, $date, '07:50')['timesheet'];
+        $zone = new DateTimeZone('Europe/Berlin');
+        self::assertSame(0, $events->process(false, new DateTimeImmutable($date . ' 12:15', $zone))['automatic_checkouts']);
+        $pause = $sync->sync($user, [
+            'client_request_id' => 'afternoon-break', 'action' => 'pause_start', 'work_date' => $date,
+            'break_started_at' => $date . ' 15:45:00', 'expected_timesheet_id' => $entry['id'],
+        ])['current_break'];
+
+        $afterEnd = new DateTimeImmutable($date . ' 16:02', $zone);
+        self::assertSame(1, $events->process(true, $afterEnd)['automatic_checkouts']);
+        self::assertNull($connection->fetchColumn('SELECT end_time FROM timesheets WHERE id = :id', ['id' => $entry['id']]));
+        self::assertNull($connection->fetchColumn('SELECT break_ended_at FROM timesheet_breaks WHERE id = :id', ['id' => $pause['id']]));
+        self::assertSame([], $pushes);
+
+        $summary = $events->process(false, $afterEnd);
+        self::assertSame(0, $summary['errors']);
+        self::assertSame(1, $summary['automatic_checkouts']);
+        self::assertSame(1, $summary['provider_accepted']);
+        self::assertSame(0, $summary['proposals']);
+        self::assertSame('16:00:00', $connection->fetchColumn('SELECT end_time FROM timesheets WHERE id = :id', ['id' => $entry['id']]));
+        self::assertSame($date . ' 16:00:00', $connection->fetchColumn('SELECT break_ended_at FROM timesheet_breaks WHERE id = :id', ['id' => $pause['id']]));
+        self::assertSame((int) $pause['id'], (int) $connection->fetchColumn('SELECT closed_break_id FROM work_time_automatic_checkouts WHERE timesheet_id = :id', ['id' => $entry['id']]));
+        self::assertSame((int) $entry['id'], $events->statusForUser($user, $date)['automatic_checkout']['timesheet_id']);
+        self::assertSame(null, $events->statusForUser($this->createUser(), $date)['automatic_checkout']);
+        self::assertCount(1, $pushes);
+        self::assertSame($user, $pushes[0][0]);
+        self::assertSame('Automatisch ausgecheckt', $pushes[0][1]['title']);
+        self::assertStringContainsString('Für Überstunden bitte erneut einchecken.', $pushes[0][1]['body']);
+
+        $overtime = $this->checkIn($sync, $user, $date, '16:02', 'overtime')['timesheet'];
+        self::assertNotSame($entry['id'], $overtime['id']);
+        self::assertNull($events->statusForUser($user, $date)['automatic_checkout']);
+        self::assertSame(0, $events->process(false, $afterEnd->modify('+2 hours'))['automatic_checkouts']);
+        self::assertNull($connection->fetchColumn('SELECT end_time FROM timesheets WHERE id = :id', ['id' => $overtime['id']]));
+        self::assertCount(1, $pushes);
+    }
+
+    public function testAutomaticCheckoutDoesNotCloseAStaleOrAccountingLockedBooking(): void
+    {
+        [$user, , $sync, $events, $date] = $this->services(true, ['checkout_mode' => 'automatic']);
+        $entry = $this->checkIn($sync, $user, $date)['timesheet'];
+        $zone = new DateTimeZone('Europe/Berlin');
+        $afterEnd = new DateTimeImmutable($date . ' 17:00', $zone);
+        self::assertSame(0, $events->process(false, $afterEnd->modify('+1 day'))['automatic_checkouts']);
+        $this->connection()->execute(
+            'INSERT INTO accounting_closures (closure_number, closure_type, status, period_start, period_end, user_id, snapshot_hash)
+             VALUES ("AUTO-LOCKED", "month", "final", :day_from, :day_to, :user, "fixture")',
+            ['day_from' => $date, 'day_to' => $date, 'user' => $user]
+        );
+        $summary = $events->process(false, $afterEnd);
+        self::assertSame(0, $summary['automatic_checkouts']);
+        self::assertNull($this->connection()->fetchColumn('SELECT end_time FROM timesheets WHERE id = :id', ['id' => $entry['id']]));
+        self::assertSame(0, (int) $this->connection()->fetchColumn('SELECT COUNT(*) FROM work_time_notification_events'));
+    }
+
+    public function testDelayedPushIsSuppressedAfterTheEmployeeAlreadyCheckedInAgain(): void
+    {
+        [$user, $policies, $sync, $events, $date] = $this->services(true, ['checkout_mode' => 'automatic']);
+        $this->checkIn($sync, $user, $date);
+        $zone = new DateTimeZone('Europe/Berlin');
+        $now = new DateTimeImmutable($date . ' 16:00', $zone);
+        self::assertSame(1, $events->process(false, $now)['not_configured']);
+        $notification = $events->notificationEventsForEmployee($user)[0];
+        $events->notifications()->requestRetry((int) $notification['id'], $user, 'Push ist wieder verfügbar', 'retry-automatic');
+        $this->checkIn($sync, $user, $date, '16:00', 'working-again');
+
+        $later = new WorkTimeEventService($this->connection(), $policies, $sync, static function (): array {
+            self::fail('Eine Aufforderung zum erneuten Check-in ist bereits überholt.');
+        });
+        $summary = $later->notifications()->dispatch($now->modify('+1 minute'));
+        self::assertSame(1, $summary['cancelled']);
+        self::assertSame(0, $summary['attempted']);
+    }
+
+    public function testAutomaticCheckoutUsesTheEndDateOfAnOvernightWindow(): void
+    {
+        [$user, , $sync, $events, $date] = $this->services(true, [
+            'checkout_mode' => 'automatic',
+            'checkout_delay_minutes' => 5,
+            'windows' => array_fill(1, 7, [['start' => '22:00', 'end' => '06:00']]),
+        ]);
+        $zone = new DateTimeZone('Europe/Berlin');
+        $overnightEnd = new DateTimeImmutable($date . ' 06:00', $zone);
+        $startDate = $overnightEnd->modify('-1 day')->format('Y-m-d');
+        $connection = $this->connection();
+        $connection->execute(
+            'UPDATE employee_work_time_assignments SET effective_from = :day WHERE user_id = :user',
+            ['day' => $startDate, 'user' => $user]
+        );
+        $entry = $this->checkIn($sync, $user, $startDate, '23:00')['timesheet'];
+        self::assertSame(0, $events->process(false, $overnightEnd->modify('+4 minutes'))['automatic_checkouts']);
+        self::assertSame(1, $events->process(false, $overnightEnd->modify('+5 minutes'))['automatic_checkouts']);
+        $booking = $connection->fetchOne('SELECT work_date, end_time FROM timesheets WHERE id = :id', ['id' => $entry['id']]);
+        self::assertSame(['work_date' => $startDate, 'end_time' => '06:00:00'], $booking);
+        self::assertSame($overnightEnd->format(DATE_ATOM), $events->statusForUser($user, $date)['automatic_checkout']['ended_at']);
+    }
+
+    public function testOverlappingWorkRollsBackAutomaticPauseEndAndPush(): void
+    {
+        [$user, , $sync, $events, $date] = $this->services(true, ['checkout_mode' => 'automatic']);
+        $entry = $this->checkIn($sync, $user, $date)['timesheet'];
+        $pause = $sync->sync($user, [
+            'client_request_id' => 'conflicted-auto-pause', 'action' => 'pause_start', 'work_date' => $date,
+            'break_started_at' => $date . ' 15:30:00', 'expected_timesheet_id' => $entry['id'],
+        ])['current_break'];
+        $connection = $this->connection();
+        $connection->execute(
+            'INSERT INTO timesheets (user_id, work_date, entry_type, source, start_time, end_time, gross_minutes, net_minutes)
+             VALUES (:user, :day, "work", "admin", "15:45:00", "17:00:00", 75, 75)',
+            ['user' => $user, 'day' => $date]
+        );
+
+        $now = new DateTimeImmutable($date . ' 16:01:00', new DateTimeZone('Europe/Berlin'));
+        self::assertSame(0, $events->process(true, $now)['automatic_checkouts']);
+        $summary = $events->process(false, $now);
+        self::assertSame(0, $summary['automatic_checkouts']);
+        self::assertSame(1, $summary['errors']);
+        self::assertNull($connection->fetchColumn('SELECT end_time FROM timesheets WHERE id = :id', ['id' => $entry['id']]));
+        self::assertNull($connection->fetchColumn('SELECT break_ended_at FROM timesheet_breaks WHERE id = :id', ['id' => $pause['id']]));
+        self::assertSame(0, (int) $connection->fetchColumn('SELECT COUNT(*) FROM work_time_automatic_checkouts'));
+        self::assertSame(0, (int) $connection->fetchColumn('SELECT COUNT(*) FROM work_time_notification_events'));
     }
 
     public function testDisabledFeaturePreservesEarlyCheckInAndCreatesNoEvents(): void

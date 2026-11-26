@@ -72,7 +72,8 @@ final class AdminController
         $periods = '';
 
         foreach ($overview['periods'] as $period) {
-            $periods .= '<article class="card period"><h3>' . htmlspecialchars((string) $period['label'], ENT_QUOTES, 'UTF-8') . '</h3><p>' . htmlspecialchars((string) $period['entries'], ENT_QUOTES, 'UTF-8') . ' Eintraege</p><p>' . htmlspecialchars((string) $period['hours'], ENT_QUOTES, 'UTF-8') . ' Std</p></article>';
+            $overlapNotice = empty($period['booking_overlap']) ? '' : '<p class="muted">Stunden ohne überlappende Buchungen</p>';
+            $periods .= '<article class="card period"><h3>' . htmlspecialchars((string) $period['label'], ENT_QUOTES, 'UTF-8') . '</h3><p>' . htmlspecialchars((string) $period['entries'], ENT_QUOTES, 'UTF-8') . ' Eintraege</p><p>' . htmlspecialchars((string) $period['hours'], ENT_QUOTES, 'UTF-8') . ' Std</p>' . $overlapNotice . '</article>';
         }
 
         $statusClass = $overview['status'] === 'database' ? 'ok' : 'warn';

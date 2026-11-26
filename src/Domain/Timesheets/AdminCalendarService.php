@@ -156,7 +156,7 @@ final class AdminCalendarService
                 break;
             }
 
-            if ((bool) ($booking['needs_project_assignment'] ?? false)) {
+            if (!empty($booking['booking_overlap']) || !empty($booking['needs_project_assignment'])) {
                 $hasProblem = true;
                 break;
             }
@@ -210,9 +210,10 @@ final class AdminCalendarService
                 $activeBookings
             )))),
             'net_minutes' => array_sum(array_map(
-                static fn (array $booking): int => (int) ($booking['net_minutes'] ?? 0),
+                static fn (array $booking): int => empty($booking['booking_overlap']) ? (int) ($booking['net_minutes'] ?? 0) : 0,
                 $activeBookings
             )),
+            'booking_overlap' => (bool) array_filter($activeBookings, static fn (array $booking): bool => !empty($booking['booking_overlap'])),
             'issue_count' => $hasProblem ? $this->issueCount($activeBookings) : 0,
         ];
     }
@@ -336,7 +337,7 @@ final class AdminCalendarService
         foreach ($bookings as $booking) {
             $entryType = (string) ($booking['entry_type'] ?? 'work');
             $isIssue = ($entryType === 'work' && (trim((string) ($booking['start_time'] ?? '')) === '' || trim((string) ($booking['end_time'] ?? '')) === ''))
-                || (bool) ($booking['needs_project_assignment'] ?? false);
+                || !empty($booking['needs_project_assignment']) || !empty($booking['booking_overlap']);
 
             if ($isIssue) {
                 $count++;

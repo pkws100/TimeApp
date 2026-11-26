@@ -64,8 +64,8 @@ final class AppTimesheetSyncService
         return $this->pauses?->hasOpenModelBooking($userId) ?? false;
     }
 
-    /** The optional callback participates in the same transaction as the stamp. */
-    public function sync(int|array $user, array $payload, ?callable $afterSync = null): array
+    /** The optional hooks participate in the stamp transaction and run only for a new operation. */
+    public function sync(int|array $user, array $payload, ?callable $afterSync = null, ?callable $beforeSync = null): array
     {
         $userId = is_array($user) ? (int) ($user['id'] ?? 0) : $user;
         $permissions = is_array($user) && is_array($user['permissions'] ?? null) ? $user['permissions'] : [];
@@ -94,14 +94,17 @@ final class AppTimesheetSyncService
             throw new RuntimeException('Die Aktion ist ungueltig.');
         }
 
-        return $this->withAccountingWriteLock(function () use ($userId, $permissions, $clientRequestId, $payload, $action, $afterSync): array {
-            return $this->connection->transaction(function () use ($userId, $permissions, $clientRequestId, $payload, $action, $afterSync): array {
+        return $this->withAccountingWriteLock(function () use ($userId, $permissions, $clientRequestId, $payload, $action, $afterSync, $beforeSync): array {
+            return $this->connection->transaction(function () use ($userId, $permissions, $clientRequestId, $payload, $action, $afterSync, $beforeSync): array {
                 $existingClaim = $this->claimSyncOperation($clientRequestId, $userId, $action);
 
                 if ($existingClaim !== null) {
                     return $existingClaim;
                 }
 
+                if ($beforeSync !== null) {
+                    $beforeSync();
+                }
                 $result = $this->performSync($userId, $permissions, $clientRequestId, $payload, $action);
                 if ($afterSync !== null) {
                     $afterSync($result);
@@ -127,6 +130,7 @@ final class AppTimesheetSyncService
         $originalAction = $action;
         $startingWork = in_array($action, ['check_in', 'work_start'], true);
         $endingWork = in_array($action, ['check_out', 'day_close'], true);
+        $requestedStartTime = $startingWork ? $this->readStampTime($payload['start_time'] ?? null) ?? $now->format('H:i') : null;
         $requestedProjectId = $this->normalizeProjectId($payload['project_id'] ?? null);
         if ($startingWork) {
             $this->assertNoOpenWorkSession($userId, $permissions, $requestedProjectId, LiveWorkSession::referenceDate($workDate, $now));
@@ -165,7 +169,8 @@ final class AppTimesheetSyncService
             $this->assertExpectedProjectAssignment($entry, $payload, $userId);
             unset($payload['source']);
         }
-        $checkSessionBinding = $appliesToUser || $pausePolicy !== null || $boundPauseAction || $endingWork;
+        $checkSessionBinding = $appliesToUser || $pausePolicy !== null || $boundPauseAction || $endingWork
+            || ($action === 'upsert' && isset($payload['expected_start_time']));
         if ($checkSessionBinding && !$startingWork && $action !== 'presence_end') {
             if (isset($payload['expected_start_time'])) {
                 $expectedStart = is_string($payload['expected_start_time']) ? $this->normalizeTime($payload['expected_start_time']) : null;
@@ -217,7 +222,9 @@ final class AppTimesheetSyncService
         $this->assertAccountingWriteAllowed($entry, $userId, $projectId, $workDate);
         $this->dayConflictService?->assertNoConflictForWork($userId, $workDate, $entry !== null ? (int) $entry['id'] : null);
         if ($startingWork) {
-            $this->assertNoLaterCompletedWork($userId, $date, $this->normalizeTime($payload['start_time'] ?? null) ?? $now->format('H:i'));
+            $this->dayConflictService?->assertNoWorkOverlap(
+                $userId, $workDate, $requestedStartTime, null, isset($entry['id']) ? (int) $entry['id'] : null, $now
+            );
         }
         $presenceResponse = $this->workTimePresenceService?->handle($userId, $payload, $action, $entry);
         if ($presenceResponse !== null) {
@@ -232,7 +239,7 @@ final class AppTimesheetSyncService
             unset($payload['source'], $payload['geo'], $payload['geo_acknowledged']);
         }
         $source = $this->normalizeSource($payload['source'] ?? ($entry['source'] ?? 'app'));
-        if ($pauseWrite && isset($entry['source'])) {
+        if (($pauseWrite || ($endingWork && !isset($payload['source']))) && isset($entry['source'])) {
             $source = (string) $entry['source'];
         }
         $manualBreakMinutes = isset($entry['break_minutes']) ? (int) $entry['break_minutes'] : $this->workdayStateCalculator->completedBreakMinutes($existingBreaks);
@@ -245,7 +252,8 @@ final class AppTimesheetSyncService
         $endTime = $entry['end_time'] ?? null;
 
         if ($action === 'check_in') {
-            $startTime = $this->normalizeTime($payload['start_time'] ?? null) ?? $now->format('H:i');
+            $startTime = $requestedStartTime;
+            $endTime = null;
         }
 
         if (in_array($action, ['check_out', 'day_close'], true)) {
@@ -257,7 +265,7 @@ final class AppTimesheetSyncService
                 throw new RuntimeException('Check-out ist erst moeglich, wenn die laufende Pause beendet wurde.');
             }
 
-            $endTime = $this->normalizeTime($payload['end_time'] ?? null) ?? $now->format('H:i');
+            $endTime = $this->readStampTime($payload['end_time'] ?? null) ?? $now->format('H:i');
             if (isset($payload['actual_end_at'])) {
                 $actualValue = $payload['actual_end_at'];
                 if (!is_string($actualValue) || !preg_match('/^\d{4}-\d{2}-\d{2}[T ](?:[01]\d|2[0-3]):[0-5]\d(?::00)?$/D', $actualValue)) {
@@ -275,8 +283,8 @@ final class AppTimesheetSyncService
         }
 
         if ($action === 'upsert') {
-            $startTime = $this->normalizeTime($payload['start_time'] ?? null) ?? $startTime;
-            $endTime = $this->normalizeTime($payload['end_time'] ?? null) ?? $endTime;
+            $startTime = $this->readStampTime($payload['start_time'] ?? null) ?? $startTime;
+            $endTime = $this->readStampTime($payload['end_time'] ?? null) ?? $endTime;
         }
 
         if ($action === 'pause_start') {
@@ -303,7 +311,8 @@ final class AppTimesheetSyncService
             throw new RuntimeException('Bitte zuerst einen Check-in buchen. Danach koennen Sie das Projekt zuordnen.');
         }
 
-        if ($action === 'upsert' && $entry === null && ($startTime === null || $startTime === '') && ($endTime === null || $endTime === '')) {
+        if ($action === 'upsert' && ($startTime === null || $startTime === '')
+            && ($entry === null || isset($payload['end_time']))) {
             throw new RuntimeException('Bitte zuerst einen Check-in buchen oder eine Startzeit eingeben.');
         }
 
@@ -366,6 +375,13 @@ final class AppTimesheetSyncService
         }
         if ($endingWork && !empty($entry['end_time'])) {
             throw new RuntimeException('Dieser Arbeitseinsatz ist bereits beendet. Bitte App-Daten neu laden.');
+        }
+        if ($endingWork || ($action === 'upsert' && ($entry === null
+            || $this->comparableStamp($startTime) !== $this->comparableStamp($entry['start_time'] ?? null)
+            || $this->comparableStamp($endTime) !== $this->comparableStamp($entry['end_time'] ?? null)))) {
+            $this->dayConflictService?->assertNoWorkOverlap(
+                $userId, $workDate, $startTime, $endTime, isset($entry['id']) ? (int) $entry['id'] : null, $now
+            );
         }
         if ($action === 'pause' && array_key_exists('manual_break_minutes', $payload) && ($pausePolicy !== null || $existingBreaks !== [])) {
             throw new InvalidArgumentException('Vorhandene Pausennachweise bleiben erhalten. Bitte einen einzelnen Pausennachtrag erfassen.');
@@ -463,25 +479,6 @@ final class AppTimesheetSyncService
         }
 
         throw new WorkSessionConflict('active_work_session', $message, $project);
-    }
-
-    private function assertNoLaterCompletedWork(int $userId, DateTimeImmutable $date, string $startTime): void
-    {
-        $overlap = $this->connection->fetchOne(
-            'SELECT id FROM timesheets
-             WHERE user_id = :user_id AND entry_type = "work" AND COALESCE(is_deleted, 0) = 0
-               AND work_date >= :earliest_date AND start_time IS NOT NULL AND end_time IS NOT NULL
-               AND TIMESTAMP(IF(end_time < start_time, DATE_ADD(work_date, INTERVAL 1 DAY), work_date), end_time) > :start_at
-             LIMIT 1',
-            [
-                'user_id' => $userId,
-                'earliest_date' => $date->modify('-1 day')->format('Y-m-d'),
-                'start_at' => $date->format('Y-m-d') . ' ' . $startTime . ':00',
-            ]
-        );
-        if ($overlap !== null) {
-            throw new WorkSessionConflict('overlapping_work_session', 'Für diesen Check-in liegt bereits eine spätere Arbeitsbuchung vor. Prüfen Sie die erfassten Zeiten, bevor Sie erneut buchen.');
-        }
     }
 
     private function assertExpectedProjectAssignment(?array $entry, array $payload, int $userId): void
@@ -1203,16 +1200,30 @@ final class AppTimesheetSyncService
 
     private function normalizeTime(mixed $value): ?string
     {
-        $value = trim((string) ($value ?? ''));
-
-        if ($value === '') {
+        if (!is_string($value)) {
             return null;
         }
+        $value = trim($value);
 
-        $time = \DateTimeImmutable::createFromFormat('H:i', $value)
-            ?: \DateTimeImmutable::createFromFormat('H:i:s', $value);
+        return preg_match('/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/D', $value) ? substr($value, 0, 5) : null;
+    }
 
-        return $time ? $time->format('H:i') : null;
+    private function readStampTime(mixed $value): ?string
+    {
+        if ($value === null || (is_string($value) && trim($value) === '')) {
+            return null;
+        }
+        $time = $this->normalizeTime($value);
+        if ($time === null) {
+            throw new InvalidArgumentException('Die angegebene Uhrzeit ist ungültig.');
+        }
+
+        return $time;
+    }
+
+    private function comparableStamp(?string $value): ?string
+    {
+        return $value !== null && strlen($value) === 5 ? $value . ':00' : $value;
     }
 
     private function normalizeDateTime(mixed $value): ?string

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Dashboard;
 
 use App\Domain\Attendance\AttendanceService;
+use App\Domain\Timesheets\TimesheetOverlap;
 use App\Domain\Users\StorageUsageService;
 use App\Infrastructure\Database\DatabaseConnection;
 
@@ -105,9 +106,9 @@ final class DashboardService
             $rows = $this->chartRows($period);
             $charts = $this->buildChartsFromRows($rows, $period);
             $charts['status'] = $rows === [] ? 'empty' : 'database';
-            $charts['message'] = $rows === []
+            $charts['message'] = !empty($charts['booking_overlap']) ? TimesheetOverlap::MESSAGE : ($rows === []
                 ? 'Fuer den gewaehlten Zeitraum liegen noch keine belastbaren Buchungen vor.'
-                : 'Live-Daten fuer die Dashboard-Grafik wurden geladen.';
+                : 'Live-Daten fuer die Dashboard-Grafik wurden geladen.');
 
             return $charts;
         }
@@ -123,6 +124,7 @@ final class DashboardService
         $hours = array_fill_keys(array_keys($buckets), 0.0);
         $entryTypeCounts = ['work' => 0, 'sick' => 0, 'vacation' => 0, 'holiday' => 0, 'absent' => 0];
         $projectAllocations = [];
+        $bookingOverlap = false;
 
         foreach ($rows as $row) {
             $bucketKey = $this->bucketKey((string) ($row['work_date'] ?? ''), $period);
@@ -139,7 +141,11 @@ final class DashboardService
 
             if ($entryType === 'work') {
                 $presentSets[$bucketKey][$userId] = true;
-                $hours[$bucketKey] += ((int) ($row['net_minutes'] ?? 0)) / 60;
+                if (!empty($row['booking_overlap'])) {
+                    $bookingOverlap = true;
+                } else {
+                    $hours[$bucketKey] += ((int) ($row['net_minutes'] ?? 0)) / 60;
+                }
 
                 $projectName = trim((string) ($row['project_name'] ?? 'Nicht zugeordnet'));
                 $projectName = $projectName !== '' ? $projectName : 'Nicht zugeordnet';
@@ -169,6 +175,7 @@ final class DashboardService
 
         return [
             'period' => $period,
+            'booking_overlap' => $bookingOverlap,
             'headcount' => [
                 'labels' => $labels,
                 'datasets' => [
@@ -246,10 +253,12 @@ final class DashboardService
         }
 
         $range = $this->periodRange($period);
+        $overlap = TimesheetOverlap::disputedSql('timesheets');
         $summary = $this->connection->fetchOne(
             'SELECT
                 COUNT(*) AS entries,
-                COALESCE(SUM(CASE WHEN timesheets.entry_type = "work" THEN timesheets.net_minutes ELSE 0 END), 0) AS net_minutes
+                COALESCE(SUM(CASE WHEN timesheets.entry_type = "work" AND NOT ' . $overlap . ' THEN timesheets.net_minutes ELSE 0 END), 0) AS net_minutes,
+                MAX(' . $overlap . ') AS booking_overlap
              FROM timesheets
              INNER JOIN users ON users.id = timesheets.user_id
              WHERE timesheets.work_date BETWEEN :start AND :end
@@ -264,7 +273,7 @@ final class DashboardService
         $entries = (int) ($summary['entries'] ?? 0);
         $hours = round(((int) ($summary['net_minutes'] ?? 0)) / 60, 2);
 
-        return ['label' => $label, 'entries' => $entries, 'hours' => $hours];
+        return ['label' => $label, 'entries' => $entries, 'hours' => $hours, 'booking_overlap' => !empty($summary['booking_overlap'])];
     }
 
     private function chartRows(string $period): array
@@ -281,6 +290,7 @@ final class DashboardService
                 timesheets.entry_type,
                 ' . $absenceReasonSelect . ',
                 timesheets.net_minutes,
+                ' . TimesheetOverlap::disputedSql('timesheets') . ' AS booking_overlap,
                 projects.name AS project_name
              FROM timesheets
              INNER JOIN users ON users.id = timesheets.user_id

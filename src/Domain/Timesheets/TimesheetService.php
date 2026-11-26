@@ -23,7 +23,7 @@ final class TimesheetService
         $this->pauses = $service;
     }
 
-    public function list(): array
+    public function list(bool $includeArchived = true): array
     {
         if ($this->connection->tableExists('timesheets')) {
             $absenceReasonSelect = $this->connection->columnExists('timesheets', 'absence_reason_code')
@@ -31,7 +31,10 @@ final class TimesheetService
                 : 'NULL AS absence_reason_code';
 
             $rows = $this->connection->fetchAll(
-                'SELECT id, user_id, project_id, work_date, start_time, end_time, break_minutes, net_minutes, entry_type, ' . $absenceReasonSelect . ', note, is_deleted FROM timesheets ORDER BY work_date DESC, start_time DESC LIMIT 50'
+                'SELECT id, user_id, project_id, work_date, start_time, end_time, break_minutes, net_minutes, entry_type, '
+                    . $absenceReasonSelect . ', note, is_deleted, ' . TimesheetOverlap::disputedSql('timesheets') . ' AS booking_overlap
+                 FROM timesheets' . ($includeArchived ? '' : ' WHERE COALESCE(is_deleted, 0) = 0') . '
+                 ORDER BY work_date DESC, start_time DESC LIMIT 50'
             );
             $assessments = $this->pauses?->assessmentsForEntries($rows) ?? [];
 
@@ -95,8 +98,9 @@ final class TimesheetService
 
     public function reportRows(string $period): array
     {
-        $rows = $this->list();
+        $rows = $this->list(includeArchived: false);
         $includeAssessment = (bool) array_filter($rows, static fn (array $row): bool => isset($row['break_assessment']));
+        $includeOverlap = (bool) array_filter($rows, static fn (array $row): bool => !empty($row['booking_overlap']));
 
         return array_map(
             static fn (array $row): array => [
@@ -105,11 +109,12 @@ final class TimesheetService
                 'Projekt' => 'Projekt #' . $row['project_id'],
                 'Start' => $row['start_time'],
                 'Ende' => $row['end_time'],
-                'Gespeicherte Pause (Min)' => $row['break_minutes'],
-                'Netto (Min)' => $row['net_minutes'],
+                'Gespeicherte Pause (Min)' => empty($row['booking_overlap']) ? $row['break_minutes'] : '',
+                'Netto (Min)' => empty($row['booking_overlap']) ? $row['net_minutes'] : '',
                 'Typ' => self::semanticEntryType($row),
                 'Bemerkung' => $row['note'],
                 'Periode' => $period,
+                ...(!$includeOverlap ? [] : ['Buchungskonflikt' => !empty($row['booking_overlap']) ? TimesheetOverlap::MESSAGE : '']),
                 ...(!$includeAssessment ? [] : [
                     'Dokumentierte Tagespause (Min)' => $row['break_assessment']['documented_break_minutes'] ?? '',
                     'Pflichtpause am Arbeitstag (Min)' => $row['break_assessment']['required_break_minutes'] ?? '',

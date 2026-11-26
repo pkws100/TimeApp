@@ -41,8 +41,8 @@ test.describe('real work-time windows workflow', () => {
     }
   }
 
-  async function history(page) {
-    const response = await page.request.get('/api/v1/app/me/timesheets?scope=all');
+  async function history(page, month) {
+    const response = await page.request.get('/api/v1/app/me/timesheets?scope=all' + (month ? '&month=' + encodeURIComponent(month) : ''));
     expect(response.ok()).toBeTruthy();
     return (await response.json()).data.items;
   }
@@ -85,6 +85,30 @@ test.describe('real work-time windows workflow', () => {
     expect(rows.filter((row) => row.entry_type === 'work')).toHaveLength(2);
     expect(rows.find((row) => row.id === id).end_time).toBe(process.env.UI_TEST_WORKTIME_END);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
+  });
+
+  test('the worker checkout remains in history and the employee can explicitly start a fresh shift', async ({ page }) => {
+    await login(page, 'automatic');
+    const id = Number(process.env.UI_TEST_WORKTIME_AUTOMATIC_ID);
+    const end = process.env.UI_TEST_WORKTIME_AUTOMATIC_END;
+    const originalMonth = process.env.UI_TEST_WORKTIME_WORK_DATE.slice(0, 7);
+    const projectId = process.env.UI_TEST_FORM_PROJECT_ID;
+    const message = page.getByText('Automatisch ausgecheckt', { exact: true });
+    await expect(message).toBeVisible();
+    await expect(page.getByText(/Für Überstunden bitte erneut einchecken/)).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Arbeitsende bestätigen' })).toHaveCount(0);
+    expect((await history(page, originalMonth)).find((row) => row.id === id)?.end_time).toBe(end);
+
+    await page.locator('#projectSelect').selectOption(projectId);
+    await page.locator('[data-action="check_in"]').click();
+
+    await expect(page.locator('[data-action="check_out"]')).toBeVisible();
+    await expect(message).toHaveCount(0);
+    const open = (await history(page)).filter((row) => row.entry_type === 'work' && row.end_time === null);
+    expect(open).toHaveLength(1);
+    expect(open[0]).toMatchObject({ project_id: Number(projectId) });
+    expect(open[0].id).not.toBe(id);
+    expect((await history(page, originalMonth)).find((row) => row.id === id)?.end_time).toBe(end);
   });
 
   test('admin previews a rule before creating an immutable version', async ({ page }) => {

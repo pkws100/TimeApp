@@ -7,6 +7,7 @@ namespace App\Domain\WorkTime;
 use App\Domain\Projects\ProjectAccessService;
 use App\Domain\Timesheets\AppTimesheetSyncService;
 use App\Domain\Timesheets\LiveWorkSession;
+use App\Domain\Timesheets\TimesheetDayConflictService;
 use App\Domain\Timesheets\TimesheetPauseIntervals;
 use App\Domain\Timesheets\TimesheetWriteGuard;
 use App\Infrastructure\Database\DatabaseConnection;
@@ -73,7 +74,37 @@ final class WorkTimeEventService
             $presence = $this->withVisibleProject($viewer, $presence);
         }
 
-        return ['enabled' => true, 'checkout_proposals' => $proposals, 'presence_session' => $presence, 'active_work_entry' => $activeEntry, 'active_work_entry_conflict' => $conflict];
+        return [
+            'enabled' => true,
+            'checkout_proposals' => $proposals,
+            'presence_session' => $presence,
+            'active_work_entry' => $activeEntry,
+            'active_work_entry_conflict' => $conflict,
+            'automatic_checkout' => $this->latestAutomaticCheckout($userId, $today),
+        ];
+    }
+
+    private function latestAutomaticCheckout(int $userId, string $today): ?array
+    {
+        if (!$this->connection->tableExists('work_time_automatic_checkouts')) {
+            return null;
+        }
+
+        $row = $this->connection->fetchOne(
+            'SELECT a.timesheet_id, a.ended_at FROM work_time_automatic_checkouts a
+             JOIN timesheets t ON t.id = a.timesheet_id AND t.user_id = a.user_id
+             WHERE a.user_id = :user AND a.ended_at >= :recent AND ' . WorkTimeAutomaticCheckoutNotice::currentSql('a', 't') . '
+             ORDER BY a.ended_at DESC, a.timesheet_id DESC LIMIT 1',
+            [
+                'user' => $userId,
+                'recent' => (new DateTimeImmutable($today, new DateTimeZone('Europe/Berlin')))->modify('-1 day')->format('Y-m-d 00:00:00'),
+            ]
+        );
+
+        return $row === null ? null : [
+            'timesheet_id' => (int) $row['timesheet_id'],
+            'ended_at' => WorkTimeLocalTime::parse($row['ended_at'])->format(DATE_ATOM),
+        ];
     }
 
     private function withVisibleProject(array $viewer, ?array $entry): ?array
@@ -190,7 +221,7 @@ final class WorkTimeEventService
 
     public function process(bool $dryRun = false, ?DateTimeImmutable $now = null, int $batchSize = 100): array
     {
-        $summary = ['enabled' => $this->policies->enabled(), 'dry_run' => $dryRun, 'proposals' => 0, 'stale' => 0, 'outside_notifications_queued' => 0, 'provider_accepted' => 0, 'sent' => 0, 'failed' => 0, 'disabled' => 0, 'not_configured' => 0, 'test_simulated' => 0, 'cancelled' => 0, 'uncertain' => 0, 'errors' => 0, 'locked' => false];
+        $summary = ['enabled' => $this->policies->enabled(), 'dry_run' => $dryRun, 'proposals' => 0, 'automatic_checkouts' => 0, 'stale' => 0, 'outside_notifications_queued' => 0, 'provider_accepted' => 0, 'sent' => 0, 'failed' => 0, 'disabled' => 0, 'not_configured' => 0, 'test_simulated' => 0, 'cancelled' => 0, 'uncertain' => 0, 'errors' => 0, 'locked' => false];
         if (!$summary['enabled']) {
             return $summary;
         }
@@ -243,19 +274,26 @@ final class WorkTimeEventService
                                 : $this->connection->transaction(fn (): int => $this->notifications->queue('work_time_outside_window_started', $entry, $policy, $startedAt));
                             $summary['outside_notifications_queued'] += $queued;
                         }
-                        if (empty($policy['checkout_proposals_enabled'])) { continue; }
-                        $proposedEnd = WorkTimeEventWindows::windowEnd($policy, $entry['work_date'], $startedAt);
-                        if ($proposedEnd === null || $proposedEnd <= $startedAt || $proposedEnd->modify('+' . (int) ($policy['checkout_delay_minutes'] ?? 0) . ' minutes') > $now || $this->connection->fetchOne('SELECT id FROM work_time_checkout_proposals WHERE timesheet_id = :id', ['id' => $entry['id']]) !== null) {
+                        if ($policy['checkout_mode'] === 'manual') { continue; }
+                        $windowEnd = WorkTimeEventWindows::windowEnd($policy, $entry['work_date'], $startedAt);
+                        $due = $windowEnd?->modify('+' . (int) ($policy['checkout_delay_minutes'] ?? 0) . ' minutes');
+                        if ($windowEnd === null || $windowEnd <= $startedAt || $due > $now || $this->connection->fetchOne('SELECT id FROM work_time_checkout_proposals WHERE timesheet_id = :id', ['id' => $entry['id']]) !== null) {
+                            continue;
+                        }
+                        if ($policy['checkout_mode'] === 'automatic') {
+                            if ($due >= $now->modify('-1 day') && $this->automaticCheckout($entry, $policy, $windowEnd, $now, $guard, $dryRun)) {
+                                $summary['automatic_checkouts']++;
+                            }
                             continue;
                         }
                         $summary['proposals']++;
                         if ($dryRun) {
                             continue;
                         }
-                        $this->connection->transaction(function () use ($entry, $policy, $proposedEnd): void {
-                            $this->connection->execute('INSERT INTO work_time_checkout_proposals (user_id, timesheet_id, policy_version_id, proposed_end_at, status, created_at) VALUES (:user_id, :timesheet_id, :version_id, :end_at, "pending", NOW())', ['user_id' => $entry['user_id'], 'timesheet_id' => $entry['id'], 'version_id' => $policy['policy_version_id'], 'end_at' => $proposedEnd->format('Y-m-d H:i:s')]);
+                        $this->connection->transaction(function () use ($entry, $policy, $windowEnd): void {
+                            $this->connection->execute('INSERT INTO work_time_checkout_proposals (user_id, timesheet_id, policy_version_id, proposed_end_at, status, created_at) VALUES (:user_id, :timesheet_id, :version_id, :end_at, "pending", NOW())', ['user_id' => $entry['user_id'], 'timesheet_id' => $entry['id'], 'version_id' => $policy['policy_version_id'], 'end_at' => $windowEnd->format('Y-m-d H:i:s')]);
                             $proposalId = $this->connection->lastInsertId();
-                            $this->notifications->queue('work_time_checkout_proposal', $entry, $policy, $proposedEnd, $proposalId);
+                            $this->notifications->queue('work_time_checkout_proposal', $entry, $policy, $windowEnd, $proposalId);
                         });
                     } catch (Throwable $exception) {
                         $summary['errors']++;
@@ -281,6 +319,70 @@ final class WorkTimeEventService
         }
 
         return $summary;
+    }
+
+    private function automaticCheckout(array $entry, array $policy, DateTimeImmutable $end, DateTimeImmutable $now, TimesheetWriteGuard $guard, bool $dryRun): bool
+    {
+        $timesheetId = (int) $entry['id'];
+        $userId = (int) $entry['user_id'];
+        if ($this->connection->fetchOne(
+            'SELECT timesheet_id FROM work_time_automatic_checkouts WHERE timesheet_id = :id',
+            ['id' => $timesheetId]
+        ) !== null) {
+            return false;
+        }
+
+        $endDate = $end->format('Y-m-d');
+        if ($endDate !== $entry['work_date']) {
+            $guard->assertAccountingPeriodOpen($userId, isset($entry['project_id']) ? (int) $entry['project_id'] : null, $endDate);
+        }
+
+        $intervals = new TimesheetPauseIntervals($this->connection);
+        $pause = $intervals->currentForTimesheet($timesheetId);
+        if ($pause !== null && WorkTimeLocalTime::fromInput($pause['break_started_at']) >= $end) {
+            throw new InvalidArgumentException('Die offene Pause beginnt am oder nach dem automatischen Arbeitsende.');
+        }
+        if ($dryRun) {
+            $conflicts = new TimesheetDayConflictService($this->connection);
+            $conflicts->assertNoConflictForWork($userId, $entry['work_date'], $timesheetId);
+            $conflicts->assertNoWorkOverlap($userId, $entry['work_date'], $entry['start_time'], $end->format('H:i:s'), $timesheetId, $now);
+            return true;
+        }
+
+        $requestId = 'wt:auto:' . bin2hex(random_bytes(16));
+        $this->sync->sync(
+            $userId,
+            [
+                'client_request_id' => $requestId,
+                'action' => 'check_out',
+                'work_date' => $entry['work_date'],
+                'end_time' => $end->format('H:i'),
+                'actual_end_at' => $end->format('Y-m-d\TH:i'),
+                'expected_timesheet_id' => $timesheetId,
+                'expected_start_time' => $entry['start_time'],
+            ],
+            afterSync: function (array $result) use ($entry, $policy, $end, $now, $pause, $requestId): void {
+                if ((int) ($result['timesheet']['id'] ?? 0) !== (int) $entry['id'] || ($result['timesheet']['end_time'] ?? null) !== $end->format('H:i:s')) {
+                    throw new InvalidArgumentException('Das automatische Arbeitsende passt nicht zur geprüften Buchung.');
+                }
+                $this->connection->execute(
+                    'INSERT INTO work_time_automatic_checkouts
+                        (timesheet_id, user_id, policy_version_id, closed_break_id, work_date, start_time, ended_at, recorded_at, sync_request_id)
+                     VALUES (:entry, :user, :policy, :pause, :date, :start, :end, :recorded, :request)',
+                    [
+                        'entry' => $entry['id'], 'user' => $entry['user_id'], 'policy' => $policy['policy_version_id'],
+                        'pause' => $pause['id'] ?? null, 'date' => $entry['work_date'], 'start' => $entry['start_time'],
+                        'end' => $end->format('Y-m-d H:i:s'), 'recorded' => $now->format('Y-m-d H:i:s'), 'request' => $requestId,
+                    ]
+                );
+                $this->notifications->queue(WorkTimeNotificationService::AUTOMATIC_CHECKOUT, $entry, $policy, $end);
+            },
+            beforeSync: $pause === null ? null : static function () use ($intervals, $pause, $end): void {
+                $intervals->close((int) $pause['id'], WorkTimeLocalTime::formatForStorage($end));
+            }
+        );
+
+        return true;
     }
 
     private function proposal(int $id, int $userId): ?array

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Exports;
 
 use App\Domain\Timesheets\AdminBookingService;
+use App\Domain\Timesheets\TimesheetOverlap;
 use App\Domain\Timesheets\TimesheetPauseService;
 use App\Domain\WorkTime\WorkTimePreviewService;
 use App\Infrastructure\Database\DatabaseConnection;
@@ -74,15 +75,19 @@ final class AccountingClosureService
     public function previewPackage(array $input): array
     {
         $selection = $this->selectionFromInput($input);
-        $items = $this->snapshotRows($this->activeRows($selection));
-        [$periodStart, $periodEnd] = $this->periodBounds($selection, $items);
+        $rows = $this->activeRows($selection);
+        $countableRows = array_values(array_filter($rows, static fn (array $row): bool => empty($row['booking_overlap'])));
+        $hasOverlap = count($countableRows) !== count($rows);
+        $items = $this->snapshotRows($countableRows);
+        [$periodStart, $periodEnd] = $this->periodBounds($selection, $rows);
         $number = $this->previewNumber($selection, $periodStart, $periodEnd);
         $closure = [
             'id' => null,
             'closure_number' => $number,
             'closure_type' => $selection['type'],
             'status' => 'draft',
-            'status_label' => 'VORLAEUFIG - nicht festgeschrieben',
+            'status_label' => $hasOverlap ? 'VORLÄUFIG - überlappende Buchungen ausgenommen' : 'VORLAEUFIG - nicht festgeschrieben',
+            'booking_overlap' => $hasOverlap,
             'period_start' => $periodStart,
             'period_end' => $periodEnd,
             'period_label' => $this->periodLabel($selection, $periodStart, $periodEnd),
@@ -211,6 +216,13 @@ final class AccountingClosureService
         foreach ($allRows as $row) {
             if ((int) ($row['is_deleted'] ?? 0) === 1) {
                 $errors[] = 'Im Abschlussbereich liegen archivierte Buchungen. Bitte den Bereich pruefen und bewusst bereinigen.';
+                break;
+            }
+        }
+
+        foreach ($activeRows as $row) {
+            if (!empty($row['booking_overlap'])) {
+                $errors[] = TimesheetOverlap::MESSAGE . ' Vor dem Festschreiben müssen die Buchungen korrigiert werden.';
                 break;
             }
         }

@@ -59,7 +59,7 @@ final class AdminWorkTimeController
             $notice .= '<div class="notice notice-success" role="status">Gespeichert. Historische Regeln und Stempelzeiten bleiben erhalten.</div>';
         }
         $content = '<header class="page-header"><div><p class="eyebrow">Optionale Mitarbeiterregeln</p><h1>Kernarbeitszeit</h1><p>' . $enabled . '</p></div></header>' . $notice
-            . '<section class="card stack"><h2>Anwesenheit und Arbeit getrennt erfassen</h2><p>Das Fenster ist eine zeitliche Orientierung, keine Zusage über Nettoarbeitsstunden. Tatsächliche Arbeit außerhalb des Fensters bleibt dokumentiert. Die abweichende Anrechnung ist eine vorläufige Vorschau; bestehende Zeitkontowerte werden weiterhin nach der bisherigen Berechnung geführt.</p><p>„Nur anwesend“ setzt voraus, dass tatsächlich noch nicht gearbeitet wird. Bereits geleistete Arbeit muss als Arbeitsbeginn bestätigt werden. Ein Vorschlag zum Arbeitsende beendet keine Buchung automatisch.</p></section>';
+            . '<section class="card stack"><h2>Anwesenheit und Arbeit getrennt erfassen</h2><p>Das Fenster dient zur zeitlichen Orientierung. Die Anrechnung innerhalb und außerhalb des Fensters wird als Vorschau ausgewiesen.</p><p>„Nur anwesend“ setzt voraus, dass tatsächlich noch nicht gearbeitet wird. Bereits geleistete Arbeit muss als Arbeitsbeginn bestätigt werden.</p><p>Mit dem automatischen Check-out endet der laufende Einsatz zur Uhrzeit des Fensterendes. Für weitere Arbeit checkt der Mitarbeiter erneut auf das gewünschte Projekt ein. Der Hinweis wird über eine aktive Push-Anmeldung verschickt.</p></section>';
         if ($this->auth->hasPermission('work_time_notifications.manage')) {
             $content .= '<p><a class="button button-secondary" href="/admin/work-time/notifications">Versandübersicht und berechtigte Wiederholungen</a></p>';
         }
@@ -77,7 +77,9 @@ final class AdminWorkTimeController
                 if (!empty($template['is_active'])) {
                     $versionOptions .= '<option value="' . (int) $version['id'] . '" data-policy="' . $this->e(json_encode($policy, JSON_THROW_ON_ERROR)) . '">' . $this->e((string) $template['name']) . ' · Version ' . (int) ($version['revision'] ?? $version['id']) . '</option>';
                 }
-                $templateRows .= '<tr><td>' . $this->e((string) $template['name']) . (empty($template['is_active']) ? ' (archiviert)' : '') . $archive . '</td><td>' . (int) $version['id'] . '</td><td>' . $this->e((string) ($policy['early_check_in_mode'] ?? 'work_started')) . '</td><td>' . $this->e((string) ($version['created_at'] ?? '')) . '</td></tr>';
+                $checkoutMode = $policy['checkout_mode'] ?? (!empty($policy['checkout_proposals_enabled']) ? 'automatic' : 'manual');
+                $checkoutLabel = $this->checkoutModes()[$checkoutMode] ?? $this->checkoutModes()['manual'];
+                $templateRows .= '<tr><td>' . $this->e((string) $template['name']) . (empty($template['is_active']) ? ' (archiviert)' : '') . $archive . '</td><td>' . (int) $version['id'] . '</td><td>' . $this->e((string) ($policy['early_check_in_mode'] ?? 'work_started')) . '</td><td>' . $this->e($checkoutLabel) . '</td><td>' . $this->e((string) ($version['created_at'] ?? '')) . '</td></tr>';
                 $archive = '';
             }
         }
@@ -92,7 +94,7 @@ final class AdminWorkTimeController
             $content .= '<section class="card stack" id="work-time-assignment"><h2>Für einen Mitarbeiter zuordnen</h2><p>Die Vorschau zeigt betroffene Buchungen, Regelkonflikte und vorhandene Abschlüsse. Rückwirkende Zuordnungen benötigen eine Begründung.</p><form method="post" action="/admin/work-time/assignments" class="form-grid" data-worktime-form><input type="hidden" name="csrf_token" value="' . $csrf . '"><input type="hidden" name="intent" value="assignment"><input type="hidden" name="preview_token"><label><span>Mitarbeiter</span><select name="user_id" required><option value="">Bitte wählen</option>' . $userOptions . '</select></label><label><span>Regelversion</span><select name="policy_version_id" required data-worktime-version>' . $versionOptions . '</select></label><label><span>Gültig ab</span><input name="effective_from" type="date" required></label><label><span>Gültig bis (optional)</span><input name="effective_to" type="date"></label>' . $supervisors
                 . '<label class="full-span"><span><input type="checkbox" name="use_overrides" value="1" data-worktime-overrides> Individuelle Zeitfenster und Optionen überschreiben</span></label><fieldset class="full-span form-grid" data-worktime-override-fields hidden disabled><legend>Individuelle Regel</legend>' . $this->ruleFields() . '</fieldset><label class="full-span"><span>Begründung für die Zuordnung</span><textarea name="reason" maxlength="2000" rows="2" required></textarea></label>' . $this->impactFields('Zuordnung speichern') . '</form></section>';
         }
-        $content .= '<section class="card stack"><h2>Unveränderliche Regelversionen</h2><div class="table-scroll"><table><thead><tr><th>Vorlage</th><th>Version-ID</th><th>Früher Check-in</th><th>Erstellt</th></tr></thead><tbody>' . ($templateRows ?: '<tr><td colspan="4">Noch keine Vorlagen.</td></tr>') . '</tbody></table></div></section>';
+        $content .= '<section class="card stack"><h2>Unveränderliche Regelversionen</h2><div class="table-scroll"><table><thead><tr><th>Vorlage</th><th>Version-ID</th><th>Früher Check-in</th><th>Arbeitsende</th><th>Erstellt</th></tr></thead><tbody>' . ($templateRows ?: '<tr><td colspan="5">Noch keine Vorlagen.</td></tr>') . '</tbody></table></div></section>';
         $assignmentRows = '';
         $today = $this->localToday();
         foreach ($assignments as $assignment) {
@@ -572,8 +574,12 @@ final class AdminWorkTimeController
                 $windows[$day][] = ['start' => $match[1], 'end' => $match[2]];
             }
         }
+        $checkoutMode = $request->input('checkout_mode');
+        $checkout = $checkoutMode === null
+            ? ['checkout_proposals_enabled' => $request->input('checkout_proposals_enabled', false)]
+            : ['checkout_mode' => $checkoutMode];
         return ['windows' => $windows, 'timezone' => 'Europe/Berlin', 'early_check_in_mode' => (string) $request->input('early_check_in_mode', 'work_started'),
-            'checkout_proposals_enabled' => (bool) $request->input('checkout_proposals_enabled', false), 'checkout_delay_minutes' => (int) $request->input('checkout_delay_minutes', 0),
+            ...$checkout, 'checkout_delay_minutes' => $request->input('checkout_delay_minutes', 0),
             'outside_window_notifications_enabled' => (bool) $request->input('outside_window_notifications_enabled', false), 'outside_window_delay_minutes' => $request->input('outside_window_delay_minutes', 5),
             'notify_employee_push' => (bool) $request->input('notify_employee_push', false), 'notify_employee_sms' => (bool) $request->input('notify_employee_sms', false),
             'notify_supervisor_push' => (bool) $request->input('notify_supervisor_push', false), 'notify_supervisor_sms' => (bool) $request->input('notify_supervisor_sms', false)];
@@ -598,12 +604,26 @@ final class AdminWorkTimeController
         foreach ([1 => 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag', 'Sonntag'] as $day => $name) {
             $html .= '<label><span>' . $name . '</span><input name="window_' . $day . '" value="' . ($day < 6 ? '08:00-16:00' : '') . '" placeholder="08:00-16:00"></label>';
         }
-        $html .= '<label><span>Früher Check-in</span><select name="early_check_in_mode"><option value="work_started">Arbeit beginnt tatsächlich</option><option value="presence_only">Nur anwesend; Arbeitsbeginn separat bestätigen</option></select></label><label><span>Verzögerung Endvorschlag (Minuten)</span><input name="checkout_delay_minutes" type="number" min="0" max="1440" value="0"></label>';
+        $html .= '<label><span>Früher Check-in</span><select name="early_check_in_mode"><option value="work_started">Arbeit beginnt tatsächlich</option><option value="presence_only">Nur anwesend, Arbeitsbeginn separat bestätigen</option></select></label>';
+        $html .= '<label><span>Am Ende des Zeitfensters</span><select name="checkout_mode">';
+        foreach ($this->checkoutModes() as $value => $label) {
+            $html .= '<option value="' . $value . '">' . $this->e($label) . '</option>';
+        }
+        $html .= '</select></label><label><span>Verzögerung für Check-out oder Vorschlag (Minuten)</span><input name="checkout_delay_minutes" type="number" min="0" max="1440" value="0"></label>';
         $html .= '<label><span>Verzögerung bei Arbeitsbeginn nach Fensterende (Minuten)</span><input name="outside_window_delay_minutes" type="number" min="0" max="1440" value="5"></label>';
-        foreach (['checkout_proposals_enabled' => 'Arbeitsende zur Bestätigung vorschlagen', 'outside_window_notifications_enabled' => 'Arbeitsbeginn nach Fensterende unabhängig melden', 'notify_employee_push' => 'Mitarbeiter: PWA-Push', 'notify_supervisor_push' => 'Zugeordnete Vorgesetzte: PWA-Push', 'notify_employee_sms' => 'Mitarbeiter: SMS (Testkanal)', 'notify_supervisor_sms' => 'Vorgesetzte: SMS (Testkanal)'] as $key => $label) {
+        foreach (['outside_window_notifications_enabled' => 'Arbeitsbeginn nach Fensterende unabhängig melden', 'notify_employee_push' => 'Mitarbeiter-Push für Vorschläge und Arbeitsbeginn außerhalb des Fensters', 'notify_supervisor_push' => 'PWA-Push für zugeordnete Vorgesetzte', 'notify_employee_sms' => 'Mitarbeiter-SMS (Testkanal)', 'notify_supervisor_sms' => 'SMS für Vorgesetzte (Testkanal)'] as $key => $label) {
             $html .= '<label><span><input type="checkbox" name="' . $key . '" value="1"> ' . $label . '</span></label>';
         }
         return $html;
+    }
+
+    private function checkoutModes(): array
+    {
+        return [
+            'automatic' => 'Automatisch am Fensterende auschecken',
+            'proposal' => 'Arbeitsende zur Bestätigung vorschlagen',
+            'manual' => 'Manuell auschecken',
+        ];
     }
 
     private function exampleFields(): string

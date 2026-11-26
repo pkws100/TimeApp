@@ -163,6 +163,7 @@ try {
         ['UI-PAGINATION', 'UI', 'Pagination', 'ui-pagination@example.test', 'mitarbeiter'],
         ['UI-WORKTIME-CONTINUE', 'UI', 'Weiterarbeit', 'ui-worktime-continue@example.test', 'mitarbeiter'],
         ['UI-WORKTIME-CONFIRM', 'UI', 'Endbestaetigung', 'ui-worktime-confirm@example.test', 'mitarbeiter'],
+        ['UI-WORKTIME-AUTOMATIC', 'UI', 'Automatischer Check-out', 'ui-worktime-automatic@example.test', 'mitarbeiter'],
         ['UI-WORKTIME-HISTORY', 'UI', 'Historische Kernzeit', 'ui-worktime-history@example.test', 'mitarbeiter'],
         ['UI-HARDENING-EMPLOYEE', 'UI', 'Hardening Ablauf', 'ui-hardening-employee@example.test', 'mitarbeiter'],
         ['UI-HARDENING-PAUSE', 'UI', 'Hardening Pausennachweis', 'ui-hardening-pause@example.test', 'mitarbeiter'],
@@ -219,22 +220,26 @@ try {
     $workTimePolicies = new WorkTimePolicyService($connection, true);
     $workTimeTemplate = $workTimePolicies->createTemplate(['name' => 'UI Kernarbeitszeit', 'policy' => [
         'windows' => array_fill(1, 7, [['start' => $workTimeStart->format('H:i'), 'end' => $workTimeEnd->format('H:i')]]),
-        'early_check_in_mode' => 'work_started', 'checkout_proposals_enabled' => true,
+        'early_check_in_mode' => 'work_started', 'checkout_mode' => 'proposal',
     ]], $adminId);
     $workTimeSync = new AppTimesheetSyncService($connection, new TimesheetCalculator(), new CompanySettingsService($connection, []), new WorkdayStateCalculator());
     $workTimeSync->setWorkTimePresenceService(new WorkTimePresenceService($connection, $workTimePolicies));
     $workTimeIds = [];
-    foreach (['continue', 'confirm'] as $flow) {
+    foreach (['continue', 'confirm', 'automatic'] as $flow) {
         $workTimeUserId = $userIds['ui-worktime-' . $flow . '@example.test'];
-        $assignment = $workTimePolicies->assign(['user_id' => $workTimeUserId, 'policy_version_id' => $workTimeTemplate['version']['id'], 'effective_from' => $workTimeNow->modify('+1 day')->format('Y-m-d')], $adminId);
+        $assignment = $workTimePolicies->assign([
+            'user_id' => $workTimeUserId, 'policy_version_id' => $workTimeTemplate['version']['id'],
+            'effective_from' => $workTimeNow->modify('+1 day')->format('Y-m-d'),
+            'overrides' => $flow === 'automatic' ? ['checkout_mode' => 'automatic'] : [],
+        ], $adminId);
         // Backdate only this random scratch DB's fixture to exercise real current UI.
         $connection->execute('UPDATE employee_work_time_assignments SET effective_from = :fixture_date WHERE id = :id', ['fixture_date' => $workTimeStart->format('Y-m-d'), 'id' => $assignment['id']]);
         $in = $workTimeSync->sync($workTimeUserId, ['client_request_id' => 'ui-worktime-' . $flow, 'action' => 'check_in', 'work_date' => $workTimeStart->format('Y-m-d'), 'start_time' => $workTimeStart->format('H:i'), 'note' => 'Isolierter Worktime-Browserworkflow']);
         $workTimeIds[$flow] = $in['timesheet']['id'];
     }
     $workTimeSummary = (new WorkTimeEventService($connection, new WorkTimePolicyService($connection, true), $workTimeSync))->process(false, $workTimeNow);
-    if ($workTimeSummary['proposals'] !== 2 || $workTimeSummary['errors'] !== 0) {
-        throw new RuntimeException('Arbeitszeitfenster-UI-Fixture konnte keine zwei offenen Vorschlaege erzeugen.');
+    if ($workTimeSummary['proposals'] !== 2 || $workTimeSummary['automatic_checkouts'] !== 1 || $workTimeSummary['errors'] !== 0) {
+        throw new RuntimeException('Arbeitszeitfenster-UI-Fixture konnte die Vorschläge und den automatischen Check-out nicht erzeugen.');
     }
     $historyEmployeeId = $userIds['ui-worktime-history@example.test'];
     $historyWorkDate = $workTimeNow->modify('-4 days')->format('Y-m-d');
@@ -257,7 +262,7 @@ try {
     $hardeningDate = (new DateTimeImmutable('yesterday'))->format('Y-m-d');
     $hardeningTemplate = $workTimePolicies->createTemplate(['name' => 'UI Hardening 08 bis 16', 'policy' => [
         'windows' => array_fill(1, 7, [['start' => '08:00', 'end' => '16:00']]),
-        'early_check_in_mode' => 'presence_only', 'checkout_proposals_enabled' => true,
+        'early_check_in_mode' => 'presence_only', 'checkout_mode' => 'proposal',
         'notify_employee_push' => true, 'outside_window_notifications_enabled' => true, 'outside_window_delay_minutes' => 5,
     ]], $adminId);
     foreach (['pause', 'off'] as $flow) {
@@ -338,6 +343,9 @@ try {
     );
     $formProjectId = $connection->lastInsertId();
     $connection->execute('INSERT INTO project_memberships (project_id, user_id, assignment_role, assigned_from, assigned_until) VALUES (:project, :user, NULL, NULL, NULL)', ['project' => $formProjectId, 'user' => $employeeId]);
+    $connection->execute('INSERT INTO project_memberships (project_id, user_id, assignment_role, assigned_from, assigned_until) VALUES (:project, :user, NULL, NULL, NULL)', [
+        'project' => $formProjectId, 'user' => $userIds['ui-worktime-automatic@example.test'],
+    ]);
     $connection->execute('INSERT INTO projects (project_number, name, status, created_at, updated_at, is_deleted) VALUES ("UI-FORM-COLLISION", "UI Formularnummer bereits vergeben", "active", NOW(), NOW(), 0)');
     $connection->execute('INSERT INTO project_material_entries (project_id, created_by_user_id, work_date, description, quantity, unit, note) VALUES (:project, :actor, :work_date, "UI Formular Material", 1.5, "Stk", "Synthetischer Navigationstest")', ['project' => $formProjectId, 'actor' => $employeeId, 'work_date' => date('Y-m-d')]);
     $formMaterialId = $connection->lastInsertId();
@@ -588,6 +596,8 @@ try {
         'UI_TEST_WORKTIME_PASSWORD' => $password,
         'UI_TEST_WORKTIME_CONTINUE_ID' => (string) $workTimeIds['continue'],
         'UI_TEST_WORKTIME_CONFIRM_ID' => (string) $workTimeIds['confirm'],
+        'UI_TEST_WORKTIME_AUTOMATIC_ID' => (string) $workTimeIds['automatic'],
+        'UI_TEST_WORKTIME_AUTOMATIC_END' => $workTimeEnd->format('H:i:s'),
         'UI_TEST_WORKTIME_WORK_DATE' => $workTimeStart->format('Y-m-d'),
         'UI_TEST_WORKTIME_END' => $workTimeEnd->format('H:i:s'),
         'UI_TEST_WORKTIME_NOW_END' => $workTimeNow->format('H:i'),

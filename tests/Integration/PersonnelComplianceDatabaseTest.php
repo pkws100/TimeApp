@@ -12,6 +12,7 @@ use App\Infrastructure\Database\DatabaseConnection;
 use PDO;
 use PDOException;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 use Tests\Support\MariaDbScratchConfig;
 use ZipArchive;
 
@@ -546,6 +547,7 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         self::assertEqualsCanonicalizing($privateTables, $manifest['security']['excluded_database_table_rows']);
         $appointmentTables = ['appointment_participants', 'appointments'];
         $dispatchTables = ['appointment_dispatches', 'appointment_dispatch_recipients'];
+        $checkoutTable = 'work_time_automatic_checkouts';
         $tablesByName = array_column($manifest['database']['tables'], null, 'table');
         foreach ($appointmentTables as $table) {
             self::assertArrayHasKey($table, $tablesByName);
@@ -555,6 +557,8 @@ final class PersonnelComplianceDatabaseTest extends TestCase
             self::assertArrayHasKey($table, $tablesByName);
             self::assertSame('[]', $zip->getFromName('database/' . $table . '.json'));
         }
+        self::assertArrayHasKey($checkoutTable, $tablesByName);
+        self::assertSame('[]', $zip->getFromName('database/' . $checkoutTable . '.json'));
         $appointments = json_decode($zip->getFromName('database/appointments.json'), true, flags: JSON_THROW_ON_ERROR);
         $participants = json_decode($zip->getFromName('database/appointment_participants.json'), true, flags: JSON_THROW_ON_ERROR);
         self::assertCount(1, $appointments);
@@ -590,6 +594,30 @@ final class PersonnelComplianceDatabaseTest extends TestCase
         self::assertTrue(copy($path, $legacyPath));
         self::assertTrue($zip->open($legacyPath));
         $legacyManifest = $manifest;
+        $legacyManifest['database']['tables'] = array_values(array_filter(
+            $legacyManifest['database']['tables'],
+            static fn (array $entry): bool => $entry['table'] !== $checkoutTable
+        ));
+        self::assertTrue($zip->deleteName('database/' . $checkoutTable . '.json'));
+        self::assertTrue($zip->addFromString('manifest.json', json_encode($legacyManifest, JSON_THROW_ON_ERROR)));
+        self::assertTrue($zip->close());
+        try {
+            $service->validateImport(['tmp_name' => $legacyPath]);
+            self::fail('Ein aktuelles Backup ohne automatischen Checkout-Nachweis wurde akzeptiert.');
+        } catch (RuntimeException $exception) {
+            self::assertStringContainsString('Tabellenliste', $exception->getMessage());
+        }
+
+        self::assertTrue($zip->open($legacyPath));
+        $legacyManifest['schema_version'] = '20261124123000_appointment_dispatch_project_scope';
+        self::assertTrue($zip->addFromString('manifest.json', json_encode($legacyManifest, JSON_THROW_ON_ERROR)));
+        self::assertTrue($zip->close());
+        $checkoutValidation = $service->validateImport(['tmp_name' => $legacyPath]);
+        self::assertSame('valid', $checkoutValidation['validation_status']);
+        self::assertTrue($checkoutValidation['dry_run']);
+        self::assertFalse($checkoutValidation['apply_supported']);
+
+        self::assertTrue($zip->open($legacyPath));
         $legacyManifest['schema_version'] = '20261123120000_create_appointment_management';
         $legacyManifest['database']['tables'] = array_values(array_filter(
             $legacyManifest['database']['tables'],

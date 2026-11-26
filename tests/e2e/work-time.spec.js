@@ -23,6 +23,7 @@ async function mockWorkTimeApp(page, options = {}) {
     unexpected: [],
     mutations: [],
     entry: options.entry || null,
+    dayUnavailable: false,
     pendingMutation: null,
     pendingStatus: null,
     workTime: {
@@ -30,12 +31,14 @@ async function mockWorkTimeApp(page, options = {}) {
       csrf_token: 'work-time-csrf',
       policy: options.noPolicy ? null : {
         early_check_in_mode: options.presence ? 'presence_only' : 'work_started',
+        checkout_mode: options.checkoutMode || 'manual',
         windows: { 1: [{ start: '08:00', end: '16:00' }] }
       },
       preview: { actual_work_minutes: 503, accountable_work_minutes: 450, outside_pending_minutes: 53, rows: [{ timesheet_id: 9 }] },
       presence_session: options.presenceSession || null,
       active_work_entry: options.activeWorkEntry || null,
       active_work_entry_conflict: !!options.activeWorkConflict,
+      automatic_checkout: null,
       checkout_proposals: options.proposals || []
     }
   };
@@ -55,11 +58,14 @@ async function mockWorkTimeApp(page, options = {}) {
     if (pathname === '/api/v1/auth/session') return json({ authenticated: true, bootstrap_required: false, user });
     if (pathname === '/api/v1/app/me/day') {
       app.reads += 1;
+      if (app.dayUnavailable) return json({ ok: false, message: 'Tagesdaten vorübergehend nicht verfügbar.' }, 503);
       return json({ data: {
         today: '2026-11-16', server_time: '2026-11-16T17:00:00+01:00', work_time_windows_enabled: app.enabled,
         user: { ...user, roles: [], time_tracking_required: false, app_ui_settings: flags }, app_ui_settings: flags,
-        projects: [{ id: 1, project_number: 'TEST-1', name: 'Testbaustelle' }], today_state: todayState(),
-        project_day_summaries: app.entry ? [{ project_id: 1, project_name: 'Testbaustelle', status: app.entry.end_time ? 'completed' : 'working', work_entry: app.entry, start_time: app.entry.start_time, end_time: app.entry.end_time, total_break_minutes: 0, total_net_minutes: app.entry.net_minutes || 0, breaks_today: [] }] : [], attachments: [], breaks_today: [], current_break: null,
+        projects: [{ id: 1, project_number: 'TEST-1', name: 'Testbaustelle' }, { id: 2, project_number: 'TEST-2', name: 'Andere Baustelle' }], today_state: todayState(),
+        booking_overlap: !!app.entry?.booking_overlap,
+        active_work_entry_conflict: app.workTime.active_work_entry_conflict,
+        project_day_summaries: app.entry ? [{ project_id: app.entry.project_id, project_name: app.entry.project_name, status: app.entry.end_time ? 'completed' : 'working', work_entry: app.entry, start_time: app.entry.start_time, end_time: app.entry.end_time, total_break_minutes: 0, total_net_minutes: app.entry.booking_overlap ? 0 : app.entry.net_minutes || 0, breaks_today: [] }] : [], attachments: [], breaks_today: [], current_break: null,
         company: {}, geo_policy: { enabled: false }, personnel_events: [], personnel_labels: []
       } });
     }
@@ -71,6 +77,7 @@ async function mockWorkTimeApp(page, options = {}) {
       if (pending) await pending;
       return route.fulfill({ contentType: 'application/json', body });
     }
+    if (pathname === '/api/v1/app/me/timesheets' && options.historyItems) return json({ data: { items: options.historyItems } });
     if (pathname === '/api/v1/settings/company') return json({ data: { company_name: 'Testfirma' } });
     if (pathname === '/api/v1/app/push/status') return json({ data: { enabled: false, can_subscribe: false, devices: [] } });
     if (request.method() === 'POST' && (pathname === '/api/v1/app/timesheets/sync' || pathname.includes('/work-time/proposals/'))) {
@@ -245,6 +252,15 @@ test('multiple earlier work sessions require clarification instead of selecting 
   expect(app.mutations).toEqual([]);
 });
 
+test('competing live bookings do not inflate Today when work-time windows are disabled', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-11-16T17:00:00+01:00') });
+  await mockWorkTimeApp(page, { entry: workingEntry(), enabled: false, activeWorkConflict: true });
+  await expect(page.getByRole('alert')).toContainText('Mehrere offene Einsätze');
+  await expect(page.locator('[data-live-today-duration]')).toHaveText('00:00');
+  await expect(page.locator('[data-live-work-duration]')).toHaveText('Zu klären');
+  await expect(page.locator('[data-action="check_in"]')).toHaveCount(0);
+});
+
 test('unplaced pauses are clearly unresolved and never rendered as zero accountable time', async ({ page }) => {
   const app = await mockWorkTimeApp(page);
   app.workTime.preview = { actual_work_minutes: 503, accountable_work_minutes: null, outside_pending_minutes: null, rows: [{ timesheet_id: 9 }], calculation_status: 'needs_clarification' };
@@ -265,6 +281,18 @@ test('a running session is kept separate from completed work in the window previ
   await expect(page.locator('.app-worktime .app-stat-row').filter({ hasText: 'Tatsächliche Arbeit (abgeschlossen)' }).locator('strong')).toHaveText('00:20');
   await expect(page.locator('.app-worktime .app-stat-row').filter({ hasText: 'Fensteranrechnung (unverbindliche Vorschau)' }).locator('strong')).toHaveText('00:10');
   await expect(page.locator('[data-action="check_out"]')).toBeVisible();
+});
+
+test('a running session does not cause the window preview to sum disputed legacy rows', async ({ page }) => {
+  const app = await mockWorkTimeApp(page, { entry: workingEntry() });
+  app.workTime.preview = { booking_overlap: true, actual_work_minutes: null, accountable_work_minutes: null, outside_pending_minutes: null, rows: [
+    { timesheet_id: 9, calculation: { calculation_status: 'open', actual_work_minutes: null, accountable_work_minutes: null, outside_pending_minutes: null } },
+    { timesheet_id: 8, booking_overlap: true, calculation: { calculation_status: 'needs_clarification', actual_work_minutes: null, accountable_work_minutes: null, outside_pending_minutes: null } },
+    { timesheet_id: 7, calculation: { calculation_status: 'complete', actual_work_minutes: 60, accountable_work_minutes: 60, outside_pending_minutes: 0 } },
+  ] };
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(page.locator('.app-worktime').getByText('Überlappende Buchungen.', { exact: true })).toBeVisible();
+  await expect(page.locator('.app-worktime .app-stat-row').filter({ hasText: 'Tatsächliche Arbeit (abgeschlossen)' }).locator('strong')).toHaveText('01:00');
 });
 
 test('continuing a checkout proposal preserves the live session and does not queue a checkout', async ({ page }) => {
@@ -314,6 +342,76 @@ test('a confirmed proposal permits a new independent check-in on the same day', 
   expect(app.mutations[0].payload.action).toBe('confirm');
   expect(app.mutations[1].payload.action).toBe('check_in');
 });
+
+test('worker checkout ends the visible shift and another project starts only by explicit check-in', async ({ page }) => {
+  const app = await mockWorkTimeApp(page, { checkoutMode: 'automatic', entry: workingEntry(), mutate: ({ app, payload, json }) => {
+    app.entry = { ...workingEntry(), id: 10, project_id: payload.project_id, project_name: 'Andere Baustelle', start_time: payload.start_time + ':00' };
+    app.workTime.automatic_checkout = null;
+    return json({ ok: true, data: { timesheet: app.entry } });
+  } });
+  await expect(page.locator('[data-action="check_out"]')).toBeVisible();
+  app.entry = { ...app.entry, end_time: '16:00:00', net_minutes: 450 };
+  app.workTime.automatic_checkout = { timesheet_id: 9, ended_at: '2026-11-16 16:00:00' };
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+
+  await expect(page.getByText('Automatisch ausgecheckt', { exact: true })).toBeVisible();
+  await expect(page.getByText(/16:00 Uhr\. Für Überstunden bitte erneut einchecken/)).toBeVisible();
+  await expect(page.locator('[data-action="check_out"]')).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Arbeitsende bestätigen' })).toHaveCount(0);
+  expect(app.mutations).toEqual([]);
+
+  await page.locator('#projectSelect').selectOption('2');
+  await page.locator('[data-action="check_in"]').click();
+  await expect.poll(() => app.mutations.length).toBe(1);
+  expect(app.mutations[0].payload).toMatchObject({ action: 'check_in', project_id: 2 });
+  await expect(page.locator('[data-action="check_out"]')).toBeVisible();
+  await expect(page.getByText('Automatisch ausgecheckt', { exact: true })).toHaveCount(0);
+  expect(app.unexpected).toEqual([]);
+});
+
+test('disputed work stays visible while Today and history omit its minutes', async ({ page }) => {
+  const disputed = { ...workingEntry(), booking_overlap: true, end_time: '16:00:00', net_minutes: 450 };
+  const valid = { ...workingEntry(), id: 10, start_time: '17:00:00', end_time: '18:00:00', net_minutes: 60 };
+  await mockWorkTimeApp(page, { entry: disputed, historyItems: [disputed, valid] });
+
+  await expect(page.getByText('Überlappende Buchungen.', { exact: true })).toBeVisible();
+  await expect(page.locator('[data-live-today-duration]')).toHaveText('00:00');
+  await expect(page.locator('[data-live-work-duration]')).toHaveText('Zu klären');
+
+  await page.evaluate(() => {
+    window.history.pushState({}, '', '/app/historie');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  });
+  await expect(page.getByRole('heading', { name: 'Monatshistorie' })).toBeVisible();
+  await expect(page.getByText('Überlappende Buchungen.', { exact: true })).toBeVisible();
+  await expect(page.locator('.app-history-metric').filter({ hasText: 'Arbeitszeit' }).locator('strong')).toHaveText('01:00');
+  await expect(page.locator('.app-history-entry').filter({ hasText: 'Zu klären' })).toHaveCount(1);
+});
+
+for (const action of ['upsert', 'check_out']) {
+  test('a rejected overlapping ' + action + ' cannot leave its optimistic hours visible after a failed refresh', async ({ page }) => {
+    const app = await mockWorkTimeApp(page, { entry: workingEntry(), mutate: ({ app, payload, json }) => {
+      app.dayUnavailable = true;
+      expect(payload.action).toBe(action);
+      return json({ ok: false, code: 'overlapping_work_session', message: 'Die Arbeitsbuchungen überschneiden sich.' }, 409);
+    } });
+    await page.evaluate(() => {
+      window.history.pushState({}, '', '/app/zeiten');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await expect(page.getByRole('heading', { name: 'Arbeitszeiten', exact: true })).toBeVisible();
+    await page.waitForLoadState('networkidle');
+    await page.locator('#manualEndTime').fill('17:00');
+    await page.locator(action === 'upsert' ? '#saveUpsert' : '[data-action="check_out"]').click();
+
+    const conflicts = page.getByRole('region', { name: 'Zeitbuchungen zur Prüfung', exact: true });
+    await expect(conflicts).toContainText('Die Arbeitsbuchungen überschneiden sich.');
+    await expect(page.getByText('Der aktuelle Buchungsstand muss online geprüft werden.', { exact: true })).toBeVisible();
+    await expect(page.locator('[data-live-end-time]')).toHaveText('--:--');
+    await expect(page.locator('#saveUpsert')).toBeDisabled();
+    expect(app.mutations).toHaveLength(1);
+  });
+}
 
 test('corrected proposal keeps the draft through refresh and sends an explicit actual end', async ({ page }) => {
   const app = await mockWorkTimeApp(page, { entry: workingEntry(), proposals: [proposal()], mutate: async ({ app, payload, json }) => {
@@ -396,7 +494,9 @@ test('admin preview ignores a superseded response and invalidates approval after
   await page.locator('[data-worktime-preview]').click();
   await expect(page.locator('[data-worktime-save]')).toBeEnabled();
   await expect(page.locator('[data-worktime-result]')).toContainText('Offene Außenzeit: 53 Min.');
-  await page.locator('[name="checkout_proposals_enabled"]').check();
+  const mode = page.locator('[name="checkout_mode"]');
+  await expect(mode).toHaveValue('automatic');
+  await mode.selectOption('proposal');
   await expect(page.locator('[data-worktime-save]')).toBeDisabled();
   await expect(page.locator('[name="preview_token"]')).toHaveValue('');
 });

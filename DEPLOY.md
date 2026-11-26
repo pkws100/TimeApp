@@ -6,6 +6,11 @@ ausgeliefert. Zusaetzlich ist eine kuenftige Zuordnung pro Mitarbeiter erforderl
 bisherige Push-Reminder-Intervall bleibt erhalten. Dry-Run, Betriebsgrenzen und
 gesonderte fachliche Freigabe: [WORK_TIME_WINDOWS.md](WORK_TIME_WINDOWS.md).
 
+Für automatische Check-outs zuerst die Migration
+`20261126120000` anwenden und den Minutenworker mit aktivierten
+Arbeitszeitfenstern betreiben. Die Mitarbeiter-PWA benötigt für die
+Benachrichtigung ein aktives Push-Abonnement.
+
 Diese Anleitung beschreibt den Docker-Compose-Betrieb fuer die TimeApp hinter
 einem Reverse Proxy. Sie enthaelt nur Platzhalter und keine produktiven Secrets.
 

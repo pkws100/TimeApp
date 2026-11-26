@@ -42,7 +42,8 @@ final class BookingModalRenderer
                 && $entryType === 'work'
                 && (trim((string) ($booking['start_time'] ?? '')) === '' || trim((string) ($booking['end_time'] ?? '')) === '');
             $needsProjectAssignment = $isActive && (bool) ($booking['needs_project_assignment'] ?? false);
-            $hasBookingIssue = $hasIncompleteTime || $needsProjectAssignment;
+            $bookingOverlap = !empty($booking['booking_overlap']);
+            $hasBookingIssue = $hasIncompleteTime || $needsProjectAssignment || $bookingOverlap;
             $projectLabel = $this->projectLabel($booking);
             $projectDisplay = $this->e($projectLabel);
 
@@ -55,6 +56,9 @@ final class BookingModalRenderer
 
             if ($hasIncompleteTime) {
                 $typeDisplay .= '<br><span class="badge error">Zeit unvollstaendig</span>';
+            }
+            if ($bookingOverlap) {
+                $typeDisplay .= '<br><span class="badge error">Überlappende Buchung</span>';
             }
 
             $sourceLabel = (string) ($booking['source_label'] ?? $this->sourceLabel((string) ($booking['source'] ?? 'app')));
@@ -136,7 +140,8 @@ final class BookingModalRenderer
                 ? '<label class="booking-card__check"><input type="checkbox" name="booking_ids[]" value="' . $id . '"' . ($bulkFormId !== '' ? ' form="' . $this->e($bulkFormId) . '"' : '') . ($isPeriodManaged ? ' disabled' : '') . '><span>' . ($isPeriodManaged ? 'Zeitraum' : 'Auswaehlen') . '</span></label>'
                 : '';
             $issueBadges = ($needsProjectAssignment ? '<span class="badge warn">Projekt offen</span>' : '')
-                . ($hasIncompleteTime ? '<span class="badge error">Zeit unvollstaendig</span>' : '');
+                . ($hasIncompleteTime ? '<span class="badge error">Zeit unvollstaendig</span>' : '')
+                . ($bookingOverlap ? '<span class="badge error">Überlappende Buchung</span>' : '');
             $timeRange = trim($this->timeValue($booking['start_time'] ?? null) . ' - ' . $this->timeValue($booking['end_time'] ?? null), ' -');
             $timeRange = $timeRange !== '' ? $this->e($timeRange) : '<span class="muted">Keine Zeit</span>';
             $cardClasses = trim('booking-card' . ($hasBookingIssue ? ' has-booking-issue' : ''));

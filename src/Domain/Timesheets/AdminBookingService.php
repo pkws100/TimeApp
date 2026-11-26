@@ -401,6 +401,7 @@ final class AdminBookingService
             $bookingId = 0;
 
             $this->connection->transaction(function () use ($normalized, $adminUserId, $reason, $policy, $documented, &$bookingId): void {
+                $this->assertWorkOverlapFree($normalized);
                 $this->connection->execute(
                     'INSERT INTO timesheets (
                         user_id, project_id, created_by_user_id, work_date, start_time, end_time, gross_minutes, break_minutes, net_minutes' . $this->insertColumnSql('credited_minutes') . ', expenses_amount, entry_type' . $this->insertColumnSql('absence_reason_code') . ', source, note, created_at, updated_at
@@ -483,6 +484,10 @@ final class AdminBookingService
 
             $this->connection->transaction(function () use ($id, $normalized, $changedByUserId, $reason, $before): void {
                 (new TimesheetPauseEvidenceGuard($this->connection))->assertChangeAllowed($id, $normalized);
+                if (empty($before['is_deleted']) && ($normalized['work_date'] !== $before['work_date']
+                    || $normalized['start_time'] !== $before['start_time'] || $normalized['end_time'] !== $before['end_time'])) {
+                    $this->assertWorkOverlapFree(['user_id' => $before['user_id']] + $normalized, $id);
+                }
                 if ($this->signatureRelevantChanges($before, $normalized)) {
                     $this->signatureService?->archiveActiveForTimesheet($id, $changedByUserId);
                 }
@@ -624,8 +629,8 @@ final class AdminBookingService
                 'Herkunft' => (string) ($row['source_label'] ?? $this->sourceLabel((string) ($row['source'] ?? 'app'))),
                 'Start' => (string) ($row['start_time'] ?? ''),
                 'Ende' => (string) ($row['end_time'] ?? ''),
-                'Pause (Min)' => (int) ($row['break_minutes'] ?? 0),
-                'Netto (Min)' => (int) ($row['net_minutes'] ?? 0),
+                'Pause (Min)' => empty($row['booking_overlap']) ? (int) ($row['break_minutes'] ?? 0) : '',
+                'Netto (Min)' => empty($row['booking_overlap']) ? (int) ($row['net_minutes'] ?? 0) : '',
                 'Gutschrift (Min)' => isset($row['credited_minutes']) ? (int) $row['credited_minutes'] : '',
                 'Abwesenheitsgrund' => (string) ($row['absence_reason_label'] ?? ''),
                 'Status' => (int) ($row['is_deleted'] ?? 0) === 1 ? 'Archiviert' : 'Aktiv',
@@ -633,7 +638,7 @@ final class AdminBookingService
                 'Kundenbestaetigung Name' => (string) ($signature['customer_name'] ?? ''),
                 'Kundenbestaetigung Datum/Uhrzeit' => (string) ($signature['signed_at'] ?? ''),
                 'Aenderungen' => (int) ($row['change_count'] ?? 0),
-                'Hinweis' => (string) ($row['version_hint'] ?? ''),
+                'Hinweis' => !empty($row['booking_overlap']) ? TimesheetOverlap::MESSAGE : (string) ($row['version_hint'] ?? ''),
                 'Notiz' => (string) ($row['note'] ?? ''),
         ];
     }
@@ -665,14 +670,18 @@ final class AdminBookingService
                 'entry_type' => (string) ($row['semantic_entry_type'] ?? $row['entry_type'] ?? ''),
                 'source' => (string) ($row['source'] ?? 'app'),
                 'source_label' => (string) ($row['source_label'] ?? 'App'),
-                'gross_minutes' => (int) ($row['gross_minutes'] ?? 0),
-                'break_minutes' => (int) ($row['break_minutes'] ?? 0),
-                'net_minutes' => (int) ($row['net_minutes'] ?? 0),
+                'gross_minutes' => empty($row['booking_overlap']) ? (int) ($row['gross_minutes'] ?? 0) : null,
+                'break_minutes' => empty($row['booking_overlap']) ? (int) ($row['break_minutes'] ?? 0) : null,
+                'net_minutes' => empty($row['booking_overlap']) ? (int) ($row['net_minutes'] ?? 0) : null,
                 'credited_minutes' => isset($row['credited_minutes']) ? (int) $row['credited_minutes'] : null,
                 'absence_reason_code' => $row['absence_reason_code'] ?? null,
                 'expenses_amount' => (string) ($row['expenses_amount'] ?? '0.00'),
                 'note' => (string) ($row['note'] ?? ''),
-                'booking_status' => (int) ($row['is_deleted'] ?? 0) === 1 ? 'archived' : 'active',
+                'booking_status' => match (true) {
+                    !empty($row['booking_overlap']) => 'overlapping',
+                    (int) ($row['is_deleted'] ?? 0) === 1 => 'archived',
+                    default => 'active',
+                },
                 ...($assessments === [] ? [] : [
                     'break_assessment_work_dates' => implode(', ', $assessments[$row['id']]['linked_work_dates'] ?? []),
                     'documented_day_break_minutes' => $assessments[$row['id']]['documented_break_minutes'] ?? null,
@@ -722,6 +731,7 @@ final class AdminBookingService
             'timesheets.gross_minutes',
             'timesheets.break_minutes',
             'timesheets.net_minutes',
+            TimesheetOverlap::disputedSql('timesheets') . ' AS booking_overlap',
             $this->creditedMinutesSelect(),
             'timesheets.expenses_amount',
             'timesheets.entry_type',
@@ -857,6 +867,9 @@ final class AdminBookingService
             }
 
             $this->connection->transaction(function () use ($id, $archived, $changedByUserId, $reason, $current): void {
+                if (!$archived) {
+                    $this->assertWorkOverlapFree($current, $id);
+                }
                 $this->connection->execute(
                     'UPDATE timesheets SET
                         is_deleted = :is_deleted,
@@ -993,6 +1006,22 @@ final class AdminBookingService
         }
 
         $this->dayConflictService?->assertNoConflictForFullDayAbsence($userId, $workDate, $excludeTimesheetId);
+    }
+
+    private function assertWorkOverlapFree(array $booking, ?int $excludeTimesheetId = null): void
+    {
+        if ($booking['entry_type'] !== 'work') {
+            return;
+        }
+
+        try {
+            $this->dayConflictService?->assertNoWorkOverlap(
+                (int) $booking['user_id'], $booking['work_date'], $booking['start_time'], $booking['end_time'],
+                $excludeTimesheetId
+            );
+        } catch (WorkSessionConflict $exception) {
+            throw new InvalidArgumentException($exception->getMessage(), previous: $exception);
+        }
     }
 
     /**
@@ -1203,7 +1232,7 @@ final class AdminBookingService
         if (($filters['issue'] ?? '') === 'all') {
             $clauses[] = 'COALESCE(' . $alias . '.is_deleted, 0) = 0';
             $clauses[] = $alias . '.entry_type = "work"';
-            $clauses[] = '(' . $alias . '.project_id IS NULL OR ' . $alias . '.start_time IS NULL OR ' . $alias . '.end_time IS NULL)';
+            $clauses[] = '(' . $alias . '.project_id IS NULL OR ' . $alias . '.start_time IS NULL OR ' . $alias . '.end_time IS NULL OR ' . TimesheetOverlap::disputedSql($alias) . ')';
         }
 
         return [implode(' AND ', $clauses), $bindings];
@@ -1279,6 +1308,7 @@ final class AdminBookingService
             'gross_minutes' => (int) ($row['gross_minutes'] ?? 0),
             'break_minutes' => (int) ($row['break_minutes'] ?? 0),
             'net_minutes' => (int) ($row['net_minutes'] ?? 0),
+            'booking_overlap' => !empty($row['booking_overlap']),
             'credited_minutes' => isset($row['credited_minutes']) ? (int) $row['credited_minutes'] : null,
             'expenses_amount' => (string) ($row['expenses_amount'] ?? '0.00'),
             'entry_type' => $entryType,
