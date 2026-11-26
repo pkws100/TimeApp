@@ -138,7 +138,10 @@ final class AdminAbsencePeriodController
             if (!is_string($reason)) {
                 throw new InvalidArgumentException('Bitte gueltigen Text eingeben.');
             }
-            $lockVersion = filter_var($request->input('lock_version'), FILTER_VALIDATE_INT);
+            $submittedVersion = $request->input('lock_version');
+            $lockVersion = is_int($submittedVersion) || is_string($submittedVersion)
+                ? filter_var($submittedVersion, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]])
+                : false;
             if ($lockVersion === false) {
                 throw new InvalidArgumentException('Bitte den Zeitraum neu laden und die Archivierung erneut pruefen.');
             }

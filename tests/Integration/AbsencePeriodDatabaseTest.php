@@ -94,7 +94,7 @@ final class AbsencePeriodDatabaseTest extends MariaDbTestCase
         $csrf = new CsrfService();
         $periodController = new AdminAbsencePeriodController($service, $auth, $csrf);
         $archiveBody = ['csrf_token' => $csrf->token(), 'change_reason' => $reason, 'lock_version' => $period['lock_version']];
-        foreach ([['change_reason' => ['Text']], ['lock_version' => [1]]] as $invalidField) {
+        foreach ([['change_reason' => ['Text']], ['lock_version' => [1]], ['lock_version' => true]] as $invalidField) {
             $response = $periodController->archive(
                 new Request('DELETE', '/admin/absence-periods/' . $period['id'] . '/archive', [], array_replace($archiveBody, $invalidField), [], [], []),
                 ['id' => $period['id']]
