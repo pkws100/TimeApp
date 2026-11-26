@@ -170,6 +170,58 @@ final class WorkTimeEventsDatabaseTest extends MariaDbTestCase
         self::assertSame($overnightEnd->format(DATE_ATOM), $events->statusForUser($user, $date)['automatic_checkout']['ended_at']);
     }
 
+    #[DataProvider('nightAssignmentBoundaries')]
+    public function testEarlyCheckInUsesTheRuleAtThePreviousNightsWindowStart(bool $hasCarriedWindow): void
+    {
+        [$user, $policies, $sync, $events, $date] = $this->services(true, [
+            'checkout_mode' => 'automatic',
+            'windows' => array_fill(1, 7, $hasCarriedWindow ? [['start' => '22:00', 'end' => '05:00']] : [['start' => '08:00', 'end' => '16:00']]),
+        ]);
+        $zone = new DateTimeZone('Europe/Berlin');
+        $workDay = new DateTimeImmutable($date, $zone);
+        $previous = $workDay->modify('-1 day');
+        $connection = $this->connection();
+        $previousVersion = $connection->fetchColumn('SELECT policy_version_id FROM employee_work_time_assignments WHERE user_id = :user', ['user' => $user]);
+        $connection->execute(
+            'UPDATE employee_work_time_assignments SET effective_from = :start, effective_to = :end WHERE user_id = :user',
+            ['start' => $previous->format('Y-m-d'), 'end' => $previous->format('Y-m-d'), 'user' => $user]
+        );
+        $expectedVersion = $previousVersion;
+        if (!$hasCarriedWindow) {
+            $new = $policies->createTemplate(['name' => 'Nach Mitternacht wirksam', 'policy' => [
+                'checkout_mode' => 'automatic',
+                'windows' => [
+                    (int) $previous->format('N') => [['start' => '22:00', 'end' => '06:00']],
+                    (int) $workDay->format('N') => [['start' => '08:00', 'end' => '17:00']],
+                ],
+            ]], $user);
+            $expectedVersion = $new['version']['id'];
+            $assignment = $policies->assign([
+                'user_id' => $user, 'policy_version_id' => $expectedVersion,
+                'effective_from' => (new DateTimeImmutable('tomorrow', $zone))->format('Y-m-d'),
+            ], $user);
+            $connection->execute('UPDATE employee_work_time_assignments SET effective_from = :day WHERE id = :id',
+                ['day' => $date, 'id' => $assignment['id']]);
+        }
+        $entry = $this->checkIn($sync, $user, $date, '02:00')['timesheet'];
+        $earlyRun = $events->process(false, $workDay->setTime(6, 10));
+        self::assertSame($hasCarriedWindow ? 1 : 0, $earlyRun['automatic_checkouts']);
+        if (!$hasCarriedWindow) {
+            self::assertSame(1, $events->process(false, $workDay->setTime(17, 1))['automatic_checkouts']);
+        }
+        $audit = $connection->fetchOne('SELECT ended_at, policy_version_id FROM work_time_automatic_checkouts WHERE timesheet_id = :id', ['id' => $entry['id']]);
+        self::assertSame($date . ($hasCarriedWindow ? ' 05:00:00' : ' 17:00:00'), $audit['ended_at']);
+        self::assertSame((int) $expectedVersion, (int) $audit['policy_version_id']);
+    }
+
+    public static function nightAssignmentBoundaries(): array
+    {
+        return [
+            'the assignment expired but its final night carries' => [true],
+            'the new assignment cannot create a window in the previous day' => [false],
+        ];
+    }
+
     public function testOverlappingWorkRollsBackAutomaticPauseEndAndPush(): void
     {
         [$user, , $sync, $events, $date] = $this->services(true, ['checkout_mode' => 'automatic']);
@@ -288,6 +340,9 @@ final class WorkTimeEventsDatabaseTest extends MariaDbTestCase
     public function testCheckInAfterMidnightUsesPreviousNightsWindowAndCheckoutProposal(): void
     {
         [$user, , $sync, $events, $date] = $this->services(true, ['early_check_in_mode' => 'presence_only', 'windows' => array_fill(1, 7, [['start' => '22:00', 'end' => '06:00']])]);
+        $previous = (new DateTimeImmutable($date, new DateTimeZone('Europe/Berlin')))->modify('-1 day')->format('Y-m-d');
+        $this->connection()->execute('UPDATE employee_work_time_assignments SET effective_from = :day WHERE user_id = :user',
+            ['day' => $previous, 'user' => $user]);
         $in = $this->checkIn($sync, $user, $date, '00:10');
         self::assertSame('synced', $in['status']);
         self::assertSame('00:10:00', $in['timesheet']['start_time']);

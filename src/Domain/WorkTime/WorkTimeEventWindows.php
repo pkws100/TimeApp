@@ -5,42 +5,52 @@ declare(strict_types=1);
 namespace App\Domain\WorkTime;
 
 use DateTimeImmutable;
-use DateTimeZone;
 
 /** Shared source classification for queued events and their final send claim. */
 final class WorkTimeEventWindows
 {
-    public static function windowEnd(array $policy, string $date, DateTimeImmutable $startedAt): ?DateTimeImmutable
+    /** @return array{policy: array, end: DateTimeImmutable}|null */
+    public static function checkoutWindow(?array $policy, ?array $previousPolicy, DateTimeImmutable $startedAt): ?array
     {
-        $day = new DateTimeImmutable($date, new DateTimeZone('Europe/Berlin'));
-        $previous = $day->modify('-1 day');
-        foreach ($policy['windows'][(int) $previous->format('N')] ?? [] as $window) {
-            if ($window['end'] <= $window['start']) {
-                $carriedEnd = WorkTimeLocalTime::parse($date . ' ' . $window['end'] . ':00');
-                if ($startedAt < $carriedEnd) {
-                    return $carriedEnd;
-                }
-            }
+        $carriedEnd = self::carriedWindowEnd($previousPolicy, $startedAt);
+        if ($carriedEnd !== null) {
+            return ['policy' => $previousPolicy, 'end' => $carriedEnd];
         }
-        $windows = $policy['windows'][(int) $day->format('N')] ?? [];
+        $day = $startedAt->setTime(0, 0);
         $end = null;
-        foreach ($windows as $window) {
-            $endDate = $window['end'] <= $window['start'] ? $day->modify('+1 day')->format('Y-m-d') : $date;
+        foreach ($policy['windows'][(int) $day->format('N')] ?? [] as $window) {
+            $endDay = $window['end'] <= $window['start'] ? $day->modify('+1 day') : $day;
+            $endDate = $endDay->format('Y-m-d');
             $candidate = WorkTimeLocalTime::parse($endDate . ' ' . $window['end'] . ':00');
             if ($end === null || $candidate > $end) {
                 $end = $candidate;
             }
         }
-        return $end;
+        return $end === null ? null : ['policy' => $policy, 'end' => $end];
     }
 
-    public static function startedOutsideAfterWindow(array $policy, DateTimeImmutable $startedAt): bool
+    public static function carriedWindowEnd(?array $previousPolicy, DateTimeImmutable $startedAt): ?DateTimeImmutable
+    {
+        $previous = $startedAt->modify('-1 day');
+        foreach ($previousPolicy['windows'][(int) $previous->format('N')] ?? [] as $window) {
+            if ($window['end'] <= $window['start']) {
+                $end = WorkTimeLocalTime::parse($startedAt->format('Y-m-d') . ' ' . $window['end'] . ':00');
+                if ($startedAt < $end) {
+                    return $end;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    public static function startedOutsideAfterWindow(array $policy, ?array $previousPolicy, DateTimeImmutable $startedAt): bool
     {
         $day = $startedAt->setTime(0, 0);
         $previous = $day->modify('-1 day');
         $intervals = [];
         $previousNight = false;
-        foreach ($policy['windows'][(int) $previous->format('N')] ?? [] as $window) {
+        foreach ($previousPolicy['windows'][(int) $previous->format('N')] ?? [] as $window) {
             if ($window['end'] > $window['start']) { continue; }
             $previousNight = true;
             $intervals[] = [WorkTimeLocalTime::parse($previous->format('Y-m-d') . ' ' . $window['start'] . ':00'), WorkTimeLocalTime::parse($day->format('Y-m-d') . ' ' . $window['end'] . ':00')];

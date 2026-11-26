@@ -371,7 +371,8 @@ final class WorkTimeNotificationDatabaseTest extends MariaDbTestCase
         $template = $policies->createTemplate(['name' => 'Benachrichtigung', 'policy' => array_replace(['windows' => array_fill(1, 7, [['start' => '08:00', 'end' => '16:00']]), 'outside_window_notifications_enabled' => true, 'outside_window_delay_minutes' => 5, 'notify_employee_push' => true], $policy)], $user);
         $assignment = $policies->assign(['user_id' => $user, 'policy_version_id' => $template['version']['id'], 'effective_from' => $this->at('tomorrow')->format('Y-m-d')], $user);
         $date ??= $this->at('yesterday')->format('Y-m-d');
-        $this->connection()->execute('UPDATE employee_work_time_assignments SET effective_from = :date_from WHERE id = :id', ['date_from' => $date, 'id' => $assignment['id']]);
+        $assignmentDate = $this->at($date)->modify('-1 day')->format('Y-m-d');
+        $this->connection()->execute('UPDATE employee_work_time_assignments SET effective_from = :date_from WHERE id = :id', ['date_from' => $assignmentDate, 'id' => $assignment['id']]);
         $entry = $this->insertEntry($user, $date, $start);
         $sync = new AppTimesheetSyncService($this->connection(), new TimesheetCalculator(), new CompanySettingsService($this->connection(), []), new WorkdayStateCalculator());
         $events = new WorkTimeEventService($this->connection(), $policies, $sync, $sender, $sms);

@@ -258,25 +258,33 @@ final class WorkTimeNotificationService
         if ((int) ($event['employee_user_id'] ?? 0) !== (int) $entry['user_id']) { return false; }
         // The request-scoped service may have loaded this assignment before an
         // administrator changed notification overrides or its supervisor list.
-        $policy = (new WorkTimePolicyService($this->connection, $this->policies->enabled()))->policyFor((int) $entry['user_id'], $entry['work_date']);
+        $startedAt = WorkTimeLocalTime::parse($entry['work_date'] . ' ' . $entry['start_time']);
+        $policies = new WorkTimePolicyService($this->connection, $this->policies->enabled());
+        $policy = $policies->policyFor((int) $entry['user_id'], $entry['work_date']);
+        $previousPolicy = $policies->policyFor((int) $entry['user_id'], $startedAt->modify('-1 day')->format('Y-m-d'));
+        $isProposal = ($event['event_type'] ?? '') === 'work_time_checkout_proposal';
+        $end = null;
+        if ($isProposal) {
+            $checkout = WorkTimeEventWindows::checkoutWindow($policy, $previousPolicy, $startedAt);
+            $policy = $checkout['policy'] ?? null;
+            $end = $checkout['end'] ?? null;
+        }
         if ($policy === null || (isset($event['policy_version_id']) && (int) $event['policy_version_id'] !== (int) $policy['policy_version_id'])) { return false; }
         $employeeRecipient = (int) $event['recipient_user_id'] === (int) $entry['user_id'];
         if ($employeeRecipient) {
             if (empty($policy['notify_employee_' . $event['channel']])) { return false; }
         } elseif (!in_array((int) $event['recipient_user_id'], array_map('intval', $policy['supervisor_user_ids'] ?? []), true)
             || empty($policy['notify_supervisor_' . $event['channel']])) { return false; }
-        $startedAt = WorkTimeLocalTime::parse($entry['work_date'] . ' ' . $entry['start_time']);
-        if (($event['event_type'] ?? '') === 'work_time_checkout_proposal') {
+        if ($isProposal) {
             if ($policy['checkout_mode'] === 'manual') { return false; }
             $proposal = $this->connection->fetchOne('SELECT status, proposed_end_at FROM work_time_checkout_proposals WHERE id = :id AND timesheet_id = :timesheet', ['id' => $event['proposal_id'] ?? 0, 'timesheet' => $entry['id']]);
-            $end = WorkTimeEventWindows::windowEnd($policy, $entry['work_date'], $startedAt);
             return ($proposal['status'] ?? '') === 'pending' && $end !== null && $end > $startedAt
                 && $end->format('Y-m-d H:i:s') === $proposal['proposed_end_at']
                 && $end->modify('+' . (int) ($policy['checkout_delay_minutes'] ?? 0) . ' minutes') <= $now;
         }
         return ($event['event_type'] ?? '') === 'work_time_outside_window_started'
             && !empty($policy['outside_window_notifications_enabled'])
-            && WorkTimeEventWindows::startedOutsideAfterWindow($policy, $startedAt)
+            && WorkTimeEventWindows::startedOutsideAfterWindow($policy, $previousPolicy, $startedAt)
             && $startedAt->modify('+' . (int) ($policy['outside_window_delay_minutes'] ?? 5) . ' minutes') <= $now;
     }
 

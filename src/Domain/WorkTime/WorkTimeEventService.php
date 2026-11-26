@@ -258,26 +258,32 @@ final class WorkTimeEventService
                         } catch (InvalidArgumentException) {
                             continue;
                         }
-                        $policy = $this->policies->policyFor((int) $entry['user_id'], $entry['work_date']);
-                        if ($policy === null) {
+                        $employee = (int) $entry['user_id'];
+                        $policy = $this->policies->policyFor($employee, $entry['work_date']);
+                        $previousDate = (new DateTimeImmutable($entry['work_date'], $now->getTimezone()))->modify('-1 day')->format('Y-m-d');
+                        $previousPolicy = $this->policies->policyFor($employee, $previousDate);
+                        if ($policy === null && $previousPolicy === null) {
                             continue;
                         }
                         $startedAt = WorkTimeLocalTime::parse($entry['work_date'] . ' ' . $entry['start_time']);
-                        if ($startedAt->getTimestamp() < (int) ($policy['live_from_unix'] ?? 0)) {
-                            continue;
-                        }
                         if (!empty($policy['outside_window_notifications_enabled'])
-                            && WorkTimeEventWindows::startedOutsideAfterWindow($policy, $startedAt)
+                            && $startedAt->getTimestamp() >= (int) ($policy['live_from_unix'] ?? 0)
+                            && WorkTimeEventWindows::startedOutsideAfterWindow($policy, $previousPolicy, $startedAt)
                             && $startedAt->modify('+' . (int) ($policy['outside_window_delay_minutes'] ?? 5) . ' minutes') <= $now) {
                             $queued = $dryRun
                                 ? $this->notifications->queue('work_time_outside_window_started', $entry, $policy, $startedAt, null, true)
                                 : $this->connection->transaction(fn (): int => $this->notifications->queue('work_time_outside_window_started', $entry, $policy, $startedAt));
                             $summary['outside_notifications_queued'] += $queued;
                         }
-                        if ($policy['checkout_mode'] === 'manual') { continue; }
-                        $windowEnd = WorkTimeEventWindows::windowEnd($policy, $entry['work_date'], $startedAt);
-                        $due = $windowEnd?->modify('+' . (int) ($policy['checkout_delay_minutes'] ?? 0) . ' minutes');
-                        if ($windowEnd === null || $windowEnd <= $startedAt || $due > $now || $this->connection->fetchOne('SELECT id FROM work_time_checkout_proposals WHERE timesheet_id = :id', ['id' => $entry['id']]) !== null) {
+                        $checkout = WorkTimeEventWindows::checkoutWindow($policy, $previousPolicy, $startedAt);
+                        if ($checkout === null) {
+                            continue;
+                        }
+                        ['policy' => $policy, 'end' => $windowEnd] = $checkout;
+                        $due = $windowEnd->modify('+' . (int) ($policy['checkout_delay_minutes'] ?? 0) . ' minutes');
+                        if ($policy['checkout_mode'] === 'manual' || $startedAt->getTimestamp() < (int) ($policy['live_from_unix'] ?? 0)
+                            || $windowEnd <= $startedAt || $due > $now
+                            || $this->connection->fetchOne('SELECT id FROM work_time_checkout_proposals WHERE timesheet_id = :id', ['id' => $entry['id']]) !== null) {
                             continue;
                         }
                         if ($policy['checkout_mode'] === 'automatic') {

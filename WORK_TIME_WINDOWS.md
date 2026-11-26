@@ -161,7 +161,8 @@ atomar mit der Aktionshistorie. „Ich arbeite weiter“ lässt die Buchung offe
 
 Im automatischen Modus schließt der Minutenworker einen laufenden Einsatz am
 letzten Ende der anwendbaren Tagesfenster oder am Ende des zugeordneten
-Nachtfensters. Die konfigurierbare Verzögerung bestimmt den Verarbeitungszeitpunkt.
+Nachtfensters. Über Mitternacht gilt die am Fensterbeginn zugeordnete Regel.
+Die konfigurierbare Verzögerung bestimmt den Verarbeitungszeitpunkt.
 Die Buchung hält die Zeit des Fensterendes in `Europe/Berlin` fest. Liegt der
 geplante Ausführungszeitpunkt mehr als einen Tag zurück, bleibt der Einsatz
 zur manuellen Klärung offen. Eine

@@ -40,7 +40,8 @@ final class AppApiController
             $events = $this->workTimeEvents?->statusForUser((int) $user['id']) ?? [];
             $assigned = $this->workTimePolicies->policyFor((int) $user['id'], $day['today']) !== null
                 || !empty($events['presence_session']) || !empty($events['checkout_proposals'])
-                || !empty($events['active_work_entry']) || !empty($events['active_work_entry_conflict']);
+                || !empty($events['active_work_entry']) || !empty($events['active_work_entry_conflict'])
+                || !empty($events['automatic_checkout']);
         }
 
         return Response::json([

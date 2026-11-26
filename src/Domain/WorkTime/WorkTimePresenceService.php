@@ -100,13 +100,9 @@ final class WorkTimePresenceService
         }
         $start = WorkTimeLocalTime::parse($date . ' ' . (strlen($startTime) === 5 ? $startTime . ':00' : $startTime));
         $previousDay = $start->modify('-1 day');
-        foreach ($policy['windows'][(int) $previousDay->format('N')] ?? [] as $window) {
-            if ($window['end'] <= $window['start']) {
-                $carriedEnd = WorkTimeLocalTime::parse($date . ' ' . $window['end'] . ':00');
-                if ($start < $carriedEnd) {
-                    return null;
-                }
-            }
+        $previousPolicy = $this->policies->policyFor($userId, $previousDay->format('Y-m-d'));
+        if (WorkTimeEventWindows::carriedWindowEnd($previousPolicy, $start) !== null) {
+            return null;
         }
         $windows = $policy['windows'][(int) $start->format('N')] ?? [];
         $earliest = $windows === [] ? null : min(array_column($windows, 'start'));
