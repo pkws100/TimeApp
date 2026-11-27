@@ -17,6 +17,20 @@ async function screenshot(page, testInfo, name) {
   }
 }
 
+async function expectMobileBalances(summary) {
+  const card = summary.locator('.vacation-account-mobile .vacation-account-card').first();
+  await expect(card).toBeVisible();
+  for (const [label, value] of [
+    ['Urlaub im Zeitraum (Tage)', '1'],
+    ['Krankheit im Zeitraum (Tage)', '1'],
+    ['Resturlaub am Standdatum (Tage)', '29'],
+  ]) {
+    const field = card.locator('.vacation-account-values > div').filter({ hasText: label });
+    await expect(field).toBeVisible();
+    await expect(field.locator('dd')).toHaveText(value);
+  }
+}
+
 test.describe('real accounting document workflow', () => {
   test.describe.configure({ mode: 'serial', timeout: 90000, retries: 0 });
   test.skip(process.env.REAL_ACCOUNT_UI !== '1' || process.env.UI_ISOLATED_ACCOUNT_RUNNER !== '1',
@@ -27,7 +41,10 @@ test.describe('real accounting document workflow', () => {
     await page.getByLabel('E-Mail').fill(process.env.UI_TEST_ADMIN_EMAIL);
     await page.getByLabel('Passwort').fill(process.env.UI_TEST_ADMIN_PASSWORD);
     await page.getByRole('button', { name: 'Anmelden' }).click();
-    await page.setViewportSize({ width: 1440, height: 1000 });
+    const isMobile = testInfo.project.use.isMobile === true;
+    if (!isMobile) {
+      await page.setViewportSize({ width: 1440, height: 1000 });
+    }
     const period = process.env.UI_TEST_BILLING_PERIOD;
     const user = process.env.UI_TEST_BILLING_USER_ID;
     await page.goto('/admin/accounting?' + new URLSearchParams({ type: 'month', period, user_id: user }));
@@ -38,14 +55,20 @@ test.describe('real accounting document workflow', () => {
     await expect(summary).toContainText('Krankheit im Zeitraum');
     await expect(summary).toContainText('UI Abrechnung Kernzeit');
     await expect(summary).toContainText('07:00–16:00');
-    const cells = summary.locator('tbody tr').first().locator('td');
-    await expect(cells.nth(2)).toHaveText('1');
-    await expect(cells.nth(3)).toHaveText('1');
-    await expect(cells.nth(5)).toHaveText('29');
+    if (isMobile) {
+      await expectMobileBalances(summary);
+    } else {
+      const cells = summary.locator('tbody tr').first().locator('td');
+      await expect(cells.first()).toBeVisible();
+      await expect(cells.nth(2)).toHaveText('1');
+      await expect(cells.nth(3)).toHaveText('1');
+      await expect(cells.nth(5)).toHaveText('29');
+    }
     await expect(page.getByText('Der aktuelle Bereich kann festgeschrieben werden.')).toBeVisible();
-    await screenshot(page, testInfo, 'accounting-desktop');
+    const initialViewport = isMobile ? 'accounting-mobile-initial' : 'accounting-desktop';
+    await screenshot(page, testInfo, initialViewport);
     await page.getByRole('button', { name: 'Dunkel', exact: true }).click();
-    await screenshot(page, testInfo, 'accounting-desktop-dark');
+    await screenshot(page, testInfo, initialViewport + '-dark');
     await page.getByRole('button', { name: 'Hell', exact: true }).click();
 
     for (const [name, signature] of [['Vorlaeufiges PDF', '%PDF'], ['Vorlaeufiges Excel', 'PK'], ['Vorlaeufiges ZIP', 'PK']]) {
@@ -81,6 +104,7 @@ test.describe('real accounting document workflow', () => {
     await page.goto('/admin/accounting?' + new URLSearchParams({ type: 'month', period, user_id: user }));
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(summary).toBeVisible();
+    await expectMobileBalances(summary);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
     await screenshot(page, testInfo, 'accounting-mobile');
 
