@@ -13,6 +13,7 @@ use App\Domain\Attendance\AttendanceService;
 use App\Domain\Attendance\AttendanceReportService;
 use App\Domain\Auth\AuthService;
 use App\Domain\Auth\CsrfService;
+use App\Domain\Auth\ProjectSessionDirectory;
 use App\Domain\Auth\RouteGuard;
 use App\Domain\Backup\BackupService;
 use App\Domain\Calendar\AppointmentCalendarFeed;
@@ -164,17 +165,9 @@ $isPublicAppResource = $request->method() === 'GET'
 
 if (!$isPublicAppResource && session_status() !== PHP_SESSION_ACTIVE) {
     $sessionCandidates = $personnelHttp === null ? [] : [$personnelHttp->sessionDirectory()];
-    $projectSessionPath = storage_path('cache/sessions');
-    $projectSessionParent = dirname($projectSessionPath);
-
-    if (is_dir($projectSessionPath) && is_writable($projectSessionPath)) {
+    $projectSessionPath = ProjectSessionDirectory::prepare(storage_path());
+    if ($projectSessionPath !== null) {
         $sessionCandidates[] = $projectSessionPath;
-    } elseif (is_dir($projectSessionParent) && is_writable($projectSessionParent)) {
-        if (@mkdir($projectSessionPath, 0775, true) || is_dir($projectSessionPath)) {
-            $sessionCandidates[] = $projectSessionPath;
-        } else {
-            error_log('App bootstrap: Session-Verzeichnis im Projekt konnte nicht erstellt werden, verwende Fallback.');
-        }
     }
 
     $configuredSessionPath = trim((string) ini_get('session.save_path'));
