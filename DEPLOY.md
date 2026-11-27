@@ -18,6 +18,13 @@ anwenden. Alte Abschlüsse bleiben unverändert. Die Migration ist ausschließli
 vorwärts ausführbar und sperrt einen automatischen Schema-Rollback. Felddefinitionen
 stehen in [ACCOUNTING_DOCUMENTS.md](ACCOUNTING_DOCUMENTS.md).
 
+Umfangreiche PHPUnit- und Browserpruefungen auf GitHub CI oder einem getrennten
+Testsystem ausfuehren. Auf dem produktiv genutzten Container keine Lasttests oder
+zusaetzlichen Browser-Testdienste starten; diese koennen CPU und Arbeitsspeicher
+erschoepfen. Der isolierte Realtest-Runner arbeitet mit genau einem Browser-Worker,
+weil seine Ablaeufe eine gemeinsame Datenbank, einen Testserver und veraenderliche
+Fixtures verwenden.
+
 Diese Anleitung beschreibt den Docker-Compose-Betrieb fuer die TimeApp hinter
 einem Reverse Proxy. Sie enthaelt nur Platzhalter und keine produktiven Secrets.
 

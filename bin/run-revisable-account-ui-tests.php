@@ -639,7 +639,8 @@ try {
         $realSpecs = [$selectedSpec];
     }
     $browserConfig = getenv('UI_REAL_TEST_BROWSER') === 'webkit' ? ['--config=playwright.webkit.config.js'] : [];
-    fwrite(STDOUT, $run([$playwright, 'test', ...$browserConfig, ...$realSpecs, '--trace=retain-on-failure', '--output=' . $outputDirectory], $playwrightEnvironment));
+    // These workflows share one database, PHP server and mutable fixtures, including global worker events.
+    fwrite(STDOUT, $run([$playwright, 'test', ...$browserConfig, ...$realSpecs, '--workers=1', '--trace=retain-on-failure', '--output=' . $outputDirectory], $playwrightEnvironment));
     $exitCode = 0;
 } catch (Throwable $exception) {
     fwrite(STDERR, $exception->getMessage() . PHP_EOL);
