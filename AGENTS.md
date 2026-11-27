@@ -365,7 +365,9 @@ Beim Implementieren:
 - im Dockerfile nur PHP-Extensions bauen, die im Basisimage fehlen; aktuell sind das fuer Produktion insbesondere `gd`, `pdo_mysql` und `zip`
 - MariaDB-spezifische Zeitkontoablaeufe mit den Scratch-DB-Integrationstests pruefen. Fehlende DB-Verbindung oder fehlendes `CREATE DATABASE` ist ein Testfehler und kein stiller Skip; `DB_OVERRIDE_FILE` darf fuer isolierte Testprozesse auf einen separaten Override-Pfad zeigen.
 - `npm run ui:test` umfasst die schnellen Browser-Smokes und den realen Zeitkonto-Workflow gegen eine automatisch erzeugte `timeapp_ui_*`-Scratch-Datenbank; fuer reine Smokes `npm run ui:test:smoke` verwenden.
-- Auf diesem produktiv genutzten Container keine umfangreichen PHPUnit-, Browser- oder Lasttestlaeufe starten. Die vollstaendigen Pruefungen auf GitHub CI oder einem getrennten Testsystem ausfuehren. Der isolierte Realtest-Runner verwendet wegen gemeinsamer Datenbank, Testserver und veraenderlicher Fixtures genau einen Browser-Worker.
+- Auf diesem produktiv genutzten Container keine umfangreichen oder parallelen PHPUnit-, Browser- oder Lasttestlaeufe starten. Gleichzeitige Testlast kann CPU und RAM erschoepfen, Prozesse wegen Speichermangel beenden und auch die Codex-Verbindung unterbrechen. Beim Vorfall vom 27.11.2026 wurden Ressourcenengpaesse und wiederholte Codex-Verbindungsabbrueche beobachtet. Vollstaendige Pruefungen ausschliesslich auf GitHub CI oder einem getrennten Testsystem ausfuehren.
+- Lokal nur leichte Syntax- und Quelltextpruefungen nacheinander ausfuehren. Bei Ressourcenengpaessen gezielt selbst gestartete Testprozesse und Lastgeneratoren beenden; fehlgeschlagene oder unterbrochene Testlaeufe nicht automatisch lokal erneut starten oder durch weitere parallele Laeufe ergaenzen.
+- Der isolierte Realtest-Runner verwendet wegen gemeinsamer Datenbank, Testserver und veraenderlicher Fixtures genau einen Browser-Worker.
 
 Beim Aendern von Dokumentation:
 

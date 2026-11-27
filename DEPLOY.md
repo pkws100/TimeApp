@@ -18,12 +18,20 @@ anwenden. Alte Abschlüsse bleiben unverändert. Die Migration ist ausschließli
 vorwärts ausführbar und sperrt einen automatischen Schema-Rollback. Felddefinitionen
 stehen in [ACCOUNTING_DOCUMENTS.md](ACCOUNTING_DOCUMENTS.md).
 
-Umfangreiche PHPUnit- und Browserpruefungen auf GitHub CI oder einem getrennten
-Testsystem ausfuehren. Auf dem produktiv genutzten Container keine Lasttests oder
-zusaetzlichen Browser-Testdienste starten; diese koennen CPU und Arbeitsspeicher
-erschoepfen. Der isolierte Realtest-Runner arbeitet mit genau einem Browser-Worker,
-weil seine Ablaeufe eine gemeinsame Datenbank, einen Testserver und veraenderliche
-Fixtures verwenden.
+Umfangreiche PHPUnit-, Browser- und Lasttestlaeufe ausschliesslich auf GitHub CI
+oder einem getrennten Testsystem ausfuehren. Auf dem produktiv genutzten Container
+keine umfangreichen oder parallelen Testlaeufe und keine zusaetzlichen
+Browser-Testdienste starten. Gleichzeitige Testlast kann CPU und Arbeitsspeicher
+erschoepfen, Prozesse wegen Speichermangel beenden und auch die Codex-Verbindung
+unterbrechen. Beim Vorfall vom 27.11.2026 wurden Ressourcenengpaesse und wiederholte
+Codex-Verbindungsabbrueche beobachtet.
+
+Lokal nur leichte Syntax- und Quelltextpruefungen nacheinander ausfuehren. Bei
+Ressourcenengpaessen gezielt selbst gestartete Testprozesse und Lastgeneratoren
+beenden; fehlgeschlagene oder unterbrochene Testlaeufe nicht automatisch lokal
+wiederholen oder durch weitere parallele Laeufe ergaenzen. Der isolierte
+Realtest-Runner arbeitet mit genau einem Browser-Worker, weil seine Ablaeufe eine
+gemeinsame Datenbank, einen Testserver und veraenderliche Fixtures verwenden.
 
 Die isolierten PHP-HTTP-Testserver laufen mit deaktiviertem JIT und weiter
 aktiviertem OPcache, passend zur nativen Laufzeit. Der CI-Helfer `setup-php`
