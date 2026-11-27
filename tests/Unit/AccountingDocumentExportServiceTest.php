@@ -123,7 +123,14 @@ final class AccountingDocumentExportServiceTest extends TestCase
 
     public function testRealZipKeepsEmployeeAccountsPrivateAndIncludesReadablePdfAndProjectPolicy(): void
     {
-        $result = $this->service()->export($this->personnelPackage(), 'zip');
+        $service = $this->service();
+        $package = $this->personnelPackage();
+        // Match the download sequence before the archive generates multiple
+        // additional PDFs and workbooks within the same PHP process.
+        self::assertStringStartsWith('%PDF-', $service->export($package, 'pdf')['content']);
+        self::assertStringStartsWith('PK', $service->export($package, 'xlsx')['content']);
+        $result = $service->export($package, 'zip');
+        self::assertSame([], glob($this->tempDir . '/accounting_*'));
         $path = $this->tempDir . '/documents.zip';
         file_put_contents($path, $result['content']);
         $zip = new ZipArchive();
@@ -164,6 +171,21 @@ final class AccountingDocumentExportServiceTest extends TestCase
         } finally {
             $zip->close();
         }
+    }
+
+    public function testFailedArchiveRenderingRemovesItsTemporaryFiles(): void
+    {
+        $package = $this->personnelPackage();
+        $package['employee_summaries'][0]['core_time_periods'] = [null];
+
+        try {
+            $this->service()->export($package, 'zip');
+            self::fail('The invalid policy must fail document rendering.');
+        } catch (\TypeError $exception) {
+            self::assertStringContainsString('coreTimeRow', $exception->getMessage());
+        }
+
+        self::assertSame([], glob($this->tempDir . '/accounting_*'));
     }
 
     public function testDuplicateEmployeeLabelsUseSeparateArchiveNamesAndAmbiguousLegacyIdsRemainUnknown(): void

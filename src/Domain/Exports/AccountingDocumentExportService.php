@@ -36,41 +36,61 @@ final class AccountingDocumentExportService
         }
 
         $tempFile = tempnam($this->tempDir(), 'accounting_zip_');
+        if ($tempFile === false) {
+            throw new RuntimeException('ZIP-Temp-Datei konnte nicht erstellt werden.');
+        }
         $zip = new ZipArchive();
+        $opened = false;
 
-        if ($zip->open($tempFile, ZipArchive::OVERWRITE) !== true) {
-            throw new RuntimeException('ZIP-Datei konnte nicht erzeugt werden.');
+        try {
+            if ($zip->open($tempFile, ZipArchive::OVERWRITE) !== true) {
+                throw new RuntimeException('ZIP-Datei konnte nicht erzeugt werden.');
+            }
+            $opened = true;
+
+            $base = $this->baseFilename($package);
+            $zip->addFromString($base . '/sammeluebersicht.pdf', (string) $this->pdfExport($package, 'sammeluebersicht.pdf')['content']);
+            $zip->addFromString($base . '/sammeluebersicht.xlsx', (string) $this->xlsxExport($package, 'sammeluebersicht.xlsx')['content']);
+
+            foreach ($this->groupItems((array) ($package['items'] ?? []), 'employee_number', 'employee_name', 'user_id', $this->personnelSummaries($package)) as $group) {
+                $employeePackage = $this->filteredPackage($package, $group['items'], true, $group['id']);
+                $name = $this->slug('mitarbeiter-' . $group['label']);
+                $zip->addFromString($base . '/mitarbeiter/' . $name . '.pdf', (string) $this->pdfExport($employeePackage, $name . '.pdf')['content']);
+                $zip->addFromString($base . '/mitarbeiter/' . $name . '.xlsx', (string) $this->xlsxExport($employeePackage, $name . '.xlsx')['content']);
+            }
+
+            foreach ($this->groupItems((array) ($package['items'] ?? []), 'project_number', 'project_name', 'project_id') as $group) {
+                $projectPackage = $this->filteredPackage($package, $group['items'], false);
+                $name = $this->slug('projekt-' . $group['label']);
+                $zip->addFromString($base . '/projekte/' . $name . '.pdf', (string) $this->pdfExport($projectPackage, $name . '.pdf')['content']);
+                $zip->addFromString($base . '/projekte/' . $name . '.xlsx', (string) $this->xlsxExport($projectPackage, $name . '.xlsx')['content']);
+            }
+
+            $opened = false;
+            if (!$zip->close()) {
+                throw new RuntimeException('ZIP-Datei konnte nicht abgeschlossen werden.');
+            }
+            $content = file_get_contents($tempFile);
+            if ($content === false) {
+                throw new RuntimeException('ZIP-Datei konnte nicht gelesen werden.');
+            }
+
+            return [
+                'content' => $content,
+                'headers' => [
+                    'Content-Type' => 'application/zip',
+                    'Content-Disposition' => 'attachment; filename="' . $base . '.zip"',
+                ],
+            ];
+        } finally {
+            try {
+                if ($opened) {
+                    $zip->close();
+                }
+            } finally {
+                @unlink($tempFile);
+            }
         }
-
-        $base = $this->baseFilename($package);
-        $zip->addFromString($base . '/sammeluebersicht.pdf', (string) $this->pdfExport($package, 'sammeluebersicht.pdf')['content']);
-        $zip->addFromString($base . '/sammeluebersicht.xlsx', (string) $this->xlsxExport($package, 'sammeluebersicht.xlsx')['content']);
-
-        foreach ($this->groupItems((array) ($package['items'] ?? []), 'employee_number', 'employee_name', 'user_id', $this->personnelSummaries($package)) as $group) {
-            $employeePackage = $this->filteredPackage($package, $group['items'], true, $group['id']);
-            $name = $this->slug('mitarbeiter-' . $group['label']);
-            $zip->addFromString($base . '/mitarbeiter/' . $name . '.pdf', (string) $this->pdfExport($employeePackage, $name . '.pdf')['content']);
-            $zip->addFromString($base . '/mitarbeiter/' . $name . '.xlsx', (string) $this->xlsxExport($employeePackage, $name . '.xlsx')['content']);
-        }
-
-        foreach ($this->groupItems((array) ($package['items'] ?? []), 'project_number', 'project_name', 'project_id') as $group) {
-            $projectPackage = $this->filteredPackage($package, $group['items'], false);
-            $name = $this->slug('projekt-' . $group['label']);
-            $zip->addFromString($base . '/projekte/' . $name . '.pdf', (string) $this->pdfExport($projectPackage, $name . '.pdf')['content']);
-            $zip->addFromString($base . '/projekte/' . $name . '.xlsx', (string) $this->xlsxExport($projectPackage, $name . '.xlsx')['content']);
-        }
-
-        $zip->close();
-        $content = (string) file_get_contents($tempFile);
-        @unlink($tempFile);
-
-        return [
-            'content' => $content,
-            'headers' => [
-                'Content-Type' => 'application/zip',
-                'Content-Disposition' => 'attachment; filename="' . $base . '.zip"',
-            ],
-        ];
     }
 
     private function pdfExport(array $package, string $filename): array
@@ -88,17 +108,28 @@ final class AccountingDocumentExportService
             'margin_bottom' => 16,
             'use_kwt' => true,
         ]);
-        $pdf->SetTitle($this->documentTitle($package));
-        $pdf->SetHTMLFooter('<div style="text-align:right;font-size:8pt;color:#4b5563">Seite {PAGENO} von {nbpg}</div>');
-        $pdf->WriteHTML($this->html($package));
+        try {
+            $pdf->SetTitle($this->documentTitle($package));
+            $pdf->SetHTMLFooter('<div style="text-align:right;font-size:8pt;color:#4b5563">Seite {PAGENO} von {nbpg}</div>');
+            $pdf->WriteHTML($this->html($package));
 
-        return [
-            'content' => $pdf->Output('', 'S'),
-            'headers' => [
-                'Content-Type' => 'application/pdf',
-                'Content-Disposition' => 'attachment; filename="' . $filename . '"',
-            ],
-        ];
+            return [
+                'content' => $pdf->Output('', 'S'),
+                'headers' => [
+                    'Content-Type' => 'application/pdf',
+                    'Content-Disposition' => 'attachment; filename="' . $filename . '"',
+                ],
+            ];
+        } finally {
+            try {
+                $pdf->cleanup();
+            } finally {
+                unset($pdf);
+                // mPDF's writers and layout services hold references back to it.
+                // Release each document graph before rendering the next ZIP member.
+                gc_collect_cycles();
+            }
+        }
     }
 
     private function xlsxExport(array $package, string $filename): array
@@ -108,6 +139,31 @@ final class AccountingDocumentExportService
         }
 
         $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+        $tempFile = null;
+        try {
+            $tempFile = tempnam($this->tempDir(), 'accounting_xlsx_');
+            if ($tempFile === false) {
+                throw new RuntimeException('Excel-Temp-Datei konnte nicht erstellt werden.');
+            }
+
+            return $this->renderXlsx($package, $filename, $spreadsheet, $tempFile);
+        } finally {
+            try {
+                $spreadsheet->disconnectWorksheets();
+            } finally {
+                unset($spreadsheet);
+                // renderXlsx has returned, so worksheet aliases and writer parts
+                // no longer keep the workbook graph reachable from local variables.
+                gc_collect_cycles();
+                if (is_string($tempFile)) {
+                    @unlink($tempFile);
+                }
+            }
+        }
+    }
+
+    private function renderXlsx(array $package, string $filename, \PhpOffice\PhpSpreadsheet\Spreadsheet $spreadsheet, string $tempFile): array
+    {
         $spreadsheet->getProperties()
             ->setCreator((string) (($this->companySettingsService->current()['company_name'] ?? '') ?: 'Zeiterfassung'))
             ->setTitle($this->documentTitle($package));
@@ -216,11 +272,11 @@ final class AccountingDocumentExportService
         }
 
         $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
-        $tempFile = tempnam($this->tempDir(), 'accounting_xlsx_');
         $writer->save($tempFile);
-        $content = (string) file_get_contents($tempFile);
-        @unlink($tempFile);
-        $spreadsheet->disconnectWorksheets();
+        $content = file_get_contents($tempFile);
+        if ($content === false) {
+            throw new RuntimeException('Excel-Datei konnte nicht gelesen werden.');
+        }
 
         return [
             'content' => $content,

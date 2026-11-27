@@ -645,6 +645,17 @@ try {
 } catch (Throwable $exception) {
     fwrite(STDERR, $exception->getMessage() . PHP_EOL);
 
+    foreach ([[$serverProcess, $serverLog], [$disabledServerProcess, $disabledServerLog]] as [$process, $logFile]) {
+        if (!is_resource($process)) { continue; }
+        $processStatus = proc_get_status($process);
+        if (!is_array($processStatus)) { continue; }
+        $diagnostic = array_intersect_key($processStatus, array_flip(['pid', 'running', 'exitcode', 'signaled', 'termsig']));
+        // Keep the termination cause without exposing commands, environment or fixture credentials.
+        $statusLine = 'Isolated PHP server status: ' . json_encode($diagnostic, JSON_THROW_ON_ERROR) . PHP_EOL;
+        file_put_contents($logFile, $statusLine, FILE_APPEND);
+        fwrite(STDERR, $statusLine);
+    }
+
     if (is_file($serverLog)) {
         $log = file_get_contents($serverLog);
         if (is_string($log) && $log !== '') {
