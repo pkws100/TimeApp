@@ -25,6 +25,12 @@ erschoepfen. Der isolierte Realtest-Runner arbeitet mit genau einem Browser-Work
 weil seine Ablaeufe eine gemeinsame Datenbank, einen Testserver und veraenderliche
 Fixtures verwenden.
 
+Die isolierten PHP-HTTP-Testserver laufen mit deaktiviertem JIT und weiter
+aktiviertem OPcache, passend zur nativen Laufzeit. Der CI-Helfer `setup-php`
+konfiguriert sonst einen JIT-Puffer auch für `cli-server`. Bereinigte
+Exportdiagnosen sind auf den expliziten Testmodus und `timeapp_ui_*`-Datenbanken
+begrenzt; sie enthalten feste Verarbeitungsstufen und Speicherwerte.
+
 Diese Anleitung beschreibt den Docker-Compose-Betrieb fuer die TimeApp hinter
 einem Reverse Proxy. Sie enthaelt nur Platzhalter und keine produktiven Secrets.
 

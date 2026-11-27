@@ -145,6 +145,13 @@ jobs:
       - name: Install Playwright Chromium and WebKit
         run: npx playwright install --with-deps chromium webkit
 
+      - name: Check accounting document downloads before broader browser workflows
+        id: accounting-document-workflow
+        env:
+          UI_REAL_TEST_SPEC: tests/e2e/accounting-documents.real.spec.js
+          UI_REVIEW_ARTIFACT_DIR: ${{ runner.temp }}/timeapp-real-account-diagnostics
+        run: npm run ui:test:real
+
       - name: Prepare smoke-test database
         run: |
           php vendor/bin/phinx migrate -c phinx.php
@@ -184,7 +191,7 @@ jobs:
         run: npm run ui:test:real
 
       - name: Upload isolated browser failure diagnostics
-        if: ${{ failure() && steps.real-account-workflow.outcome == 'failure' }}
+        if: ${{ failure() && (steps.real-account-workflow.outcome == 'failure' || steps.accounting-document-workflow.outcome == 'failure') }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: real-account-diagnostics-${{ github.run_attempt }}

@@ -13,7 +13,8 @@ final class AccountingDocumentExportService
 {
     public function __construct(
         private CompanySettingsService $companySettingsService,
-        private array $config
+        private array $config,
+        private ?\Closure $diagnostics = null
     ) {
     }
 
@@ -49,27 +50,29 @@ final class AccountingDocumentExportService
             $opened = true;
 
             $base = $this->baseFilename($package);
-            $zip->addFromString($base . '/sammeluebersicht.pdf', (string) $this->pdfExport($package, 'sammeluebersicht.pdf')['content']);
-            $zip->addFromString($base . '/sammeluebersicht.xlsx', (string) $this->xlsxExport($package, 'sammeluebersicht.xlsx')['content']);
+            $this->zipDocument($zip, $package, 'pdf', $base . '/sammeluebersicht.pdf', 'zip.aggregate');
+            $this->zipDocument($zip, $package, 'xlsx', $base . '/sammeluebersicht.xlsx', 'zip.aggregate');
 
-            foreach ($this->groupItems((array) ($package['items'] ?? []), 'employee_number', 'employee_name', 'user_id', $this->personnelSummaries($package)) as $group) {
+            foreach ($this->groupItems((array) ($package['items'] ?? []), 'employee_number', 'employee_name', 'user_id', $this->personnelSummaries($package)) as $index => $group) {
                 $employeePackage = $this->filteredPackage($package, $group['items'], true, $group['id']);
                 $name = $this->slug('mitarbeiter-' . $group['label']);
-                $zip->addFromString($base . '/mitarbeiter/' . $name . '.pdf', (string) $this->pdfExport($employeePackage, $name . '.pdf')['content']);
-                $zip->addFromString($base . '/mitarbeiter/' . $name . '.xlsx', (string) $this->xlsxExport($employeePackage, $name . '.xlsx')['content']);
+                $this->zipDocument($zip, $employeePackage, 'pdf', $base . '/mitarbeiter/' . $name . '.pdf', 'zip.employee.' . ($index + 1));
+                $this->zipDocument($zip, $employeePackage, 'xlsx', $base . '/mitarbeiter/' . $name . '.xlsx', 'zip.employee.' . ($index + 1));
             }
 
-            foreach ($this->groupItems((array) ($package['items'] ?? []), 'project_number', 'project_name', 'project_id') as $group) {
+            foreach ($this->groupItems((array) ($package['items'] ?? []), 'project_number', 'project_name', 'project_id') as $index => $group) {
                 $projectPackage = $this->filteredPackage($package, $group['items'], false);
                 $name = $this->slug('projekt-' . $group['label']);
-                $zip->addFromString($base . '/projekte/' . $name . '.pdf', (string) $this->pdfExport($projectPackage, $name . '.pdf')['content']);
-                $zip->addFromString($base . '/projekte/' . $name . '.xlsx', (string) $this->xlsxExport($projectPackage, $name . '.xlsx')['content']);
+                $this->zipDocument($zip, $projectPackage, 'pdf', $base . '/projekte/' . $name . '.pdf', 'zip.project.' . ($index + 1));
+                $this->zipDocument($zip, $projectPackage, 'xlsx', $base . '/projekte/' . $name . '.xlsx', 'zip.project.' . ($index + 1));
             }
 
+            $this->diagnose('zip.close.start');
             $opened = false;
             if (!$zip->close()) {
                 throw new RuntimeException('ZIP-Datei konnte nicht abgeschlossen werden.');
             }
+            $this->diagnose('zip.close.done');
             $content = file_get_contents($tempFile);
             if ($content === false) {
                 throw new RuntimeException('ZIP-Datei konnte nicht gelesen werden.');
@@ -93,12 +96,32 @@ final class AccountingDocumentExportService
         }
     }
 
+    private function zipDocument(ZipArchive $zip, array $package, string $format, string $path, string $stage): void
+    {
+        $stage .= '.' . $format;
+        $this->diagnose($stage . '.render.start');
+        $document = $format === 'pdf' ? $this->pdfExport($package, basename($path)) : $this->xlsxExport($package, basename($path));
+        $this->diagnose($stage . '.render.done');
+        if (!$zip->addFromString($path, (string) $document['content'])) {
+            throw new RuntimeException('ZIP-Dokument konnte nicht hinzugefügt werden.');
+        }
+        $this->diagnose($stage . '.add.done');
+    }
+
+    private function diagnose(string $stage): void
+    {
+        if ($this->diagnostics !== null) {
+            ($this->diagnostics)($stage);
+        }
+    }
+
     private function pdfExport(array $package, string $filename): array
     {
         if (!class_exists(\Mpdf\Mpdf::class)) {
             throw new RuntimeException('mPDF ist nicht installiert. Bitte Composer-Abhaengigkeiten installieren.');
         }
 
+        $this->diagnose('pdf.construct.start');
         $pdf = MpdfFactory::create([
             'tempDir' => $this->tempDir(),
             'format' => 'A4-L',
@@ -108,13 +131,19 @@ final class AccountingDocumentExportService
             'margin_bottom' => 16,
             'use_kwt' => true,
         ]);
+        $this->diagnose('pdf.construct.done');
         try {
             $pdf->SetTitle($this->documentTitle($package));
             $pdf->SetHTMLFooter('<div style="text-align:right;font-size:8pt;color:#4b5563">Seite {PAGENO} von {nbpg}</div>');
+            $this->diagnose('pdf.html.start');
             $pdf->WriteHTML($this->html($package));
+            $this->diagnose('pdf.html.done');
+            $this->diagnose('pdf.output.start');
+            $content = $pdf->Output('', 'S');
+            $this->diagnose('pdf.output.done');
 
             return [
-                'content' => $pdf->Output('', 'S'),
+                'content' => $content,
                 'headers' => [
                     'Content-Type' => 'application/pdf',
                     'Content-Disposition' => 'attachment; filename="' . $filename . '"',
@@ -122,12 +151,16 @@ final class AccountingDocumentExportService
             ];
         } finally {
             try {
+                $this->diagnose('pdf.cleanup.start');
                 $pdf->cleanup();
+                $this->diagnose('pdf.cleanup.done');
             } finally {
                 unset($pdf);
                 // mPDF's writers and layout services hold references back to it.
                 // Release each document graph before rendering the next ZIP member.
+                $this->diagnose('pdf.collect.start');
                 gc_collect_cycles();
+                $this->diagnose('pdf.collect.done');
             }
         }
     }
@@ -138,7 +171,9 @@ final class AccountingDocumentExportService
             throw new RuntimeException('PhpSpreadsheet ist nicht installiert. Bitte Composer-Abhaengigkeiten installieren.');
         }
 
+        $this->diagnose('xlsx.construct.start');
         $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+        $this->diagnose('xlsx.construct.done');
         $tempFile = null;
         try {
             $tempFile = tempnam($this->tempDir(), 'accounting_xlsx_');
@@ -149,12 +184,16 @@ final class AccountingDocumentExportService
             return $this->renderXlsx($package, $filename, $spreadsheet, $tempFile);
         } finally {
             try {
+                $this->diagnose('xlsx.disconnect.start');
                 $spreadsheet->disconnectWorksheets();
+                $this->diagnose('xlsx.disconnect.done');
             } finally {
                 unset($spreadsheet);
                 // renderXlsx has returned, so worksheet aliases and writer parts
                 // no longer keep the workbook graph reachable from local variables.
+                $this->diagnose('xlsx.collect.start');
                 gc_collect_cycles();
+                $this->diagnose('xlsx.collect.done');
                 if (is_string($tempFile)) {
                     @unlink($tempFile);
                 }
@@ -272,7 +311,9 @@ final class AccountingDocumentExportService
         }
 
         $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+        $this->diagnose('xlsx.write.start');
         $writer->save($tempFile);
+        $this->diagnose('xlsx.write.done');
         $content = file_get_contents($tempFile);
         if ($content === false) {
             throw new RuntimeException('Excel-Datei konnte nicht gelesen werden.');

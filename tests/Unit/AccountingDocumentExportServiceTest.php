@@ -188,6 +188,56 @@ final class AccountingDocumentExportServiceTest extends TestCase
         self::assertSame([], glob($this->tempDir . '/accounting_*'));
     }
 
+    public function testMixedAbsenceAndWorkDownloadsIncludeEveryZipMemberAndPrivateDiagnosticStages(): void
+    {
+        $package = $this->mixedBookingPackage();
+        $stages = [];
+        $service = $this->service(static function (string $stage) use (&$stages): void { $stages[] = $stage; });
+        self::assertStringStartsWith('%PDF-', $service->export($package, 'pdf')['content']);
+        self::assertStringStartsWith('PK', $service->export($package, 'xlsx')['content']);
+        $stages = [];
+        $result = $service->export($package, 'zip');
+        self::assertSame([], glob($this->tempDir . '/accounting_*'));
+        self::assertSame('zip.aggregate.pdf.render.start', $stages[0]);
+        self::assertSame('zip.close.done', $stages[array_key_last($stages)]);
+        foreach (['zip.aggregate', 'zip.employee.1', 'zip.project.1', 'zip.project.2'] as $member) {
+            foreach (['pdf', 'xlsx'] as $format) {
+                foreach (['render.start', 'render.done', 'add.done'] as $boundary) {
+                    self::assertContains($member . '.' . $format . '.' . $boundary, $stages);
+                }
+            }
+        }
+        foreach ($stages as $stage) {
+            self::assertMatchesRegularExpression('/\A(?:zip\.(?:aggregate|employee\.\d+|project\.\d+)\.(?:pdf|xlsx)\.(?:render\.(?:start|done)|add\.done)|zip\.close\.(?:start|done)|(?:pdf|xlsx)\.(?:construct|html|output|cleanup|collect|disconnect|write)\.(?:start|done))\z/', $stage);
+        }
+        $path = $this->tempDir . '/mixed.zip';
+        file_put_contents($path, $result['content']);
+        $zip = new ZipArchive();
+        self::assertTrue($zip->open($path));
+        $projectRowCounts = [];
+        try {
+            self::assertSame(8, $zip->numFiles);
+            for ($index = 0; $index < $zip->numFiles; $index++) {
+                $name = $zip->getNameIndex($index);
+                if (str_ends_with($name, '.pdf')) {
+                    self::assertStringStartsWith('%PDF-', $zip->getFromIndex($index));
+                } elseif (str_contains($name, '/projekte/')) {
+                    $book = $this->readWorkbook($zip->getFromIndex($index));
+                    try {
+                        self::assertNull($book->getSheetByName('Urlaubskonten'));
+                        $projectRowCounts[] = $book->getSheetByName('Buchungen')->getHighestRow() - 1;
+                    } finally {
+                        $book->disconnectWorksheets();
+                    }
+                }
+            }
+            sort($projectRowCounts);
+            self::assertSame([1, 3], $projectRowCounts);
+        } finally {
+            $zip->close();
+        }
+    }
+
     public function testDuplicateEmployeeLabelsUseSeparateArchiveNamesAndAmbiguousLegacyIdsRemainUnknown(): void
     {
         $service = $this->service();
@@ -262,9 +312,9 @@ final class AccountingDocumentExportServiceTest extends TestCase
         self::assertSame('Keine Zuordnung', $rows[1]['Aktivierung']);
     }
 
-    private function service(): AccountingDocumentExportService
+    private function service(?\Closure $diagnostics = null): AccountingDocumentExportService
     {
-        return new AccountingDocumentExportService(new CompanySettingsService(new DatabaseConnection([]), []), ['temp_path' => $this->tempDir]);
+        return new AccountingDocumentExportService(new CompanySettingsService(new DatabaseConnection([]), []), ['temp_path' => $this->tempDir], $diagnostics);
     }
 
     private function readWorkbook(string $content): Spreadsheet
@@ -311,6 +361,57 @@ final class AccountingDocumentExportServiceTest extends TestCase
                     $package[$key][0][$field] = $value * 2;
                 }
             }
+        }
+
+        return $package;
+    }
+
+    private function mixedBookingPackage(): array
+    {
+        $package = $this->personnelPackage();
+        $package['closure']['user_id'] = 7;
+        $package['closure']['item_count'] = 4;
+        $package['closure']['total_net_minutes'] = 450;
+        $package['employee_summaries'] = [$package['employee_summaries'][0]];
+        $package['employee_summaries'][0]['vacation_taken_days'] = 1;
+        $package['employee_summaries'][0]['vacation_unpaid_days'] = 1;
+        $package['employee_summaries'][0]['sick_days'] = 1;
+        $package['employee_summaries'][0]['credited_absence_minutes'] = 960;
+        $work = $package['items'][0];
+        $work['work_date'] = '2026-05-07';
+        $work['start_time'] = '08:00:00';
+        $work['end_time'] = '16:00:00';
+        $work['gross_minutes'] = 480;
+        $work['net_minutes'] = 450;
+        $work['row_hash'] = hash('sha256', 'mixed-work-booking');
+        $work['work_time_policy']['windows'] = array_fill(1, 5, [['start' => '07:00', 'end' => '16:00']]);
+        $package['employee_summaries'][0]['core_time_periods'][0]['windows'] = $work['work_time_policy']['windows'];
+        $work['pause_assessment'] = [
+            'linked_work_dates' => ['2026-05-07'], 'calculation_status' => 'resolved',
+            'documented_break_minutes' => 30, 'required_break_minutes' => 30,
+            'missing_break_minutes' => 0, 'legacy_deduction_minutes' => 0,
+        ];
+        $package['items'] = [];
+        foreach ([['vacation', 'vacation_paid', 480], ['sick', 'sick_paid', 480], ['absent', 'unpaid_leave', 0]] as $index => [$type, $reason, $credit]) {
+            $absence = array_replace($work, [
+                'project_id' => null, 'project_number' => '', 'project_name' => '',
+                'work_date' => '2026-05-0' . ($index + 4), 'entry_type' => $type,
+                'absence_reason_code' => $reason, 'credited_minutes' => $credit,
+                'start_time' => null, 'end_time' => null, 'gross_minutes' => 0,
+                'break_minutes' => 0, 'net_minutes' => 0, 'source_label' => 'Admin',
+            ]);
+            unset($absence['pause_assessment']);
+            $package['items'][] = $absence;
+        }
+        $package['items'][] = $work;
+        $package['employee_totals'] = [array_replace($package['employee_totals'][0], ['count' => 4, 'gross_minutes' => 480, 'net_minutes' => 450])];
+        $package['project_totals'] = [$package['project_totals'][0], [
+            'label' => 'Ohne Projekt', 'count' => 3, 'gross_minutes' => 0, 'break_minutes' => 0, 'net_minutes' => 0,
+        ]];
+        $package['project_totals'][0] = array_replace($package['project_totals'][0], ['count' => 1, 'gross_minutes' => 480, 'break_minutes' => 30, 'net_minutes' => 450]);
+        $package['entry_type_totals'] = [['label' => 'work', 'count' => 1, 'gross_minutes' => 480, 'break_minutes' => 30, 'net_minutes' => 450]];
+        foreach (['vacation', 'sick', 'absent'] as $type) {
+            $package['entry_type_totals'][] = ['label' => $type, 'count' => 1, 'gross_minutes' => 0, 'break_minutes' => 0, 'net_minutes' => 0];
         }
 
         return $package;

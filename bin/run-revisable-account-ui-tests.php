@@ -496,6 +496,7 @@ try {
         'DB_OVERRIDE_FILE' => $overrideFile,
         'SESSION_SECURE_COOKIE' => 'false',
         'WORK_TIME_WINDOWS_ENABLED' => 'true',
+        'UI_EXPORT_DIAGNOSTICS' => '1',
     ]);
     $router = 'tests/Support/php-server-router.php';
     if ($withAppointmentDispatch) {
@@ -509,7 +510,8 @@ try {
         ]);
     }
     $serverProcess = proc_open(
-        [PHP_BINARY, '-S', '127.0.0.1:' . $port, base_path($router)],
+        // Match the native runtime: setup-php enables JIT for cli-server even when CLI JIT is disabled.
+        [PHP_BINARY, '-d', 'opcache.jit=disable', '-d', 'opcache.jit_buffer_size=0', '-S', '127.0.0.1:' . $port, base_path($router)],
         [1 => ['file', $serverLog, 'a'], 2 => ['file', $serverLog, 'a']],
         $serverPipes,
         base_path(),
@@ -544,7 +546,7 @@ try {
     $disabledPort = (int) substr((string) $disabledAddress, strrpos((string) $disabledAddress, ':') + 1);
     $disabledBaseUrl = 'http://127.0.0.1:' . $disabledPort;
     $disabledEnvironment = array_merge($environment, ['WORK_TIME_WINDOWS_ENABLED' => 'false']);
-    $disabledServerProcess = proc_open([PHP_BINARY, '-S', '127.0.0.1:' . $disabledPort, base_path('tests/Support/php-server-router.php')], [1 => ['file', $disabledServerLog, 'a'], 2 => ['file', $disabledServerLog, 'a']], $disabledServerPipes, base_path(), $disabledEnvironment);
+    $disabledServerProcess = proc_open([PHP_BINARY, '-d', 'opcache.jit=disable', '-d', 'opcache.jit_buffer_size=0', '-S', '127.0.0.1:' . $disabledPort, base_path('tests/Support/php-server-router.php')], [1 => ['file', $disabledServerLog, 'a'], 2 => ['file', $disabledServerLog, 'a']], $disabledServerPipes, base_path(), $disabledEnvironment);
     if (!is_resource($disabledServerProcess)) {
         throw new RuntimeException('Der deaktivierte PHP-Testserver konnte nicht gestartet werden.');
     }

@@ -308,7 +308,19 @@ $attendanceReportService = new AttendanceReportService(
 $bookingExportService = new BookingExportService($adminBookingService);
 $accountingExportService = new AccountingExportService($adminBookingService);
 $accountingClosureService = new AccountingClosureService($connection, $adminBookingService);
-$accountingDocumentExportService = new AccountingDocumentExportService($companySettingsService, $config->get('exports', []));
+$exportDiagnostics = PHP_SAPI === 'cli-server' && getenv('APP_ENV') === 'test'
+    && getenv('UI_EXPORT_DIAGNOSTICS') === '1'
+    && preg_match('/^timeapp_ui_[a-f0-9]+$/D', (string) ($databaseConfiguration['database'] ?? '')) === 1
+    ? static function (string $stage): void {
+        error_log('Isolated export stage: ' . json_encode([
+            'stage' => $stage, 'memory_bytes' => memory_get_usage(true), 'peak_bytes' => memory_get_peak_usage(true),
+            'php_version' => PHP_VERSION, 'sapi' => PHP_SAPI,
+            'zip_version' => phpversion('zip'),
+            'libzip_version' => defined('ZipArchive::LIBZIP_VERSION') ? \ZipArchive::LIBZIP_VERSION : null,
+            'jit' => ini_get('opcache.jit'), 'jit_buffer_size' => ini_get('opcache.jit_buffer_size'),
+        ], JSON_THROW_ON_ERROR));
+    } : null;
+$accountingDocumentExportService = new AccountingDocumentExportService($companySettingsService, $config->get('exports', []), $exportDiagnostics);
 $backupService = new BackupService($connection, $config->get('uploads', []),
     backupRoot: $personnelHttp?->generalBackupDirectory() ?? (string) env('BACKUP_TEMP_PATH', storage_path('cache/backups')),
     runtimeOverridePath: $databaseOverridePath);
