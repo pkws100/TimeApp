@@ -28,6 +28,7 @@ final class BackupService
     private const APPOINTMENT_PROJECT_SCOPE_SCHEMA = '20261124123000_appointment_dispatch_project_scope';
     private const AUTOMATIC_CHECKOUT_SCHEMA = '20261126120000_work_time_automatic_checkouts';
     private const AUTOMATIC_CHECKOUT_TABLE = 'work_time_automatic_checkouts';
+    private const ACCOUNTING_SUMMARIES_SCHEMA = '20261127120000_accounting_document_summaries';
     private const PHASE_TWO_PRIVATE_TABLES = ['employee_personnel_scope_events', 'personnel_command_receipts'];
     private const PERSONNEL_EVIDENCE_REVIEWS_TABLE = 'employee_document_evidence_reviews';
     private const REDACTED_SECRET = '[redacted:backup-secret]';
@@ -509,6 +510,8 @@ final class BackupService
         $previousAppointmentSchema = $hasDispatchSchema && $schemaVersion === self::APPOINTMENTS_SCHEMA;
         $previousDispatchSchema = $hasDispatchSchema && $schemaVersion === self::APPOINTMENT_DISPATCH_SCHEMA;
         $previousProjectScopeSchema = $hasAutomaticCheckoutSchema && $schemaVersion === self::APPOINTMENT_PROJECT_SCOPE_SCHEMA;
+        $previousAutomaticCheckoutSchema = self::schemaAtLeast($currentSchema, self::ACCOUNTING_SUMMARIES_SCHEMA)
+            && $schemaVersion === self::AUTOMATIC_CHECKOUT_SCHEMA;
         // These releases only changed the excluded personnel rows after their original table layouts were published.
         $personnelSchemaOrder = [self::PREVIOUS_PERSONNEL_SCHEMA, self::PERSONNEL_TRIGGER_MIGRATION,
             self::PERSONNEL_PHASE_TWO_SCHEMA, self::PERSONNEL_EMPLOYEE_ACCESS_SCHEMA, self::PERSONNEL_PRIVATE_STORAGE_SCHEMA,
@@ -519,7 +522,7 @@ final class BackupService
             && ($legacy ? $archivePosition === 0 : $archivePosition > 0);
         if ($schemaVersion !== $currentSchema && $schemaVersion !== $previousArchiveLayout
             && !$previousPresenceSchema && !$previousPersonnelSchema && !$previousAppointmentSchema && !$previousDispatchSchema
-            && !$previousProjectScopeSchema) {
+            && !$previousProjectScopeSchema && !$previousAutomaticCheckoutSchema) {
             throw new RuntimeException('Die Backup-Schema-Version passt nicht zum aktuellen System.');
         }
         $this->assertCurrentSchemaApplied($currentSchema);
@@ -555,7 +558,7 @@ final class BackupService
         }
         $this->assertExpectedTables(
             $databaseTables,
-            !$legacy || $previousPersonnelSchema || $previousPresenceSchema || $previousAppointmentSchema || $previousDispatchSchema || $previousProjectScopeSchema,
+            !$legacy || $previousPersonnelSchema || $previousPresenceSchema || $previousAppointmentSchema || $previousDispatchSchema || $previousProjectScopeSchema || $previousAutomaticCheckoutSchema,
             $tablesAddedSinceArchive
         );
         $this->assertPersonnelArchiveEntries($archiveEntries, $databaseFiles);

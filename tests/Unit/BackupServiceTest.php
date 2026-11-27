@@ -149,6 +149,44 @@ final class BackupServiceTest extends TestCase
         }
     }
 
+    public function testValidateImportAcceptsImmediatelyPreviousSchemaWithoutDocumentSummaryColumn(): void
+    {
+        $tables = ['accounting_closures', 'accounting_closure_items', 'users'];
+        $service = $this->backupServiceExpectingTables($tables);
+        $manifest = $this->validManifest([
+            'schema_version' => '20261126120000_work_time_automatic_checkouts',
+            'database' => ['tables' => $this->manifestTables($tables)],
+        ]);
+        $zipPath = $this->zipWithManifest($manifest, $this->databaseFilesForTables($tables), false);
+        try {
+            $result = $service->validateImport(['tmp_name' => $zipPath]);
+            self::assertTrue($result['ok']);
+            self::assertTrue($result['dry_run']);
+            self::assertFalse($result['apply_supported']);
+        } finally {
+            unlink($zipPath);
+        }
+    }
+
+    public function testPreviousDocumentSchemaStillRequiresEveryOriginalTable(): void
+    {
+        $tables = ['accounting_closures', 'accounting_closure_items', 'users'];
+        $service = $this->backupServiceExpectingTables($tables);
+        $archiveTables = ['accounting_closures', 'users'];
+        $manifest = $this->validManifest([
+            'schema_version' => '20261126120000_work_time_automatic_checkouts',
+            'database' => ['tables' => $this->manifestTables($archiveTables)],
+        ]);
+        $zipPath = $this->zipWithManifest($manifest, $this->databaseFilesForTables($archiveTables), false);
+        try {
+            $this->expectException(\RuntimeException::class);
+            $this->expectExceptionMessage('Die Tabellenliste im Backup passt nicht zum aktuellen System.');
+            $service->validateImport(['tmp_name' => $zipPath]);
+        } finally {
+            unlink($zipPath);
+        }
+    }
+
     public function testValidateImportRejectsMissingAccountJournalTable(): void
     {
         $expectedTables = ['employee_account_cutovers', 'time_account_entries', 'users', 'vacation_account_entries'];

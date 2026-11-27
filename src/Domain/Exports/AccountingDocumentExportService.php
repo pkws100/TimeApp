@@ -19,6 +19,7 @@ final class AccountingDocumentExportService
 
     public function export(array $package, string $format): array
     {
+        $package = $this->resolveMissingItemIds($package);
         $format = in_array($format, ['pdf', 'xlsx', 'zip'], true) ? $format : 'pdf';
 
         return match ($format) {
@@ -45,15 +46,15 @@ final class AccountingDocumentExportService
         $zip->addFromString($base . '/sammeluebersicht.pdf', (string) $this->pdfExport($package, 'sammeluebersicht.pdf')['content']);
         $zip->addFromString($base . '/sammeluebersicht.xlsx', (string) $this->xlsxExport($package, 'sammeluebersicht.xlsx')['content']);
 
-        foreach ($this->groupItems((array) ($package['items'] ?? []), 'employee_number', 'employee_name') as $group) {
-            $employeePackage = $this->filteredPackage($package, $group['items']);
+        foreach ($this->groupItems((array) ($package['items'] ?? []), 'employee_number', 'employee_name', 'user_id', $this->personnelSummaries($package)) as $group) {
+            $employeePackage = $this->filteredPackage($package, $group['items'], true, $group['id']);
             $name = $this->slug('mitarbeiter-' . $group['label']);
             $zip->addFromString($base . '/mitarbeiter/' . $name . '.pdf', (string) $this->pdfExport($employeePackage, $name . '.pdf')['content']);
             $zip->addFromString($base . '/mitarbeiter/' . $name . '.xlsx', (string) $this->xlsxExport($employeePackage, $name . '.xlsx')['content']);
         }
 
-        foreach ($this->groupItems((array) ($package['items'] ?? []), 'project_number', 'project_name') as $group) {
-            $projectPackage = $this->filteredPackage($package, $group['items']);
+        foreach ($this->groupItems((array) ($package['items'] ?? []), 'project_number', 'project_name', 'project_id') as $group) {
+            $projectPackage = $this->filteredPackage($package, $group['items'], false);
             $name = $this->slug('projekt-' . $group['label']);
             $zip->addFromString($base . '/projekte/' . $name . '.pdf', (string) $this->pdfExport($projectPackage, $name . '.pdf')['content']);
             $zip->addFromString($base . '/projekte/' . $name . '.xlsx', (string) $this->xlsxExport($projectPackage, $name . '.xlsx')['content']);
@@ -78,7 +79,17 @@ final class AccountingDocumentExportService
             throw new RuntimeException('mPDF ist nicht installiert. Bitte Composer-Abhaengigkeiten installieren.');
         }
 
-        $pdf = MpdfFactory::create(['tempDir' => $this->tempDir()]);
+        $pdf = MpdfFactory::create([
+            'tempDir' => $this->tempDir(),
+            'format' => 'A4-L',
+            'margin_left' => 12,
+            'margin_right' => 12,
+            'margin_top' => 12,
+            'margin_bottom' => 16,
+            'use_kwt' => true,
+        ]);
+        $pdf->SetTitle($this->documentTitle($package));
+        $pdf->SetHTMLFooter('<div style="text-align:right;font-size:8pt;color:#4b5563">Seite {PAGENO} von {nbpg}</div>');
         $pdf->WriteHTML($this->html($package));
 
         return [
@@ -103,14 +114,14 @@ final class AccountingDocumentExportService
 
         $summary = $spreadsheet->getActiveSheet();
         $summary->setTitle('Uebersicht');
-        $summary->fromArray($this->sheetRows($this->summaryRows($package)), null, 'A1');
+        $summary->fromArray($this->sheetRows($this->summaryRows($package)), null, 'A1', true);
 
         $bookings = $spreadsheet->createSheet();
         $bookings->setTitle('Buchungen');
         $rows = $this->bookingRows((array) ($package['items'] ?? []));
-        $bookings->fromArray($this->sheetRow($rows !== [] ? array_keys($rows[0]) : ['Keine Buchungen']), null, 'A1');
+        $bookings->fromArray($this->sheetRow($rows !== [] ? array_keys($rows[0]) : ['Keine Buchungen']), null, 'A1', true);
         if ($rows !== []) {
-            $bookings->fromArray($this->sheetRows(array_values($rows)), null, 'A2');
+            $bookings->fromArray($this->sheetRows(array_values($rows)), null, 'A2', true);
             if (isset($rows[0]['Pausenprüfung am Arbeitstag'])) {
                 $bookings->getColumnDimension('N')->setWidth(54);
                 $bookings->getStyle('N2:N' . (count($rows) + 1))->getAlignment()->setWrapText(true);
@@ -120,30 +131,87 @@ final class AccountingDocumentExportService
         $employees = $spreadsheet->createSheet();
         $employees->setTitle('Mitarbeiter');
         $employeeRows = $this->totalRows((array) ($package['employee_totals'] ?? []));
-        $employees->fromArray($this->sheetRow($employeeRows !== [] ? array_keys($employeeRows[0]) : ['Keine Summen']), null, 'A1');
+        $employees->fromArray($this->sheetRow($employeeRows !== [] ? array_keys($employeeRows[0]) : ['Keine Summen']), null, 'A1', true);
         if ($employeeRows !== []) {
-            $employees->fromArray($this->sheetRows(array_values($employeeRows)), null, 'A2');
+            $employees->fromArray($this->sheetRows(array_values($employeeRows)), null, 'A2', true);
         }
 
         $projects = $spreadsheet->createSheet();
         $projects->setTitle('Projekte');
         $projectRows = $this->totalRows((array) ($package['project_totals'] ?? []));
-        $projects->fromArray($this->sheetRow($projectRows !== [] ? array_keys($projectRows[0]) : ['Keine Summen']), null, 'A1');
+        $projects->fromArray($this->sheetRow($projectRows !== [] ? array_keys($projectRows[0]) : ['Keine Summen']), null, 'A1', true);
         if ($projectRows !== []) {
-            $projects->fromArray($this->sheetRows(array_values($projectRows)), null, 'A2');
+            $projects->fromArray($this->sheetRows(array_values($projectRows)), null, 'A2', true);
         }
 
         $types = $spreadsheet->createSheet();
         $types->setTitle('Typen');
         $typeRows = $this->totalRows((array) ($package['entry_type_totals'] ?? []));
-        $types->fromArray($this->sheetRow($typeRows !== [] ? array_keys($typeRows[0]) : ['Keine Summen']), null, 'A1');
+        $types->fromArray($this->sheetRow($typeRows !== [] ? array_keys($typeRows[0]) : ['Keine Summen']), null, 'A1', true);
         if ($typeRows !== []) {
-            $types->fromArray($this->sheetRows(array_values($typeRows)), null, 'A2');
+            $types->fromArray($this->sheetRows(array_values($typeRows)), null, 'A2', true);
+        }
+
+        $additionalSheets = [
+            'Abwesenheiten' => $this->absenceRows($package),
+            'Urlaubskonten' => $this->vacationRows($package),
+            'Kernarbeitszeit' => $this->coreTimeRows($package),
+            'Fensterzeiten' => $this->windowRows($package),
+        ];
+        foreach ($additionalSheets as $title => $dataRows) {
+            if ($dataRows === []) {
+                continue;
+            }
+            $sheet = $spreadsheet->createSheet();
+            $sheet->setTitle($title);
+            $sheet->fromArray($this->sheetRow(array_keys($dataRows[0])), null, 'A1', true);
+            $sheet->fromArray($this->sheetRows($dataRows), null, 'A2', true);
         }
 
         foreach ($spreadsheet->getAllSheets() as $sheet) {
-            foreach (range('A', 'M') as $column) {
+            $lastColumn = $sheet->getHighestColumn();
+            $lastRow = $sheet->getHighestRow();
+            $sheet->getStyle('A1:' . $lastColumn . '1')->getFont()->setBold(true)->getColor()->setRGB('FFFFFF');
+            $sheet->getStyle('A1:' . $lastColumn . '1')->getFill()
+                ->setFillType(\PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID)->getStartColor()->setRGB('24394F');
+            $sheet->getStyle('A1:' . $lastColumn . $lastRow)->getAlignment()
+                ->setVertical(\PhpOffice\PhpSpreadsheet\Style\Alignment::VERTICAL_TOP);
+            $sheet->freezePane('B2');
+            $sheet->getPageSetup()->setOrientation(\PhpOffice\PhpSpreadsheet\Worksheet\PageSetup::ORIENTATION_LANDSCAPE)
+                ->setPaperSize(\PhpOffice\PhpSpreadsheet\Worksheet\PageSetup::PAPERSIZE_A4)->setFitToWidth(1)->setFitToHeight(0);
+            $sheet->getPageSetup()->setRowsToRepeatAtTopByStartAndEnd(1, 1);
+            if ($sheet->getTitle() !== 'Uebersicht') {
+                $sheet->setAutoFilter('A1:' . $lastColumn . $lastRow);
+            }
+            $columnCount = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($lastColumn);
+            for ($index = 1; $index <= $columnCount; $index++) {
+                $column = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($index);
                 $sheet->getColumnDimension($column)->setAutoSize(true);
+            }
+            if ($sheet->getTitle() === 'Uebersicht') {
+                $sheet->getColumnDimension('A')->setAutoSize(false)->setWidth(32);
+                $sheet->getColumnDimension('B')->setAutoSize(false)->setWidth(100);
+                $sheet->getStyle('B2:B' . $lastRow)->getAlignment()->setWrapText(true);
+            }
+            if (array_key_exists($sheet->getTitle(), $additionalSheets)) {
+                $sheet->getStyle('A1:' . $lastColumn . $lastRow)->getAlignment()->setWrapText(true);
+                $sheet->getRowDimension(1)->setRowHeight(58);
+                for ($index = 1; $index <= $columnCount; $index++) {
+                    $column = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($index);
+                    $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth($index === 1 ? 28 : 22);
+                }
+            }
+            if ($sheet->getTitle() === 'Buchungen') {
+                foreach (['L' => 48, 'M' => 36, 'N' => 54] as $column => $width) {
+                    if (\PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($column) <= $columnCount) {
+                        $sheet->getColumnDimension($column)->setAutoSize(false)->setWidth($width);
+                        $sheet->getStyle($column . '1:' . $column . $lastRow)->getAlignment()->setWrapText(true);
+                    }
+                }
+            }
+            if (in_array($sheet->getTitle(), ['Kernarbeitszeit', 'Fensterzeiten'], true)) {
+                $sheet->getStyle('A2:' . $lastColumn . $lastRow)->getAlignment()->setWrapText(true);
+                $sheet->getColumnDimension('F')->setAutoSize(false)->setWidth(58);
             }
         }
 
@@ -152,6 +220,7 @@ final class AccountingDocumentExportService
         $writer->save($tempFile);
         $content = (string) file_get_contents($tempFile);
         @unlink($tempFile);
+        $spreadsheet->disconnectWorksheets();
 
         return [
             'content' => $content,
@@ -172,8 +241,10 @@ final class AccountingDocumentExportService
 
         foreach ($this->bookingRows($items) as $row) {
             $rows .= '<tr>';
-            foreach ($row as $cell) {
-                $rows .= '<td>' . $this->e((string) $cell) . '</td>';
+            foreach ($row as $key => $cell) {
+                $rows .= $key === 'Hash'
+                    ? '<td class="hash">' . $this->htmlHash((string) $cell, 24) . '</td>'
+                    : '<td>' . $this->e((string) $cell) . '</td>';
             }
             $rows .= '</tr>';
         }
@@ -198,26 +269,32 @@ final class AccountingDocumentExportService
         }
 
         return '<style>
-            body{font-family:DejaVu Sans,sans-serif;font-size:10pt;color:#111827}
+            body{font-family:DejaVu Sans,sans-serif;font-size:9pt;color:#111827}
             h1{font-size:18pt;margin:0 0 8px}
-            h2{font-size:13pt;margin:18px 0 8px}
+            h2{font-size:13pt;margin:14px 0 6px}
             table{width:100%;border-collapse:collapse}
-            th,td{border:1px solid #d1d5db;padding:5px;vertical-align:top}
-            th{background:#f3f4f6}
+            th,td{border:1px solid #d1d5db;padding:4px;vertical-align:top}
+            th{background:#e8edf3;font-size:8pt}
+            thead{display:table-header-group}
+            h2{page-break-after:avoid}
+            tr{page-break-inside:avoid}
             .badge{display:inline-block;padding:4px 8px;border:1px solid #111827;font-weight:bold}
             .muted{color:#4b5563}
+            .hash{font-family:DejaVu Sans Mono,monospace;font-size:7pt}
         </style>'
             . '<h1>Abrechnungs-Stundenzettel</h1>'
             . '<p><span class="badge">' . $this->e((string) ($closure['status_label'] ?? 'VORLAEUFIG - nicht festgeschrieben')) . '</span></p>'
             . '<table><tbody>'
             . '<tr><th>Firma</th><td>' . $this->e($this->companyLine($company)) . '</td><th>Abschluss</th><td>' . $this->e((string) ($closure['closure_number'] ?? '')) . '</td></tr>'
-            . '<tr><th>Zeitraum</th><td>' . $this->e((string) ($closure['period_label'] ?? '')) . '</td><th>Hash</th><td>' . $this->e((string) ($closure['snapshot_hash'] ?? '')) . '</td></tr>'
+            . '<tr><th>Zeitraum</th><td>' . $this->e((string) ($closure['period_label'] ?? '')) . '</td><th>Hash</th><td class="hash">' . $this->htmlHash((string) ($closure['snapshot_hash'] ?? ''), 32) . '</td></tr>'
             . '<tr><th>Erstellt</th><td>' . $this->e((string) ($closure['created_at'] ?? '')) . '</td><th>Festgeschrieben</th><td>' . $this->e((string) ($closure['finalized_at'] ?? '')) . '</td></tr>'
             . '<tr><th>Buchungen</th><td>' . count($items) . '</td><th>Netto gesamt</th><td>' . $this->minutes((int) ($closure['total_net_minutes'] ?? 0)) . '</td></tr>'
             . '</tbody></table>'
             . '<h2>Summen Mitarbeiter</h2><table><thead><tr><th>Name</th><th>Buchungen</th><th>Brutto</th><th>Gespeicherte Pause</th><th>Netto</th></tr></thead><tbody>' . $employeeTotalRows . '</tbody></table>'
             . '<h2>Summen Projekte</h2><table><thead><tr><th>Name</th><th>Buchungen</th><th>Brutto</th><th>Gespeicherte Pause</th><th>Netto</th></tr></thead><tbody>' . $projectTotalRows . '</tbody></table>'
             . '<h2>Summen Typen</h2><table><thead><tr><th>Name</th><th>Buchungen</th><th>Brutto</th><th>Gespeicherte Pause</th><th>Netto</th></tr></thead><tbody>' . $typeTotalRows . '</tbody></table>'
+            . $this->personnelHtml($package)
+            . $this->coreTimeHtml($package)
             . '<h2>Buchungen</h2><table><thead><tr>'
             . '<th>Datum</th><th>Mitarbeiter</th><th>Projekt</th><th>Typ</th><th>Start</th><th>Ende</th><th>Gespeicherte Pause</th><th>Brutto</th><th>Netto</th><th>Quelle</th><th>Aend.</th><th>Notiz</th><th>Hash</th>'
             . ($hasAssessment ? '<th>Pausenprüfung am Arbeitstag</th>' : '')
@@ -230,7 +307,7 @@ final class AccountingDocumentExportService
         $company = $this->companySettingsService->current();
         $closure = (array) ($package['closure'] ?? []);
 
-        return [
+        $rows = [
             ['Feld', 'Wert'],
             ['Firma', $this->companyLine($company)],
             ['Status', (string) ($closure['status_label'] ?? '')],
@@ -242,6 +319,250 @@ final class AccountingDocumentExportService
             ['Erstellt am', (string) ($closure['created_at'] ?? '')],
             ['Festgeschrieben am', (string) ($closure['finalized_at'] ?? '')],
         ];
+        if ($this->includesPersonnel($package)) {
+            $rows[] = ['Urlaubs- und Krankheitsdaten', $this->summaryStatusLabel($package)];
+            if ($this->personnelSummaries($package) !== []) {
+                $rows[] = ['Kontobasis des Resturlaubs', 'Resturlaub basiert auf dem Kontostart; davor gebuchter Urlaub ist im Eröffnungsbestand berücksichtigt.'];
+            }
+        }
+
+        return $rows;
+    }
+
+    private function absenceRows(array $package): array
+    {
+        return array_map(fn (array $row): array => [
+            'Mitarbeiter' => $this->employeeLabel($row),
+            'Jahr' => (int) $row['leave_year'],
+            'Zeitraum von' => (string) $row['period_start'],
+            'Zeitraum bis' => (string) $row['period_end'],
+            'Standdatum' => (string) $row['as_of_date'],
+            'Urlaub genommen im Zeitraum (Tage)' => $row['vacation_taken_days'] ?? null,
+            'Unbezahlter Urlaub im Zeitraum (Tage)' => $row['vacation_unpaid_days'] ?? null,
+            'Krankheit im Zeitraum (Tage)' => $row['sick_days'] ?? null,
+            'Abwesenheitsgutschrift im Zeitraum' => $this->nullableMinutes($row['credited_absence_minutes'] ?? null),
+        ], $this->personnelSummaries($package));
+    }
+
+    private function vacationRows(array $package): array
+    {
+        return array_map(fn (array $row): array => [
+            'Mitarbeiter' => $this->employeeLabel($row),
+            'Urlaubsjahr' => (int) $row['leave_year'],
+            'Standdatum' => (string) $row['as_of_date'],
+            'Jahresanspruch (Tage)' => $row['vacation_entitlement_days'] ?? null,
+            'Anspruch inkl. Übertrag und Korrekturen (Tage)' => $row['vacation_total_days'] ?? null,
+            'Urlaub genommen bis Standdatum (Tage)' => $row['vacation_taken_year_days'] ?? null,
+            'Künftig gebuchter Urlaub (Tage)' => $row['vacation_future_days'] ?? null,
+            'Resturlaub am Standdatum (Tage)' => $row['vacation_remaining_days'] ?? null,
+            'Rest nach künftig gebuchtem Urlaub (Tage)' => $row['vacation_booked_remaining_days'] ?? null,
+            'Status' => !empty($row['vacation_is_provisional']) ? 'Vorläufig' : 'Bestätigter Kontostand',
+            'Kontoverbrauch ab' => $row['vacation_consumption_from_date'] ?? null,
+            'Kontoverbrauch bis Standdatum (Tage)' => $row['vacation_taken_account_days'] ?? null,
+        ], $this->personnelSummaries($package));
+    }
+
+    private function coreTimeRows(array $package): array
+    {
+        $rows = [];
+        foreach ($this->personnelSummaries($package) as $employee) {
+            $periods = (array) ($employee['core_time_periods'] ?? []);
+            if ($periods === []) {
+                $rows[] = array_replace($this->coreTimeRow($employee, []), [
+                    'Gültig von' => (string) $employee['period_start'],
+                    'Gültig bis' => (string) $employee['period_end'],
+                    'Regel' => 'Keine Kernarbeitszeit zugeordnet',
+                    'Version' => null,
+                    'Zeitzone' => '',
+                    'Arbeitsende' => '',
+                    'Aktivierung' => 'Keine Zuordnung',
+                ]);
+            }
+            foreach ($periods as $period) {
+                $rows[] = $this->coreTimeRow($employee, $period);
+            }
+        }
+        if ($rows !== []) {
+            return $rows;
+        }
+        foreach ((array) ($package['items'] ?? []) as $item) {
+            if (!is_array($item['work_time_policy'] ?? null)) {
+                continue;
+            }
+            $row = $this->coreTimeRow($item, $item['work_time_policy']);
+            $key = (int) ($item['user_id'] ?? 0) . ':' . json_encode($row, JSON_THROW_ON_ERROR);
+            $rows[$key] = $row;
+        }
+
+        return array_values($rows);
+    }
+
+    private function coreTimeRow(array $employee, array $policy): array
+    {
+        return [
+            'Mitarbeiter' => $this->employeeLabel($employee),
+            'Gültig von' => (string) ($policy['effective_from'] ?? ''),
+            'Gültig bis' => (string) ($policy['effective_to'] ?? ''),
+            'Regel' => (string) ($policy['template_name'] ?? ''),
+            'Version' => (int) ($policy['revision'] ?? 0),
+            'Zeitfenster' => $this->windowsLabel((array) ($policy['windows'] ?? [])),
+            'Zeitzone' => (string) ($policy['timezone'] ?? 'Europe/Berlin'),
+            'Arbeitsende' => match ($policy['checkout_mode'] ?? '') {
+                'automatic' => 'Automatischer Check-out',
+                'proposal' => 'Ende zur Bestätigung vorschlagen',
+                default => 'Manueller Check-out',
+            },
+            'Aktivierung' => !empty($policy['enabled']) ? 'Aktiv' : 'Arbeitszeitfenster global deaktiviert',
+        ];
+    }
+
+    private function windowRows(array $package): array
+    {
+        return array_map(fn (array $row): array => [
+            'Mitarbeiter' => $this->employeeLabel($row),
+            'Zeitraum von' => (string) $row['period_start'],
+            'Zeitraum bis' => (string) $row['period_end'],
+            'Innerhalb der Kernarbeitszeit' => $this->nullableMinutes($row['inside_window_minutes'] ?? null),
+            'Außerhalb der Kernarbeitszeit' => $this->nullableMinutes($row['outside_window_minutes'] ?? null),
+            'Berechnungsstatus' => 'Unverbindliche Vorschau',
+            'Sollzeit im Zeitraum' => $this->nullableMinutes($row['target_minutes'] ?? null),
+            'Solltage im Zeitraum' => $row['required_days'] ?? null,
+        ], $this->personnelSummaries($package));
+    }
+
+    private function personnelHtml(array $package): string
+    {
+        if (!$this->includesPersonnel($package)) {
+            return '';
+        }
+        $html = '<h2>Urlaub und Krankheit</h2><p class="muted">' . $this->e($this->summaryStatusLabel($package)) . '</p>';
+        $absenceRows = $this->absenceRows($package);
+        if ($absenceRows === []) {
+            return $html;
+        }
+
+        $accountRows = [];
+        foreach ($this->personnelSummaries($package) as $row) {
+            if (!empty($row['vacation_consumption_from_date'])) {
+                $accountRows[] = [
+                    'Mitarbeiter' => $this->employeeLabel($row),
+                    'Urlaubsjahr' => (int) $row['leave_year'],
+                    'Kontoverbrauch ab' => (string) $row['vacation_consumption_from_date'],
+                    'Kontoverbrauch bis Standdatum (Tage)' => $row['vacation_taken_account_days'] ?? null,
+                ];
+            }
+        }
+        return $html . $this->htmlDataTable($absenceRows)
+            . '<h2>Urlaubskonten am Standdatum</h2>'
+            . '<p class="muted">Genommener Urlaub und Resturlaub beziehen sich auf das angegebene Urlaubsjahr und Standdatum. Künftig gebuchter Urlaub wird gesondert ausgewiesen.</p>'
+            . $this->htmlDataTable(array_map(static fn (array $row): array => array_slice($row, 0, 10, true), $this->vacationRows($package)))
+            . '<p class="muted">Resturlaub basiert auf dem Kontostart; davor gebuchter Urlaub ist im Eröffnungsbestand berücksichtigt.</p>'
+            . ($accountRows === [] ? '' : $this->htmlDataTable($accountRows));
+    }
+
+    private function coreTimeHtml(array $package): string
+    {
+        $rows = $this->coreTimeRows($package);
+        if ($rows === [] && $this->personnelSummaries($package) === []) {
+            return '';
+        }
+        $html = '<h2>Kernarbeitszeit</h2>';
+        $html .= $rows === [] ? '<p>Im Zeitraum ist keine Kernarbeitszeit zugeordnet.</p>' : $this->htmlDataTable($rows);
+        $windowRows = $this->windowRows($package);
+        if ($windowRows !== []) {
+            $html .= '<h2>Arbeitszeit innerhalb und außerhalb der Kernarbeitszeit</h2>'
+                . '<p class="muted">Die Fensterzeiten sind eine unverbindliche Vorschau. Die Abrechnung verwendet die erfasste Arbeitszeit. Zeit außerhalb der Kernarbeitszeit bedeutet keine genehmigten Überstunden. Nicht ermittelbare Werte werden mit einem Gedankenstrich dargestellt.</p>'
+                . $this->htmlDataTable($windowRows);
+        }
+
+        return $html;
+    }
+
+    private function htmlDataTable(array $rows): string
+    {
+        $html = '<table><thead><tr>';
+        foreach (array_keys($rows[0]) as $header) {
+            $html .= '<th>' . $this->e((string) $header) . '</th>';
+        }
+        $html .= '</tr></thead><tbody>';
+        foreach ($rows as $row) {
+            $html .= '<tr>';
+            foreach ($row as $cell) {
+                $label = $cell === null ? '—' : (is_float($cell) ? rtrim(rtrim(number_format($cell, 2, ',', ''), '0'), ',') : (string) $cell);
+                $html .= '<td>' . $this->e($label) . '</td>';
+            }
+            $html .= '</tr>';
+        }
+
+        return $html . '</tbody></table>';
+    }
+
+    private function summaryStatusLabel(array $package): string
+    {
+        return match ($package['employee_summary_status'] ?? 'unavailable') {
+            'snapshot' => 'Die Urlaubs- und Krankheitsdaten sind mit diesem Abschluss gespeichert.',
+            'preview' => 'Vorläufige Urlaubs- und Krankheitsdaten zum angegebenen Standdatum.',
+            default => 'Für diesen Abschluss wurden keine Urlaubs- und Krankheitsdaten gespeichert.',
+        };
+    }
+
+    private function employeeLabel(array $row): string
+    {
+        return trim((string) ($row['employee_number'] ?? '') . ' ' . (string) ($row['employee_name'] ?? ''));
+    }
+
+    private function includesPersonnel(array $package): bool
+    {
+        return ($package['employee_summary_status'] ?? '') !== 'not_applicable'
+            && (int) ($package['closure']['project_id'] ?? 0) <= 0;
+    }
+
+    private function personnelSummaries(array $package): array
+    {
+        return $this->includesPersonnel($package) ? (array) ($package['employee_summaries'] ?? []) : [];
+    }
+
+    private function resolveMissingItemIds(array $package): array
+    {
+        $userIdsByLabel = [];
+        foreach ((array) ($package['employee_summaries'] ?? []) as $summary) {
+            if ((int) ($summary['user_id'] ?? 0) > 0) {
+                $userIdsByLabel[$this->employeeLabel($summary)][(int) $summary['user_id']] = true;
+            }
+        }
+        foreach ($package['items'] ?? [] as $index => $item) {
+            if ((int) ($item['user_id'] ?? 0) <= 0) {
+                $knownIds = array_keys($userIdsByLabel[$this->employeeLabel($item)] ?? []);
+                $knownId = (int) ($package['closure']['user_id'] ?? 0);
+                if ($knownId > 0 || count($knownIds) === 1) {
+                    $package['items'][$index]['user_id'] = $knownId > 0 ? $knownId : $knownIds[0];
+                }
+            }
+            if ((int) ($item['project_id'] ?? 0) <= 0 && (int) ($package['closure']['project_id'] ?? 0) > 0) {
+                $package['items'][$index]['project_id'] = (int) $package['closure']['project_id'];
+            }
+        }
+
+        return $package;
+    }
+
+    private function nullableMinutes(mixed $minutes): ?string
+    {
+        return $minutes === null ? null : $this->minutes((int) $minutes);
+    }
+
+    private function windowsLabel(array $windows): string
+    {
+        $weekdays = [1 => 'Mo', 2 => 'Di', 3 => 'Mi', 4 => 'Do', 5 => 'Fr', 6 => 'Sa', 7 => 'So'];
+        $labels = [];
+        foreach ($weekdays as $day => $label) {
+            $intervals = array_map(static fn (array $window): string => (string) $window['start'] . '–' . (string) $window['end'], $windows[$day] ?? []);
+            if ($intervals !== []) {
+                $labels[] = $label . ' ' . implode(', ', $intervals);
+            }
+        }
+
+        return implode(' | ', $labels);
     }
 
     private function bookingRows(array $items): array
@@ -308,11 +629,23 @@ final class AccountingDocumentExportService
         );
     }
 
-    private function filteredPackage(array $package, array $items): array
+    private function filteredPackage(array $package, array $items, bool $includePersonnel = true, ?int $employeeId = null): array
     {
         $closure = (array) ($package['closure'] ?? []);
         $closure['item_count'] = count($items);
         $closure['total_net_minutes'] = array_sum(array_map(static fn (array $item): int => (int) ($item['net_minutes'] ?? 0), $items));
+
+        $summaries = [];
+        $userIds = array_fill_keys(array_filter(array_map(static fn (array $item): int => (int) ($item['user_id'] ?? 0), $items)), true);
+        if ($employeeId !== null && $employeeId > 0) {
+            $userIds[$employeeId] = true;
+        }
+        if ($includePersonnel) {
+            $summaries = array_values(array_filter(
+                (array) ($package['employee_summaries'] ?? []),
+                static fn (array $row): bool => isset($userIds[(int) ($row['user_id'] ?? 0)])
+            ));
+        }
 
         return [
             'closure' => $closure,
@@ -320,6 +653,9 @@ final class AccountingDocumentExportService
             'employee_totals' => $this->totalsBy($items, 'employee_name', 'employee_number'),
             'project_totals' => $this->totalsBy($items, 'project_name', 'project_number'),
             'entry_type_totals' => $this->totalsBy($items, 'entry_type', null),
+            'employee_summaries' => $summaries,
+            'employee_summary_status' => !$includePersonnel ? 'not_applicable'
+                : ($summaries === [] ? 'unavailable' : ($package['employee_summary_status'] ?? 'unavailable')),
         ];
     }
 
@@ -353,18 +689,35 @@ final class AccountingDocumentExportService
         return $value;
     }
 
-    private function groupItems(array $items, string $numberKey, string $labelKey): array
+    private function groupItems(array $items, string $numberKey, string $labelKey, string $idKey, array $supplementalRows = []): array
     {
         $groups = [];
 
         foreach ($items as $item) {
             $label = trim((string) ($item[$numberKey] ?? '') . ' ' . (string) ($item[$labelKey] ?? ''));
             $label = $label !== '' ? $label : 'ohne-angabe';
-            $groups[$label] ??= ['label' => $label, 'items' => []];
-            $groups[$label]['items'][] = $item;
+            $key = (int) ($item[$idKey] ?? 0) > 0 ? 'id:' . (int) $item[$idKey] : 'label:' . $label;
+            $groups[$key] ??= ['label' => $label, 'items' => [], 'id' => (int) ($item[$idKey] ?? 0) ?: null];
+            $groups[$key]['items'][] = $item;
+        }
+
+        foreach ($supplementalRows as $row) {
+            $id = (int) ($row[$idKey] ?? 0);
+            if ($id <= 0) {
+                continue;
+            }
+            $label = trim((string) ($row[$numberKey] ?? '') . ' ' . (string) ($row[$labelKey] ?? ''));
+            $groups['id:' . $id] ??= ['label' => $label !== '' ? $label : 'ohne-angabe', 'items' => [], 'id' => $id];
         }
 
         ksort($groups);
+        $filenames = array_count_values(array_map(fn (array $group): string => $this->slug($group['label']), $groups));
+        foreach ($groups as $key => &$group) {
+            if ($filenames[$this->slug($group['label'])] > 1) {
+                $group['label'] .= '-' . substr(hash('sha256', $key), 0, 8);
+            }
+        }
+        unset($group);
 
         return array_values($groups);
     }
@@ -438,5 +791,10 @@ final class AccountingDocumentExportService
     private function e(string $value): string
     {
         return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+    }
+
+    private function htmlHash(string $value, int $width): string
+    {
+        return nl2br($this->e(wordwrap($value, $width, "\n", true)), false);
     }
 }

@@ -606,6 +606,10 @@ final class TimeAccountPdoDouble extends PDO
             return array_values(array_filter($this->users, static fn (array $user): bool => (int) ($user['is_deleted'] ?? 0) === 0 && ($user['employment_status'] ?? 'active') === 'active'));
         }
 
+        if (str_contains($sql, 'SELECT work_date, entry_type,')) {
+            return array_values(array_filter($this->timesheetsForRange($params), static fn (array $row): bool => in_array($row['entry_type'], ['vacation', 'sick'], true)));
+        }
+
         if (str_contains($sql, 'GROUP BY entry_type')) {
             $grouped = [];
 

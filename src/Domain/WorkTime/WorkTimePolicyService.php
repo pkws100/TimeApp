@@ -424,6 +424,30 @@ final class WorkTimePolicyService
         return $this->enabled() ? $this->assignedPolicyFor($userId, $date) : null;
     }
 
+    /** Configured dated schedules, including configuration while the feature is disabled. */
+    public function configuredPeriods(int $userId, string $dateFrom, string $dateTo): array
+    {
+        $this->date($dateFrom);
+        $this->date($dateTo);
+        $periods = [];
+        foreach ($this->listAssignments($userId) as $assignment) {
+            $from = max($dateFrom, (string) $assignment['effective_from']);
+            $to = min($dateTo, (string) ($assignment['effective_to'] ?? $dateTo));
+            if ($from > $to) { continue; }
+            $policy = $this->assignedPolicyFor($userId, $from);
+            if ($policy === null) { continue; }
+            $periods[] = [
+                'effective_from' => $from, 'effective_to' => $to,
+                'template_name' => (string) $policy['template_name'], 'revision' => (int) $policy['revision'],
+                'timezone' => (string) ($policy['timezone'] ?? 'Europe/Berlin'),
+                'windows' => $policy['windows'] ?? [], 'checkout_mode' => $policy['checkout_mode'],
+                'enabled' => $this->enabled(),
+            ];
+        }
+        usort($periods, static fn (array $a, array $b): int => strcmp($a['effective_from'], $b['effective_from']));
+        return $periods;
+    }
+
     public function assignedPolicyFor(int $userId, string $date): ?array
     {
         if (!($this->assignmentSchemaAvailable ??= $this->connection->tableExists('employee_work_time_assignments'))) { return null; }

@@ -11,6 +11,11 @@ und fehlende Nachweise separat aus. Vor der Nutzung die Phinx-Migrationen
 in Reihenfolge anwenden und die Regel fuer die vorgesehenen Mitarbeiter freigeben.
 
 ## Ueberblick
+
+[Abrechnungsdokumente](ACCOUNTING_DOCUMENTS.md) enthalten genommenen und künftig
+gebuchten Urlaub, Resturlaub, Krankheit und datierte Kernarbeitszeiten. PDF und
+Excel sowie das ZIP verwenden bei Festschreibungen die gespeicherten Nachweise.
+
 Monolithische PHP-Anwendung fuer Admin-Backend, API und mobile Mitarbeiter-WebApp.
 
 - Admin: `/admin`

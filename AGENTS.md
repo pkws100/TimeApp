@@ -395,6 +395,8 @@ Die vollstaendige offene Aufgabenliste steht in `PROJECTS.md`.
 
 ## 17. Kurzfazit fuer neue Laeufe
 
+- Erweiterte Abrechnungsdokumente enthalten datierte Urlaubskonten, Krankheit und zugeordnete Kernarbeitszeiten. Neue Abschlüsse speichern `document_summary_json`; historische Abschlüsse werden nicht live ergänzt. Persönliche Jahreskonten bleiben aus Projektdateien ausgeschlossen. Details in [Abrechnungsdokumente](ACCOUNTING_DOCUMENTS.md).
+
 - Optionale Arbeitszeitfenster: `WORK_TIME_WINDOWS_ENABLED=false` plus zeitlich gueltige Mitarbeiterzuordnung; Anrechnung bleibt separate Vorschau. Anwesenheit und Endvorschlaege sind keine echten Stempelungen. Details stehen in `WORK_TIME_WINDOWS.md`.
 - Im automatischen Modus setzt der Minutenworker das gebuchte Arbeitsende am Ende der zugeordneten Kernarbeitszeit. Abschluss, Systemnachweis und Push-Auftrag entstehen atomar. Für weitere Arbeit stempelt der Mitarbeiter neu. Die App-Sitzung bleibt dabei gültig.
 - Überschneidungen zwischen Arbeitsbuchungen eines Mitarbeiters werden projektübergreifend und über Mitternacht unter dem zentralen Schreiblock geprüft. Historische Konfliktbuchungen bleiben zur Korrektur sichtbar. Die Summen weisen den Konflikt aus und neue Abschlüsse bleiben bis zur Klärung gesperrt.

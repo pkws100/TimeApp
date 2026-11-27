@@ -161,6 +161,7 @@ try {
         ['UI-MATERIAL', 'UI', 'Materialerfassung', 'ui-material@example.test', 'mitarbeiter'],
         ['UI-PAUSE-CONTROLS', 'UI', 'Pausenerfassung', 'ui-pause-controls@example.test', 'mitarbeiter'],
         ['UI-PAGINATION', 'UI', 'Pagination', 'ui-pagination@example.test', 'mitarbeiter'],
+        ['UI-BILLING', 'UI', 'Abrechnung', 'ui-billing@example.test', 'mitarbeiter'],
         ['UI-WORKTIME-CONTINUE', 'UI', 'Weiterarbeit', 'ui-worktime-continue@example.test', 'mitarbeiter'],
         ['UI-WORKTIME-CONFIRM', 'UI', 'Endbestaetigung', 'ui-worktime-confirm@example.test', 'mitarbeiter'],
         ['UI-WORKTIME-AUTOMATIC', 'UI', 'Automatischer Check-out', 'ui-worktime-automatic@example.test', 'mitarbeiter'],
@@ -479,6 +480,9 @@ try {
         ['user_id' => $employeeId, 'work_date' => $accountYear . '-06-01']
     );
 
+    $billingFixture = require base_path('tests/Support/accounting-documents-fixture.php');
+    $billingFixture = $billingFixture($connection, $userIds['ui-billing@example.test'], $adminId, $workTimePolicies);
+
     $listener = stream_socket_server('tcp://127.0.0.1:0', $errorCode, $errorMessage);
     if (!is_resource($listener)) {
         throw new RuntimeException('Freier UI-Testport konnte nicht reserviert werden: ' . $errorMessage);
@@ -564,6 +568,9 @@ try {
         'UI_BASE_URL' => $baseUrl,
         'UI_TEST_ADMIN_EMAIL' => 'ui-admin@example.test',
         'UI_TEST_ADMIN_PASSWORD' => $password,
+        'UI_TEST_BILLING_USER_ID' => (string) $userIds['ui-billing@example.test'],
+        'UI_TEST_BILLING_PERIOD' => $billingFixture['period'],
+        'UI_TEST_BILLING_PROJECT_ID' => (string) $billingFixture['project_id'],
         'UI_TEST_FORM_PROJECT_ID' => (string) $formProjectId,
         'UI_TEST_FORM_MATERIAL_ID' => (string) $formMaterialId,
         'UI_TEST_FORM_OTHER_USER_ID' => (string) $paginationUserId,
@@ -623,6 +630,7 @@ try {
         'tests/e2e/project-material-context.real.spec.js',
         'tests/e2e/pause-models.real.spec.js',
         'tests/e2e/pause-controls.real.spec.js',
+        'tests/e2e/accounting-documents.real.spec.js',
         $appointmentSpec,
         $appointmentDispatchSpec,
     ];

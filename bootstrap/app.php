@@ -20,6 +20,7 @@ use App\Domain\Calendar\CalendarPolicyService;
 use App\Domain\Dashboard\DashboardService;
 use App\Domain\Exports\AccountingClosureService;
 use App\Domain\Exports\AccountingDocumentExportService;
+use App\Domain\Exports\AccountingEmployeeSummaryService;
 use App\Domain\Exports\AccountingExportService;
 use App\Domain\Exports\BookingExportService;
 use App\Domain\Exports\ReportService;
@@ -339,7 +340,11 @@ $workTimeDeviations = new WorkTimeDeviationService($connection, $workTimePolicie
 $workTimePauseCorrections = new WorkTimePauseCorrectionService($connection, $workTimePolicies, $workTimePreview, $timesheetWriteGuard, $timesheetPauses);
 $workTimeUserSummary = new WorkTimeUserSummaryService($connection, $workTimePolicies);
 $timeAccountService->setWorkTimePreviewService($workTimePreview);
+$timeAccountService->setWorkTimePolicyService($workTimePolicies);
 $accountingClosureService->setWorkTimePreviewService($workTimePreview);
+$accountingClosureService->setEmployeeSummaryService(new AccountingEmployeeSummaryService(
+    $connection, $timeAccountService, $dailyTargetService, $workTimePolicies, $workTimePreview
+));
 $employeeAccountCutoverService->setWorkTimePreviewService($workTimePreview);
 $timeAccountService->setPauseService($timesheetPauses);
 $accountingClosureService->setPauseService($timesheetPauses);

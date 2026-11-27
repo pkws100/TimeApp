@@ -83,7 +83,7 @@ final class MobileAppServiceTest extends TestCase
 
     public function testDayContextUsesIndividualWorkdayForBookingRequirement(): void
     {
-        $today = new \DateTimeImmutable('today');
+        $today = new \DateTimeImmutable('today', new \DateTimeZone('Europe/Berlin'));
         $scheduledDay = (int) $today->format('N');
         $otherDay = $scheduledDay === 7 ? 1 : $scheduledDay + 1;
         $baseUser = [
@@ -95,14 +95,21 @@ final class MobileAppServiceTest extends TestCase
             'roles' => [],
         ];
 
-        $freeDay = $this->service()->dayContext([
-            ...$baseUser,
-            'workdays_mask' => (string) $otherDay,
-        ]);
-        $workday = $this->service()->dayContext([
-            ...$baseUser,
-            'workdays_mask' => (string) $scheduledDay,
-        ]);
+        // The app bootstrap uses Berlin; PHP CLI may otherwise still be on UTC's previous day.
+        $originalTimezone = date_default_timezone_get();
+        date_default_timezone_set('Europe/Berlin');
+        try {
+            $freeDay = $this->service()->dayContext([
+                ...$baseUser,
+                'workdays_mask' => (string) $otherDay,
+            ]);
+            $workday = $this->service()->dayContext([
+                ...$baseUser,
+                'workdays_mask' => (string) $scheduledDay,
+            ]);
+        } finally {
+            date_default_timezone_set($originalTimezone);
+        }
 
         self::assertFalse($freeDay['today_state']['booking_required']);
         self::assertFalse($freeDay['today_state']['is_missing']);

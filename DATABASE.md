@@ -130,6 +130,10 @@
   `php bin/bootstrap-admin.php --email=... --password=... --first-name=... --last-name=...`
 - Beispielbenutzer, Demo-Projekte und Demo-Assets liegen in einem separaten optionalen Demo-Seeder.
 
+## Abrechnungsnachweise
+
+- Erweiterte Abrechnungsnachweise werden seit Migration `20261127120000` in `accounting_closures.document_summary_json` gespeichert und in den Abschlusshash einbezogen. Historische `NULL`-Snapshots werden nicht aus aktuellen Kontodaten ergänzt. Details in [Abrechnungsdokumente](ACCOUNTING_DOCUMENTS.md).
+
 ## MariaDB-Integrationstests
 - Zeitkonto-, Lock-, Migrations-, Foreign-Key- und System-Versioning-Tests verwenden pro Testklasse eine zufaellige Scratch-Datenbank auf MariaDB.
 - Die Testbasis migriert das Schema mit Phinx, leert Testdaten zwischen Methoden und entfernt die Datenbank danach. Append-only-Tabellen werden nur in der verifizierten, vom Test selbst erzeugten Scratch-Datenbank mittels `TRUNCATE` zurueckgesetzt. Historische Migrationstests starten bei ihrem jeweiligen Zielstand. Produktivdatenbanken werden nicht als Testziel verwendet.

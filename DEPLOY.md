@@ -11,6 +11,13 @@ Für automatische Check-outs zuerst die Migration
 Arbeitszeitfenstern betreiben. Die Mitarbeiter-PWA benötigt für die
 Benachrichtigung ein aktives Push-Abonnement.
 
+Erweiterte Abrechnungsdokumente benötigen die additive Migration
+`20261127120000` für gespeicherte Urlaubs-, Krankheits- und Arbeitszeitnachweise.
+Vor neuen Festschreibungen die Migration mit dem bestehenden Phinx-Betriebszugang
+anwenden. Alte Abschlüsse bleiben unverändert. Die Migration ist ausschließlich
+vorwärts ausführbar und sperrt einen automatischen Schema-Rollback. Felddefinitionen
+stehen in [ACCOUNTING_DOCUMENTS.md](ACCOUNTING_DOCUMENTS.md).
+
 Diese Anleitung beschreibt den Docker-Compose-Betrieb fuer die TimeApp hinter
 einem Reverse Proxy. Sie enthaelt nur Platzhalter und keine produktiven Secrets.
 

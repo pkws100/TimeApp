@@ -7,6 +7,7 @@ namespace App\Domain\TimeAccounts;
 use App\Domain\Calendar\CalendarPolicyService;
 use App\Domain\Timesheets\TimesheetOverlap;
 use App\Domain\Timesheets\TimesheetPauseService;
+use App\Domain\WorkTime\WorkTimePolicyService;
 use App\Domain\WorkTime\WorkTimePreviewService;
 use App\Infrastructure\Database\DatabaseConnection;
 use DateInterval;
@@ -23,6 +24,7 @@ final class TimeAccountService
     private const PER_PAGE_OPTIONS = [25, 50, 75, 100];
 
     private ?WorkTimePreviewService $workTimePreviewService = null;
+    private ?WorkTimePolicyService $workTimePolicyService = null;
     private ?TimesheetPauseService $pauses = null;
 
     public function __construct(
@@ -40,6 +42,11 @@ final class TimeAccountService
     public function setWorkTimePreviewService(WorkTimePreviewService $service): void
     {
         $this->workTimePreviewService = $service;
+    }
+
+    public function setWorkTimePolicyService(WorkTimePolicyService $service): void
+    {
+        $this->workTimePolicyService = $service;
     }
 
     public function setPauseService(TimesheetPauseService $service): void
@@ -237,35 +244,52 @@ final class TimeAccountService
         return $this->vacationYearForCutover($userId, $year, $user ?? [], $cutover);
     }
 
-    private function vacationYearForCutover(int $userId, int $year, array $user, ?array $cutover): array
+    /** Current evidence evaluated at the reporting date; persisted reports must snapshot this result. */
+    public function vacationYearAsOf(int $userId, int $year, string $asOfDate, ?array $user = null): array
+    {
+        $user ??= $this->user($userId);
+        $asOfDate = $this->normalizeAsOfDate($asOfDate);
+        $cutover = $this->cutoverService?->activeCutover($userId);
+        if ($cutover !== null && (string) $cutover['effective_from'] > $asOfDate) {
+            $cutover = null;
+        }
+        $result = $this->vacationYearForCutover($userId, $year, $user ?? [], $cutover, $asOfDate);
+        return [...$result, 'as_of_date' => $asOfDate,
+            'remaining_at_date_days' => $result['total_days'] - $result['approved_taken_past_days'],
+            'recorded_taken_year_days' => $this->takenVacationDays($userId, $year, null, null, $asOfDate),
+            'consumption_from_date' => max(sprintf('%04d-01-01', $year), (string) ($cutover['effective_from'] ?? '')),
+            'is_provisional' => $cutover === null || $result['source'] === 'user_defaults'];
+    }
+
+    private function vacationYearForCutover(int $userId, int $year, array $user, ?array $cutover, ?string $asOfDate = null): array
     {
         $cutoverDate = $cutover !== null ? (string) $cutover['effective_from'] : null;
         $cutoverId = $cutover !== null ? (int) $cutover['id'] : null;
         $isCutoverYear = $cutover !== null && (int) ($cutover['leave_year'] ?? 0) === $year;
-        $hasJournal = !$isCutoverYear && $cutoverId !== null && $this->hasVacationJournalEntries($userId, $year, $cutoverId);
+        $hasJournal = !$isCutoverYear && $cutoverId !== null && $this->hasVacationJournalEntries($userId, $year, $cutoverId, $asOfDate);
 
         if ($isCutoverYear) {
             $entitlement = (float) ($cutover['annual_leave_entitlement_days'] ?? 0);
             $carryover = (float) ($cutover['leave_carryover_days'] ?? 0);
             $openingBalance = (float) ($cutover['opening_remaining_leave_days'] ?? 0);
             $openingAdjustment = $openingBalance - $entitlement - $carryover;
-            $manualAdjustments = $cutoverId !== null ? $this->vacationJournalManualSum($userId, $year, $cutoverId) : 0.0;
+            $manualAdjustments = $cutoverId !== null ? $this->vacationJournalManualSum($userId, $year, $cutoverId, $asOfDate) : 0.0;
             $total = $openingBalance + $manualAdjustments;
             $source = 'cutover_snapshot';
         } else {
-            $journalTotal = $cutoverId !== null ? $this->vacationJournalSum($userId, $year, $cutoverId) : 0.0;
-            $entitlement = $hasJournal ? $this->vacationJournalTypeSum($userId, $year, 'annual_entitlement', $cutoverId) : (float) ($user['vacation_days_year'] ?? 0);
-            $carryover = $hasJournal ? $this->vacationJournalTypeSum($userId, $year, 'carryover', $cutoverId) : (float) ($user['vacation_carryover_days'] ?? 0);
-            $openingAdjustment = $hasJournal ? $this->vacationJournalTypeSum($userId, $year, 'opening_adjustment', $cutoverId) : 0.0;
-            $manualAdjustments = $hasJournal ? $this->vacationJournalManualSum($userId, $year, $cutoverId) : 0.0;
+            $journalTotal = $cutoverId !== null ? $this->vacationJournalSum($userId, $year, $cutoverId, $asOfDate) : 0.0;
+            $entitlement = $hasJournal ? $this->vacationJournalTypeSum($userId, $year, 'annual_entitlement', $cutoverId, $asOfDate) : (float) ($user['vacation_days_year'] ?? 0);
+            $carryover = $hasJournal ? $this->vacationJournalTypeSum($userId, $year, 'carryover', $cutoverId, $asOfDate) : (float) ($user['vacation_carryover_days'] ?? 0);
+            $openingAdjustment = $hasJournal ? $this->vacationJournalTypeSum($userId, $year, 'opening_adjustment', $cutoverId, $asOfDate) : 0.0;
+            $manualAdjustments = $hasJournal ? $this->vacationJournalManualSum($userId, $year, $cutoverId, $asOfDate) : 0.0;
             $total = $hasJournal ? $journalTotal : $entitlement + $carryover;
             $openingBalance = $hasJournal ? $entitlement + $carryover + $openingAdjustment : $total;
             $source = $hasJournal ? 'journal' : 'user_defaults';
         }
 
         $taken = $this->takenVacationDays($userId, $year, $cutoverDate);
-        $takenPast = $this->takenVacationDays($userId, $year, $cutoverDate, null, $this->normalizeAsOfDate(null));
-        $futureApproved = $this->futureApprovedVacationDays($userId, $year, $cutoverDate, $this->normalizeAsOfDate(null));
+        $takenPast = $this->takenVacationDays($userId, $year, $cutoverDate, null, $asOfDate ?? $this->normalizeAsOfDate(null));
+        $futureApproved = $this->futureApprovedVacationDays($userId, $year, $cutoverDate, $asOfDate ?? $this->normalizeAsOfDate(null));
         $pending = $this->pendingVacationDays($userId, $year, $user);
         $remaining = $total - $taken;
         $available = $remaining - $pending;
@@ -520,6 +544,12 @@ final class TimeAccountService
 
         return array_map(function (array $row) use ($includeWindow, $includeStatus, $includeOverlap): array {
             $vacation = $row['vacation'] ?? [];
+            $vacationAsOf = (string) ($row['as_of_date'] ?? $this->normalizeAsOfDate(null));
+            $user = $this->user((int) $row['user_id']) ?? [];
+            $datedVacation = $this->vacationYearAsOf((int) $row['user_id'], (int) $row['year'], $vacationAsOf, $user);
+            $periodStart = sprintf('%04d-%02d-01', (int) $row['year'], (int) $row['month']);
+            $periodEnd = (new DateTimeImmutable($periodStart))->modify('last day of this month')->format('Y-m-d');
+            $absenceStats = $this->reportAbsenceDays((int) $row['user_id'], $user, $periodStart, min($periodEnd, $vacationAsOf));
 
             $export = [
                 'Mitarbeiter' => (string) ($row['user'] ?? ''),
@@ -580,8 +610,84 @@ final class TimeAccountService
                 $export['Buchungskonflikt'] = !empty($row['booking_overlap']) ? TimesheetOverlap::MESSAGE : '';
             }
 
+            // Existing columns retain their legacy semantics. Dated fields distinguish
+            // leave already taken from later approved bookings in the same leave year.
+            $export += [
+                'Urlaubsjahr' => (int) $row['year'],
+                'Urlaubsstand' => $vacationAsOf,
+                'Urlaubskonto Status' => !empty($datedVacation['is_provisional']) ? 'Vorlaeufig' : 'Finaler Mitarbeiter-Stichtag',
+                'Urlaubsanspruch am Standdatum (Tage)' => (float) ($datedVacation['entitlement_days'] ?? 0),
+                'Urlaubsuebertrag am Standdatum (Tage)' => (float) ($datedVacation['carryover_days'] ?? 0),
+                'Urlaubskorrekturen bis Standdatum (Tage)' => (float) ($datedVacation['opening_adjustment_days'] ?? 0) + (float) ($datedVacation['manual_adjustment_days'] ?? 0),
+                'Urlaubsbudget am Standdatum (Tage)' => (float) ($datedVacation['total_days'] ?? 0),
+                'Urlaub genommen bis Standdatum (Tage)' => (float) ($datedVacation['recorded_taken_year_days'] ?? 0),
+                'Urlaubskonto Verbrauch ab' => (string) ($datedVacation['consumption_from_date'] ?? ''),
+                'Urlaubsverbrauch ab Kontostart (Tage)' => (float) ($datedVacation['approved_taken_past_days'] ?? 0),
+                'Urlaub kuenftig genehmigt (Tage)' => (float) ($datedVacation['future_approved_days'] ?? 0),
+                'Urlaub gebucht gesamt (Tage)' => (float) ($datedVacation['recorded_taken_year_days'] ?? 0) + (float) ($datedVacation['future_approved_days'] ?? 0),
+                'Resturlaub am Standdatum (Tage)' => (float) ($datedVacation['remaining_at_date_days'] ?? 0),
+                'Resturlaub nach genehmigtem Urlaub (Tage)' => (float) ($datedVacation['remaining_days'] ?? 0),
+                'Verfuegbar nach offenen Antraegen (Tage)' => (float) ($datedVacation['available_days'] ?? 0),
+                'Urlaub im Abrechnungszeitraum (Tage)' => (float) ($absenceStats['vacation_days'] ?? 0),
+                'Krankheit im Abrechnungszeitraum (Tage)' => (float) ($absenceStats['sick_days'] ?? 0),
+                ...$this->configuredWorkTimeExport((int) $row['user_id'], $periodStart, $periodEnd),
+            ];
+
             return $export;
         }, $rows);
+    }
+
+    private function reportAbsenceDays(int $userId, array $user, string $dateFrom, string $dateTo): array
+    {
+        $paid = $sick = [];
+        if ($dateFrom > $dateTo || !$this->connection->tableExists('timesheets')) {
+            return ['vacation_days' => 0, 'sick_days' => 0];
+        }
+        $days = $this->dailyTargetService?->breakdown($user, $dateFrom, $dateTo) ?? [];
+        $reason = $this->connection->columnExists('timesheets', 'absence_reason_code') ? 'absence_reason_code' : 'NULL AS absence_reason_code';
+        $rows = $this->connection->fetchAll('SELECT work_date, entry_type, ' . $reason . ' FROM timesheets
+            WHERE user_id = :user_id AND work_date >= :date_from AND work_date <= :date_to
+              AND entry_type IN ("vacation", "sick") AND COALESCE(is_deleted, 0) = 0', [
+            'user_id' => $userId, 'date_from' => $dateFrom, 'date_to' => $dateTo,
+        ]);
+        foreach ($rows as $row) {
+            $date = (string) $row['work_date'];
+            if ((int) ($days[$date]['effective_minutes'] ?? 0) <= 0) { continue; }
+            if ($row['entry_type'] === 'sick') { $sick[$date] = true; }
+            if ($row['entry_type'] === 'vacation' && (($row['absence_reason_code'] ?? null) === null || $row['absence_reason_code'] === 'vacation_paid')) {
+                $paid[$date] = true;
+            }
+        }
+        return ['vacation_days' => count($paid), 'sick_days' => count($sick)];
+    }
+
+    private function configuredWorkTimeExport(int $userId, string $dateFrom, string $dateTo): array
+    {
+        $periods = $this->workTimePolicyService?->configuredPeriods($userId, $dateFrom, $dateTo) ?? [];
+        $lines = [];
+        $weekdays = [1 => 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+        $modes = ['automatic' => 'Automatisch', 'proposal' => 'Endvorschlag', 'manual' => 'Manuell'];
+
+        foreach ($periods as $period) {
+            $windows = [];
+            foreach ($weekdays as $day => $label) {
+                $intervals = array_map(static fn (array $window): string => (string) $window['start'] . '–' . (string) $window['end']
+                    . ((string) $window['end'] <= (string) $window['start'] ? ' (+1 Tag)' : ''), $period['windows'][$day] ?? []);
+                $windows[] = $label . ' ' . ($intervals === [] ? 'frei' : implode(', ', $intervals));
+            }
+            $lines[] = (string) $period['effective_from'] . ' bis ' . (string) $period['effective_to']
+                . ' | ' . (string) $period['template_name'] . ' v' . (int) $period['revision']
+                . ' | ' . (string) $period['timezone']
+                . ' | ' . implode('; ', $windows)
+                . ' | Checkout ' . ($modes[$period['checkout_mode']] ?? (string) $period['checkout_mode']);
+        }
+
+        return [
+            'Kernarbeitszeit Zeitraum' => $dateFrom . ' bis ' . $dateTo,
+            'Kernarbeitszeit Status' => $this->workTimePolicyService === null ? 'Nicht verfuegbar'
+                : (!$this->workTimePolicyService->enabled() ? 'Global deaktiviert' : ($periods === [] ? 'Keine Zuordnung' : 'Aktiv')),
+            'Kernarbeitszeit Konfiguration' => $lines === [] ? 'Keine Zuordnung im Abrechnungszeitraum' : implode("\n", $lines),
+        ];
     }
 
     private function withWorkTimePreview(array $account, string $dateFrom, string $dateTo, ?string $cutoverDate): array
@@ -1177,8 +1283,8 @@ final class TimeAccountService
             return 0.0;
         }
 
-        $dateFrom = $dateFromOverride ?? sprintf('%04d-01-01', $year);
-        $dateTo = $dateToOverride ?? sprintf('%04d-12-31', $year);
+        $dateFrom = max($dateFromOverride ?? sprintf('%04d-01-01', $year), sprintf('%04d-01-01', $year));
+        $dateTo = min($dateToOverride ?? sprintf('%04d-12-31', $year), sprintf('%04d-12-31', $year));
 
         if ($cutoverDate !== null && $cutoverDate > $dateFrom) {
             $dateFrom = $cutoverDate;
@@ -1217,7 +1323,7 @@ final class TimeAccountService
         return $this->takenVacationDays($userId, $year, $cutoverDate, $dateFrom, sprintf('%04d-12-31', $year));
     }
 
-    private function vacationJournalSum(int $userId, int $year, int $cutoverId): float
+    private function vacationJournalSum(int $userId, int $year, int $cutoverId, ?string $asOfDate = null): float
     {
         if (!$this->connection->tableExists('vacation_account_entries')) {
             return 0.0;
@@ -1231,13 +1337,18 @@ final class TimeAccountService
             $bindings['cutover_id'] = $cutoverId;
         }
 
+        if ($asOfDate !== null) {
+            $clauses[] = 'effective_date <= :as_of_date';
+            $bindings['as_of_date'] = $asOfDate;
+        }
+
         return (float) ($this->connection->fetchColumn(
             'SELECT COALESCE(SUM(days), 0) FROM vacation_account_entries WHERE ' . implode(' AND ', $clauses),
             $bindings
         ) ?? 0);
     }
 
-    private function hasVacationJournalEntries(int $userId, int $year, int $cutoverId): bool
+    private function hasVacationJournalEntries(int $userId, int $year, int $cutoverId, ?string $asOfDate = null): bool
     {
         if (!$this->connection->tableExists('vacation_account_entries')) {
             return false;
@@ -1251,13 +1362,18 @@ final class TimeAccountService
             $bindings['cutover_id'] = $cutoverId;
         }
 
+        if ($asOfDate !== null) {
+            $clauses[] = 'effective_date <= :as_of_date';
+            $bindings['as_of_date'] = $asOfDate;
+        }
+
         return (int) ($this->connection->fetchColumn(
             'SELECT COUNT(*) FROM vacation_account_entries WHERE ' . implode(' AND ', $clauses),
             $bindings
         ) ?? 0) > 0;
     }
 
-    private function vacationJournalTypeSum(int $userId, int $year, string $entryType, int $cutoverId): float
+    private function vacationJournalTypeSum(int $userId, int $year, string $entryType, int $cutoverId, ?string $asOfDate = null): float
     {
         if (!$this->connection->tableExists('vacation_account_entries')) {
             return 0.0;
@@ -1271,6 +1387,11 @@ final class TimeAccountService
             $bindings['cutover_id'] = $cutoverId;
         }
 
+        if ($asOfDate !== null) {
+            $clauses[] = 'effective_date <= :as_of_date';
+            $bindings['as_of_date'] = $asOfDate;
+        }
+
         return (float) ($this->connection->fetchColumn(
             'SELECT COALESCE(SUM(days), 0)
              FROM vacation_account_entries
@@ -1279,7 +1400,7 @@ final class TimeAccountService
         ) ?? 0);
     }
 
-    private function vacationJournalManualSum(int $userId, int $year, int $cutoverId): float
+    private function vacationJournalManualSum(int $userId, int $year, int $cutoverId, ?string $asOfDate = null): float
     {
         if (!$this->connection->tableExists('vacation_account_entries')) {
             return 0.0;
@@ -1291,6 +1412,11 @@ final class TimeAccountService
         if ($this->connection->columnExists('vacation_account_entries', 'cutover_id')) {
             $clauses[] = 'cutover_id = :cutover_id';
             $bindings['cutover_id'] = $cutoverId;
+        }
+
+        if ($asOfDate !== null) {
+            $clauses[] = 'effective_date <= :as_of_date';
+            $bindings['as_of_date'] = $asOfDate;
         }
 
         return (float) ($this->connection->fetchColumn(

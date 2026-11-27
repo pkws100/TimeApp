@@ -19,6 +19,7 @@ final class AccountingClosureService
 
     private ?WorkTimePreviewService $workTimePreviewService = null;
     private ?TimesheetPauseService $pauses = null;
+    private ?AccountingEmployeeSummaryService $employeeSummaryService = null;
 
     public function __construct(
         private DatabaseConnection $connection,
@@ -34,6 +35,11 @@ final class AccountingClosureService
     public function setPauseService(TimesheetPauseService $service): void
     {
         $this->pauses = $service;
+    }
+
+    public function setEmployeeSummaryService(AccountingEmployeeSummaryService $service): void
+    {
+        $this->employeeSummaryService = $service;
     }
 
     public function selectionFromInput(array $input): array
@@ -101,7 +107,8 @@ final class AccountingClosureService
             'note' => '',
         ];
 
-        return $this->package($closure, $items);
+        $summary = $this->employeeSummaryService?->forPeriod($selection, $items, $periodStart, $periodEnd);
+        return $this->package($closure, $items, $summary);
     }
 
     public function createClosure(array $input, int $userId, string $status = 'final', ?int $originalClosureId = null): array
@@ -112,6 +119,9 @@ final class AccountingClosureService
 
         if (!$this->hasClosureTables()) {
             throw new RuntimeException('Die Abrechnungstabellen sind noch nicht verfuegbar. Bitte Migrationen ausfuehren.');
+        }
+        if ($this->employeeSummaryService !== null && !$this->connection->columnExists('accounting_closures', 'document_summary_json')) {
+            throw new RuntimeException('Die Abrechnungsnachweise sind noch nicht migriert. Bitte Migrationen ausführen.');
         }
 
         $selection = $this->selectionFromInput($input);
@@ -133,6 +143,14 @@ final class AccountingClosureService
 
             $closureId = 0;
             $this->connection->transaction(function () use ($selection, $items, $periodStart, $periodEnd, $userId, $status, $originalClosureId, &$closureId): void {
+                $documentSummary = $this->employeeSummaryService?->forPeriod($selection, $items, $periodStart, $periodEnd);
+                if ($documentSummary === null && $this->connection->columnExists('accounting_closures', 'document_summary_json')) {
+                    $documentSummary = ['version' => 1, 'employee_summaries' => [], 'employee_summary_status' => 'unavailable',
+                        'item_details' => array_column(array_map(static fn (array $item): array => [
+                            'timesheet_id' => $item['timesheet_id'],
+                            'absence_reason_code' => $item['absence_reason_code'], 'credited_minutes' => $item['credited_minutes'],
+                        ], $items), null, 'timesheet_id')];
+                }
                 $pendingNumber = 'PENDING-' . bin2hex(random_bytes(8));
                 $this->connection->execute(
                     'INSERT INTO accounting_closures (
@@ -179,12 +197,18 @@ final class AccountingClosureService
                     'project_id' => $selection['project_id'],
                     'user_id' => $selection['user_id'],
                     'items' => array_column($items, 'row_hash'),
+                    'document_summary' => $documentSummary,
                 ]);
 
                 $this->connection->execute(
                     'UPDATE accounting_closures SET snapshot_hash = :snapshot_hash WHERE id = :id',
                     ['id' => $closureId, 'snapshot_hash' => $snapshotHash]
                 );
+                if ($documentSummary !== null) {
+                    $this->connection->execute('UPDATE accounting_closures SET document_summary_json = :summary WHERE id = :id', [
+                        'id' => $closureId, 'summary' => json_encode($documentSummary, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRESERVE_ZERO_FRACTION),
+                    ]);
+                }
             });
 
             $closure = $this->findClosure($closureId);
@@ -369,15 +393,19 @@ final class AccountingClosureService
             'SELECT * FROM accounting_closure_items WHERE closure_id = :id ORDER BY work_date ASC, employee_name ASC, start_time ASC, id ASC',
             ['id' => $id]
         );
+        $summary = isset($closure['document_summary_json'])
+            ? json_decode((string) $closure['document_summary_json'], true, flags: JSON_THROW_ON_ERROR) : null;
+        unset($closure['document_summary_json']);
         foreach ($items as &$item) {
             if (isset($item['pause_assessment_json'])) {
                 $item['pause_assessment'] = json_decode((string) $item['pause_assessment_json'], true, flags: JSON_THROW_ON_ERROR);
             }
             unset($item['pause_assessment_json']);
+            $item = [...$item, ...($summary['item_details'][(string) $item['timesheet_id']] ?? [])];
         }
         unset($item);
 
-        return $this->package($this->hydrateClosure($closure), $items);
+        return $this->package($this->hydrateClosure($closure), $items, $summary);
     }
 
     public function isTimesheetLocked(int $timesheetId): bool
@@ -505,6 +533,8 @@ final class AccountingClosureService
                 'gross_minutes' => (int) ($row['gross_minutes'] ?? 0),
                 'break_minutes' => (int) ($row['break_minutes'] ?? 0),
                 'net_minutes' => (int) ($row['net_minutes'] ?? 0),
+                'credited_minutes' => (int) ($row['credited_minutes'] ?? 0),
+                'absence_reason_code' => $row['absence_reason_code'] ?? null,
                 'expenses_amount' => (string) ($row['expenses_amount'] ?? '0.00'),
                 'note' => (string) ($row['note'] ?? ''),
                 'change_count' => (int) ($row['change_count'] ?? 0),
@@ -524,7 +554,7 @@ final class AccountingClosureService
     private function insertItem(int $closureId, array $item): void
     {
         $assessment = $item['pause_assessment'] ?? null;
-        unset($item['pause_assessment']);
+        unset($item['pause_assessment'], $item['credited_minutes'], $item['absence_reason_code']);
         $assessmentColumn = $assessment !== null ? ', pause_assessment_json' : '';
         $assessmentPlaceholder = $assessment !== null ? ', :pause_assessment_json' : '';
         if ($assessment !== null) {
@@ -544,9 +574,13 @@ final class AccountingClosureService
         );
     }
 
-    private function package(array $closure, array $items): array
+    private function package(array $closure, array $items, ?array $summary = null): array
     {
         $closure = $this->hydrateClosure($closure);
+        foreach ($items as &$item) {
+            $item = [...$item, ...($summary['item_details'][(string) $item['timesheet_id']] ?? [])];
+        }
+        unset($item);
 
         return [
             'closure' => $closure,
@@ -554,6 +588,9 @@ final class AccountingClosureService
             'employee_totals' => $this->totalsBy($items, 'employee_name', 'employee_number'),
             'project_totals' => $this->totalsBy($items, 'project_name', 'project_number'),
             'entry_type_totals' => $this->totalsBy($items, 'entry_type', null),
+            'employee_summaries' => $summary['employee_summaries'] ?? [],
+            'employee_summary_status' => ($summary['employee_summary_status'] ?? 'unavailable') === 'snapshot' && $closure['status'] === 'draft'
+                ? 'preview' : ($summary['employee_summary_status'] ?? 'unavailable'),
         ];
     }
 

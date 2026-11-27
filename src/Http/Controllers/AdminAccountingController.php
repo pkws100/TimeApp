@@ -157,6 +157,7 @@ final class AdminAccountingController
     <article class="card metric"><h2>Zeitraum</h2><p>{$this->e((string) ($closure['period_label'] ?? ''))}</p></article>
 </section>
 {$validationNotice}
+{$this->employeeSummary($preview)}
 <section class="card stack">
     <div class="section-toolbar">
         <div>
@@ -180,6 +181,69 @@ final class AdminAccountingController
     {$this->closuresTable($closures)}
 </section>
 HTML;
+    }
+
+    private function employeeSummary(array $package): string
+    {
+        if (($package['employee_summary_status'] ?? '') === 'not_applicable') { return ''; }
+        $summaries = (array) ($package['employee_summaries'] ?? []);
+        if ($summaries === []) { return ''; }
+        $rows = '';
+        $cards = '';
+        foreach ($summaries as $row) {
+            $name = trim((string) ($row['employee_number'] ?? '') . ' ' . (string) ($row['employee_name'] ?? ''));
+            $status = !empty($row['vacation_is_provisional']) ? 'Vorläufiges Urlaubskonto' : 'Bestätigter Kontostand';
+            $core = [];
+            foreach ((array) ($row['core_time_periods'] ?? []) as $period) {
+                $days = [];
+                foreach ((array) ($period['windows'] ?? []) as $weekday => $windows) {
+                    $times = array_map(static fn (array $window): string => (string) $window['start'] . '–' . (string) $window['end'], (array) $windows);
+                    if ($times !== []) { $days[] = ([1 => 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'][(int) $weekday] ?? (string) $weekday) . ' ' . implode(', ', $times); }
+                }
+                $core[] = '<strong>' . $this->e((string) ($period['template_name'] ?? '')) . '</strong> · V' . (int) ($period['revision'] ?? 0)
+                    . '<br>' . $this->e((string) ($period['effective_from'] ?? '') . ' bis ' . (string) ($period['effective_to'] ?? ''))
+                    . '<br>' . $this->e(implode(' · ', $days))
+                    . '<br><small>' . $this->e((string) ($period['timezone'] ?? 'Europe/Berlin'))
+                    . (empty($period['enabled']) ? ' · Global deaktiviert' : '') . '</small>';
+            }
+            $rows .= '<tr><td>' . $this->e($name) . '<br><small>' . $this->e($status) . '</small></td>'
+                . '<td>' . (int) ($row['leave_year'] ?? 0) . '<br><small>Stand ' . $this->e((string) ($row['as_of_date'] ?? '')) . '</small>'
+                . '<br><small>Kontoverbrauch ab ' . $this->e((string) ($row['vacation_consumption_from_date'] ?? '')) . '</small></td>'
+                . '<td>' . $this->days($row['vacation_taken_days'] ?? null) . '</td>'
+                . '<td>' . $this->days($row['sick_days'] ?? null) . '</td>'
+                . '<td>' . $this->days($row['vacation_taken_year_days'] ?? null) . '</td>'
+                . '<td>' . $this->days($row['vacation_remaining_days'] ?? null) . '</td>'
+                . '<td>' . $this->days($row['vacation_future_days'] ?? null) . '</td>'
+                . '<td>' . $this->days($row['vacation_booked_remaining_days'] ?? null) . '</td>'
+                . '<td>' . ($core === [] ? 'Keine Kernarbeitszeit zugeordnet' : implode('<hr>', $core)) . '</td></tr>';
+            $values = '';
+            foreach ([
+                'Urlaub im Zeitraum (Tage)' => 'vacation_taken_days',
+                'Krankheit im Zeitraum (Tage)' => 'sick_days',
+                'Urlaub genommen im Jahr (Tage)' => 'vacation_taken_year_days',
+                'Resturlaub am Standdatum (Tage)' => 'vacation_remaining_days',
+                'Künftig gebuchter Urlaub (Tage)' => 'vacation_future_days',
+                'Rest nach künftig gebuchtem Urlaub (Tage)' => 'vacation_booked_remaining_days',
+            ] as $label => $key) {
+                $values .= '<div><dt>' . $this->e($label) . '</dt><dd>' . $this->days($row[$key] ?? null) . '</dd></div>';
+            }
+            $cards .= '<article class="card vacation-account-card"><header><div><strong>' . $this->e($name)
+                . '</strong><small>' . $this->e($status) . '</small><small>Urlaubsjahr ' . (int) ($row['leave_year'] ?? 0)
+                . ' · Stand ' . $this->e((string) ($row['as_of_date'] ?? '')) . '</small><small>Kontoverbrauch ab '
+                . $this->e((string) ($row['vacation_consumption_from_date'] ?? '')) . '</small></div></header>'
+                . '<dl class="vacation-account-values">' . $values . '</dl><div><h3>Kernarbeitszeit</h3>'
+                . ($core === [] ? 'Keine Kernarbeitszeit zugeordnet' : implode('<hr>', $core)) . '</div></article>';
+        }
+
+        return '<section class="card stack" aria-label="Abrechnungsübersicht"><h2>Urlaub, Krankheit und Kernarbeitszeit</h2>'
+            . '<p class="muted">Urlaub und Krankheit werden in Tagen ausgewiesen, im Zeitraum jeweils bis zum Standdatum. Der Jahreswert zeigt gebuchten und genommenen Urlaub. Urlaub vor dem Kontostart ist bereits im Eröffnungsbestand berücksichtigt und wird vom Resturlaub nicht erneut abgezogen. Künftig gebuchter Urlaub wird gesondert ausgewiesen. PDF und Excel enthalten zusätzlich Abwesenheitsgutschriften und Arbeitszeitvorschau.</p>'
+            . '<div class="table-scroll vacation-account-desktop"><table class="accounting-summary-table"><colgroup><col style="width:16%"><col style="width:12%"><col span="6" style="width:8%"><col style="width:24%"></colgroup><thead><tr><th>Mitarbeiter</th><th>Urlaubsjahr / Standdatum</th><th>Urlaub im Zeitraum</th><th>Krankheit im Zeitraum</th><th>Urlaub im Jahr</th><th>Resturlaub<br><small>am Standdatum</small></th><th>Künftig gebucht</th><th>Rest nach Buchungen</th><th>Kernarbeitszeit</th></tr></thead><tbody>'
+            . $rows . '</tbody></table></div><div class="vacation-account-mobile">' . $cards . '</div></section>';
+    }
+
+    private function days(mixed $value): string
+    {
+        return $value === null ? '—' : $this->e(rtrim(rtrim(number_format((float) $value, 2, ',', ''), '0'), ','));
     }
 
     private function closuresTable(array $closures): string
