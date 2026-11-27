@@ -176,6 +176,133 @@ final class AppTimesheetSyncDatabaseTest extends TestCase
         });
     }
 
+    public function testCheckInAfterArchivedLatestBookingsPreservesEarlierWorkHistoryAndReplayReceipts(): void
+    {
+        $this->withScratchDatabase(function (DatabaseConnection $connection): void {
+            $connection->execute('ALTER TABLE timesheets ADD SYSTEM VERSIONING');
+            $service = $this->createSyncService($connection);
+            foreach ([true, false] as $keepEarlierWork) {
+                [$userId, $projectId, $suffix] = $this->seedAssignedUserAndProject($connection, $keepEarlierWork ? 'archived-latest' : 'archived-all');
+                $workDate = '2026-06-03';
+                $oldIds = [];
+                $originalCheckIn = [];
+                $originalReceipt = [];
+                foreach ([['07:27', '09:00'], ['09:01', '12:15'], ['12:39', '12:40'], ['12:40', '12:41']] as $index => [$start, $end]) {
+                    $originalCheckIn = [
+                        'client_request_id' => 'before-archive-in-' . $index . '-' . $suffix,
+                        'action' => 'check_in', 'work_date' => $workDate,
+                        'project_id' => $projectId, 'start_time' => $start,
+                    ];
+                    $originalReceipt = $service->sync($userId, $originalCheckIn);
+                    $oldIds[] = $originalReceipt['timesheet']['id'];
+                    $service->sync($userId, [
+                        'client_request_id' => 'before-archive-out-' . $index . '-' . $suffix,
+                        'action' => 'check_out', 'work_date' => $workDate,
+                        'expected_timesheet_id' => $originalReceipt['timesheet']['id'], 'end_time' => $end,
+                    ]);
+                }
+                $connection->execute('UPDATE timesheets
+                    SET is_deleted = 1, deleted_at = NOW(), deleted_by_user_id = :actor, updated_at = NOW()
+                    WHERE user_id = :user AND id >= :first_archived', [
+                    'actor' => $userId, 'user' => $userId, 'first_archived' => $oldIds[$keepEarlierWork ? 2 : 0],
+                ]);
+                $lastOldId = $oldIds[array_key_last($oldIds)];
+                $history = static fn (): array => $connection->fetchAll(
+                    'SELECT *, ROW_START, ROW_END FROM timesheets FOR SYSTEM_TIME ALL
+                     WHERE user_id = :user AND id <= :last_old ORDER BY id, ROW_START',
+                    ['user' => $userId, 'last_old' => $lastOldId]
+                );
+                $beforeHistory = $history();
+                $beforeReceipts = $connection->fetchAll('SELECT * FROM app_sync_operations WHERE user_id = :user ORDER BY id', ['user' => $userId]);
+                self::assertSame($keepEarlierWork ? 2 : 4, (int) $connection->fetchColumn(
+                    'SELECT COUNT(*) FROM timesheets WHERE user_id = :user AND is_deleted = 1', ['user' => $userId]
+                ));
+
+                // A previously accepted offline request remains a receipt for the
+                // archived booking; replay must not reopen or replace that row.
+                self::assertSame($originalReceipt, $service->sync($userId, $originalCheckIn));
+                $freshCheckIn = [
+                    'client_request_id' => 'after-archive-in-' . $suffix,
+                    'action' => 'check_in', 'work_date' => $workDate,
+                    'project_id' => $projectId, 'start_time' => '12:45',
+                ];
+                $fresh = $service->sync($userId, $freshCheckIn);
+                self::assertGreaterThan($lastOldId, $fresh['timesheet']['id']);
+                self::assertSame('12:45:00', $fresh['timesheet']['start_time']);
+                self::assertNull($fresh['timesheet']['end_time']);
+                self::assertSame($projectId, $fresh['timesheet']['project_id']);
+                self::assertSame($fresh, $service->sync($userId, $freshCheckIn));
+                self::assertSame($originalReceipt, $service->sync($userId, $originalCheckIn));
+
+                try {
+                    $service->sync($userId, [
+                        'client_request_id' => 'stale-archive-out-' . $suffix,
+                        'action' => 'check_out', 'work_date' => $workDate,
+                        'expected_timesheet_id' => $lastOldId, 'expected_start_time' => '12:40', 'end_time' => '13:00',
+                    ]);
+                    self::fail('A delayed check-out for an archived booking must not close the new session.');
+                } catch (RuntimeException $exception) {
+                    self::assertStringContainsString('inzwischen geaendert', $exception->getMessage());
+                }
+
+                self::assertSame($beforeHistory, $history());
+                self::assertSame($beforeReceipts, $connection->fetchAll(
+                    'SELECT * FROM app_sync_operations WHERE user_id = :user AND client_request_id <> :fresh_request ORDER BY id',
+                    ['user' => $userId, 'fresh_request' => $freshCheckIn['client_request_id']]
+                ));
+                self::assertSame(5, (int) $connection->fetchColumn('SELECT COUNT(*) FROM timesheets WHERE user_id = :user', ['user' => $userId]));
+                self::assertSame(1, (int) $connection->fetchColumn(
+                    'SELECT COUNT(*) FROM timesheets WHERE user_id = :user AND is_deleted = 0 AND start_time IS NOT NULL AND end_time IS NULL', ['user' => $userId]
+                ));
+                self::assertSame($keepEarlierWork ? 3 : 1, (int) $connection->fetchColumn(
+                    'SELECT COUNT(*) FROM timesheets WHERE user_id = :user AND is_deleted = 0', ['user' => $userId]
+                ));
+            }
+        });
+    }
+
+    public function testCheckInAfterArchivedBookingsStillRejectsOverlapAndAnotherLiveSession(): void
+    {
+        $this->withScratchDatabase(function (DatabaseConnection $connection): void {
+            [$userId, $projectId, $suffix] = $this->seedAssignedUserAndProject($connection, 'archive-conflicts');
+            $connection->execute('INSERT INTO timesheets (user_id, project_id, work_date, start_time, end_time, gross_minutes, net_minutes)
+                VALUES (:user, :project, "2026-06-03", "09:01", "12:15", 194, 194)', ['user' => $userId, 'project' => $projectId]);
+            $connection->execute('INSERT INTO timesheets (user_id, project_id, work_date, start_time, end_time, is_deleted)
+                VALUES (:user, :project, "2026-06-03", "12:40", "12:41", 1)', ['user' => $userId, 'project' => $projectId]);
+            $before = $connection->fetchAll('SELECT * FROM timesheets ORDER BY id');
+            $service = $this->createSyncService($connection);
+            $checkIn = [
+                'client_request_id' => 'overlapping-after-archive-' . $suffix,
+                'action' => 'check_in', 'work_date' => '2026-06-03',
+                'project_id' => $projectId, 'start_time' => '10:00',
+            ];
+
+            try {
+                $service->sync($userId, $checkIn);
+                self::fail('The retained working interval must still block an overlapping check-in.');
+            } catch (WorkSessionConflict $exception) {
+                self::assertSame('overlapping_work_session', $exception->reason);
+            }
+            self::assertSame($before, $connection->fetchAll('SELECT * FROM timesheets ORDER BY id'));
+            self::assertSame(0, (int) $connection->fetchColumn('SELECT COUNT(*) FROM app_sync_operations'));
+
+            $fresh = $service->sync($userId, array_replace($checkIn, [
+                'client_request_id' => 'valid-after-archive-' . $suffix, 'start_time' => '12:45',
+            ]));
+            try {
+                $service->sync($userId, array_replace($checkIn, [
+                    'client_request_id' => 'duplicate-after-archive-' . $suffix, 'start_time' => '12:46',
+                ]));
+                self::fail('An archived predecessor must not permit duplicate active check-ins.');
+            } catch (WorkSessionConflict $exception) {
+                self::assertSame('active_work_session', $exception->reason);
+            }
+            self::assertNull($connection->fetchColumn('SELECT end_time FROM timesheets WHERE id = :id', ['id' => $fresh['timesheet']['id']]));
+            self::assertSame(3, (int) $connection->fetchColumn('SELECT COUNT(*) FROM timesheets'));
+            self::assertSame(1, (int) $connection->fetchColumn('SELECT COUNT(*) FROM app_sync_operations'));
+        });
+    }
+
     public function testManualFortyFiveMinuteBreakSurvivesCheckout(): void
     {
         $this->withScratchDatabase(function (DatabaseConnection $connection): void {

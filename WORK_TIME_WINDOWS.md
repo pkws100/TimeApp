@@ -178,6 +178,12 @@ zeigt das gespeicherte Arbeitsende und lässt die Anmeldung bestehen. Weitere
 Arbeit beginnt mit einem neuen Check-in auf dem gewählten Projekt.
 Ein noch wartender Push verfällt, wenn der Mitarbeiter bereits neu eingecheckt hat.
 
+Auch nach der Archivierung der letzten Tagesbuchungen ist ein neuer Check-in
+moeglich. Er legt einen eigenen Einsatz an und stellt keine archivierte Buchung
+wieder her. Verzoegerte Aenderungen an archivierten Einsaetzen bleiben gesperrt;
+bereits bestaetigte Anfrage-IDs behalten ihren urspruenglichen Wiederholungsbeleg.
+Offene Einsaetze, Ueberschneidungen und Abrechnungssperren werden weiterhin geprueft.
+
 Ein vom Vortag laufender Einsatz bleibt fuer individuell zugeordnete Mitarbeiter
 auch ohne Endvorschlag in der PWA sichtbar und kann mit seiner urspruenglichen
 Buchungs-ID ausdruecklich beendet werden. Offene Pausen werden separat bestaetigt.

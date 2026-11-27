@@ -196,7 +196,9 @@ final class AppTimesheetSyncService
         }
         $latestDailyEntry = $this->findLatestDailyWorkEntryAnyState($userId, $workDate);
 
-        if (!$explicitPauseEntry && $latestDailyEntry !== null && (int) ($latestDailyEntry['is_deleted'] ?? 0) === 1) {
+        // An explicit new check-in creates a separate session; archived predecessors
+        // must only block changes to the former session, never the next check-in.
+        if (!$startingWork && !$explicitPauseEntry && $latestDailyEntry !== null && (int) ($latestDailyEntry['is_deleted'] ?? 0) === 1) {
             throw new RuntimeException('Ihre Tagesbuchung wurde im Backend geaendert oder archiviert. Bitte App-Daten neu laden.');
         }
 
